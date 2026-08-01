@@ -198,6 +198,13 @@ pub struct GenerationInput {
     /// recorded once in the generation log when a provider supplies it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimated_cost_credits: Option<i64>,
+    /// Explicit user-consent record supplied for identity-bearing generation.
+    /// This is an opaque local audit id, never a credential.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consent_id: Option<String>,
+    /// SHA-256 of the canonical, non-secret provider request inputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_hash: Option<String>,
 }
 
 /// Serializable manifest entry. 1:1 port of `MediaManifestEntry`.

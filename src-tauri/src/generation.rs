@@ -1606,6 +1606,33 @@ impl GenerationArtifactDownloader for SecureResultDownloader {
     }
 }
 
+/// Reuse the production generation downloader for advanced provider workflows.
+/// The destination must be a fresh explicit file path chosen by the caller.
+pub(crate) fn secure_download_generation_result(
+    staging_root: PathBuf,
+    cancel: MediaCancelToken,
+    raw_url: &str,
+    destination: &Path,
+) -> Result<(String, u64), String> {
+    let downloader = SecureResultDownloader::new(staging_root, cancel)?;
+    let artifact = downloader.download("advanced", raw_url)?;
+    let mut source = std::fs::File::open(&artifact.path)
+        .map_err(|_| "generation staging result disappeared".to_string())?;
+    let mut destination_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)
+        .map_err(|_| "generated destination already exists or is unavailable".to_string())?;
+    let copy_result =
+        std::io::copy(&mut source, &mut destination_file).and_then(|_| destination_file.sync_all());
+    let _ = std::fs::remove_file(&artifact.path);
+    if copy_result.is_err() {
+        let _ = std::fs::remove_file(destination);
+        return Err("generated result could not be committed to staging".to_string());
+    }
+    Ok((artifact.media_type, artifact.byte_size))
+}
+
 fn build_client(provider: &str, managed: bool) -> Result<GenClient, String> {
     if managed {
         let (backend, token) = crate::account::generation_credential()?

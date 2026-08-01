@@ -21,6 +21,8 @@ vi.mock("../../lib/api", () => ({
   toggleFavorite: vi.fn(),
   extractAudio: vi.fn(),
   scriptToVideo: vi.fn(),
+  generateAvatar: vi.fn(),
+  cloneVoice: vi.fn(),
   cancelAdvancedWorkflow: vi.fn(),
 }));
 

@@ -22,7 +22,8 @@ use opentake_domain::{
     AudioDenoise, CaptionTranslationInput, ChromaKey, Clip, ClipType, ColorGrade, ColorMatchInput,
     Crop, Effect, Interpolation, LoudnessNormalization, LutReference, Mask, MaskShape,
     MediaManifestEntry, NestedSequence, ScriptAssemblyPlan, StabilizationTrack, Timeline, Track,
-    Transform, Transition, TransitionKind, MAX_MASKS_PER_CLIP, MAX_POLYGON_MASK_POINTS,
+    Transform, Transition, TransitionKind, VoiceModelRecord, MAX_MASKS_PER_CLIP,
+    MAX_POLYGON_MASK_POINTS,
 };
 
 use crate::editor_state::EditorState;
@@ -945,6 +946,10 @@ pub enum EditCommand {
     /// Apply one already persisted plan to fresh visual/narration tracks as a
     /// single timeline transaction.
     ApplyScriptAssemblyPlan { plan_id: String },
+    /// Persist one consent-bearing provider voice identity.
+    SaveVoiceModel { record: VoiceModelRecord },
+    /// Permanently mark a provider voice as revoked in project metadata.
+    RevokeVoiceModel { voice_model_id: String },
     /// Link clips into one group.
     Link { clip_ids: Vec<String> },
     /// Unlink clips (and their whole groups).
@@ -1226,6 +1231,10 @@ pub fn apply(
         EditCommand::ApplyScriptAssemblyPlan { plan_id } => {
             apply_script_assembly_plan(state, plan_id, ids)
         }
+        EditCommand::SaveVoiceModel { record } => save_voice_model(state, record),
+        EditCommand::RevokeVoiceModel { voice_model_id } => {
+            revoke_voice_model(state, voice_model_id)
+        }
         EditCommand::Link { clip_ids } => link(state, clip_ids, ids),
         EditCommand::Unlink { clip_ids } => unlink(state, clip_ids),
         EditCommand::RemoveTracks { track_indexes } => remove_tracks(state, track_indexes),
@@ -1478,6 +1487,8 @@ fn edit_nested_sequence(
             | EditCommand::SetTimelineSettings { .. }
             | EditCommand::SaveScriptAssemblyPlan { .. }
             | EditCommand::ApplyScriptAssemblyPlan { .. }
+            | EditCommand::SaveVoiceModel { .. }
+            | EditCommand::RevokeVoiceModel { .. }
     ) {
         return Err(EditError::Invalid(
             "nested-sequence, media-library, and project-settings commands must target the root timeline".into(),
@@ -3003,6 +3014,114 @@ fn apply_script_assembly_plan(
             Ok(affected)
         },
     )
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn validate_voice_model(record: &VoiceModelRecord) -> Result<(), EditError> {
+    let valid_token = |value: &str, max: usize| {
+        !value.trim().is_empty()
+            && value.len() <= max
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:/".contains(&byte))
+    };
+    if !valid_token(&record.id, 128)
+        || !valid_token(&record.provider, 64)
+        || record.provider_voice_id.is_empty()
+        || record.provider_voice_id.len() > 256
+        || !record
+            .provider_voice_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        || !valid_token(&record.model, 256)
+        || !valid_token(&record.consent_id, 256)
+        || !valid_token(&record.source_audio_asset_id, 256)
+        || !valid_sha256(&record.source_audio_sha256)
+        || !valid_sha256(&record.request_hash)
+        || record.voice_name.trim().is_empty()
+        || record.voice_name.len() > 128
+    {
+        return Err(EditError::Invalid("invalid cloned voice metadata".into()));
+    }
+    Ok(())
+}
+
+fn save_voice_model(
+    state: &mut EditorState,
+    record: VoiceModelRecord,
+) -> Result<EditResult, EditError> {
+    validate_voice_model(&record)?;
+    let source = state
+        .manifest
+        .entries
+        .iter()
+        .find(|entry| entry.id == record.source_audio_asset_id)
+        .ok_or_else(|| EditError::Invalid("voice reference audio does not exist".into()))?;
+    if source.kind != ClipType::Audio || !source.has_audio.unwrap_or(true) {
+        return Err(EditError::Invalid(
+            "voice reference must be an audio asset".into(),
+        ));
+    }
+    if state.timeline.voice_models.iter().any(|existing| {
+        existing.id == record.id
+            || (existing.provider == record.provider
+                && existing.provider_voice_id == record.provider_voice_id)
+    }) {
+        return Err(EditError::Invalid(
+            "provider voice identity is already registered".into(),
+        ));
+    }
+    if state.timeline.voice_models.len() >= 100 {
+        return Err(EditError::Invalid(
+            "project voice model limit reached".into(),
+        ));
+    }
+    let record_id = record.id.clone();
+    state.timeline.voice_models.push(record);
+    state.commit_irreversible();
+    Ok(result(
+        state,
+        true,
+        false,
+        "Enroll Voice Clone",
+        Vec::new(),
+        &format!("Enrolled voice clone {record_id}"),
+    ))
+}
+
+fn revoke_voice_model(
+    state: &mut EditorState,
+    voice_model_id: String,
+) -> Result<EditResult, EditError> {
+    let record = state
+        .timeline
+        .voice_models
+        .iter_mut()
+        .find(|record| record.id == voice_model_id)
+        .ok_or_else(|| EditError::Invalid("voice model not found".into()))?;
+    if record.revoked {
+        return Ok(result(
+            state,
+            false,
+            false,
+            "Revoke Voice Clone",
+            Vec::new(),
+            "Voice clone was already revoked",
+        ));
+    }
+    record.revoked = true;
+    state.commit_irreversible();
+    Ok(result(
+        state,
+        true,
+        false,
+        "Revoke Voice Clone",
+        Vec::new(),
+        &format!("Revoked voice clone {voice_model_id}"),
+    ))
 }
 
 fn set_keyframes(

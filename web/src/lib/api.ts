@@ -29,6 +29,8 @@ import type {
   CaptionTranslationReviewChange,
   ScriptToVideoResult,
   ScriptToVideoSegmentInput,
+  AvatarGenerationResult,
+  VoiceCloneResult,
   LutReference,
   LoudnessNormalization,
   DenoiseMode,
@@ -901,6 +903,36 @@ export async function scriptToVideo(
     });
   }
   throw new Error("script-to-video requires the desktop app");
+}
+
+export async function generateAvatar(request: {
+  portraitMediaRef: string;
+  audioMediaRef: string;
+  consentId: string;
+  costAuthorized: boolean;
+  startFrame?: number;
+}): Promise<AvatarGenerationResult> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<AvatarGenerationResult>("advanced_generate_avatar", { request });
+  }
+  throw new Error("avatar generation requires the desktop app");
+}
+
+export async function cloneVoice(request: {
+  action: "enroll" | "generate" | "revoke";
+  consentId: string;
+  referenceAudioMediaRef?: string;
+  voiceId?: string;
+  voiceName?: string;
+  prompt?: string;
+  costAuthorized?: boolean;
+}): Promise<VoiceCloneResult> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<VoiceCloneResult>("advanced_clone_voice", { request });
+  }
+  throw new Error("voice cloning requires the desktop app");
 }
 
 export async function cancelAdvancedWorkflow(): Promise<boolean> {

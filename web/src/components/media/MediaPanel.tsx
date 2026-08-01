@@ -66,7 +66,7 @@ import { SoundLibraryTab } from "./SoundLibraryTab";
 import { MusicTab } from "./MusicTab";
 import { TransitionTab } from "./TransitionTab";
 import { CaptionsTab } from "./CaptionsTab";
-import { ScriptToVideoTab } from "./ScriptToVideoTab";
+import { SmartPackTab } from "./SmartPackTab";
 import { MediaSearchResults } from "./MediaSearch";
 import { applyFavoriteMigrationOutcome, migrateLocalFavorites } from "./favorites";
 import { LibraryEntryGrid } from "./LibraryView";
@@ -211,7 +211,7 @@ export function MediaPanel() {
         ) : mediaTab === "subtitle" ? (
           <CaptionsTab />
         ) : mediaTab === "smartPack" ? (
-          <ScriptToVideoTab />
+          <SmartPackTab />
         ) : (
           <Placeholder label={t(`media.tab.${mediaTab}`)} />
         )}

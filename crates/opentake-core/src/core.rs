@@ -542,6 +542,61 @@ impl AppCore {
         self.apply_with_revision(command, Some(expected))
     }
 
+    /// Apply one revision-bound edit and durably save the project under the
+    /// same session lock. Persistence failure restores document, history, and
+    /// version exactly before returning.
+    pub fn apply_at_revision_persisted(
+        &self,
+        expected: ProjectRevision,
+        command: EditCommand,
+    ) -> Result<EditResult> {
+        let (result, project_epoch, media_count, written) = {
+            let mut session = self.lock();
+            if session.project_epoch != expected.project_epoch
+                || session.editor.version() != expected.version
+            {
+                return Err(CoreError::Media(
+                    "project changed while preparing a deferred edit".to_string(),
+                ));
+            }
+            let before = session.editor.checkpoint_editor_state();
+            let outcome = (|| {
+                let result = session.editor.apply(command, self.ids.as_ref())?;
+                let media_count = result
+                    .manifest_changed
+                    .then(|| session.editor.media().entries.len());
+                let written = session.editor.save_project(None)?;
+                Ok((result, media_count, written))
+            })();
+            match outcome {
+                Ok((result, media_count, written)) => {
+                    (result, session.project_epoch, media_count, written)
+                }
+                Err(error) => {
+                    session.editor.restore_editor_state(before);
+                    return Err(error);
+                }
+            }
+        };
+        if result.changed {
+            self.events.emit(&CoreEvent::TimelineChanged {
+                project_epoch,
+                version: result.timeline_version,
+            });
+        }
+        if let Some(count) = media_count {
+            self.events.emit(&CoreEvent::MediaChanged {
+                project_epoch,
+                count,
+            });
+        }
+        self.events.emit(&CoreEvent::ProjectSaved {
+            path: written.to_string_lossy().into_owned(),
+            project_epoch,
+        });
+        Ok(result)
+    }
+
     fn apply_with_revision(
         &self,
         command: EditCommand,
@@ -956,12 +1011,7 @@ impl AppCore {
     }
 
     /// Atomically register a completed project-managed motion render and place
-    /// or replace its timeline clip. The generated file must already be a
-    /// regular, non-symlink child of the active bundle's `media/` directory.
-    /// The document command and project save share the session lock; any command
-    /// or persistence failure restores timeline, manifest, undo/redo, and
-    /// version exactly. A stale document version is rejected under that same
-    /// lock. Events are emitted only after the durable save succeeds.
+    /// or replace its timeline clip.
     #[allow(clippy::too_many_arguments)]
     pub fn commit_motion_media_for_project(
         &self,
@@ -973,6 +1023,41 @@ impl AppCore {
         probe: &ProbedMedia,
         provenance: GenerationInput,
         placement: MotionPlacement,
+    ) -> Result<MotionMediaCommit> {
+        self.commit_generated_media_for_project(
+            expected_project_epoch,
+            expected_version,
+            expected_project_dir,
+            path,
+            name,
+            ClipType::Video,
+            probe,
+            provenance,
+            placement,
+            "Add Motion Graphic",
+        )
+    }
+
+    /// Atomically register a completed generated audio/video file and place or
+    /// replace its timeline clip. The generated file must already be a
+    /// regular, non-symlink child of the active bundle's `media/` directory.
+    /// The document command and project save share the session lock; any command
+    /// or persistence failure restores timeline, manifest, undo/redo, and
+    /// version exactly. A stale document version is rejected under that same
+    /// lock. Events are emitted only after the durable save succeeds.
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_generated_media_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_version: u64,
+        expected_project_dir: &Path,
+        path: impl AsRef<Path>,
+        name: impl Into<String>,
+        kind: ClipType,
+        probe: &ProbedMedia,
+        provenance: GenerationInput,
+        placement: MotionPlacement,
+        action_name: &str,
     ) -> Result<MotionMediaCommit> {
         let path = path.as_ref();
         let media_dir = expected_project_dir.join(opentake_project::layout::MEDIA_DIR);
@@ -986,7 +1071,7 @@ impl AppCore {
             })
         {
             return Err(CoreError::Media(
-                "motion output must be one direct child of the active project media directory"
+                "generated output must be one direct child of the active project media directory"
                     .into(),
             ));
         }
@@ -994,7 +1079,7 @@ impl AppCore {
             .map_err(|error| CoreError::Media(format!("motion output metadata failed: {error}")))?;
         if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
             return Err(CoreError::Media(
-                "motion output must be a regular non-symlink file".into(),
+                "generated output must be a regular non-symlink file".into(),
             ));
         }
 
@@ -1016,8 +1101,12 @@ impl AppCore {
             };
 
             let result = (|| {
-                let mut asset =
-                    MediaAsset::new(id, path, ClipType::Video, name, probe.duration_secs);
+                if !matches!(kind, ClipType::Audio | ClipType::Video) {
+                    return Err(CoreError::Media(
+                        "generated placement supports audio or video".into(),
+                    ));
+                }
+                let mut asset = MediaAsset::new(id, path, kind, name, probe.duration_secs);
                 asset.source_width = probe.width;
                 asset.source_height = probe.height;
                 asset.source_fps = probe.fps;
@@ -1034,8 +1123,8 @@ impl AppCore {
                     } => EditCommand::RegisterMediaAndAddClip {
                         entry: ClipEntry {
                             media_ref: media.id.clone(),
-                            media_type: ClipType::Video,
-                            source_clip_type: ClipType::Video,
+                            media_type: kind,
+                            source_clip_type: kind,
                             track_index: track_index.unwrap_or(0),
                             start_frame,
                             duration_frames,
@@ -1059,7 +1148,9 @@ impl AppCore {
                         }
                     }
                 };
-                let edit = session.editor.apply(command, self.ids.as_ref())?;
+                let mut edit = session.editor.apply(command, self.ids.as_ref())?;
+                edit.action_name = action_name.to_string();
+                edit.summary = format!("{} generated media clip(s)", edit.affected_clip_ids.len());
                 let written = session.editor.save_project(None)?;
                 Ok((MotionMediaCommit { media, edit }, written))
             })();

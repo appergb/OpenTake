@@ -42,6 +42,24 @@ pub struct ScriptAssemblyPlan {
     pub segments: Vec<ScriptAssemblySegment>,
 }
 
+/// Durable non-secret record for a provider-hosted cloned voice. Provider
+/// credentials and reference audio bytes never enter the project document.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceModelRecord {
+    pub id: String,
+    pub provider: String,
+    pub provider_voice_id: String,
+    pub model: String,
+    pub consent_id: String,
+    pub source_audio_asset_id: String,
+    pub source_audio_sha256: String,
+    pub request_hash: String,
+    pub voice_name: String,
+    #[serde(default)]
+    pub revoked: bool,
+}
+
 /// Clip location inside track storage.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct ClipLocation {
@@ -88,6 +106,10 @@ pub struct Timeline {
     /// ignored by render/export until explicitly applied.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub script_assembly_plans: Vec<ScriptAssemblyPlan>,
+    /// Consent-bearing provider voice identities. Revoked records remain for
+    /// audit and are rejected by every generation path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub voice_models: Vec<VoiceModelRecord>,
     #[serde(default)]
     pub tracks: Vec<Track>,
 }
@@ -123,6 +145,7 @@ impl Default for Timeline {
             settings_configured: false,
             nested_sequences: Vec::new(),
             script_assembly_plans: Vec::new(),
+            voice_models: Vec::new(),
             tracks: Vec::new(),
         }
     }
@@ -132,6 +155,7 @@ impl Timeline {
     pub const TRACKS_WIRE_FIELD: &'static str = "tracks";
     pub const NESTED_SEQUENCES_WIRE_FIELD: &'static str = "nestedSequences";
     pub const SCRIPT_ASSEMBLY_PLANS_WIRE_FIELD: &'static str = "scriptAssemblyPlans";
+    pub const VOICE_MODELS_WIRE_FIELD: &'static str = "voiceModels";
 
     pub fn new() -> Self {
         Timeline::default()
@@ -509,6 +533,28 @@ mod tests {
         )
         .unwrap();
         assert!(legacy.script_assembly_plans.is_empty());
+        assert!(legacy.voice_models.is_empty());
+    }
+
+    #[test]
+    fn voice_model_record_roundtrips_without_secret_material() {
+        let mut timeline = Timeline::new();
+        timeline.voice_models.push(VoiceModelRecord {
+            id: "voice-local-1".into(),
+            provider: "elevenlabs".into(),
+            provider_voice_id: "provider-voice-1".into(),
+            model: "eleven_multilingual_v2".into(),
+            consent_id: "consent-1".into(),
+            source_audio_asset_id: "audio-1".into(),
+            source_audio_sha256: "a".repeat(64),
+            request_hash: "b".repeat(64),
+            voice_name: "Narrator".into(),
+            revoked: false,
+        });
+        let json = serde_json::to_string(&timeline).unwrap();
+        assert!(json.contains("\"voiceModels\""));
+        assert!(!json.contains("apiKey"));
+        assert_eq!(serde_json::from_str::<Timeline>(&json).unwrap(), timeline);
     }
 
     #[test]

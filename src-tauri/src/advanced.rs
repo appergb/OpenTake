@@ -10,8 +10,8 @@ use opentake_agent::mcp::advanced::{
     AdvancedWorkflowErrorKind, AdvancedWorkflowRequest,
 };
 use opentake_agent::tools::args::{
-    GenerateMatteArgs, MatchColorArgs, RemoveObjectArgs, ScriptSegmentArg, ScriptToVideoArgs,
-    SeparateStemsArgs, TrackMotionArgs, TranslateCaptionsArgs,
+    CloneVoiceArgs, GenerateAvatarArgs, GenerateMatteArgs, MatchColorArgs, RemoveObjectArgs,
+    ScriptSegmentArg, ScriptToVideoArgs, SeparateStemsArgs, TrackMotionArgs, TranslateCaptionsArgs,
 };
 use opentake_agent::tools::names::ToolName;
 use opentake_core::{
@@ -21,7 +21,7 @@ use opentake_core::{
 use opentake_domain::{
     luma709, AnimPair, CaptionTranslationInput, ColorGrade, ColorMatchInput, GenerationInput,
     GenerationJobStatus, Interpolation, Keyframe, KeyframeTrack, LiftGammaGain, Mask, Rgb,
-    ScriptAssemblyPlan, ScriptAssemblySegment, TransitionKind,
+    ScriptAssemblyPlan, ScriptAssemblySegment, TransitionKind, VoiceModelRecord,
 };
 use opentake_gen::{KeyStore, KeyringStore, ProviderKey};
 use opentake_media::analysis::{
@@ -50,6 +50,8 @@ pub struct TauriAdvancedWorkflowBridge {
     cache_root: PathBuf,
     models_dir: PathBuf,
     caption_translator: Arc<dyn CaptionTranslationProvider>,
+    avatar_provider: Arc<dyn AvatarProvider>,
+    voice_provider: Arc<dyn VoiceCloneProvider>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -87,6 +89,445 @@ trait CaptionTranslationProvider: Send + Sync {
 }
 
 struct NetworkCaptionTranslationProvider;
+
+#[derive(Clone, Debug)]
+struct AvatarProviderRequest {
+    portrait_path: PathBuf,
+    audio_path: PathBuf,
+    model: String,
+    destination: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+struct AvatarProviderOutput {
+    request_id: String,
+    media_type: String,
+}
+
+trait AvatarProvider: Send + Sync {
+    fn generate(
+        &self,
+        request: &AvatarProviderRequest,
+        cancel: &MediaCancelToken,
+    ) -> Result<AvatarProviderOutput, AdvancedWorkflowError>;
+}
+
+#[derive(Clone, Debug)]
+struct VoiceEnrollmentRequest {
+    reference_path: PathBuf,
+    voice_name: String,
+}
+
+#[derive(Clone, Debug)]
+struct VoiceGenerationRequest {
+    provider_voice_id: String,
+    model: String,
+    prompt: String,
+    destination: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+struct VoiceProviderOutput {
+    request_id: String,
+    media_type: String,
+}
+
+trait VoiceCloneProvider: Send + Sync {
+    fn enroll(
+        &self,
+        request: &VoiceEnrollmentRequest,
+        cancel: &MediaCancelToken,
+    ) -> Result<String, AdvancedWorkflowError>;
+
+    fn generate(
+        &self,
+        request: &VoiceGenerationRequest,
+        cancel: &MediaCancelToken,
+    ) -> Result<VoiceProviderOutput, AdvancedWorkflowError>;
+
+    fn revoke(
+        &self,
+        provider_voice_id: &str,
+        cancel: &MediaCancelToken,
+    ) -> Result<(), AdvancedWorkflowError>;
+}
+
+struct NetworkFalAvatarProvider {
+    cache_root: PathBuf,
+}
+
+struct NetworkElevenLabsVoiceProvider;
+
+fn valid_provider_resource_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+}
+
+fn provider_key(key: ProviderKey, label: &str) -> Result<String, AdvancedWorkflowError> {
+    KeyringStore::new()
+        .load(key.account())
+        .map_err(|error| advanced_execution(format!("could not read {label} key: {error}")))?
+        .ok_or_else(|| {
+            AdvancedWorkflowError::new(
+                AdvancedWorkflowErrorKind::ConsentRequired,
+                format!("no {label} API key is configured; open Settings → AI"),
+            )
+        })
+}
+
+fn reference_data_url(
+    path: &Path,
+    fallback: &str,
+    max_bytes: u64,
+) -> Result<String, AdvancedWorkflowError> {
+    use base64::Engine as _;
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|_| advanced_resource("reference media is unavailable"))?;
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() == 0
+        || metadata.len() > max_bytes
+    {
+        return Err(advanced_invalid(
+            "reference media must be a bounded regular non-symlink file",
+        ));
+    }
+    let bytes =
+        std::fs::read(path).map_err(|_| advanced_resource("reference media could not be read"))?;
+    let mime = opentake_gen::content_type_for(path, fallback);
+    Ok(format!(
+        "data:{mime};base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    ))
+}
+
+fn bounded_json_response(
+    response: reqwest::blocking::Response,
+    provider: &str,
+) -> Result<serde_json::Value, AdvancedWorkflowError> {
+    const LIMIT: u64 = 4 * 1024 * 1024;
+    if !response.status().is_success() {
+        return Err(advanced_execution(format!(
+            "{provider} provider returned HTTP {}",
+            response.status()
+        )));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > LIMIT)
+    {
+        return Err(advanced_execution(format!(
+            "{provider} provider response is too large"
+        )));
+    }
+    let mut body = Vec::new();
+    response
+        .take(LIMIT + 1)
+        .read_to_end(&mut body)
+        .map_err(|_| advanced_execution(format!("could not read {provider} response")))?;
+    if body.len() as u64 > LIMIT {
+        return Err(advanced_execution(format!(
+            "{provider} provider response is too large"
+        )));
+    }
+    serde_json::from_slice(&body)
+        .map_err(|_| advanced_execution(format!("{provider} returned invalid JSON")))
+}
+
+impl AvatarProvider for NetworkFalAvatarProvider {
+    fn generate(
+        &self,
+        request: &AvatarProviderRequest,
+        cancel: &MediaCancelToken,
+    ) -> Result<AvatarProviderOutput, AdvancedWorkflowError> {
+        if cancel.checkpoint() {
+            return Err(cancelled_workflow("avatar generation cancelled"));
+        }
+        let key = provider_key(ProviderKey::Fal, "fal")?;
+        let image_url = reference_data_url(&request.portrait_path, "image", 20 * 1024 * 1024)?;
+        let audio_url = reference_data_url(&request.audio_path, "audio", 50 * 1024 * 1024)?;
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .map_err(|_| advanced_execution("avatar provider client initialization failed"))?;
+        let queue_base = format!("https://queue.fal.run/{}", request.model);
+        let submit = client
+            .post(&queue_base)
+            .header("Authorization", format!("Key {key}"))
+            .json(&json!({"image_url": image_url, "audio_url": audio_url}))
+            .send()
+            .map_err(|_| advanced_execution("avatar provider submission failed"))?;
+        let submit = bounded_json_response(submit, "avatar")?;
+        let request_id = submit
+            .get("request_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| valid_provider_resource_id(value))
+            .ok_or_else(|| advanced_execution("avatar provider returned no request id"))?
+            .to_string();
+        let cancel_remote = || {
+            let _ = client
+                .put(format!("{queue_base}/requests/{request_id}/cancel"))
+                .header("Authorization", format!("Key {key}"))
+                .timeout(std::time::Duration::from_secs(10))
+                .send();
+        };
+        let started = std::time::Instant::now();
+        loop {
+            if cancel.checkpoint() {
+                cancel_remote();
+                return Err(cancelled_workflow("avatar generation cancelled"));
+            }
+            if started.elapsed() > std::time::Duration::from_secs(30 * 60) {
+                cancel_remote();
+                return Err(advanced_execution("avatar provider timed out"));
+            }
+            let response = client
+                .get(format!("{queue_base}/requests/{request_id}/status"))
+                .header("Authorization", format!("Key {key}"))
+                .send()
+                .map_err(|_| advanced_execution("avatar provider status request failed"))?;
+            let status = bounded_json_response(response, "avatar")?;
+            match status.get("status").and_then(serde_json::Value::as_str) {
+                Some("COMPLETED") => break,
+                Some("FAILED") => {
+                    return Err(advanced_execution("avatar provider generation failed"))
+                }
+                Some("IN_QUEUE" | "IN_PROGRESS") => {
+                    std::thread::sleep(std::time::Duration::from_millis(350));
+                }
+                _ => {
+                    return Err(advanced_execution(
+                        "avatar provider returned unknown status",
+                    ))
+                }
+            }
+        }
+        if cancel.checkpoint() {
+            cancel_remote();
+            return Err(cancelled_workflow("avatar generation cancelled"));
+        }
+        let result = client
+            .get(format!("{queue_base}/requests/{request_id}"))
+            .header("Authorization", format!("Key {key}"))
+            .send()
+            .map_err(|_| advanced_execution("avatar provider result request failed"))?;
+        let result = bounded_json_response(result, "avatar")?;
+        let result_url = result
+            .pointer("/video/url")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| advanced_execution("avatar provider returned no video"))?;
+        let (media_type, _) = crate::generation::secure_download_generation_result(
+            self.cache_root.join("avatar-downloads"),
+            cancel.clone(),
+            result_url,
+            &request.destination,
+        )
+        .map_err(advanced_execution)?;
+        Ok(AvatarProviderOutput {
+            request_id,
+            media_type,
+        })
+    }
+}
+
+impl VoiceCloneProvider for NetworkElevenLabsVoiceProvider {
+    fn enroll(
+        &self,
+        request: &VoiceEnrollmentRequest,
+        cancel: &MediaCancelToken,
+    ) -> Result<String, AdvancedWorkflowError> {
+        if cancel.checkpoint() {
+            return Err(cancelled_workflow("voice enrollment cancelled"));
+        }
+        let key = provider_key(ProviderKey::ElevenLabs, "ElevenLabs")?;
+        let metadata = std::fs::symlink_metadata(&request.reference_path)
+            .map_err(|_| advanced_resource("voice reference audio is unavailable"))?;
+        if !metadata.file_type().is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.len() == 0
+            || metadata.len() > 100 * 1024 * 1024
+        {
+            return Err(advanced_invalid(
+                "voice reference audio is invalid or too large",
+            ));
+        }
+        let bytes = std::fs::read(&request.reference_path)
+            .map_err(|_| advanced_resource("voice reference audio could not be read"))?;
+        let file_name = request
+            .reference_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("voice-reference.wav")
+            .to_string();
+        let part = reqwest::blocking::multipart::Part::bytes(bytes).file_name(file_name);
+        let form = reqwest::blocking::multipart::Form::new()
+            .text("name", request.voice_name.clone())
+            .part("files", part);
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(180))
+            .build()
+            .map_err(|_| advanced_execution("voice provider client initialization failed"))?;
+        let response = client
+            .post("https://api.elevenlabs.io/v1/voices/add")
+            .header("xi-api-key", key.clone())
+            .multipart(form)
+            .send()
+            .map_err(|_| advanced_execution("voice enrollment request failed"))?;
+        let response = bounded_json_response(response, "voice")?;
+        let provider_voice_id = response
+            .get("voice_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| valid_provider_resource_id(value))
+            .map(str::to_string)
+            .ok_or_else(|| advanced_execution("voice provider returned no valid voice id"))?;
+        if cancel.checkpoint() {
+            let _ = client
+                .delete(format!(
+                    "https://api.elevenlabs.io/v1/voices/{provider_voice_id}"
+                ))
+                .header("xi-api-key", key)
+                .timeout(std::time::Duration::from_secs(10))
+                .send();
+            return Err(cancelled_workflow("voice enrollment cancelled"));
+        }
+        Ok(provider_voice_id)
+    }
+
+    fn generate(
+        &self,
+        request: &VoiceGenerationRequest,
+        cancel: &MediaCancelToken,
+    ) -> Result<VoiceProviderOutput, AdvancedWorkflowError> {
+        if cancel.checkpoint() {
+            return Err(cancelled_workflow("voice generation cancelled"));
+        }
+        if !valid_provider_resource_id(&request.provider_voice_id) {
+            return Err(advanced_invalid("voice provider id is invalid"));
+        }
+        let key = provider_key(ProviderKey::ElevenLabs, "ElevenLabs")?;
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(180))
+            .build()
+            .map_err(|_| advanced_execution("voice provider client initialization failed"))?;
+        let mut response = client
+            .post(format!(
+                "https://api.elevenlabs.io/v1/text-to-speech/{}",
+                request.provider_voice_id
+            ))
+            .header("xi-api-key", key)
+            .json(&json!({"text": request.prompt, "model_id": request.model}))
+            .send()
+            .map_err(|_| advanced_execution("voice generation request failed"))?;
+        if !response.status().is_success() {
+            return Err(advanced_execution(format!(
+                "voice provider returned HTTP {}",
+                response.status()
+            )));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > 100 * 1024 * 1024)
+        {
+            return Err(advanced_execution("voice output is too large"));
+        }
+        let media_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .unwrap_or("audio/mpeg")
+            .to_string();
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&request.destination)
+            .map_err(|_| advanced_execution("voice output staging is unavailable"))?;
+        let mut total = 0_u64;
+        let mut buffer = [0_u8; 64 * 1024];
+        loop {
+            if cancel.checkpoint() {
+                let _ = std::fs::remove_file(&request.destination);
+                return Err(cancelled_workflow("voice generation cancelled"));
+            }
+            let count = response
+                .read(&mut buffer)
+                .map_err(|_| advanced_execution("voice output stream failed"))?;
+            if count == 0 {
+                break;
+            }
+            total = total.saturating_add(count as u64);
+            if total > 100 * 1024 * 1024 {
+                let _ = std::fs::remove_file(&request.destination);
+                return Err(advanced_execution("voice output is too large"));
+            }
+            output
+                .write_all(&buffer[..count])
+                .map_err(|_| advanced_execution("voice output staging failed"))?;
+        }
+        output
+            .sync_all()
+            .map_err(|_| advanced_execution("voice output staging failed"))?;
+        if total == 0 {
+            let _ = std::fs::remove_file(&request.destination);
+            return Err(advanced_execution("voice provider returned empty audio"));
+        }
+        Ok(VoiceProviderOutput {
+            request_id: format!("tts-{}", uuid::Uuid::new_v4()),
+            media_type,
+        })
+    }
+
+    fn revoke(
+        &self,
+        provider_voice_id: &str,
+        cancel: &MediaCancelToken,
+    ) -> Result<(), AdvancedWorkflowError> {
+        if cancel.checkpoint() {
+            return Err(cancelled_workflow("voice revocation cancelled"));
+        }
+        if !valid_provider_resource_id(provider_voice_id) {
+            return Err(advanced_invalid("voice provider id is invalid"));
+        }
+        let key = provider_key(ProviderKey::ElevenLabs, "ElevenLabs")?;
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .map_err(|_| advanced_execution("voice provider client initialization failed"))?;
+        let response = client
+            .delete(format!(
+                "https://api.elevenlabs.io/v1/voices/{provider_voice_id}"
+            ))
+            .header("xi-api-key", key)
+            .send()
+            .map_err(|_| advanced_execution("voice revocation request failed"))?;
+        if !response.status().is_success() && response.status() != reqwest::StatusCode::NOT_FOUND {
+            return Err(advanced_execution(format!(
+                "voice provider returned HTTP {}",
+                response.status()
+            )));
+        }
+        // Once the provider has accepted deletion, the local revocation record
+        // must be committed even if cancellation arrives concurrently. Returning
+        // Cancelled here would leave an apparently active local model whose
+        // remote identity has already been irreversibly removed.
+        Ok(())
+    }
+}
 
 impl CaptionTranslationProvider for NetworkCaptionTranslationProvider {
     fn translate(
@@ -502,6 +943,53 @@ pub async fn advanced_script_to_video(
     })
 }
 
+#[tauri::command]
+pub async fn advanced_generate_avatar(
+    state: State<'_, AdvancedWorkflowCommandState>,
+    request: GenerateAvatarArgs,
+) -> Result<GenerateMatteResultDto, String> {
+    let token = state.begin()?;
+    let bridge = Arc::clone(&state.bridge);
+    let worker_token = token.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        bridge.execute(
+            AdvancedWorkflowRequest::GenerateAvatar(request),
+            &worker_token,
+        )
+    })
+    .await
+    .map_err(|error| format!("advanced workflow worker failed: {error}"))
+    .and_then(|result| result.map_err(|error| error.message));
+    state.finish(&token);
+    let commit = result?;
+    Ok(GenerateMatteResultDto {
+        result: commit.result,
+        action_name: commit.action_name,
+    })
+}
+
+#[tauri::command]
+pub async fn advanced_clone_voice(
+    state: State<'_, AdvancedWorkflowCommandState>,
+    request: CloneVoiceArgs,
+) -> Result<GenerateMatteResultDto, String> {
+    let token = state.begin()?;
+    let bridge = Arc::clone(&state.bridge);
+    let worker_token = token.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        bridge.execute(AdvancedWorkflowRequest::CloneVoice(request), &worker_token)
+    })
+    .await
+    .map_err(|error| format!("advanced workflow worker failed: {error}"))
+    .and_then(|result| result.map_err(|error| error.message));
+    state.finish(&token);
+    let commit = result?;
+    Ok(GenerateMatteResultDto {
+        result: commit.result,
+        action_name: commit.action_name,
+    })
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyCaptionTranslationReviewRequest {
@@ -589,9 +1077,13 @@ impl TauriAdvancedWorkflowBridge {
     pub fn new(core: AppCore, cache_root: PathBuf, models_dir: PathBuf) -> Self {
         Self {
             core,
+            avatar_provider: Arc::new(NetworkFalAvatarProvider {
+                cache_root: cache_root.clone(),
+            }),
             cache_root,
             models_dir,
             caption_translator: Arc::new(NetworkCaptionTranslationProvider),
+            voice_provider: Arc::new(NetworkElevenLabsVoiceProvider),
         }
     }
 
@@ -604,9 +1096,31 @@ impl TauriAdvancedWorkflowBridge {
     ) -> Self {
         Self {
             core,
+            avatar_provider: Arc::new(NetworkFalAvatarProvider {
+                cache_root: cache_root.clone(),
+            }),
             cache_root,
             models_dir,
             caption_translator,
+            voice_provider: Arc::new(NetworkElevenLabsVoiceProvider),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_identity_providers(
+        core: AppCore,
+        cache_root: PathBuf,
+        models_dir: PathBuf,
+        avatar_provider: Arc<dyn AvatarProvider>,
+        voice_provider: Arc<dyn VoiceCloneProvider>,
+    ) -> Self {
+        Self {
+            core,
+            cache_root,
+            models_dir,
+            caption_translator: Arc::new(NetworkCaptionTranslationProvider),
+            avatar_provider,
+            voice_provider,
         }
     }
 
@@ -1126,12 +1640,13 @@ impl TauriAdvancedWorkflowBridge {
             };
             let committed = self
                 .core
-                .commit_motion_media_for_project(
+                .commit_generated_media_for_project(
                     snapshot.project_epoch,
                     snapshot.version,
                     &project_dir,
                     published.path(),
                     "Object Removed",
+                    opentake_domain::ClipType::Video,
                     &ProbedMedia {
                         duration_secs: output_probe.duration_secs,
                         width: output_probe
@@ -1148,6 +1663,7 @@ impl TauriAdvancedWorkflowBridge {
                     MotionPlacement::ReplaceAndClearMasks {
                         clip_id: clip.id.clone(),
                     },
+                    "Remove Masked Object",
                 )
                 .map_err(|error| advanced_execution(error.to_string()))?;
             published.commit();
@@ -2019,6 +2535,555 @@ impl TauriAdvancedWorkflowBridge {
             action_name,
         })
     }
+
+    fn generate_avatar(
+        &self,
+        args: GenerateAvatarArgs,
+        cancel: &MediaCancelToken,
+    ) -> Result<AdvancedWorkflowCommit, AdvancedWorkflowError> {
+        const PROVIDER: &str = "fal";
+        const MODEL: &str = "fal-ai/sync-lipsync/v3/image-to-video";
+        validate_consent_id(&args.consent_id)?;
+        if args.cost_authorized != Some(true) {
+            return Err(AdvancedWorkflowError::new(
+                AdvancedWorkflowErrorKind::CostAuthorizationRequired,
+                "avatar generation sends the consented portrait and narration to a paid provider; set costAuthorized=true after review",
+            ));
+        }
+        if args
+            .provider
+            .as_deref()
+            .is_some_and(|value| value != PROVIDER)
+            || args.model.as_deref().is_some_and(|value| value != MODEL)
+        {
+            return Err(AdvancedWorkflowError::new(
+                AdvancedWorkflowErrorKind::CapabilityUnavailable,
+                format!("this build supports {PROVIDER}:{MODEL}"),
+            ));
+        }
+        if cancel.checkpoint() {
+            return Err(cancelled_workflow("avatar generation cancelled"));
+        }
+        let snapshot = self.core.runtime_snapshot();
+        let project_dir = snapshot
+            .project_dir
+            .clone()
+            .ok_or_else(|| advanced_invalid("save the project before generating an avatar"))?;
+        let portrait = snapshot
+            .media
+            .entries
+            .iter()
+            .find(|entry| entry.id == args.portrait_media_ref)
+            .ok_or_else(|| advanced_resource("portrait media does not exist"))?;
+        if portrait.kind != opentake_domain::ClipType::Image {
+            return Err(advanced_invalid("avatar portrait must be an image"));
+        }
+        let audio = snapshot
+            .media
+            .entries
+            .iter()
+            .find(|entry| entry.id == args.audio_media_ref)
+            .ok_or_else(|| advanced_resource("avatar narration media does not exist"))?;
+        if audio.kind != opentake_domain::ClipType::Audio || !audio.has_audio.unwrap_or(true) {
+            return Err(advanced_invalid("avatar narration must be an audio asset"));
+        }
+        if audio.duration <= 0.0 || audio.duration > 60.0 * 30.0 {
+            return Err(advanced_invalid(
+                "avatar narration duration must be between zero and 30 minutes",
+            ));
+        }
+        let (portrait_path, _) =
+            crate::transcribe::resolve_asset_from_snapshot(&snapshot, &args.portrait_media_ref)
+                .map_err(advanced_resource)?;
+        let (audio_path, _) =
+            crate::transcribe::resolve_asset_from_snapshot(&snapshot, &args.audio_media_ref)
+                .map_err(advanced_resource)?;
+        let portrait_sha256 = file_sha256(&portrait_path).map_err(media_workflow_error)?;
+        let audio_sha256 = file_sha256(&audio_path).map_err(media_workflow_error)?;
+        let request_hash = canonical_request_hash(&json!({
+            "provider": PROVIDER,
+            "model": MODEL,
+            "consentId": args.consent_id,
+            "portraitMediaRef": args.portrait_media_ref,
+            "portraitSha256": portrait_sha256,
+            "audioMediaRef": args.audio_media_ref,
+            "audioSha256": audio_sha256,
+        }))?;
+        let media_dir = project_dir.join(opentake_project::layout::MEDIA_DIR);
+        std::fs::create_dir_all(&media_dir)
+            .map_err(|_| advanced_execution("project media directory is unavailable"))?;
+        let destination = media_dir.join(format!("avatar-{}.mp4", uuid::Uuid::new_v4()));
+        let output = self.avatar_provider.generate(
+            &AvatarProviderRequest {
+                portrait_path,
+                audio_path,
+                model: MODEL.into(),
+                destination: destination.clone(),
+            },
+            cancel,
+        )?;
+        if cancel.checkpoint() {
+            let _ = std::fs::remove_file(&destination);
+            return Err(cancelled_workflow("avatar generation cancelled"));
+        }
+        let output_probe = probe(&destination).map_err(|error| {
+            let _ = std::fs::remove_file(&destination);
+            media_workflow_error(error)
+        })?;
+        let fps = snapshot.timeline.fps.max(1) as f64;
+        if !output_probe.has_video
+            || !output_probe.has_audio
+            || output_probe.duration_secs <= 0.0
+            || ((output_probe.duration_secs - audio.duration) * fps).abs() > 1.0
+        {
+            let _ = std::fs::remove_file(&destination);
+            return Err(advanced_execution(
+                "avatar output must contain synchronized video/audio matching narration within one frame",
+            ));
+        }
+        let start_frame = args.start_frame.unwrap_or(snapshot.timeline.total_frames());
+        if start_frame < 0 {
+            let _ = std::fs::remove_file(&destination);
+            return Err(advanced_invalid("startFrame must be non-negative"));
+        }
+        let duration_frames = (output_probe.duration_secs * fps).round().max(1.0) as i32;
+        let aspect_ratio = output_probe
+            .width
+            .zip(output_probe.height)
+            .map(|(width, height)| format!("{width}:{height}"))
+            .unwrap_or_else(|| "avatar".into());
+        let provenance = GenerationInput {
+            prompt: "lip-synchronized avatar".into(),
+            model: MODEL.into(),
+            duration: output_probe.duration_secs.round() as i32,
+            aspect_ratio,
+            image_urls: Some(vec![format!("sha256:{portrait_sha256}")]),
+            reference_image_asset_ids: Some(vec![args.portrait_media_ref.clone()]),
+            reference_audio_urls: Some(vec![format!("sha256:{audio_sha256}")]),
+            reference_audio_asset_ids: Some(vec![args.audio_media_ref.clone()]),
+            source_asset_id: Some(args.portrait_media_ref.clone()),
+            provider: Some(PROVIDER.into()),
+            provider_job_id: Some(output.request_id.clone()),
+            status: Some(GenerationJobStatus::Ready),
+            progress: Some(1.0),
+            consent_id: Some(args.consent_id.clone()),
+            request_hash: Some(request_hash.clone()),
+            ..GenerationInput::default()
+        };
+        let probed = ProbedMedia {
+            duration_secs: output_probe.duration_secs,
+            width: output_probe
+                .width
+                .and_then(|value| i32::try_from(value).ok()),
+            height: output_probe
+                .height
+                .and_then(|value| i32::try_from(value).ok()),
+            fps: output_probe.fps,
+            has_audio: output_probe.has_audio,
+            color: output_probe.color.clone(),
+        };
+        let committed = self
+            .core
+            .commit_generated_media_for_project(
+                snapshot.project_epoch,
+                snapshot.version,
+                &project_dir,
+                &destination,
+                "Generated avatar",
+                opentake_domain::ClipType::Video,
+                &probed,
+                provenance,
+                MotionPlacement::Add {
+                    start_frame,
+                    duration_frames,
+                    track_index: None,
+                },
+                "Generate Avatar",
+            )
+            .map_err(|error| {
+                let _ = std::fs::remove_file(&destination);
+                advanced_execution(error.to_string())
+            })?;
+        Ok(AdvancedWorkflowCommit {
+            result: json!({
+                "assetId": committed.media.id,
+                "clipIds": committed.edit.affected_clip_ids,
+                "previewPath": destination,
+                "provider": PROVIDER,
+                "model": MODEL,
+                "providerRequestId": output.request_id,
+                "requestHash": request_hash,
+                "consentId": args.consent_id,
+                "portraitMediaRef": args.portrait_media_ref,
+                "audioMediaRef": args.audio_media_ref,
+                "durationFrames": duration_frames,
+                "mediaType": output.media_type,
+                "imported": true
+            }),
+            action_name: Some(committed.edit.action_name),
+        })
+    }
+
+    fn clone_voice(
+        &self,
+        args: CloneVoiceArgs,
+        cancel: &MediaCancelToken,
+    ) -> Result<AdvancedWorkflowCommit, AdvancedWorkflowError> {
+        const PROVIDER: &str = "elevenlabs";
+        const MODEL: &str = "eleven_multilingual_v2";
+        validate_consent_id(&args.consent_id)?;
+        if args
+            .provider
+            .as_deref()
+            .is_some_and(|value| value != PROVIDER)
+            || args.model.as_deref().is_some_and(|value| value != MODEL)
+        {
+            return Err(AdvancedWorkflowError::new(
+                AdvancedWorkflowErrorKind::CapabilityUnavailable,
+                format!("this build supports {PROVIDER}:{MODEL}"),
+            ));
+        }
+        if cancel.checkpoint() {
+            return Err(cancelled_workflow("voice workflow cancelled"));
+        }
+        let snapshot = self.core.runtime_snapshot();
+        let project_dir = snapshot
+            .project_dir
+            .clone()
+            .ok_or_else(|| advanced_invalid("save the project before using voice cloning"))?;
+        match args.action.as_str() {
+            "enroll" => {
+                if args.cost_authorized != Some(true) {
+                    return Err(AdvancedWorkflowError::new(
+                        AdvancedWorkflowErrorKind::CostAuthorizationRequired,
+                        "voice enrollment sends consented reference audio to a paid provider; set costAuthorized=true after review",
+                    ));
+                }
+                let source_id = args.reference_audio_media_ref.as_deref().ok_or_else(|| {
+                    advanced_invalid("referenceAudioMediaRef is required for enrollment")
+                })?;
+                let voice_name = args
+                    .voice_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty() && value.len() <= 128)
+                    .ok_or_else(|| advanced_invalid("voiceName is required and too long"))?;
+                let source = snapshot
+                    .media
+                    .entries
+                    .iter()
+                    .find(|entry| entry.id == source_id)
+                    .ok_or_else(|| advanced_resource("voice reference media does not exist"))?;
+                if source.kind != opentake_domain::ClipType::Audio
+                    || !source.has_audio.unwrap_or(true)
+                {
+                    return Err(advanced_invalid("voice reference must be an audio asset"));
+                }
+                let (reference_path, _) =
+                    crate::transcribe::resolve_asset_from_snapshot(&snapshot, source_id)
+                        .map_err(advanced_resource)?;
+                let source_sha256 = file_sha256(&reference_path).map_err(media_workflow_error)?;
+                let request_hash = canonical_request_hash(&json!({
+                    "provider": PROVIDER,
+                    "model": MODEL,
+                    "consentId": args.consent_id,
+                    "sourceAudioAssetId": source_id,
+                    "sourceAudioSha256": source_sha256,
+                    "voiceName": voice_name,
+                }))?;
+                let voice_model_id = format!("voice-model-{}", &request_hash[..16]);
+                if snapshot
+                    .timeline
+                    .voice_models
+                    .iter()
+                    .any(|record| record.id == voice_model_id)
+                {
+                    return Err(advanced_invalid(
+                        "this consented voice enrollment is already registered",
+                    ));
+                }
+                let provider_voice_id = self.voice_provider.enroll(
+                    &VoiceEnrollmentRequest {
+                        reference_path,
+                        voice_name: voice_name.to_string(),
+                    },
+                    cancel,
+                )?;
+                if cancel.checkpoint() {
+                    let _ = self
+                        .voice_provider
+                        .revoke(&provider_voice_id, &MediaCancelToken::new());
+                    return Err(cancelled_workflow("voice enrollment cancelled"));
+                }
+                let record = VoiceModelRecord {
+                    id: voice_model_id.clone(),
+                    provider: PROVIDER.into(),
+                    provider_voice_id: provider_voice_id.clone(),
+                    model: MODEL.into(),
+                    consent_id: args.consent_id.clone(),
+                    source_audio_asset_id: source_id.to_string(),
+                    source_audio_sha256: source_sha256,
+                    request_hash: request_hash.clone(),
+                    voice_name: voice_name.to_string(),
+                    revoked: false,
+                };
+                let edit = self
+                    .core
+                    .apply_at_revision_persisted(
+                        ProjectRevision {
+                            project_epoch: snapshot.project_epoch,
+                            version: snapshot.version,
+                        },
+                        EditCommand::SaveVoiceModel {
+                            record: record.clone(),
+                        },
+                    )
+                    .map_err(|error| {
+                        let _ = self
+                            .voice_provider
+                            .revoke(&provider_voice_id, &MediaCancelToken::new());
+                        advanced_execution(error.to_string())
+                    })?;
+                Ok(AdvancedWorkflowCommit {
+                    result: json!({
+                        "action": "enroll",
+                        "voiceId": voice_model_id,
+                        "voiceName": record.voice_name,
+                        "provider": PROVIDER,
+                        "model": MODEL,
+                        "consentId": record.consent_id,
+                        "sourceAudioMediaRef": record.source_audio_asset_id,
+                        "sourceAudioSha256": record.source_audio_sha256,
+                        "requestHash": request_hash,
+                        "revoked": false
+                    }),
+                    action_name: edit.changed.then_some(edit.action_name),
+                })
+            }
+            "generate" => {
+                if args.cost_authorized != Some(true) {
+                    return Err(AdvancedWorkflowError::new(
+                        AdvancedWorkflowErrorKind::CostAuthorizationRequired,
+                        "cloned-voice generation uses a paid provider; set costAuthorized=true after review",
+                    ));
+                }
+                let voice_id = args
+                    .voice_id
+                    .as_deref()
+                    .ok_or_else(|| advanced_invalid("voiceId is required for generation"))?;
+                let record = snapshot
+                    .timeline
+                    .voice_models
+                    .iter()
+                    .find(|record| record.id == voice_id)
+                    .cloned()
+                    .ok_or_else(|| advanced_resource("voice model does not exist"))?;
+                if record.provider != PROVIDER || record.model != MODEL {
+                    return Err(AdvancedWorkflowError::new(
+                        AdvancedWorkflowErrorKind::CapabilityUnavailable,
+                        "voice model provider metadata is not supported by this build",
+                    ));
+                }
+                if record.revoked {
+                    return Err(AdvancedWorkflowError::new(
+                        AdvancedWorkflowErrorKind::ConsentRequired,
+                        "revoked voice models cannot generate audio",
+                    ));
+                }
+                if record.consent_id != args.consent_id {
+                    return Err(AdvancedWorkflowError::new(
+                        AdvancedWorkflowErrorKind::ConsentRequired,
+                        "consentId does not match the enrolled voice record",
+                    ));
+                }
+                let prompt = args
+                    .prompt
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty() && value.len() <= 20_000)
+                    .ok_or_else(|| advanced_invalid("prompt is required and too long"))?;
+                let request_hash = canonical_request_hash(&json!({
+                    "provider": PROVIDER,
+                    "model": MODEL,
+                    "consentId": record.consent_id,
+                    "voiceId": record.id,
+                    "voiceRequestHash": record.request_hash,
+                    "prompt": prompt,
+                }))?;
+                let media_dir = project_dir.join(opentake_project::layout::MEDIA_DIR);
+                std::fs::create_dir_all(&media_dir)
+                    .map_err(|_| advanced_execution("project media directory is unavailable"))?;
+                let destination =
+                    media_dir.join(format!("cloned-voice-{}.mp3", uuid::Uuid::new_v4()));
+                let output = self.voice_provider.generate(
+                    &VoiceGenerationRequest {
+                        provider_voice_id: record.provider_voice_id.clone(),
+                        model: MODEL.into(),
+                        prompt: prompt.to_string(),
+                        destination: destination.clone(),
+                    },
+                    cancel,
+                )?;
+                if cancel.checkpoint() {
+                    let _ = std::fs::remove_file(&destination);
+                    return Err(cancelled_workflow("voice generation cancelled"));
+                }
+                let output_probe = probe(&destination).map_err(|error| {
+                    let _ = std::fs::remove_file(&destination);
+                    media_workflow_error(error)
+                })?;
+                if output_probe.has_video
+                    || !output_probe.has_audio
+                    || output_probe.duration_secs <= 0.0
+                {
+                    let _ = std::fs::remove_file(&destination);
+                    return Err(advanced_execution(
+                        "voice provider output must be non-empty audio",
+                    ));
+                }
+                let fps = snapshot.timeline.fps.max(1) as f64;
+                let duration_frames = (output_probe.duration_secs * fps).round().max(1.0) as i32;
+                let provenance = GenerationInput {
+                    prompt: prompt.to_string(),
+                    model: MODEL.into(),
+                    duration: output_probe.duration_secs.round() as i32,
+                    aspect_ratio: "audio".into(),
+                    voice: Some(record.id.clone()),
+                    reference_audio_urls: Some(vec![format!(
+                        "sha256:{}",
+                        record.source_audio_sha256
+                    )]),
+                    reference_audio_asset_ids: Some(vec![record.source_audio_asset_id.clone()]),
+                    source_asset_id: Some(record.source_audio_asset_id.clone()),
+                    provider: Some(PROVIDER.into()),
+                    provider_job_id: Some(output.request_id.clone()),
+                    status: Some(GenerationJobStatus::Ready),
+                    progress: Some(1.0),
+                    consent_id: Some(record.consent_id.clone()),
+                    request_hash: Some(request_hash.clone()),
+                    ..GenerationInput::default()
+                };
+                let probed = ProbedMedia {
+                    duration_secs: output_probe.duration_secs,
+                    width: None,
+                    height: None,
+                    fps: None,
+                    has_audio: true,
+                    color: None,
+                };
+                let committed = self
+                    .core
+                    .commit_generated_media_for_project(
+                        snapshot.project_epoch,
+                        snapshot.version,
+                        &project_dir,
+                        &destination,
+                        format!("{} voice", record.voice_name),
+                        opentake_domain::ClipType::Audio,
+                        &probed,
+                        provenance,
+                        MotionPlacement::Add {
+                            start_frame: snapshot.timeline.total_frames(),
+                            duration_frames,
+                            track_index: None,
+                        },
+                        "Generate Cloned Voice",
+                    )
+                    .map_err(|error| {
+                        let _ = std::fs::remove_file(&destination);
+                        advanced_execution(error.to_string())
+                    })?;
+                Ok(AdvancedWorkflowCommit {
+                    result: json!({
+                        "action": "generate",
+                        "voiceId": record.id,
+                        "assetId": committed.media.id,
+                        "clipIds": committed.edit.affected_clip_ids,
+                        "previewPath": destination,
+                        "provider": PROVIDER,
+                        "model": MODEL,
+                        "providerRequestId": output.request_id,
+                        "requestHash": request_hash,
+                        "consentId": record.consent_id,
+                        "durationFrames": duration_frames,
+                        "mediaType": output.media_type,
+                        "imported": true
+                    }),
+                    action_name: Some(committed.edit.action_name),
+                })
+            }
+            "revoke" => {
+                let voice_id = args
+                    .voice_id
+                    .as_deref()
+                    .ok_or_else(|| advanced_invalid("voiceId is required for revocation"))?;
+                let record = snapshot
+                    .timeline
+                    .voice_models
+                    .iter()
+                    .find(|record| record.id == voice_id)
+                    .cloned()
+                    .ok_or_else(|| advanced_resource("voice model does not exist"))?;
+                if record.provider != PROVIDER || record.model != MODEL {
+                    return Err(AdvancedWorkflowError::new(
+                        AdvancedWorkflowErrorKind::CapabilityUnavailable,
+                        "voice model provider metadata is not supported by this build",
+                    ));
+                }
+                if record.consent_id != args.consent_id {
+                    return Err(AdvancedWorkflowError::new(
+                        AdvancedWorkflowErrorKind::ConsentRequired,
+                        "consentId does not match the enrolled voice record",
+                    ));
+                }
+                if !record.revoked {
+                    self.voice_provider
+                        .revoke(&record.provider_voice_id, cancel)?;
+                    let current = self.core.runtime_snapshot();
+                    if current.project_epoch != snapshot.project_epoch {
+                        return Err(advanced_execution(
+                            "project changed while revoking the provider voice",
+                        ));
+                    }
+                    let edit = self
+                        .core
+                        .apply_at_revision_persisted(
+                            ProjectRevision {
+                                project_epoch: current.project_epoch,
+                                version: current.version,
+                            },
+                            EditCommand::RevokeVoiceModel {
+                                voice_model_id: record.id.clone(),
+                            },
+                        )
+                        .map_err(|error| advanced_execution(error.to_string()))?;
+                    return Ok(AdvancedWorkflowCommit {
+                        result: json!({
+                            "action": "revoke",
+                            "voiceId": record.id,
+                            "provider": PROVIDER,
+                            "consentId": record.consent_id,
+                            "revoked": true
+                        }),
+                        action_name: edit.changed.then_some(edit.action_name),
+                    });
+                }
+                Ok(AdvancedWorkflowCommit {
+                    result: json!({
+                        "action": "revoke",
+                        "voiceId": record.id,
+                        "provider": PROVIDER,
+                        "consentId": record.consent_id,
+                        "revoked": true
+                    }),
+                    action_name: None,
+                })
+            }
+            _ => Err(advanced_invalid(
+                "voice action must be enroll, generate, or revoke",
+            )),
+        }
+    }
 }
 
 impl AdvancedWorkflowBridge for TauriAdvancedWorkflowBridge {
@@ -2030,6 +3095,8 @@ impl AdvancedWorkflowBridge for TauriAdvancedWorkflowBridge {
             ToolName::SeparateStems,
             ToolName::TranslateCaptions,
             ToolName::ScriptToVideo,
+            ToolName::GenerateAvatar,
+            ToolName::CloneVoice,
         ];
         if verify_rvm_model(&self.models_dir).is_ok() {
             tools.push(ToolName::GenerateMatte);
@@ -2052,10 +3119,8 @@ impl AdvancedWorkflowBridge for TauriAdvancedWorkflowBridge {
                 self.translate_captions(args, cancel)
             }
             AdvancedWorkflowRequest::ScriptToVideo(args) => self.script_to_video(args, cancel),
-            _ => Err(AdvancedWorkflowError::new(
-                AdvancedWorkflowErrorKind::CapabilityUnavailable,
-                "advanced workflow is not supported by this desktop host",
-            )),
+            AdvancedWorkflowRequest::GenerateAvatar(args) => self.generate_avatar(args, cancel),
+            AdvancedWorkflowRequest::CloneVoice(args) => self.clone_voice(args, cancel),
         }
     }
 }
@@ -2084,6 +3149,26 @@ fn position_keyframes(
 
 fn advanced_invalid(message: impl Into<String>) -> AdvancedWorkflowError {
     AdvancedWorkflowError::new(AdvancedWorkflowErrorKind::InvalidArguments, message)
+}
+
+fn validate_consent_id(value: &str) -> Result<(), AdvancedWorkflowError> {
+    if value.len() < 8
+        || value.len() > 256
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+    {
+        return Err(AdvancedWorkflowError::new(
+            AdvancedWorkflowErrorKind::ConsentRequired,
+            "record explicit consent and provide its 8-256 character consentId",
+        ));
+    }
+    Ok(())
+}
+
+fn canonical_request_hash(value: &serde_json::Value) -> Result<String, AdvancedWorkflowError> {
+    let bytes = serde_json::to_vec(value).map_err(|error| advanced_execution(error.to_string()))?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
 }
 
 fn advanced_resource(message: impl Into<String>) -> AdvancedWorkflowError {
@@ -2740,7 +3825,110 @@ mod tests {
     use opentake_domain::{Clip, ClipType, MaskShape, Point2};
     use opentake_media::analysis::StabilizationMotionSample;
     use opentake_ops::ClipEntry;
+    use std::collections::HashSet;
     use std::process::Command;
+
+    #[test]
+    fn provider_resource_ids_are_safe_path_segments() {
+        assert!(valid_provider_resource_id("abc-123_DEF"));
+        assert!(!valid_provider_resource_id(""));
+        assert!(!valid_provider_resource_id("../voices"));
+        assert!(!valid_provider_resource_id("voice/id"));
+        assert!(!valid_provider_resource_id(&"a".repeat(257)));
+    }
+
+    struct FixtureAvatarProvider {
+        fixture: PathBuf,
+        fail: bool,
+        calls: Arc<Mutex<usize>>,
+    }
+
+    impl AvatarProvider for FixtureAvatarProvider {
+        fn generate(
+            &self,
+            request: &AvatarProviderRequest,
+            cancel: &MediaCancelToken,
+        ) -> Result<AvatarProviderOutput, AdvancedWorkflowError> {
+            *self.calls.lock().unwrap() += 1;
+            if cancel.checkpoint() {
+                return Err(cancelled_workflow("fixture avatar cancelled"));
+            }
+            if self.fail {
+                return Err(advanced_execution("fixture avatar provider failed"));
+            }
+            std::fs::copy(&self.fixture, &request.destination)
+                .map_err(|error| advanced_execution(error.to_string()))?;
+            Ok(AvatarProviderOutput {
+                request_id: "avatar-request-fixture".into(),
+                media_type: "video/mp4".into(),
+            })
+        }
+    }
+
+    struct FixtureVoiceProvider {
+        fixture: PathBuf,
+        fail_generation: bool,
+        revoked: Arc<Mutex<HashSet<String>>>,
+        calls: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl VoiceCloneProvider for FixtureVoiceProvider {
+        fn enroll(
+            &self,
+            _request: &VoiceEnrollmentRequest,
+            cancel: &MediaCancelToken,
+        ) -> Result<String, AdvancedWorkflowError> {
+            self.calls.lock().unwrap().push("enroll".into());
+            if cancel.checkpoint() {
+                return Err(cancelled_workflow("fixture voice enrollment cancelled"));
+            }
+            Ok("provider-voice-fixture".into())
+        }
+
+        fn generate(
+            &self,
+            request: &VoiceGenerationRequest,
+            cancel: &MediaCancelToken,
+        ) -> Result<VoiceProviderOutput, AdvancedWorkflowError> {
+            self.calls.lock().unwrap().push("generate".into());
+            if cancel.checkpoint() {
+                return Err(cancelled_workflow("fixture voice generation cancelled"));
+            }
+            if self.fail_generation {
+                return Err(advanced_execution("fixture voice provider failed"));
+            }
+            if self
+                .revoked
+                .lock()
+                .unwrap()
+                .contains(&request.provider_voice_id)
+            {
+                return Err(advanced_execution("fixture voice was revoked"));
+            }
+            std::fs::copy(&self.fixture, &request.destination)
+                .map_err(|error| advanced_execution(error.to_string()))?;
+            Ok(VoiceProviderOutput {
+                request_id: "voice-request-fixture".into(),
+                media_type: "audio/mpeg".into(),
+            })
+        }
+
+        fn revoke(
+            &self,
+            provider_voice_id: &str,
+            cancel: &MediaCancelToken,
+        ) -> Result<(), AdvancedWorkflowError> {
+            self.calls.lock().unwrap().push("revoke".into());
+            if cancel.checkpoint() {
+                return Err(cancelled_workflow("fixture voice revocation cancelled"));
+            }
+            self.revoked
+                .lock()
+                .unwrap()
+                .insert(provider_voice_id.to_string());
+            Ok(())
+        }
+    }
 
     #[test]
     fn tracked_motion_becomes_editable_linear_position_keyframes() {
@@ -4058,5 +5246,419 @@ mod tests {
         let undone = core.runtime_snapshot();
         assert!(undone.timeline.tracks.is_empty());
         assert_eq!(undone.timeline.script_assembly_plans.len(), 1);
+    }
+
+    struct IdentityFixture {
+        root: tempfile::TempDir,
+        bundle: PathBuf,
+        core: AppCore,
+        portrait_id: String,
+        audio_id: String,
+        avatar_video: PathBuf,
+        generated_voice: PathBuf,
+    }
+
+    fn identity_fixture() -> Option<IdentityFixture> {
+        if !opentake_media::ffmpeg_status::ffmpeg_available()
+            || !opentake_media::ffmpeg_status::ffprobe_available()
+        {
+            return None;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let bundle = root.path().join("Identity.opentake");
+        let portrait = root.path().join("portrait.png");
+        image::RgbaImage::from_pixel(96, 54, image::Rgba([80, 140, 220, 255]))
+            .save(&portrait)
+            .unwrap();
+        let narration = root.path().join("narration.wav");
+        assert!(Command::new(opentake_media::ffmpeg_status::ffmpeg_path())
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000:duration=1",
+            ])
+            .arg(&narration)
+            .status()
+            .unwrap()
+            .success());
+        let generated_voice = root.path().join("generated-voice.mp3");
+        assert!(Command::new(opentake_media::ffmpeg_status::ffmpeg_path())
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+            .arg(&narration)
+            .args(["-c:a", "libmp3lame"])
+            .arg(&generated_voice)
+            .status()
+            .unwrap()
+            .success());
+        let avatar_video = root.path().join("avatar.mp4");
+        assert!(Command::new(opentake_media::ffmpeg_status::ffmpeg_path())
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-loop",
+                "1",
+                "-i"
+            ])
+            .arg(&portrait)
+            .arg("-i")
+            .arg(&narration)
+            .args([
+                "-t",
+                "1",
+                "-r",
+                "6",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-shortest",
+            ])
+            .arg(&avatar_video)
+            .status()
+            .unwrap()
+            .success());
+        let core = AppCore::new();
+        core.apply(EditCommand::SetTimelineSettings {
+            fps: 6,
+            width: 96,
+            height: 54,
+        })
+        .unwrap();
+        core.save_project(Some(bundle.clone())).unwrap();
+        let to_probe = |path: &Path| {
+            let value = probe(path).unwrap();
+            ProbedMedia {
+                duration_secs: value.duration_secs,
+                width: value.width.and_then(|width| i32::try_from(width).ok()),
+                height: value.height.and_then(|height| i32::try_from(height).ok()),
+                fps: value.fps,
+                has_audio: value.has_audio,
+                color: value.color,
+            }
+        };
+        let imported = core
+            .import_media_batch_for_project_persisted(
+                core.runtime_snapshot().project_epoch,
+                &bundle,
+                vec![
+                    PreparedMediaImportOp::ImportFile {
+                        path: portrait.clone(),
+                        name: "portrait.png".into(),
+                        probe: to_probe(&portrait),
+                        folder: None,
+                    },
+                    PreparedMediaImportOp::ImportFile {
+                        path: narration.clone(),
+                        name: "narration.wav".into(),
+                        probe: to_probe(&narration),
+                        folder: None,
+                    },
+                ],
+            )
+            .unwrap();
+        Some(IdentityFixture {
+            root,
+            bundle,
+            core,
+            portrait_id: imported[0].entry.id.clone(),
+            audio_id: imported[1].entry.id.clone(),
+            avatar_video,
+            generated_voice,
+        })
+    }
+
+    #[test]
+    fn avatar_consent_failure_cancel_import_undo_reopen_and_export() {
+        let Some(fixture) = identity_fixture() else {
+            return;
+        };
+        let calls = Arc::new(Mutex::new(0));
+        let provider = Arc::new(FixtureAvatarProvider {
+            fixture: fixture.avatar_video.clone(),
+            fail: false,
+            calls: calls.clone(),
+        });
+        let voice = Arc::new(FixtureVoiceProvider {
+            fixture: fixture.generated_voice.clone(),
+            fail_generation: false,
+            revoked: Arc::new(Mutex::new(HashSet::new())),
+            calls: Arc::new(Mutex::new(Vec::new())),
+        });
+        let bridge = TauriAdvancedWorkflowBridge::with_identity_providers(
+            fixture.core.clone(),
+            fixture.root.path().join("cache"),
+            fixture.root.path().join("models"),
+            provider,
+            voice,
+        );
+        let args = GenerateAvatarArgs {
+            portrait_media_ref: fixture.portrait_id.clone(),
+            audio_media_ref: fixture.audio_id.clone(),
+            consent_id: "consent-avatar-fixture".into(),
+            provider: Some("fal".into()),
+            model: Some("fal-ai/sync-lipsync/v3/image-to-video".into()),
+            cost_authorized: Some(true),
+            start_frame: Some(0),
+        };
+        let before = fixture.core.runtime_snapshot();
+        let denied = bridge
+            .generate_avatar(
+                GenerateAvatarArgs {
+                    cost_authorized: Some(false),
+                    ..args.clone()
+                },
+                &MediaCancelToken::new(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            denied.kind,
+            AdvancedWorkflowErrorKind::CostAuthorizationRequired
+        );
+        assert_eq!(*calls.lock().unwrap(), 0);
+        let cancelled = MediaCancelToken::new();
+        cancelled.cancel();
+        assert_eq!(
+            bridge
+                .generate_avatar(args.clone(), &cancelled)
+                .unwrap_err()
+                .kind,
+            AdvancedWorkflowErrorKind::Cancelled
+        );
+        assert_eq!(fixture.core.runtime_snapshot().media, before.media);
+        let result = bridge
+            .generate_avatar(args, &MediaCancelToken::new())
+            .unwrap();
+        assert_eq!(result.action_name.as_deref(), Some("Generate Avatar"));
+        assert_eq!(*calls.lock().unwrap(), 1);
+        let generated = fixture.core.runtime_snapshot();
+        assert_eq!(
+            generated.media.entries.len(),
+            before.media.entries.len() + 1
+        );
+        assert_eq!(generated.timeline.tracks.len(), 1);
+        let entry = generated.media.entries.last().unwrap();
+        let provenance = entry.generation_input.as_ref().unwrap();
+        assert_eq!(
+            provenance.consent_id.as_deref(),
+            Some("consent-avatar-fixture")
+        );
+        assert_eq!(
+            provenance.reference_audio_asset_ids.as_deref(),
+            Some([fixture.audio_id.clone()].as_slice())
+        );
+        assert_eq!(provenance.request_hash.as_ref().unwrap().len(), 64);
+        assert!(!serde_json::to_string(&generated.media)
+            .unwrap()
+            .contains("api-key"));
+        let reopened = AppCore::new();
+        reopened.open_project(&fixture.bundle).unwrap();
+        assert_eq!(reopened.runtime_snapshot().timeline, generated.timeline);
+        let out = fixture.root.path().join("avatar-export.mp4");
+        let summary = crate::export::run_export(
+            &generated.timeline,
+            &generated.media,
+            &generated.project_dir,
+            &crate::export::ExportRequest {
+                out_path: out.to_string_lossy().into_owned(),
+                codec: crate::export::ExportCodec::H264,
+                quality: crate::export::ExportQuality::P720,
+            },
+        )
+        .unwrap();
+        assert_eq!(summary.frame_count, 6);
+        assert!(summary.has_audio);
+        assert!(probe(&out).unwrap().has_audio);
+        fixture.core.undo().unwrap();
+        let undone = fixture.core.runtime_snapshot();
+        assert_eq!(undone.media, before.media);
+        assert!(undone.timeline.tracks.is_empty());
+    }
+
+    #[test]
+    fn voice_clone_consent_provider_cancel_revoke_and_reopen_contract() {
+        let Some(fixture) = identity_fixture() else {
+            return;
+        };
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let revoked = Arc::new(Mutex::new(HashSet::new()));
+        let voice = Arc::new(FixtureVoiceProvider {
+            fixture: fixture.generated_voice.clone(),
+            fail_generation: false,
+            revoked: revoked.clone(),
+            calls: calls.clone(),
+        });
+        let avatar = Arc::new(FixtureAvatarProvider {
+            fixture: fixture.avatar_video.clone(),
+            fail: false,
+            calls: Arc::new(Mutex::new(0)),
+        });
+        let bridge = TauriAdvancedWorkflowBridge::with_identity_providers(
+            fixture.core.clone(),
+            fixture.root.path().join("cache"),
+            fixture.root.path().join("models"),
+            avatar,
+            voice,
+        );
+        let invalid = bridge
+            .clone_voice(
+                CloneVoiceArgs {
+                    action: "enroll".into(),
+                    reference_audio_media_ref: Some(fixture.audio_id.clone()),
+                    consent_id: "no".into(),
+                    voice_name: Some("Narrator".into()),
+                    cost_authorized: Some(true),
+                    ..CloneVoiceArgs::default()
+                },
+                &MediaCancelToken::new(),
+            )
+            .unwrap_err();
+        assert_eq!(invalid.kind, AdvancedWorkflowErrorKind::ConsentRequired);
+        let enrollment = bridge
+            .clone_voice(
+                CloneVoiceArgs {
+                    action: "enroll".into(),
+                    reference_audio_media_ref: Some(fixture.audio_id.clone()),
+                    consent_id: "consent-voice-fixture".into(),
+                    voice_name: Some("Narrator".into()),
+                    provider: Some("elevenlabs".into()),
+                    model: Some("eleven_multilingual_v2".into()),
+                    cost_authorized: Some(true),
+                    ..CloneVoiceArgs::default()
+                },
+                &MediaCancelToken::new(),
+            )
+            .unwrap();
+        let voice_id = enrollment.result["voiceId"].as_str().unwrap().to_string();
+        assert_eq!(calls.lock().unwrap().as_slice(), ["enroll"]);
+        let enrolled = fixture.core.runtime_snapshot();
+        assert_eq!(enrolled.timeline.voice_models.len(), 1);
+        assert!(!enrolled.timeline.voice_models[0].revoked);
+        let cancelled = MediaCancelToken::new();
+        cancelled.cancel();
+        assert_eq!(
+            bridge
+                .clone_voice(
+                    CloneVoiceArgs {
+                        action: "generate".into(),
+                        consent_id: "consent-voice-fixture".into(),
+                        voice_id: Some(voice_id.clone()),
+                        prompt: Some("Hello from the cloned voice".into()),
+                        cost_authorized: Some(true),
+                        ..CloneVoiceArgs::default()
+                    },
+                    &cancelled,
+                )
+                .unwrap_err()
+                .kind,
+            AdvancedWorkflowErrorKind::Cancelled
+        );
+        assert_eq!(calls.lock().unwrap().as_slice(), ["enroll"]);
+        let failed_calls = Arc::new(Mutex::new(Vec::new()));
+        let failed_bridge = TauriAdvancedWorkflowBridge::with_identity_providers(
+            fixture.core.clone(),
+            fixture.root.path().join("failed-cache"),
+            fixture.root.path().join("models"),
+            Arc::new(FixtureAvatarProvider {
+                fixture: fixture.avatar_video.clone(),
+                fail: false,
+                calls: Arc::new(Mutex::new(0)),
+            }),
+            Arc::new(FixtureVoiceProvider {
+                fixture: fixture.generated_voice.clone(),
+                fail_generation: true,
+                revoked: revoked.clone(),
+                calls: failed_calls,
+            }),
+        );
+        let before_failure = fixture.core.runtime_snapshot();
+        assert!(failed_bridge
+            .clone_voice(
+                CloneVoiceArgs {
+                    action: "generate".into(),
+                    consent_id: "consent-voice-fixture".into(),
+                    voice_id: Some(voice_id.clone()),
+                    prompt: Some("Provider failure".into()),
+                    cost_authorized: Some(true),
+                    ..CloneVoiceArgs::default()
+                },
+                &MediaCancelToken::new(),
+            )
+            .is_err());
+        assert_eq!(fixture.core.runtime_snapshot().media, before_failure.media);
+        let generated = bridge
+            .clone_voice(
+                CloneVoiceArgs {
+                    action: "generate".into(),
+                    consent_id: "consent-voice-fixture".into(),
+                    voice_id: Some(voice_id.clone()),
+                    prompt: Some("Hello from the cloned voice".into()),
+                    cost_authorized: Some(true),
+                    ..CloneVoiceArgs::default()
+                },
+                &MediaCancelToken::new(),
+            )
+            .unwrap();
+        assert_eq!(generated.result["imported"], true);
+        let after_generation = fixture.core.runtime_snapshot();
+        assert_eq!(
+            after_generation.media.entries.len(),
+            enrolled.media.entries.len() + 1
+        );
+        assert_eq!(after_generation.timeline.tracks.len(), 1);
+        let generated_entry = after_generation.media.entries.last().unwrap();
+        assert_eq!(
+            generated_entry
+                .generation_input
+                .as_ref()
+                .unwrap()
+                .voice
+                .as_deref(),
+            Some(voice_id.as_str())
+        );
+        fixture.core.undo().unwrap();
+        assert_eq!(fixture.core.runtime_snapshot().media, enrolled.media);
+        let revoked_result = bridge
+            .clone_voice(
+                CloneVoiceArgs {
+                    action: "revoke".into(),
+                    consent_id: "consent-voice-fixture".into(),
+                    voice_id: Some(voice_id.clone()),
+                    ..CloneVoiceArgs::default()
+                },
+                &MediaCancelToken::new(),
+            )
+            .unwrap();
+        assert_eq!(revoked_result.result["revoked"], true);
+        assert!(revoked.lock().unwrap().contains("provider-voice-fixture"));
+        fixture.core.undo().unwrap();
+        assert!(fixture.core.runtime_snapshot().timeline.voice_models[0].revoked);
+        let call_count = calls.lock().unwrap().len();
+        let rejected = bridge
+            .clone_voice(
+                CloneVoiceArgs {
+                    action: "generate".into(),
+                    consent_id: "consent-voice-fixture".into(),
+                    voice_id: Some(voice_id),
+                    prompt: Some("Must not run".into()),
+                    cost_authorized: Some(true),
+                    ..CloneVoiceArgs::default()
+                },
+                &MediaCancelToken::new(),
+            )
+            .unwrap_err();
+        assert_eq!(rejected.kind, AdvancedWorkflowErrorKind::ConsentRequired);
+        assert_eq!(calls.lock().unwrap().len(), call_count);
+        let reopened = AppCore::new();
+        reopened.open_project(&fixture.bundle).unwrap();
+        assert!(reopened.runtime_snapshot().timeline.voice_models[0].revoked);
     }
 }

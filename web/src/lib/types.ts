@@ -23,7 +23,21 @@ export interface Timeline {
   settingsConfigured: boolean;
   nestedSequences?: NestedSequence[];
   scriptAssemblyPlans?: ScriptAssemblyPlan[];
+  voiceModels?: VoiceModelRecord[];
   tracks: Track[];
+}
+
+export interface VoiceModelRecord {
+  id: string;
+  provider: string;
+  providerVoiceId: string;
+  model: string;
+  consentId: string;
+  sourceAudioAssetId: string;
+  sourceAudioSha256: string;
+  requestHash: string;
+  voiceName: string;
+  revoked: boolean;
 }
 
 export interface ScriptAssemblySegment {
@@ -720,6 +734,48 @@ export interface ScriptToVideoResult {
   actionName?: string | null;
 }
 
+export interface AvatarGenerationResult {
+  result: {
+    assetId: string;
+    clipIds: string[];
+    previewPath: string;
+    provider: string;
+    model: string;
+    providerRequestId: string;
+    requestHash: string;
+    consentId: string;
+    portraitMediaRef: string;
+    audioMediaRef: string;
+    durationFrames: number;
+    mediaType: string;
+    imported: boolean;
+  };
+  actionName?: string | null;
+}
+
+export interface VoiceCloneResult {
+  result: {
+    action: "enroll" | "generate" | "revoke";
+    voiceId: string;
+    voiceName?: string;
+    assetId?: string;
+    clipIds?: string[];
+    previewPath?: string;
+    provider: string;
+    model?: string;
+    providerRequestId?: string;
+    requestHash?: string;
+    consentId: string;
+    sourceAudioMediaRef?: string;
+    sourceAudioSha256?: string;
+    durationFrames?: number;
+    mediaType?: string;
+    imported?: boolean;
+    revoked?: boolean;
+  };
+  actionName?: string | null;
+}
+
 /** One transcript word/token with optional source-seconds timing. */
 export interface TranscriptWord {
   text: string;
@@ -910,6 +966,8 @@ export interface GenerationInput {
   sourceStartFrame?: number | null;
   sourceEndFrame?: number | null;
   estimatedCostCredits?: number | null;
+  consentId?: string | null;
+  requestHash?: string | null;
 }
 
 /** A media-library folder (flat list; nest via `parentFolderId`). */

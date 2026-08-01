@@ -72,6 +72,7 @@ pub use subtitle_export::{collect_caption_cues, export_srt, export_vtt, Subtitle
 pub use text::{Fill, Rgba, Shadow, TextAlignment, TextLayout, TextStyle};
 pub use timeline::{
     ClipLocation, NestedSequence, ScriptAssemblyPlan, ScriptAssemblySegment, Timeline, Track,
+    VoiceModelRecord,
 };
 pub use transform::{Crop, CropAspectLock, Point, Transform};
 pub use transition::{Transition, TransitionKind};

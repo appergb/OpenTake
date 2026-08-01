@@ -335,6 +335,8 @@ pub fn run() {
             advanced::advanced_translate_captions,
             advanced::advanced_apply_caption_translation_review,
             advanced::advanced_script_to_video,
+            advanced::advanced_generate_avatar,
+            advanced::advanced_clone_voice,
             advanced::cancel_advanced_workflow,
             secret::secret_save,
             secret::secret_load,

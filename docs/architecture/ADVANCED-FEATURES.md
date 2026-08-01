@@ -88,8 +88,8 @@ OpenTake 补齐这些进阶能力,**几乎不需要新建基础设施**,全部�
 |---|---|---|---|---|
 | 智能剪口播(剔除停顿/语气词) | partial(已规划) | medium | p1 | **本地为主**:词级 `get_transcript` + 静音检测 → Rust 内一次算好 ripple 区间(高阶工具 `remove_filler_words`/`tighten_silences`,避免把帧算术外包给 LLM) |
 | 图文成片 script-to-video | partial(地基在) | high | p1 | agent 编排既有工具:脚本 → `generate_image`→`generate_video`→`generate_audio`(配音)→`add_clips`/`add_texts`/`set_transition`;素材匹配用 SigLIP2 搜索 + import_media 接 stock |
-| 音色克隆 voice cloning | missing | high | p2 | 外部 API(ElevenLabs 等)经 opentake-gen,扩展 audio 生成参数支持自定义音色 |
-| 虚拟数字人 digital avatar | missing | high | p3 | 外部 API(HeyGen/fal 等)经 opentake-gen,新增 catalog kind |
+| 音色克隆 voice cloning | **has** | high | p2 | ElevenLabs IVC 注册/TTS/永久撤销生产桥；参考音频、同意记录、请求哈希和 provider voice id 持久化，生成音频原子导入落轨并可试听/撤销 |
+| 虚拟数字人 digital avatar | **has** | high | p3 | fal Sync Lipsync v3 image-to-video 生产桥；人像+驱动音频、同意与成本确认、结果探测、原子导入落轨和预览/撤销完整接入 |
 | 多语种翻译(字幕) | partial(靠 agent) | medium | p2 | 一等公民:离线 MT 或外部 API + LLM 兜底,翻译后保持时码 |
 
 ---
