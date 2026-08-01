@@ -2217,33 +2217,49 @@ not the separately owned desktop motion/Lottie materialization.
   - Resolve packaged sidecar paths without relying on developer PATH.
   - Run installed-app probe/decode/encode smoke tests on macOS and Windows.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `scripts/tests/packaged-sidecars-test.rb#packaged_macos_windows_sidecars_resolve_and_execute` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `ruby scripts/tests/packaged-sidecars-test.rb --name "packaged_macos_windows_sidecars_resolve_and_execute"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-media/src/ff.rs#ffmpeg_path`, `crates/opentake-media/src/ff.rs#ffprobe_path`, `src-tauri/tauri.conf.json`, `docs/specs/media/2-ffmpeg.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `ruby scripts/tests/packaged-sidecars-test.rb --name "packaged_macos_windows_sidecars_resolve_and_execute"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Reconciled 2026-08-01 from the tracked RED/GREEN receipt and reverified on
+  the current descendant. The original owner failed before the immutable
+  sidecar lock existed, then passed after checksum/version-pinned macOS arm64,
+  macOS x64, and Windows x64 supplies plus both platform `externalBin` configs
+  were added. Current macOS arm64 source binaries pass verify-only and the
+  empty-`PATH` probe/decode/encode smoke; the exact release `.app` sibling pair
+  passes the same installed-package owner and nested codesign verification.
+  GitHub Actions run `30614001607`, exact SHA
+  `9eeeb6ffe3088a16f19946ceb7db5e90090356ac`, remains a successful ancestor
+  receipt: its Windows full-product job built MSI/NSIS, silently installed NSIS,
+  and passed the installed-directory empty-`PATH` smoke. Current packaged-path
+  tests, Windows CI/config contracts, rustfmt, and the full workspace suite pass.
+  This closes sidecar resolution/execution only; the separately tracked
+  `--enable-nonfree` licensing replacement and Developer-ID/notarization gates
+  remain Beta-release blockers.
 
 ### Task 34: MR-ffmpeg-contract-complete (implementation-slice-2edbd096c204bad4)
 
