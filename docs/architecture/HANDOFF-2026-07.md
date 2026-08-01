@@ -193,13 +193,13 @@ default-off Rust renderer or to perform the then-missing first device check.
 
 | 项 | 怎么写 |
 |---|---|
-| Lottie 接线(#34/#65) | `opentake-motion` 实现已在但 src-tauri 未依赖;评估 wgpu 直渲 vs 预烘焙 PNG 序列(后者先通:motion→PNG 序列→图片 clip) |
+| Lottie 接线(#34/#65) | 已完成：Velato/Vello 直渲共用于 preview/playback/export/Agent 源检查和时间线检查；无效文档及无 GPU 时 fail closed。 |
 | ffmpeg 随包(#131) | tauri sidecar 打包 ffmpeg/ffprobe,`OPENTAKE_FFMPEG` 已支持自定义路径,只差 bundle 配置 + 许可证说明(GPL 兼容) |
 | solo(#147) | `Clip.is_soloed` + 混音/合成时非 solo 轨静音/隐藏;前端轨头加 S 按钮 |
 | 布局常量(#148) | 对照上游 rulerHeight/dropZoneHeight/trackHeight 改 `theme.ts`,纯数值对齐 |
 | CSP 加固(#161) | null→非 null 白屏高风险,**必须真机逐项验证**,独立小 PR |
 | Storage/Models 设置页 | `SettingsView.tsx` 加两 pane:模型缓存管理(whisper/SigLIP 已下载模型列表+删除)、存储占用(项目/缓存目录大小) |
-| MCP 动态能力 | `InspectMedia` 已接 MediaBridge（剩 Lottie）；生成/超分按凭据动态发布；Motion add/edit 于 2026-08-01 接生产桥并按 Chromium/FFmpeg 能力动态发布 |
+| MCP 动态能力 | `InspectMedia` 已接 MediaBridge，包含 Lottie 均匀抽帧；生成/超分按凭据动态发布；Motion add/edit 于 2026-08-01 接生产桥并按 Chromium/FFmpeg 能力动态发布 |
 | 技术债 | `fcpxml.rs` 1489 行拆分;`export_fcpxml` 名实不符(产物 XMEML)可改名 `export_xml`;`library.rs:322` remove 静默吞错补 `tracing::warn!` |
 
 ---

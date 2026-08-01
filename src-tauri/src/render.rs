@@ -290,6 +290,15 @@ struct CachedLottie {
     composition: velato::Composition,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LottieMetadata {
+    pub width: u32,
+    pub height: u32,
+    pub frame_rate: f64,
+    pub frame_count: i64,
+    pub duration_seconds: f64,
+}
+
 /// Device-lifetime Lottie JSON parser/rasterizer shared by preview, playback,
 /// and export. GPU textures live in the caller's [`TextureCache`]; parsed
 /// documents live here and are replaced whenever the source content hash
@@ -310,17 +319,7 @@ impl LottieMaterializer {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn resolve(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        textures: &mut TextureCache,
-        path: &std::path::Path,
-        source_frame: i64,
-        render_box: (u32, u32),
-        label: &str,
-    ) -> Result<Rc<GpuTexture>, String> {
+    fn ensure_document(&mut self, path: &std::path::Path) -> Result<(), String> {
         let bytes = std::fs::read(path)
             .map_err(|error| format!("read Lottie document {}: {error}", path.display()))?;
         if bytes.is_empty() || bytes.len() > MAX_LOTTIE_BYTES {
@@ -348,16 +347,49 @@ impl LottieMaterializer {
             self.documents.insert(
                 path.to_path_buf(),
                 CachedLottie {
-                    content_hash: content_hash.clone(),
+                    content_hash,
                     composition,
                 },
             );
         }
+        Ok(())
+    }
+
+    pub(crate) fn metadata(&mut self, path: &std::path::Path) -> Result<LottieMetadata, String> {
+        self.ensure_document(path)?;
+        let composition = &self
+            .documents
+            .get(path)
+            .expect("document inserted or already cached")
+            .composition;
+        let frame_count = lottie_frame_count(composition);
+        Ok(LottieMetadata {
+            width: composition.width as u32,
+            height: composition.height as u32,
+            frame_rate: composition.frame_rate,
+            frame_count,
+            duration_seconds: frame_count as f64 / composition.frame_rate,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn resolve(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        textures: &mut TextureCache,
+        path: &std::path::Path,
+        source_frame: i64,
+        render_box: (u32, u32),
+        label: &str,
+    ) -> Result<Rc<GpuTexture>, String> {
+        self.ensure_document(path)?;
 
         let cached = self
             .documents
             .get(path)
             .expect("document inserted or already cached");
+        let content_hash = cached.content_hash.clone();
         let composition = &cached.composition;
         let frame_count = lottie_frame_count(composition);
         let internal_frame = source_frame.rem_euclid(frame_count);

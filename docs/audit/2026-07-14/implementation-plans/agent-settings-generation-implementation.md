@@ -12,7 +12,20 @@
 
 ### Task 1: advertised-mcp-tool-reachability + AG-advertised-tool-surface-acceptance (implementation-slice-6a8f42f312c40661)
 
-**2026-07-29 progress (not closed):** The production base catalog now contains 39 real dispatch paths and is filtered per host session: seven media/transcript tools require the desktop `MediaBridge`; four generation/upscale tools are appended only with compatible managed or BYOK authorization; Motion remains schema-known but hidden. `inspect_media` is wired for image/video/audio inspection, storyboard sampling, and local/cached transcription; generation has durable provider jobs, progress/cancel/retry and deterministic finalization. This satisfies the fail-closed discovery and generation portions, but Task 1 remains open for Lottie inspection, Motion rendering/import, retained real-device evidence, and final ledger reconciliation.
+**2026-08-01 completion:** The production base catalog contains 39 real dispatch
+paths and is filtered per host session: seven media/transcript tools require the
+desktop `MediaBridge`; four generation/upscale tools are appended only with
+compatible managed or BYOK authorization; Motion add/edit are appended only
+when the Chromium/FFmpeg production bridge is ready. `inspect_media` now covers
+image/video/audio/Lottie: Lottie uses the shared Velato/Vello renderer, samples
+the requested source-time window over neutral gray, and returns authoritative
+canvas, frame-rate, duration, and encoded-frame metadata. `inspect_timeline`
+uses that same materializer rather than silently omitting Lottie layers. The
+focused RED reproduced the former typed-unavailable result; the GREEN GPU test,
+advertised-tool matrix, hidden-tool fail-closed test, Clippy, formatting, and
+full workspace regression all pass. Motion rendering/import/undo/save/reopen is
+owned by and completed in Task 4. Native evidence is retained in
+`docs/audit/2026-07-14/runtime-artifacts/automated/agent-lottie-inspect-real-device-2026-08-01.md`.
 
 **Covered records:**
 - `requirement-1c40dd077c50436b` (requirement)
@@ -223,32 +236,32 @@
   - Contract tests enumerate the advertised and dispatched tool sets bidirectionally, and integration tests invoke every high-risk write/generation path.
   - Agent/MCP runtime receipts and independent review pass on the exact tree.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-agent/src/mcp/dispatch.rs#hidden_tool_is_rejected_as_unadvertised` (existing-owned) — Exact named test records the fail-closed compatibility-name boundary.
   - `crates/opentake-agent/tests/advertised_tool_acceptance.rs#every_advertised_tool_is_live_or_absent` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-agent hidden_tool_is_rejected_as_unadvertised`
   - Run: `cargo test -p opentake-agent --test advertised_tool_acceptance every_advertised_tool_is_live_or_absent -- --exact`
 
   Expected: FAIL because one or more of the 17 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-agent/src/chat/loop.rs#tool_catalog`, `crates/opentake-agent/src/mcp/dispatch.rs#Dispatcher::dispatch`, `crates/opentake-agent/src/mcp/dispatch.rs#dispatch`, `crates/opentake-agent/src/tools/names.rs#ToolName::ALL`, `CLAUDE.md`, `docs/architecture/BUGS.md`, `docs/architecture/FULL_PROJECT_SCAN_REPORT.md`, `docs/architecture/HANDOFF-2026-07.md`, `docs/architecture/ROADMAP.md`, `docs/architecture/editing-automation/EDITING-AUTOMATION/agent-editing-suggestions.md`, `docs/specs/agent/10-implementation.md`, `docs/specs/agent/2-tools.md`, `docs/superpowers/specs/2026-07-10-opentake-full-convergence-design.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-agent stub_tool_reports_not_implemented`
   - Run: `cargo test -p opentake-agent --test advertised_tool_acceptance every_advertised_tool_is_live_or_absent -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 

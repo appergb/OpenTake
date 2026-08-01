@@ -60,12 +60,12 @@
 | **描述** | GPU 合成的 infrastructure 已就绪（`composite_frame` Tauri 命令、`useTimelineFrame` hook 均存在），但 `Preview.tsx` 仍然使用 DOM `<video>`/`<img>` 路径渲染，未接入 `useTimelineFrame`。后果：看不到关键帧动画、transform/crop/text/effects，preview ≠ export |
 | **当前状态** | 已有完整的 wgpu 合成管线，只需在 Preview.tsx 中接入 `useTimelineFrame` hook |
 
-### D2. Agent/MCP Lottie 检查仍待生产后端（中）
+### D2. Agent/MCP Lottie 检查（已关闭）
 
 | 属性 | 值 |
 |---|---|
-| **位置** | `crates/opentake-agent/src/tools/names.rs`、`crates/opentake-agent/src/mcp/dispatch.rs` |
-| **描述** | 基础目录最多发布 39 个真实路径工具，并按媒体桥能力过滤；生成四工具按授权动态发布，Motion 两工具按桌面 Chromium/FFmpeg 能力动态发布且已接生产渲染/导入/落轨工作流。剩余缺口是 `inspect_media` 的 Lottie 源检查仍返回明确不支持。 |
+| **位置** | `src-tauri/src/mcp.rs`、`src-tauri/src/render.rs` |
+| **描述** | 已关闭：`inspect_media` 使用共享 Velato/Vello 管线在中性灰底上均匀采样 Lottie，返回尺寸、帧率、时长和真实 JPEG 帧；`inspect_timeline` 也不再跳过 Lottie 层。无效文档、离线源和无 GPU 环境返回类型化失败。 |
 
 ### D3. Media 缩略图始终返回 `None`（中）
 
@@ -115,7 +115,7 @@
 | **B3** | rippleDeleteRanges 忽略 clipId | 🟠 高 | Agent 工具精度下降 | 中 |
 | **B4** | canGenerate 硬编码 false（已修复） | ✅ 已关闭 | 动态生成能力已恢复 | — |
 | **D1** | 预览未接入 GPU 合成 | 🟠 高 | 所有编辑效果不可见 | 中 |
-| **D2** | Agent 工具 30% stub | 🟠 高 | AI 协作核心缺失 | 高 |
+| **D2** | Agent/MCP Lottie 检查 | ✅ 已关闭 | 真实抽帧与合成已恢复 | — |
 | **D3** | 缩略图始终 None | 🟡 中 | 媒体库 UX 差 | 中 |
 | **D4** | Export 仅 H.264 | 🟡 中 | 输出格式受限 | 低 |
 | **D5** | TextTab/AIEdit scaffold | 🟡 中 | 功能不完整 | 中 |

@@ -95,9 +95,9 @@
 
 **问题/风险**:
 - 最多 39 个基础工具均已脱离 `not yet implemented` 分支，并按主机媒体桥能力 fail-closed 过滤；`inspect_media` 与 `remove_filler_words` 已通过 Tauri `MediaBridge` 接入抽帧/本地转写与词级项目帧分析。
-- 生成/超分四个工具已接共享生产 GenerationBridge；Motion 两工具已接 Motion Canvas 3.17.2 + 本地 fallback 生产桥，并仅在 Chromium/FFmpeg 能力可用时动态发布。Lottie 源检查仍明确不支持。
+- 生成/超分四个工具已接共享生产 GenerationBridge；Motion 两工具已接 Motion Canvas 3.17.2 + 本地 fallback 生产桥，并仅在 Chromium/FFmpeg 能力可用时动态发布。Lottie 源检查与时间线合成均已接共享 Velato/Vello 路径。
 - 生成作业已具备成本授权、耐久占位/日志、进度、取消、部分成功、失败码、重试与重启恢复；结果下载受协议/地址/大小/重定向约束并在探测后原子导入。
-- 严重性: **中**（生成与 Motion 主竖切已闭合；Lottie 检查、高级 AI workflow 与付费真实账号冒烟仍属发布验证项）。
+- 严重性: **中**（生成、Motion 与 Lottie 检查主竖切已闭合；高级 AI workflow 与付费真实账号冒烟仍属发布验证项）。
 
 **测试**: mcp_http.rs (传输) 存在；全工具执行弱。
 
@@ -142,7 +142,7 @@
 
 **Critical**:
 1. 预览不反映真实合成 (DOM 主导 + GPU 合成 infrastructure 已就绪但未接入 Preview.tsx) → [BUGS.md](BUGS.md#d1-预览未接入-gpu-合成高)
-2. Agent/MCP 的 `inspect_media` 尚缺 Lottie 生产检查后端 → [BUGS.md](BUGS.md#d2-agentmcp-lottie-检查仍待生产后端中)
+2. Agent/MCP Lottie 生产检查已关闭；剩余 Agent 目标按完成度计划继续验收。
 3. Media thumbnails 永远 None、import 无反馈/进度 → [BUGS.md](BUGS.md#d3-media-缩略图始终返回-none中)
 
 **High**:

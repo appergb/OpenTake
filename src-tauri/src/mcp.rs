@@ -49,9 +49,9 @@ use opentake_media::{decode_frame_at, decode_frames_at, FrameRequest, MediaEngin
 use opentake_project::ProjectRoot;
 use opentake_render::gpu::texture::upload_rgba;
 use opentake_render::{
-    even, try_build_render_plan, Compositor, CosmicTextRasterizer, DecodedFrame, GpuLutTexture,
-    GpuTexture, RenderDevice, RenderSize, SourceMetrics, TextRasterRequest, TextRasterizer,
-    TextureCache, TextureResolver, TextureSource,
+    even, try_build_render_plan, Compositor, CosmicTextRasterizer, DecodedFrame, FramePlan,
+    GpuLutTexture, GpuTexture, LayerDraw, RenderDevice, RenderSize, SourceMetrics,
+    TextRasterRequest, TextRasterizer, TextureCache, TextureResolver, TextureSource,
 };
 
 use crate::library::ProjectMediaCapability;
@@ -1236,12 +1236,6 @@ fn inspect_source_media(
             "inspect_media: text clips are not source media",
         ));
     }
-    if entry.kind == ClipType::Lottie {
-        return Err(BridgeError::unavailable(
-            "inspect_media: Lottie rendering is not available in this build",
-        ));
-    }
-
     let (path, _) =
         crate::transcribe::resolve_asset_from_snapshot(&snapshot, &request.media_ref)
             .map_err(|_| BridgeError::unavailable("inspect_media: source media is offline"))?;
@@ -1253,6 +1247,10 @@ fn inspect_source_media(
         ));
     }
     let byte_size = metadata.len();
+
+    if entry.kind == ClipType::Lottie {
+        return inspect_lottie_frames(&path, request, byte_size);
+    }
 
     if entry.kind == ClipType::Image {
         let frame =
@@ -1325,6 +1323,154 @@ fn inspect_source_media(
         byte_size,
         transcript,
         transcription_unavailable,
+    })
+}
+
+fn inspect_lottie_frames(
+    path: &Path,
+    request: &InspectMediaRequest,
+    byte_size: u64,
+) -> Result<InspectMediaResult, BridgeError> {
+    struct FixedResolver(Rc<GpuTexture>);
+
+    impl TextureResolver for FixedResolver {
+        fn resolve(
+            &mut self,
+            _source: &TextureSource,
+            _source_frame: i64,
+        ) -> Option<Rc<GpuTexture>> {
+            Some(self.0.clone())
+        }
+    }
+
+    let dev = RenderDevice::try_new()
+        .map_err(|_| BridgeError::unavailable("inspect_media: Lottie GPU rendering unavailable"))?;
+    let mut materializer = crate::render::LottieMaterializer::new();
+    let metadata = materializer
+        .metadata(path)
+        .map_err(|_| BridgeError::unavailable("inspect_media: invalid Lottie document"))?;
+    let start = request
+        .start_seconds
+        .unwrap_or(0.0)
+        .clamp(0.0, metadata.duration_seconds);
+    let end = request
+        .end_seconds
+        .unwrap_or(metadata.duration_seconds)
+        .clamp(0.0, metadata.duration_seconds);
+    if start >= end {
+        return Err(BridgeError::new(
+            "inspect_media: requested time range is outside the Lottie animation",
+        ));
+    }
+
+    let count = if request.overview {
+        INSPECT_MEDIA_OVERVIEW_TILES
+    } else {
+        request.max_frames.max(1)
+    };
+    let timestamps = (0..count)
+        .map(|index| start + (end - start) * (index as f64 + 0.5) / count as f64)
+        .collect::<Vec<_>>();
+    let render_size = fit_render_size(
+        metadata.width as i32,
+        metadata.height as i32,
+        INSPECT_MEDIA_FRAME_MAX_DIMENSION,
+    );
+    let source = TextureSource::Lottie {
+        media_ref: request.media_ref.clone(),
+    };
+    let compositor = Compositor::new(&dev.device);
+    let mut cache = TextureCache::new(TEXTURE_CACHE_CAP);
+    let mut rendered = Vec::with_capacity(timestamps.len());
+    for &timestamp in &timestamps {
+        let source_frame = (timestamp * metadata.frame_rate)
+            .floor()
+            .clamp(0.0, (metadata.frame_count - 1) as f64) as i64;
+        let texture = materializer
+            .resolve(
+                &dev.device,
+                &dev.queue,
+                &mut cache,
+                path,
+                source_frame,
+                (render_size.width, render_size.height),
+                "inspect-media-lottie",
+            )
+            .map_err(|_| BridgeError::new("inspect_media: failed to render Lottie frame"))?;
+        let draw = LayerDraw {
+            source: &source,
+            source_frame,
+            affine: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            nat_size: (render_size.width as f64, render_size.height as f64),
+            crop_uv: (0.0, 0.0, 1.0, 1.0),
+            opacity: 1.0,
+            needs_premultiply: false,
+            clip_id: "inspect-media-lottie",
+            color_grade: None,
+            lut: None,
+            chroma_key: None,
+            masks: &[],
+            effects: &[],
+        };
+        let plan = FramePlan {
+            // Lottie inspection deliberately exposes transparency over neutral
+            // gray, matching the public tool description and upstream behavior.
+            clear_rgba: [0.5, 0.5, 0.5, 1.0],
+            draws: vec![draw],
+        };
+        let frame = compositor
+            .render_to_rgba(
+                &dev.device,
+                &dev.queue,
+                render_size,
+                &plan,
+                &mut FixedResolver(texture),
+            )
+            .map_err(|_| BridgeError::new("inspect_media: failed to composite Lottie frame"))?;
+        rendered.push((
+            timestamp,
+            RgbaFrame::new(frame.width, frame.height, frame.rgba),
+        ));
+    }
+
+    let (frames, overview_timestamps) = if request.overview {
+        let (bytes, _, _) = encode_storyboard_jpeg(&rendered)
+            .ok_or_else(|| BridgeError::new("inspect_media: failed to encode Lottie overview"))?;
+        (
+            vec![InspectedMediaFrame {
+                timestamp_seconds: start,
+                bytes,
+                media_type: "image/jpeg".into(),
+            }],
+            timestamps,
+        )
+    } else {
+        let frames = rendered
+            .iter()
+            .map(|(timestamp_seconds, frame)| {
+                encode_rgba_jpeg(frame)
+                    .map(|bytes| InspectedMediaFrame {
+                        timestamp_seconds: *timestamp_seconds,
+                        bytes,
+                        media_type: "image/jpeg".into(),
+                    })
+                    .ok_or_else(|| BridgeError::new("inspect_media: failed to encode Lottie frame"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        (frames, Vec::new())
+    };
+
+    Ok(InspectMediaResult {
+        frames,
+        overview_timestamps,
+        duration_seconds: metadata.duration_seconds,
+        width: Some(metadata.width),
+        height: Some(metadata.height),
+        fps: Some(metadata.frame_rate),
+        has_audio: false,
+        byte_size,
+        transcript: None,
+        transcription_unavailable: false,
     })
 }
 
@@ -1501,6 +1647,7 @@ fn composite_frames_jpeg(
 
     let mut out_frames: Vec<InspectedFrame> = Vec::with_capacity(frames.len());
     let mut lut_cache = HashMap::new();
+    let mut lottie = crate::render::LottieMaterializer::new();
     for &f in frames {
         let frame_plan = plan.frame(timeline, f);
         let mut resolver = InspectResolver {
@@ -1514,6 +1661,7 @@ fn composite_frames_jpeg(
             render_box: (render_size.width, render_size.height),
             project_root: project_root.as_ref(),
             lut_cache: &mut lut_cache,
+            lottie: &mut lottie,
         };
         let composite = match compositor.render_to_rgba(
             &dev.device,
@@ -1602,9 +1750,9 @@ impl SourceMetrics for ManifestMetrics {
     }
 }
 
-/// `TextureResolver` that decodes a layer's pixels on demand via ffmpeg and
-/// uploads them to the GPU. Mirrors the preview / export resolvers; the decode box
-/// is the downscaled inspect render size. Lottie is skipped (returns `None`).
+/// `TextureResolver` that materializes a layer's pixels on demand and uploads
+/// them to the GPU. Video/image use FFmpeg/image decode, text uses the shared
+/// rasterizer, and Lottie uses the same Velato/Vello path as preview/export.
 struct InspectResolver<'d> {
     device: &'d opentake_render::wgpu::Device,
     queue: &'d opentake_render::wgpu::Queue,
@@ -1616,6 +1764,7 @@ struct InspectResolver<'d> {
     render_box: (u32, u32),
     project_root: Option<&'d ProjectRoot>,
     lut_cache: &'d mut HashMap<String, Rc<GpuLutTexture>>,
+    lottie: &'d mut crate::render::LottieMaterializer,
 }
 
 impl InspectResolver<'_> {
@@ -1660,13 +1809,28 @@ impl InspectResolver<'_> {
 
 impl TextureResolver for InspectResolver<'_> {
     fn resolve(&mut self, source: &TextureSource, source_frame: i64) -> Option<Rc<GpuTexture>> {
+        if let TextureSource::Lottie { media_ref } = source {
+            let info = self.media.get(media_ref)?;
+            return self
+                .lottie
+                .resolve(
+                    self.device,
+                    self.queue,
+                    &mut self.cache,
+                    &info.path,
+                    source_frame,
+                    self.render_box,
+                    "inspect-lottie",
+                )
+                .ok();
+        }
         let (media_ref, key, is_image) = match source {
             TextureSource::Decoded { media_ref } => {
                 (media_ref, format!("v:{media_ref}:{source_frame}"), false)
             }
             TextureSource::Image { media_ref } => (media_ref, format!("i:{media_ref}"), true),
             TextureSource::Text { clip_id } => return self.resolve_text(clip_id),
-            TextureSource::Lottie { .. } => return None,
+            TextureSource::Lottie { .. } => unreachable!("handled above"),
         };
 
         if let Some(tex) = self.cache.get(&key) {
@@ -2041,6 +2205,123 @@ mod tests {
             result.byte_size,
             std::fs::metadata(source).expect("source metadata").len()
         );
+    }
+
+    fn two_frame_lottie_fixture() -> String {
+        r##"{
+  "v":"5.5.2","fr":2,"ip":0,"op":2,"w":16,"h":16,"ddd":0,"assets":[],
+  "layers":[
+    {"ddd":0,"ind":1,"ty":4,"nm":"red",
+      "ks":{"o":{"a":0,"k":100},"r":{"a":0,"k":0},"p":{"a":0,"k":[8,8,0]},
+             "a":{"a":0,"k":[8,8,0]},"s":{"a":0,"k":[100,100,100]}},
+      "shapes":[
+        {"ty":"rc","d":1,"s":{"a":0,"k":[8,8]},"p":{"a":0,"k":[8,8]},"r":{"a":0,"k":0}},
+        {"ty":"fl","c":{"a":0,"k":[1,0,0,1]},"o":{"a":0,"k":100},"r":1}
+      ],"ao":0,"ip":0,"op":1,"st":0,"bm":0},
+    {"ddd":0,"ind":2,"ty":4,"nm":"green",
+      "ks":{"o":{"a":0,"k":100},"r":{"a":0,"k":0},"p":{"a":0,"k":[8,8,0]},
+             "a":{"a":0,"k":[8,8,0]},"s":{"a":0,"k":[100,100,100]}},
+      "shapes":[
+        {"ty":"rc","d":1,"s":{"a":0,"k":[8,8]},"p":{"a":0,"k":[8,8]},"r":{"a":0,"k":0}},
+        {"ty":"fl","c":{"a":0,"k":[0,1,0,1]},"o":{"a":0,"k":100},"r":1}
+      ],"ao":0,"ip":1,"op":2,"st":0,"bm":0}
+  ]
+}"##
+        .to_string()
+    }
+
+    #[test]
+    fn inspect_media_renders_lottie_frames_over_gray_end_to_end() {
+        let Ok(_) = RenderDevice::try_new() else {
+            return;
+        };
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let bundle = tmp.path().join("InspectLottie.opentake");
+        let project = opentake_project::Project::new(&bundle);
+        project.save().expect("save Lottie project");
+        let source = bundle.join("media/animation.json");
+        std::fs::create_dir_all(source.parent().expect("media parent"))
+            .expect("create media directory");
+        std::fs::write(&source, two_frame_lottie_fixture()).expect("write Lottie fixture");
+        let mut manifest = opentake_domain::MediaManifest::new();
+        manifest.entries.push(opentake_domain::MediaManifestEntry {
+            id: "lottie-asset".into(),
+            name: "animation".into(),
+            kind: ClipType::Lottie,
+            source: MediaSource::Project {
+                relative_path: "media/animation.json".into(),
+            },
+            duration: 1.0,
+            generation_input: None,
+            source_width: Some(16),
+            source_height: Some(16),
+            source_fps: Some(2.0),
+            has_audio: Some(false),
+            color: None,
+            proxy: None,
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        });
+        std::fs::write(
+            bundle.join("media.json"),
+            serde_json::to_vec_pretty(&manifest).expect("encode Lottie manifest"),
+        )
+        .expect("write Lottie manifest");
+        let core = AppCore::new();
+        core.open_project(bundle).expect("open Lottie project");
+        let engine = MediaEngine::new(tmp.path().join("cache"), tmp.path().join("models"));
+
+        let result = inspect_source_media(
+            &core,
+            &engine,
+            &InspectMediaRequest {
+                media_ref: "lottie-asset".into(),
+                kind: ClipType::Lottie,
+                start_seconds: None,
+                end_seconds: None,
+                max_frames: 2,
+                overview: false,
+            },
+        )
+        .expect("inspect imported Lottie");
+
+        assert_eq!((result.width, result.height), (Some(16), Some(16)));
+        assert_eq!(result.fps, Some(2.0));
+        assert_eq!(result.duration_seconds, 1.0);
+        assert_eq!(result.frames.len(), 2);
+        assert_eq!(result.frames[0].timestamp_seconds, 0.25);
+        assert_eq!(result.frames[1].timestamp_seconds, 0.75);
+        let decoded = result
+            .frames
+            .iter()
+            .map(|frame| {
+                assert_eq!(frame.media_type, "image/jpeg");
+                image::load_from_memory(&frame.bytes)
+                    .expect("decode inspected Lottie JPEG")
+                    .into_rgb8()
+            })
+            .collect::<Vec<_>>();
+        assert_ne!(decoded[0].as_raw(), decoded[1].as_raw());
+        let first_center = decoded[0].get_pixel(8, 8).0;
+        let second_center = decoded[1].get_pixel(8, 8).0;
+        assert!(first_center[0] > first_center[1] + 80, "{first_center:?}");
+        assert!(
+            second_center[1] > second_center[0] + 80,
+            "{second_center:?}"
+        );
+        for frame in &decoded {
+            let corner = frame.get_pixel(0, 0).0;
+            assert!(
+                (corner[0] as i16 - corner[1] as i16).abs() < 30,
+                "{corner:?}"
+            );
+            assert!(
+                (corner[1] as i16 - corner[2] as i16).abs() < 30,
+                "{corner:?}"
+            );
+            assert!(corner[0] > 80 && corner[0] < 180, "{corner:?}");
+        }
     }
 
     #[test]
