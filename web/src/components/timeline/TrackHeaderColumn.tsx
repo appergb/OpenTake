@@ -128,6 +128,7 @@ interface RowProps {
 
 function TrackHeaderRow(p: RowProps) {
   const t = useT();
+  const pushToast = useEditorUiStore((s) => s.pushToast);
   const dragRef = useRef<{ startY: number } | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 
@@ -156,6 +157,13 @@ function TrackHeaderRow(p: RowProps) {
 
   const iconColor = (active: boolean) =>
     active ? "var(--text-secondary)" : "rgba(255,255,255,0.186)"; // 0.62*0.3
+
+  const updateTrack = (properties: { muted?: boolean; hidden?: boolean; syncLocked?: boolean }) => {
+    void setTrackProps(p.index, properties).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      pushToast(t("timeline.trackUpdateFailed", { error: message }));
+    });
+  };
 
   return (
     <div
@@ -194,35 +202,47 @@ function TrackHeaderRow(p: RowProps) {
       {/* Toggles. Clicking dispatches SetTrackProps (toggles the field). */}
       <div style={{ display: "flex", alignItems: "center", gap: 2, paddingRight: 4 }}>
         {p.isAudio ? (
-          <span
+          <button
+            type="button"
+            data-track-action="mute"
+            data-track-index={p.index}
+            aria-label={t("timeline.mute")}
+            aria-pressed={p.muted}
             title={t("timeline.mute")}
-            role="button"
             onPointerDown={(e) => e.stopPropagation()}
-            onClick={() => void setTrackProps(p.index, { muted: !p.muted })}
+            onClick={() => updateTrack({ muted: !p.muted })}
             style={{ color: iconColor(!p.muted), display: "inline-flex", cursor: "pointer" }}
           >
             <Icon icon={p.muted ? VolumeX : Volume2} size={11} />
-          </span>
+          </button>
         ) : (
-          <span
+          <button
+            type="button"
+            data-track-action="hide"
+            data-track-index={p.index}
+            aria-label={t("timeline.hide")}
+            aria-pressed={p.hidden}
             title={t("timeline.hide")}
-            role="button"
             onPointerDown={(e) => e.stopPropagation()}
-            onClick={() => void setTrackProps(p.index, { hidden: !p.hidden })}
+            onClick={() => updateTrack({ hidden: !p.hidden })}
             style={{ color: iconColor(!p.hidden), display: "inline-flex", cursor: "pointer" }}
           >
             <Icon icon={p.hidden ? EyeOff : Eye} size={11} />
-          </span>
+          </button>
         )}
-        <span
+        <button
+          type="button"
+          data-track-action="sync-lock"
+          data-track-index={p.index}
+          aria-label={t("timeline.syncLock")}
+          aria-pressed={p.syncLocked}
           title={t("timeline.syncLock")}
-          role="button"
           onPointerDown={(e) => e.stopPropagation()}
-          onClick={() => void setTrackProps(p.index, { syncLocked: !p.syncLocked })}
+          onClick={() => updateTrack({ syncLocked: !p.syncLocked })}
           style={{ color: iconColor(p.syncLocked), display: "inline-flex", cursor: "pointer" }}
         >
           <Icon icon={p.syncLocked ? Link : Unlink} size={11} />
-        </span>
+        </button>
       </div>
       {menu &&
         createPortal(

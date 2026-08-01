@@ -1611,7 +1611,7 @@
   - Visible/accessibility/return path: success=toggle track sync lock: assert exactly setTrackProps(p.index, { syncLocked: !p.syncLocked }) and no sibling branch/command.; accessibility={"focus":"role=button span has no tabIndex and is not keyboard-focusable.","label":"title supplies text but aria-pressed is absent.","shortcut":"No Enter/Space handler exists."}; returnPath=["Remain on the owning editor surface after local state or authoritative mirror refresh.","Retain focus on the native control or explicitly restore it when conditional UI closes; this must be asserted."].
   - Outcome matrix: {"success":"toggle track sync lock: assert exactly setTrackProps(p.index, { syncLocked: !p.syncLocked }) and no sibling branch/command.","pending":"A promise may be pending, but this candidate exposes no explicit progress state.","empty":"N/A — owning visibility/handler guards prevent an absent target from emitting a command.","disabled":"No explicit disabled attribute beyond the listed visibility/handler guards.","cancel":"N/A — no separate cancellation phase.","retry":"No automatic retry; repeated activation resubmits after the candidate becomes actionable.","failure":"Backend rejection is not caught/rendered at this fire-and-forget candidate; visible recovery evidence is required."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/timeline/TrackHeaderColumn.interaction.test.tsx#control-4c72d4f81e47c57d mute audio track` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
   - `web/src/components/timeline/TrackHeaderColumn.interaction.test.tsx#control-74289f5806f8162a hide visual track` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
@@ -1619,7 +1619,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/timeline/TrackHeaderColumn.interaction.test.tsx -t "control-4c72d4f81e47c57d mute audio track"`
   - Run: `pnpm -C web test -- --run src/components/timeline/TrackHeaderColumn.interaction.test.tsx -t "control-74289f5806f8162a hide visual track"`
@@ -1627,11 +1627,11 @@
 
   Expected: FAIL because one or more of the 3 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/timeline/TrackHeaderColumn.tsx`, `web/src/store/editActions.ts#setTrackProps`, `web/src/store/editActions.ts#applyAndRefresh`, `web/src/lib/api.ts#editApply`, `src-tauri/src/commands.rs#edit_apply`, `crates/opentake-core/src/dto.rs#handle_edit_apply`, `crates/opentake-ops/src/command.rs#EditCommand::SetTrackProps`, `web/src/components/timeline/TrackHeaderColumn.tsx#TrackHeaderColumn`, `crates/opentake-ops/src/command.rs#EditCommand` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/timeline/TrackHeaderColumn.interaction.test.tsx -t "control-4c72d4f81e47c57d mute audio track"`
   - Run: `pnpm -C web test -- --run src/components/timeline/TrackHeaderColumn.interaction.test.tsx -t "control-74289f5806f8162a hide visual track"`
@@ -1639,11 +1639,23 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: all three focused owners first failed because the
+  controls were non-focusable spans without pressed state. Mute, hide and sync
+  lock are now native labeled toggle buttons that each prove one exact
+  `setTrackProps` patch, no swap command, retained focus and visible recovery on
+  rejection. The Web gate passes with 108 files / 855 tests plus a production
+  build. Formatting and the complete Rust workspace pass; only the seven
+  pre-existing real-device probes remain ignored.
+
+- [ ] **Runtime evidence gate:** toggle mute, hide and sync lock by pointer and
+  keyboard in the packaged timeline, verifying icon/pressed/focus states and a
+  safe rejected update before final control reclassification.
 
 ### Task 19: control-acceptance (implementation-slice-d5ef678a62684383)
 
