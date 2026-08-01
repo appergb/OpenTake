@@ -179,6 +179,7 @@ P1-1、P2-1 与 P2-2 已按独立所有者闭环：`useAutosave` 保持 1.5 秒�
 
 ### 批次 9 ｜ `feat/p2-samples-polish`（打磨）
 - P2-4 Sample 区、P2-12 窗口尺寸、剩余 P2 项。
+- **2026-08-01 代码门禁**:Sample 区已接入三个内置离线工程;物化成功、失败原子回滚、Home 路由成功/失败均有可执行测试。发布级 Web 门禁同时覆盖面板键盘聚焦、时间线 clip 的 24px 可访问代理、统一 `:focus-visible`、`prefers-reduced-motion` 与 `forced-colors`。打包桌面端的逐项视觉、键盘和核心编辑流证据仍必须在顺序 GUI 验证阶段留存后方可判定本批发布就绪。
 
 ---
 

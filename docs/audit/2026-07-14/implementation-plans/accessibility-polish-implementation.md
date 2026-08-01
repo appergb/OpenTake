@@ -472,33 +472,47 @@
   - Validate sample-project load and core edit flows.
   - Run visual and accessibility regression checks on packaged desktop builds.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/releaseParity.test.tsx#sample_projects_accessibility_visual_and_interaction_gate` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/releaseParity.test.tsx -t "sample_projects_accessibility_visual_and_interaction_gate"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/ui/PanelShell.tsx#PanelShell`, `web/src/components/timeline/TimelineContainer.tsx#accessibleClipRects`, `web/src/styles/global.css`, `docs/architecture/PORT-1TO1-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/releaseParity.test.tsx -t "sample_projects_accessibility_visual_and_interaction_gate"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: the focused release owner failed first because panel
+  regions were not keyboard-focusable. It passed after keyboard panel focus and
+  global focus-visible, reduced-motion, and forced-colors behavior were added.
+  The release owner also binds the existing executable sample materialization,
+  rollback, Home routing, and 24px timeline clip-access contracts. The full Web
+  gate passed with 98 files / 835 tests and the production build passed; only
+  the existing dynamic-import and chunk-size advisories remained.
+
+- [ ] **Runtime evidence gate:** on the packaged desktop build, open an offline
+  sample, perform the core edit flow, traverse panel and timeline controls by
+  keyboard, inspect focus/hover/high-contrast/reduced-motion presentation, and
+  retain screenshots plus the exact interaction result before release-ready
+  reclassification.
 
 ### Task 5: AP-keyboard-shortcut-matrix + complete-shortcut-table (implementation-slice-c9e6c68dcdf6b5bb)
 

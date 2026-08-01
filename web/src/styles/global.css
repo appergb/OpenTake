@@ -60,6 +60,13 @@ button {
   cursor: default;
 }
 
+/* Every native or explicitly focusable control gets one predictable keyboard
+ * affordance. Component-specific focus styles can layer on top of this base. */
+:where(button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])):focus-visible {
+  outline: var(--bw-medium) solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
 .editor-panel-shell {
   position: relative;
   width: 100%;
@@ -123,6 +130,28 @@ button {
   box-shadow:
     0 0 0 1px rgba(255, 255, 255, 0.22),
     0 0 0 4px rgba(72, 170, 255, 0.22);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media (forced-colors: active) {
+  :where(button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])):focus-visible {
+    outline-color: Highlight;
+  }
+
+  .editor-panel-focus-ring,
+  .timeline-clip-access-button:focus-visible {
+    border-color: Highlight;
+  }
 }
 
 input,

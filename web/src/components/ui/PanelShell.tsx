@@ -26,9 +26,11 @@ export function PanelShell({ panel, children }: PanelShellProps) {
       data-focused={focused ? "true" : "false"}
       role="region"
       aria-label={t(`layout.panel.${panel}`)}
+      tabIndex={0}
       className="editor-panel-shell"
       style={{ background: "var(--bg-base)" }}
       onMouseDown={() => focusPanel(panel)}
+      onFocus={() => focusPanel(panel)}
     >
       <div
         className="editor-panel-card"
