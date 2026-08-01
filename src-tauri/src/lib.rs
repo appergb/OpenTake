@@ -26,6 +26,7 @@ mod render;
 mod samples;
 mod search;
 mod secret;
+pub mod telemetry;
 mod transcribe;
 
 // Streaming playback engine (#53). Feature-gated (`playback-engine`, now a DEFAULT
@@ -71,6 +72,10 @@ impl IdGen for UuidIdGen {
 /// keeps running in the background. Dock-reopen ([`RunEvent::Reopen`]) shows it
 /// again. `Cmd+Q` still exits (it raises `ExitRequested`, not prevented here).
 pub fn run() {
+    // Telemetry is a strict opt-in at the configuration boundary: without an
+    // explicit packaged/environment DSN this creates no SDK client or network.
+    let _telemetry = telemetry::init_telemetry();
+
     // Pin ffmpeg/ffprobe before anything decodes (see `resolve_media_tools`).
     resolve_media_tools();
 

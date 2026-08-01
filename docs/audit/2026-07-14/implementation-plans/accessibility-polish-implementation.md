@@ -413,33 +413,40 @@
   - Add token, semantic-role, keyboard-focus, state, privacy, and visual assertions for every named surface; the affected lint, typecheck, and web suites must pass.
   - Exercise the named surface with keyboard and browser or packaged-app visual inspection, and retain exact accessibility or screenshot evidence before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `src-tauri/tests/telemetry_init.rs#starts_only_with_explicit_packaged_or_environment_dsn` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-tauri --test telemetry_init starts_only_with_explicit_packaged_or_environment_dsn -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `src-tauri/src/telemetry.rs#init_telemetry`, `docs/architecture/MODULE-PORT-MAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-tauri --test telemetry_init starts_only_with_explicit_packaged_or_environment_dsn -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: the reviewed test first failed while the telemetry owner
+  was absent, then passed after the DSN gate and scrubber were integrated. The
+  exact owner, telemetry unit test, `cargo fmt --all -- --check`, and
+  `CARGO_INCREMENTAL=0 cargo test --workspace --no-fail-fast` all passed. The
+  workspace gate reported only the existing explicitly ignored real-device
+  probes.
 
 ### Task 4: release-accessibility-visual-parity (implementation-slice-75d12e695c4bc7e4)
 
