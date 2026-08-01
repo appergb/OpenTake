@@ -2603,7 +2603,7 @@ the focused owning test, and
   - Visible/returned assertion: assert the exact returned status plus deterministic frame/audio/container properties or typed unsupported/error output, and verify preview/export parity when both paths are named.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-project/tests/completion_9ae7ed1acecc8998.rs#completion_9ae7ed1acecc8998_projects_export_interoperable_fcpxml_otio_and_ed.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/shell/TitleBar.visual.test.ts#offers all four interchange formats with their extensions and commands` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-project/src/fcpxml_modern_tests.rs#document_has_fcpxml_header_and_version` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -2612,7 +2612,7 @@ the focused owning test, and
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and reconcile the historical baseline**
 
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.visual.test.ts -t "offers all four interchange formats with their extensions and commands"`
   - Run: `cargo test -p opentake-project document_has_fcpxml_header_and_version`
@@ -2621,11 +2621,11 @@ the focused owning test, and
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-project/src/fcpxml.rs#export_xmeml`, `crates/opentake-project/src/fcpxml_modern.rs#export_fcpxml`, `crates/opentake-project/src/otio.rs#export_otio`, `crates/opentake-project/src/edl.rs#export_edl`, `src-tauri/src/commands.rs`, `web/src/components/shell/TitleBar.tsx#TitleBar`, `docs/需求与问题汇总.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.visual.test.ts -t "offers all four interchange formats with their extensions and commands"`
   - Run: `cargo test -p opentake-project document_has_fcpxml_header_and_version`
@@ -2634,11 +2634,25 @@ the focused owning test, and
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Reconciled 2026-08-01 as an already-integrated baseline. Git history shows
+  the EDL, OTIO and modern FCPXML writers and their format tests landed together
+  in `5713d22`, followed by the four-format title-bar route in `3d09eb6`; there
+  is therefore no honest test-present/implementation-missing RED command to
+  replay. The four declared owners pass on the current descendant, the exact
+  title-bar interaction suite covers success, failure, cancellation, extension
+  completion and all four Tauri routes, and the full workspace suite passes.
+  Existing packaged-app evidence additionally parsed both XML outputs with
+  `xmllint`, parsed OTIO with `jq`, verified the corrected three-event EDL, and
+  proved deterministic re-export. The historical requirement source now records
+  the shipped formats and their explicit degradation boundary; no production
+  code change was required for this reconciliation. Runtime evidence:
+  [`interchange-export-real-device-2026-07-30.md`](../runtime-artifacts/automated/interchange-export-real-device-2026-07-30.md).
 
 ### Task 38: control-acceptance (implementation-slice-5148c914ccdac250)
 
