@@ -756,33 +756,40 @@
 - Exact acceptance contract:
   - Add deterministic unit tests for default/invalid persisted locale, zh-CN/en lookup, missing-key fallback, numeric/string interpolation, unknown placeholder preservation, locale persistence, and document.lang updates.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/i18n/index.test.ts#defaults_zh_cn_supports_en_and_preserves_unknown_named_placeholders` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/i18n/index.test.ts -t "defaults_zh_cn_supports_en_and_preserves_unknown_named_placeholders"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/i18n/index.ts#DEFAULT_LOCALE`, `web/src/i18n/index.ts#translate`, `web/src/i18n/dict.ts#DICTS`, `docs/modules/web/hooks-i18n-theme.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/i18n/index.test.ts -t "defaults_zh_cn_supports_en_and_preserves_unknown_named_placeholders"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: the reviewed owner first failed because an invalid
+  persisted locale remained in storage after the runtime fell back to zh-CN.
+  The runtime now removes unsupported persisted values, tolerates unavailable
+  storage, and exports the default/translation boundaries for deterministic
+  proof. The full Web gate passed with 102 files / 840 tests and the production
+  build passed, with only the existing dynamic-import and chunk-size advisories.
 
 ### Task 8: AP-bg-placeholder-token (implementation-slice-2c3937178aa8f103)
 
