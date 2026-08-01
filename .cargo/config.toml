@@ -18,3 +18,9 @@ MACOSX_DEPLOYMENT_TARGET = { value = "11.0", force = true }
 # whisper.cpp CMake project; non-MSVC generators ignore both values.
 CMAKE_POLICY_DEFAULT_CMP0091 = { value = "NEW", force = false }
 CMAKE_MSVC_RUNTIME_LIBRARY = { value = "MultiThreaded", force = false }
+
+# Rust's MSVC target otherwise links VCRUNTIME/UCRT dynamically even when the
+# C++ libraries above use /MT. Keep the Windows executable self-contained and
+# make every cc-rs consumer observe the same crt-static target feature.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

@@ -355,7 +355,7 @@ jobs:
           & $dumpbin /DEPENDENTS $testImage.FullName | Set-Content windows-tauri-test-imports.txt
           & $dumpbin /IMPORTS $testImage.FullName | Add-Content windows-tauri-test-imports.txt
           $imports = Get-Content windows-tauri-test-imports.txt -Raw
-          if ($imports -match '(?im)^\s*(MSVCP140|onnxruntime|DirectML)\.dll\s*$') {
+          if ($imports -match '(?im)^\s*(MSVCP140|VCRUNTIME140(?:_1)?|api-ms-win-crt-[^\s]+|onnxruntime|DirectML)\.dll\s*$') {
             throw 'Tauri test image retains a non-portable native runtime dependency'
           }
 
