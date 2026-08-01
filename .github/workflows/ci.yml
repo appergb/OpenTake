@@ -218,6 +218,18 @@ jobs:
       - name: Rust workspace clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Windows Chromium motion capture regression
+        shell: bash
+        env:
+          OPENTAKE_MOTION_TRACE: '1'
+        run: |
+          cargo test -p opentake-motion --features chromium --lib \
+            renderer::tests::chromium_skeleton_reports_unavailable_not_panic \
+            -- --exact --nocapture --test-threads=1
+          cargo test -p opentake-tauri --test motion_command \
+            sandbox_progress_cancel_validated_mp4_result \
+            -- --exact --nocapture --test-threads=1
+
       - name: Web editor behavior suite
         run: pnpm -C web test
 
