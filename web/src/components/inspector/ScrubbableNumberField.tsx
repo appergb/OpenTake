@@ -5,7 +5,7 @@
  * commit, Esc cancel). `mixed` shows an em dash.
  */
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { LAYOUT } from "../../lib/theme";
 
 interface Props {
@@ -30,9 +30,29 @@ interface Props {
 export function ScrubbableNumberField(p: Props) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
-  const dragRef = useRef<{ startX: number; startValue: number; moved: boolean } | null>(null);
+  const dragRef = useRef<{
+    startX: number;
+    startValue: number;
+    moved: boolean;
+    pointerId: number;
+    captureTarget: HTMLElement;
+  } | null>(null);
   const provisionalRef = useRef<number | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const displayRef = useRef<HTMLSpanElement>(null);
+  const restoreDisplayFocusRef = useRef(false);
+
+  useEffect(() => {
+    if (editing) {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+      return;
+    }
+    if (restoreDisplayFocusRef.current) {
+      restoreDisplayFocusRef.current = false;
+      displayRef.current?.focus();
+    }
+  }, [editing]);
 
   const clamp = (v: number) => Math.max(p.min, Math.min(p.max, v));
 
@@ -47,9 +67,17 @@ export function ScrubbableNumberField(p: Props) {
     (e: React.PointerEvent) => {
       if (p.disabled) return;
       e.preventDefault();
-      dragRef.current = { startX: e.clientX, startValue: p.value, moved: false };
+      const captureTarget = e.currentTarget as HTMLElement;
+      captureTarget.focus();
+      dragRef.current = {
+        startX: e.clientX,
+        startValue: p.value,
+        moved: false,
+        pointerId: e.pointerId,
+        captureTarget,
+      };
       provisionalRef.current = null;
-      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+      captureTarget.setPointerCapture(e.pointerId);
     },
     [p.disabled, p.value],
   );
@@ -73,37 +101,57 @@ export function ScrubbableNumberField(p: Props) {
   );
 
   const onPointerUp = useCallback(
-    (e: React.PointerEvent) => {
+    (_e: React.PointerEvent) => {
       const d = dragRef.current;
       dragRef.current = null;
-      (e.target as HTMLElement).releasePointerCapture(e.pointerId);
       if (!d) return;
+      try {
+        d.captureTarget.releasePointerCapture(d.pointerId);
+      } catch {
+        // Capture may already be gone when the browser ends the gesture.
+      }
       if (d.moved && provisionalRef.current !== null) {
         p.onCommit(provisionalRef.current);
         provisionalRef.current = null;
       } else {
         setDraft(p.format(p.value));
         setEditing(true);
-        requestAnimationFrame(() => inputRef.current?.select());
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [p],
   );
 
-  const commitEdit = useCallback(() => {
+  const cancelPointer = useCallback(() => {
+    const d = dragRef.current;
+    dragRef.current = null;
+    provisionalRef.current = null;
+    if (!d) return;
+    try {
+      d.captureTarget.releasePointerCapture(d.pointerId);
+    } catch {
+      // `lostpointercapture` means there is no capture left to release.
+    }
+    d.captureTarget.focus();
+  }, []);
+
+  const finishEditing = useCallback((restoreFocus: boolean) => {
+    restoreDisplayFocusRef.current = restoreFocus;
+    setEditing(false);
+  }, []);
+
+  const commitEdit = useCallback((restoreFocus: boolean) => {
     const cleaned = draft.replace(p.suffix ?? "", "").replace(",", ".").trim();
     const parsed = Number(cleaned);
     if (Number.isFinite(parsed)) p.onCommit(clamp(parsed));
-    setEditing(false);
+    finishEditing(restoreFocus);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draft, p]);
+  }, [draft, p, finishEditing]);
 
   const beginEditing = useCallback(() => {
     if (p.disabled) return;
     setDraft(p.format(p.value));
     setEditing(true);
-    requestAnimationFrame(() => inputRef.current?.select());
   }, [p]);
 
   if (editing) {
@@ -113,10 +161,10 @@ export function ScrubbableNumberField(p: Props) {
         aria-label={p.ariaLabel ?? "Value"}
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
-        onBlur={commitEdit}
+        onBlur={() => commitEdit(false)}
         onKeyDown={(e) => {
-          if (e.key === "Enter") commitEdit();
-          else if (e.key === "Escape") setEditing(false);
+          if (e.key === "Enter") commitEdit(true);
+          else if (e.key === "Escape") finishEditing(true);
         }}
         className="tabular"
         style={{
@@ -135,9 +183,12 @@ export function ScrubbableNumberField(p: Props) {
 
   return (
     <span
+      ref={displayRef}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
+      onPointerCancel={cancelPointer}
+      onLostPointerCapture={cancelPointer}
       role="spinbutton"
       aria-label={p.ariaLabel ?? "Value"}
       aria-valuemin={p.min}
@@ -149,6 +200,11 @@ export function ScrubbableNumberField(p: Props) {
       data-interaction-state={p.disabled ? "disabled" : "enabled"}
       onKeyDown={(e) => {
         if (p.disabled) return;
+        if (e.key === "Escape" && dragRef.current) {
+          e.preventDefault();
+          cancelPointer();
+          return;
+        }
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           beginEditing();

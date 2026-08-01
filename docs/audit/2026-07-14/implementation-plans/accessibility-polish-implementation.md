@@ -1363,36 +1363,48 @@
   - Visible/accessibility/return path: success=pointer-scrubbable numeric value: assert exactly pointerdown captures start; pointermove computes clamped startValue + delta*sensitivity (Shift x10, Command x0.1) and calls p.onChange?.(next); pointerup calls p.onCommit(provisionalValue) exactly once when moved, otherwise enters text editing and no sibling branch/command.; accessibility={"focus":"Pointer-only span has no tabIndex or keyboard adjustment.","label":"No role or accessible name exists on the displayed-value span.","shortcut":"Shift/Command change pointer sensitivity only."}; returnPath=["Pointerup/cancel releases the gesture and remains on the same editor surface.","A keyboard equivalent must retain/restore focus; current custom drag surface does not prove one."].
   - Outcome matrix: {"success":"pointer-scrubbable numeric value: assert exactly pointerdown captures start; pointermove computes clamped startValue + delta*sensitivity (Shift x10, Command x0.1) and calls p.onChange?.(next); pointerup calls p.onCommit(provisionalValue) exactly once when moved, otherwise enters text editing and no sibling branch/command.","pending":"N/A — synchronous local/browser state only.","empty":"N/A — owning visibility/handler guards prevent an absent target from emitting a command.","disabled":"No explicit disabled attribute beyond the listed visibility/handler guards.","cancel":"Pointer capture loss/Escape cancellation is not implemented for the drag.","retry":"N/A — repeated activation is a new synchronous action.","failure":"N/A — no API/Tauri/Rust failure route."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/inspector/ScrubbableNumberField.interaction.test.tsx#control-481c7d66573516a6 numeric text-entry mode` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
   - `web/src/components/inspector/ScrubbableNumberField.interaction.test.tsx#control-3e4fc80f4dde046e pointer-scrubbable numeric value` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/inspector/ScrubbableNumberField.interaction.test.tsx -t "control-481c7d66573516a6 numeric text-entry mode"`
   - Run: `pnpm -C web test -- --run src/components/inspector/ScrubbableNumberField.interaction.test.tsx -t "control-3e4fc80f4dde046e pointer-scrubbable numeric value"`
 
   Expected: FAIL because one or more of the 2 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/inspector/ScrubbableNumberField.tsx`, `web/src/components/inspector/ScrubbableNumberField.tsx#ScrubbableNumberField` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/inspector/ScrubbableNumberField.interaction.test.tsx -t "control-481c7d66573516a6 numeric text-entry mode"`
   - Run: `pnpm -C web test -- --run src/components/inspector/ScrubbableNumberField.interaction.test.tsx -t "control-3e4fc80f4dde046e pointer-scrubbable numeric value"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: RED exposed missing post-edit focus restoration and
+  pointer-cancellation cleanup. The two owners now prove suffix/decimal-comma
+  parsing, finite-only clamped commit, invalid/blur and Escape behavior,
+  thresholded live scrub, Shift/Command multipliers, exactly-once pointerup
+  commit, pointercancel/lost-capture/Escape cancellation and focus retention.
+  The full Web gate passes with 105 files / 850 tests and the production build
+  passes, with only the existing dynamic-import and chunk-size advisories.
+
+- [ ] **Runtime evidence gate:** exercise text entry, modifier scrubbing,
+  pointer-capture loss and Escape cancellation in the packaged Inspector,
+  confirming focus and visible values before final control reclassification.
 
 ### Task 16: control-acceptance (implementation-slice-aea2e7e06f8f518b)
 
