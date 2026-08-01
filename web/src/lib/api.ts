@@ -23,6 +23,7 @@ import type {
   MediaList,
   MattingModelStatus,
   GenerateMatteResult,
+  RemoveObjectResult,
   LutReference,
   LoudnessNormalization,
   DenoiseMode,
@@ -794,6 +795,28 @@ export async function generateMatte(
     });
   }
   throw new Error("AI matting requires the desktop app");
+}
+
+export async function removeObject(
+  clipId: string,
+  apply: boolean,
+  range: { startFrame: number; endFrame: number },
+): Promise<RemoveObjectResult> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<RemoveObjectResult>("advanced_remove_object", {
+      request: {
+        clipId,
+        maskId: "primary",
+        provider: "local",
+        model: "opentake-boundary-fill-v1",
+        startFrame: range.startFrame,
+        endFrame: range.endFrame,
+        apply,
+      },
+    });
+  }
+  throw new Error("object removal requires the desktop app");
 }
 
 export async function cancelAdvancedWorkflow(): Promise<boolean> {

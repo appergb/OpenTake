@@ -139,6 +139,11 @@ pub enum MotionPlacement {
     Replace {
         clip_id: String,
     },
+    /// Replace a clip with a derivative that already contains the result of
+    /// its masks, then clear those editable masks in the same undo snapshot.
+    ReplaceAndClearMasks {
+        clip_id: String,
+    },
 }
 
 /// Result of atomically registering a rendered video and placing/replacing it.
@@ -955,11 +960,13 @@ impl AppCore {
     /// regular, non-symlink child of the active bundle's `media/` directory.
     /// The document command and project save share the session lock; any command
     /// or persistence failure restores timeline, manifest, undo/redo, and
-    /// version exactly. Events are emitted only after the durable save succeeds.
+    /// version exactly. A stale document version is rejected under that same
+    /// lock. Events are emitted only after the durable save succeeds.
     #[allow(clippy::too_many_arguments)]
     pub fn commit_motion_media_for_project(
         &self,
         expected_project_epoch: u64,
+        expected_version: u64,
         expected_project_dir: &Path,
         path: impl AsRef<Path>,
         name: impl Into<String>,
@@ -994,6 +1001,11 @@ impl AppCore {
         let (commit, count, written) = {
             let mut session = self.lock();
             ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+            if session.editor.version() != expected_version {
+                return Err(CoreError::Media(
+                    "project changed while preparing a generated-media edit".into(),
+                ));
+            }
             session.editor.ensure_mutable()?;
             let before = session.editor.checkpoint_editor_state();
             let id = loop {
@@ -1040,6 +1052,12 @@ impl AppCore {
                         media: media.clone(),
                         clip_id,
                     },
+                    MotionPlacement::ReplaceAndClearMasks { clip_id } => {
+                        EditCommand::RegisterMediaAndSwapClipClearingMasks {
+                            media: media.clone(),
+                            clip_id,
+                        }
+                    }
                 };
                 let edit = session.editor.apply(command, self.ids.as_ref())?;
                 let written = session.editor.save_project(None)?;
@@ -1830,6 +1848,7 @@ mod tests {
         let committed = core
             .commit_motion_media_for_project(
                 snapshot.project_epoch,
+                snapshot.version,
                 &bundle,
                 &rendered,
                 "Motion A",
@@ -1866,6 +1885,51 @@ mod tests {
     }
 
     #[test]
+    fn generated_media_commit_refuses_version_drift_without_mutation() {
+        let bundle = project_bundle("generated-version-drift");
+        let core = AppCore::new();
+        core.open_project(&bundle).unwrap();
+        let media_dir = opentake_project::layout::media_dir(&bundle);
+        std::fs::create_dir_all(&media_dir).unwrap();
+        let rendered = media_dir.join("stale-render.mp4");
+        std::fs::write(&rendered, b"validated-render-fixture").unwrap();
+        let stale = core.runtime_snapshot();
+        core.apply(EditCommand::SetTimelineSettings {
+            fps: 24,
+            width: 1280,
+            height: 720,
+        })
+        .unwrap();
+        let before_commit = core.runtime_snapshot();
+
+        let error = core
+            .commit_motion_media_for_project(
+                stale.project_epoch,
+                stale.version,
+                &bundle,
+                &rendered,
+                "Stale Render",
+                &ProbedMedia::default(),
+                GenerationInput::default(),
+                MotionPlacement::Add {
+                    start_frame: 0,
+                    duration_frames: 1,
+                    track_index: Some(0),
+                },
+            )
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("project changed while preparing a generated-media edit"));
+        let after_commit = core.runtime_snapshot();
+        assert_eq!(after_commit.timeline, before_commit.timeline);
+        assert_eq!(after_commit.media, before_commit.media);
+        assert_eq!(after_commit.version, before_commit.version);
+
+        let _ = std::fs::remove_dir_all(bundle);
+    }
+
+    #[test]
     fn motion_media_commit_rejects_output_outside_active_bundle_without_mutation() {
         let bundle = project_bundle("motion-outside");
         let core = AppCore::new();
@@ -1881,6 +1945,7 @@ mod tests {
         let error = core
             .commit_motion_media_for_project(
                 before.project_epoch,
+                before.version,
                 &bundle,
                 &outside,
                 "Outside",
@@ -1922,6 +1987,7 @@ mod tests {
         let error = core
             .commit_motion_media_for_project(
                 before.project_epoch,
+                before.version,
                 &bundle,
                 &linked,
                 "Linked",

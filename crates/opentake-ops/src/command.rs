@@ -174,6 +174,61 @@ mod motion_media_transaction_tests {
         assert_eq!(state.manifest.entries.len(), 1);
         assert_eq!(state.timeline.tracks[0].clips[0].media_ref, "motion-a");
     }
+
+    #[test]
+    fn register_swap_and_clear_masks_is_one_reversible_transaction() {
+        let mut state = EditorState::default();
+        let ids = SeqIdGen::default();
+        let added = apply(
+            &mut state,
+            EditCommand::RegisterMediaAndAddClip {
+                media: media("source-a"),
+                entry: clip("source-a", 0),
+                auto_track: true,
+            },
+            &ids,
+        )
+        .unwrap();
+        let clip_id = added.affected_clip_ids[0].clone();
+        state.timeline.tracks[0].clips[0].masks = vec![Mask::default()];
+        let undo_depth_before = state.undo_depth();
+
+        let edited = apply(
+            &mut state,
+            EditCommand::RegisterMediaAndSwapClipClearingMasks {
+                media: media("object-removed-b"),
+                clip_id: clip_id.clone(),
+            },
+            &ids,
+        )
+        .unwrap();
+
+        assert_eq!(edited.action_name, "Remove Masked Object");
+        assert_eq!(edited.affected_clip_ids, vec![clip_id]);
+        assert_eq!(state.undo_depth(), undo_depth_before + 1);
+        assert_eq!(state.manifest.entries.len(), 2);
+        assert_eq!(
+            state.timeline.tracks[0].clips[0].media_ref,
+            "object-removed-b"
+        );
+        assert!(state.timeline.tracks[0].clips[0].masks.is_empty());
+
+        apply(&mut state, EditCommand::Undo, &ids).unwrap();
+        assert_eq!(state.manifest.entries.len(), 1);
+        assert_eq!(state.timeline.tracks[0].clips[0].media_ref, "source-a");
+        assert_eq!(
+            state.timeline.tracks[0].clips[0].masks,
+            vec![Mask::default()]
+        );
+
+        apply(&mut state, EditCommand::Redo, &ids).unwrap();
+        assert_eq!(state.manifest.entries.len(), 2);
+        assert_eq!(
+            state.timeline.tracks[0].clips[0].media_ref,
+            "object-removed-b"
+        );
+        assert!(state.timeline.tracks[0].clips[0].masks.is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -539,6 +594,14 @@ pub enum EditCommand {
         media: MediaManifestEntry,
         clip_id: String,
     },
+    /// Register a rendered replacement, swap an existing clip to it, and
+    /// remove the editable masks that were baked into that derivative. The
+    /// three mutations share one undo snapshot so undo restores both the
+    /// source media and its masks.
+    RegisterMediaAndSwapClipClearingMasks {
+        media: MediaManifestEntry,
+        clip_id: String,
+    },
     /// Ripple-insert clips at `at_frame`, pushing later clips right.
     InsertClips {
         track_index: usize,
@@ -882,7 +945,10 @@ pub fn apply(
             auto_track,
         } => register_media_and_add_clip(state, media, entry, auto_track, ids),
         EditCommand::RegisterMediaAndSwapClip { media, clip_id } => {
-            register_media_and_swap_clip(state, media, clip_id, ids)
+            register_media_and_swap_clip(state, media, clip_id, false, ids)
+        }
+        EditCommand::RegisterMediaAndSwapClipClearingMasks { media, clip_id } => {
+            register_media_and_swap_clip(state, media, clip_id, true, ids)
         }
         EditCommand::InsertClips {
             track_index,
@@ -1919,13 +1985,25 @@ fn register_media_and_swap_clip(
     state: &mut EditorState,
     media: MediaManifestEntry,
     clip_id: String,
+    clear_masks: bool,
     ids: &dyn IdGen,
 ) -> Result<EditResult, EditError> {
     validate_registered_media(state, &media)?;
     let mut candidate = state.clone();
     let media_ref = media.id.clone();
     candidate.manifest.entries.push(media);
+    let seed_clip_id = clip_id.clone();
     let replacement = swap_media(&mut candidate, clip_id, media_ref)?;
+    if clear_masks {
+        let clip = candidate
+            .timeline
+            .tracks
+            .iter_mut()
+            .flat_map(|track| track.clips.iter_mut())
+            .find(|clip| clip.id == seed_clip_id)
+            .ok_or_else(|| EditError::Invalid("replacement clip disappeared".into()))?;
+        clip.masks.clear();
+    }
     let timeline = candidate.timeline;
     let manifest = candidate.manifest;
     let affected = replacement.affected_clip_ids;
@@ -1935,8 +2013,18 @@ fn register_media_and_swap_clip(
     let _ = ids;
     transact(
         state,
-        "Edit Motion Graphic",
-        |ids| format!("Edited motion graphic: {}", ids.join(", ")),
+        if clear_masks {
+            "Remove Masked Object"
+        } else {
+            "Edit Motion Graphic"
+        },
+        move |ids| {
+            if clear_masks {
+                format!("Removed masked object: {}", ids.join(", "))
+            } else {
+                format!("Edited motion graphic: {}", ids.join(", "))
+            }
+        },
         move |current| {
             current.timeline = timeline;
             current.manifest = manifest;

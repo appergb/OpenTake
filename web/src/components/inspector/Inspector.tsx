@@ -29,6 +29,7 @@ import { ScrubbableNumberField } from "./ScrubbableNumberField";
 import { TextTab } from "./TextTab";
 import { AiEditTab } from "./AiEditTab";
 import { MattingSection } from "./MattingSection";
+import { ObjectRemovalSection } from "./ObjectRemovalSection";
 import { KeyframesPanel } from "./KeyframesPanel";
 import { SwapMediaSection } from "./SwapMediaSection";
 import { useProjectStore } from "../../store/projectStore";
@@ -1011,6 +1012,9 @@ function ShaderEffectsSection({ clip, t }: { clip: Clip; t: TFunction }) {
       <ColorGradeSection clip={clip} t={t} />
       <ChromaKeySection clip={clip} t={t} />
       <MaskSection clip={clip} t={t} />
+      {clip.mediaType === "video" && !clip.nestedSequenceId && (
+        <ObjectRemovalSection clip={clip} />
+      )}
       <GenericEffectsSection clip={clip} t={t} />
     </>
   );

@@ -465,6 +465,7 @@ impl TauriMotionBridge {
         (self.progress)(MotionProgress::Committing);
         let committed = self.core.commit_motion_media_for_project(
             snapshot.project_epoch,
+            snapshot.version,
             &project_dir,
             published.path(),
             "Motion Graphic",

@@ -329,6 +329,7 @@ pub fn run() {
             advanced::download_matting_model,
             advanced::cancel_matting_model_download,
             advanced::advanced_generate_matte,
+            advanced::advanced_remove_object,
             advanced::cancel_advanced_workflow,
             secret::secret_save,
             secret::secret_load,

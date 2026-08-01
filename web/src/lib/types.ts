@@ -588,6 +588,28 @@ export interface GenerateMatteResult {
   actionName?: string | null;
 }
 
+export interface RemoveObjectResult {
+  result: {
+    clipId: string;
+    sourceMediaRef: string;
+    assetId?: string | null;
+    applied: boolean;
+    cacheKey: string;
+    previewPath: string;
+    frameCount: number;
+    width?: number | null;
+    height?: number | null;
+    fps?: number | null;
+    provider: string;
+    model: string;
+    sourceSha256: string;
+    maskIndex: number;
+    startFrame: number;
+    endFrame: number;
+  };
+  actionName?: string | null;
+}
+
 /** One transcript word/token with optional source-seconds timing. */
 export interface TranscriptWord {
   text: string;
