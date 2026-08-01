@@ -14,6 +14,7 @@ mod commands;
 // drive the export orchestrator (`export::run_export`) against the library
 // target. The Tauri command itself is registered below like the other modules.
 pub mod export;
+pub mod feedback;
 mod generation;
 mod haptic;
 mod home;
@@ -198,6 +199,7 @@ pub fn run() {
             // Shared cancel flag for the in-flight `export_video` (#112 progress
             // + cancel). One export runs at a time, so a single flag suffices.
             app.manage(export::ExportControl::default());
+            app.manage(feedback::FeedbackState::default());
             // Optional account scaffold. It starts offline and never performs
             // network I/O until the user configures a backend and logs in.
             app.manage(account::AccountState::default());
@@ -232,6 +234,7 @@ pub fn run() {
             commands::export_edl,
             commands::export_otio,
             commands::export_subtitles,
+            feedback::submit_feedback,
             commands::check_path_exists,
             home::home_projects_sync,
             home::home_project_register,

@@ -32,33 +32,43 @@
   - Add token, semantic-role, keyboard-focus, state, privacy, and visual assertions for every named surface; the affected lint, typecheck, and web suites must pass.
   - Exercise the named surface with keyboard and browser or packaged-app visual inspection, and retain exact accessibility or screenshot evidence before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `src-tauri/tests/feedback.rs#submission_includes_app_and_os_version` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-tauri --test feedback submission_includes_app_and_os_version -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `src-tauri/src/feedback.rs#submit_feedback`, `docs/architecture/MODULE-PORT-MAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-tauri --test feedback submission_includes_app_and_os_version -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Completed 2026-08-01. The owning integration test was observed RED before the
+  module existed, then GREEN after the typed submission boundary was registered.
+  It covers package/build and OS metadata, missing-version fallbacks, camel-case
+  serialization, no-email contact suppression, and debug redaction. The runtime
+  remains offline unless an HTTPS endpoint is explicitly configured; redirects
+  are disabled and requests have a 15-second timeout. The formatting check and
+  `cargo test --workspace --no-fail-fast` pass. This metadata slice
+  has no user-visible surface; the disabled Beta feedback menu is not claimed as
+  an implemented feedback form by this task.
 
 ### Task 2: centralized-design-token-table + AP-design-token-consistency (implementation-slice-d434285f35d42846)
 
