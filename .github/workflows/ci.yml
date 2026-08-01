@@ -339,12 +339,37 @@ jobs:
           cargo test -p opentake-media --lib windows_cancelling_running_pcm_child_reaps_both_pipe_readers
           cargo test -p opentake-media --lib windows_cancelling_mux_wait_reaps_child
 
+      - name: Record Tauri test image imports
+        shell: pwsh
+        run: |
+          cargo test -p opentake-tauri --lib --no-run
+          $testImage = Get-ChildItem 'target/debug/deps/opentake_tauri_lib-*.exe' -File |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (-not $testImage) { throw 'compiled Tauri test image not found' }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $dumpbin = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -find 'VC/Tools/MSVC/**/bin/Hostx64/x64/dumpbin.exe' |
+            Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin.exe not found' }
+          & $dumpbin /DEPENDENTS $testImage.FullName | Set-Content windows-tauri-test-imports.txt
+          & $dumpbin /IMPORTS $testImage.FullName | Add-Content windows-tauri-test-imports.txt
+
       - name: Reserved output identity and reparse safety
         shell: pwsh
         run: |
           cargo test -p opentake-tauri --lib windows_project_media_junction_is_rejected_without_writing_target
           cargo test -p opentake-tauri --lib windows_directory_handoff_blocks_junction_replacement_before_child_create
           cargo test -p opentake-tauri --lib windows_retained_output_handle_blocks_final_name_replacement
+
+      - name: Upload Tauri test image imports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-tauri-test-imports-${{ github.sha }}
+          path: windows-tauri-test-imports.txt
+          if-no-files-found: error
+          retention-days: 7
 
   web:
     name: Web (install / build)
