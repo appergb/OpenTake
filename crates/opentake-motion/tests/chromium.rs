@@ -65,8 +65,7 @@ mod live {
         let animation = r#"<!doctype html><html><body style="margin:0;background:transparent">
           <div id="box" style="width:48px;height:32px"></div>
           <script>
-            OpenTake.onSeek(async (t) => {
-              await new Promise((resolve) => setTimeout(resolve, 1));
+            OpenTake.onSeek((t) => {
               const value = Math.round(t * 1000);
               box.style.background = `rgb(${value}, 20, 30)`;
               box.dataset.clock = `${Date.now()}:${performance.now()}`;

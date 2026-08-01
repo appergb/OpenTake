@@ -125,6 +125,8 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: cargo test
+        env:
+          OPENTAKE_MOTION_TRACE: '1'
         run: cargo test --workspace
 
       - name: live playback transport integration (fail closed)

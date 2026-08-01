@@ -643,18 +643,6 @@ mod chromium_backend {
         {
             check_abort(renderer, deadline)?;
             trace(format!("frame {index}: seek start at {seconds:.17}s"));
-            // `OpenTake.onSeek` callbacks are allowed to be asynchronous. In
-            // particular, Motion Canvas may use a zero-delay timer while it
-            // initializes layout on Windows. Leaving Chromium virtual time
-            // paused while awaiting that callback deadlocks the CDP command.
-            // Resume only for the callback, then pause again before capture;
-            // the injected clock and document timeline still expose the exact
-            // requested timestamp to author code.
-            cdp.command(
-                "Emulation.setVirtualTimePolicy",
-                json!({"policy": "advance"}),
-                Some(&session),
-            )?;
             let expression = format!(
                 "(async () => {{ if (!window.OpenTake) throw new Error('OpenTake clock missing'); await window.OpenTake.seek({seconds:.17}); return window.OpenTake.currentTime(); }})()"
             );
@@ -667,12 +655,7 @@ mod chromium_backend {
                 }),
                 Some(&session),
             )?;
-            cdp.command(
-                "Emulation.setVirtualTimePolicy",
-                json!({"policy": "pause"}),
-                Some(&session),
-            )?;
-            trace(format!("frame {index}: seek complete and clock paused"));
+            trace(format!("frame {index}: seek complete"));
             if evaluated
                 .get("exceptionDetails")
                 .and_then(Value::as_object)
