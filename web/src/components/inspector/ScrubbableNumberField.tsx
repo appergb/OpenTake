@@ -9,6 +9,8 @@ import { useCallback, useRef, useState } from "react";
 import { LAYOUT } from "../../lib/theme";
 
 interface Props {
+  ariaLabel?: string;
+  disabled?: boolean;
   value: number;
   mixed?: boolean;
   min: number;
@@ -43,12 +45,13 @@ export function ScrubbableNumberField(p: Props) {
 
   const onPointerDown = useCallback(
     (e: React.PointerEvent) => {
+      if (p.disabled) return;
       e.preventDefault();
       dragRef.current = { startX: e.clientX, startValue: p.value, moved: false };
       provisionalRef.current = null;
       (e.target as HTMLElement).setPointerCapture(e.pointerId);
     },
-    [p.value],
+    [p.disabled, p.value],
   );
 
   const onPointerMove = useCallback(
@@ -96,10 +99,18 @@ export function ScrubbableNumberField(p: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft, p]);
 
+  const beginEditing = useCallback(() => {
+    if (p.disabled) return;
+    setDraft(p.format(p.value));
+    setEditing(true);
+    requestAnimationFrame(() => inputRef.current?.select());
+  }, [p]);
+
   if (editing) {
     return (
       <input
         ref={inputRef}
+        aria-label={p.ariaLabel ?? "Value"}
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         onBlur={commitEdit}
@@ -127,6 +138,27 @@ export function ScrubbableNumberField(p: Props) {
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
+      role="spinbutton"
+      aria-label={p.ariaLabel ?? "Value"}
+      aria-valuemin={p.min}
+      aria-valuemax={p.max}
+      aria-valuenow={p.mixed ? undefined : p.value}
+      aria-valuetext={text}
+      aria-disabled={p.disabled || undefined}
+      tabIndex={p.disabled ? -1 : 0}
+      data-interaction-state={p.disabled ? "disabled" : "enabled"}
+      onKeyDown={(e) => {
+        if (p.disabled) return;
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          beginEditing();
+          return;
+        }
+        if (e.key !== "ArrowUp" && e.key !== "ArrowDown") return;
+        e.preventDefault();
+        const modifier = (e.shiftKey ? 10 : 1) * (e.metaKey || e.ctrlKey ? 0.1 : 1);
+        p.onCommit(clamp(p.value + (e.key === "ArrowUp" ? 1 : -1) * p.sensitivity * modifier));
+      }}
       className="tabular"
       style={{
         width: p.width ?? 56,
@@ -134,7 +166,7 @@ export function ScrubbableNumberField(p: Props) {
         textAlign: "right",
         color: p.mixed ? "var(--text-tertiary)" : "var(--accent-primary)",
         fontSize: "var(--fs-sm)",
-        cursor: "ew-resize",
+        cursor: p.disabled ? "not-allowed" : "ew-resize",
         userSelect: "none",
       }}
     >

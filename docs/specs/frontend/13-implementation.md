@@ -37,6 +37,8 @@
 
 代码门禁已完成：完整快捷键表由 `DOCUMENTED_SHORTCUT_ROWS`、`resolveDocumentedShortcut`、`APPLICATION_MENU_SPEC` 和两个 owning tests 共同约束，覆盖修饰键冲突、焦点/弹窗/只读态、repeat 与语义命令。此项保持未勾选，直到打包应用按表逐键完成实际验证并留存结果。
 - [ ] §9.7 hover/游标全表。
+
+代码门禁已完成：跨组件矩阵覆盖 enabled/disabled/active/dragging/focus 与完整时间线 cursor 投影，并验证 Transform/Crop/SplitPane/数字字段/图标按钮的语义状态。此项保持未勾选，直到打包应用完成鼠标、触控板、键盘及高对比度实际验证。
 - [ ] §9.8 右键菜单项与分组逐字（§5.10）。
 
 **C. 几何（单测）**

@@ -989,6 +989,8 @@ TimelineContainer (relative)
 | scrub 条 | `pointingHand` + 变粗 | `PreviewContainerView.swift:655,677` |
 | 数字字段 | `resizeLeftRight`（ew-resize）| `ScrubbableNumberField.swift:185-187` |
 
+**OpenTake 代码门禁（2026-08-01）**:`timelineInteractionCursor` 是时间线刻度、trim、body、razor、drag 与只读态的唯一 cursor 投影；跨组件 owning matrix 同时覆盖 Transform/Crop、SplitPane、ScrubbableNumberField 与 HoverButton 的 enabled/disabled/active/dragging/focus 状态。数字字段已具备 spinbutton 键盘语义，禁用 hover 不再着色。代码测试与生产构建已通过，打包桌面实际交互/高对比度证据仍待顺序 GUI 阶段。
+
 ### 9.8 右键菜单（汇总，见 §5.10 详表）
 
 时间线 clip / 空白 / range / 淡变拐点 / 音量 kf / 关键帧泳道，菜单项逐字照搬（`TimelineView.swift:641-799` + `KeyframesLane.swift:contextMenu`）。Media 面板资产/文件夹右键（`MediaTab` 各处）。
@@ -1282,6 +1284,8 @@ interface Clip {                  // Timeline.swift:75-117
 
 代码门禁已完成：完整表、平台修饰键、冲突/抑制规则与菜单动作均有 owning matrix；此项保持未勾选，直到打包应用逐键实际验证完成。
 - [ ] §9.7 hover/游标全表。
+
+代码门禁已完成：完整 hover/focus/cursor 表已由跨组件矩阵和纯 cursor 投影覆盖；此项保持未勾选，直到打包应用实际验证完成。
 - [ ] §9.8 右键菜单项与分组逐字（§5.10）。
 
 **C. 几何（单测）**

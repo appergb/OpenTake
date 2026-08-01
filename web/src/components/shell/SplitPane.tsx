@@ -33,6 +33,7 @@ export function SplitPane({
   const [size, setSize] = useState(initial);
   const [totalSize, setTotalSize] = useState(initial + secondMin);
   const dragging = useRef(false);
+  const [dragActive, setDragActive] = useState(false);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -64,6 +65,7 @@ export function SplitPane({
     (e: React.PointerEvent) => {
       e.preventDefault();
       dragging.current = true;
+      setDragActive(true);
       (e.target as HTMLElement).setPointerCapture(e.pointerId);
     },
     [],
@@ -83,6 +85,7 @@ export function SplitPane({
 
   const onPointerUp = useCallback((e: React.PointerEvent) => {
     dragging.current = false;
+    setDragActive(false);
     (e.target as HTMLElement).releasePointerCapture(e.pointerId);
   }, []);
 
@@ -138,6 +141,7 @@ export function SplitPane({
           aria-valuemax={Math.max(min, totalSize - secondMin)}
           aria-valuenow={Math.round(size)}
           aria-valuetext={t("layout.positionPixels", { value: Math.round(size) })}
+          data-interaction-state={dragActive ? "dragging" : "enabled"}
           tabIndex={0}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}

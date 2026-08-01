@@ -105,6 +105,28 @@ type DragState =
     }
   | null;
 
+export interface TimelineCursorState {
+  toolMode: "pointer" | "razor";
+  inRuler?: boolean;
+  shiftKey?: boolean;
+  hitRegion?: ClipHit["region"];
+  dragKind?: Exclude<DragState, null>["kind"];
+  disabled?: boolean;
+}
+
+/** One auditable cursor projection for the canvas interaction state. */
+export function timelineInteractionCursor(state: TimelineCursorState): string {
+  if (state.disabled) return "not-allowed";
+  if (state.dragKind === "move" || state.dragKind === "scrub") return "grabbing";
+  if (state.dragKind === "trimLeft" || state.dragKind === "trimRight") return "ew-resize";
+  if (state.dragKind === "marquee") return "crosshair";
+  if (state.inRuler) return state.shiftKey ? "crosshair" : "pointer";
+  if (state.toolMode === "razor") return "crosshair";
+  if (state.hitRegion === "trimLeft" || state.hitRegion === "trimRight") return "ew-resize";
+  if (state.hitRegion === "body") return "grab";
+  return "default";
+}
+
 type TimelineContextMenu =
   | {
       kind: "clip";
@@ -588,6 +610,7 @@ function moveParticipantsForIds(timeline: Timeline, ids: string[]): MoveParticip
 
 export function TimelineContainer() {
   const rootTimeline = useProjectStore((s) => s.timeline);
+  const compatibilityReadOnly = useProjectStore((s) => s.compatibilityReadOnly);
   const activeNestedSequenceId = useEditorUiStore((s) => s.activeNestedSequenceId);
   const enterNestedSequence = useEditorUiStore((s) => s.enterNestedSequence);
   const exitNestedSequence = useEditorUiStore((s) => s.exitNestedSequence);
@@ -620,6 +643,7 @@ export function TimelineContainer() {
   const selectGap = useEditorUiStore((s) => s.selectGap);
   const trackHeights = useEditorUiStore((s) => s.trackDisplayHeights);
   const mediaItems = useMediaStore((s) => s.items);
+  const [canvasCursor, setCanvasCursor] = useState("default");
 
   useEffect(() => {
     if (
@@ -1336,6 +1360,7 @@ export function TimelineContainer() {
       // Ruler -> scrub playhead.
       if (inRuler) {
         dragRef.current = { kind: "scrub" };
+        setCanvasCursor("grabbing");
         scrubSnapRef.current = null;
         setScrubbing(true);
         updateRulerScrubFrame(docX);
@@ -1355,6 +1380,15 @@ export function TimelineContainer() {
         !e.metaKey && !e.shiftKey
           ? fadeKneeHit(timeline, docX, docY, zoomScale, trackHeights)
           : null;
+
+      // Compatibility-read-only projects remain selectable and scrubbable, but
+      // no canvas edit gesture may start behind the disabled cursor.
+      if (compatibilityReadOnly && hit) {
+        selectClips(clipSelectionForInteraction(timeline, selectedClipIds, hit.clip.id, e));
+        dragRef.current = null;
+        setCanvasCursor("not-allowed");
+        return;
+      }
 
       // Razor tool + clip -> split at the (snapped) click frame. Snapping to
       // clip edges / playhead matches upstream's razor (a cut landing on the
@@ -1482,14 +1516,38 @@ export function TimelineContainer() {
       updateRulerScrubFrame,
       docWidth,
       docHeight,
+      compatibilityReadOnly,
     ],
   );
 
   const onPointerMove = useCallback(
     (e: React.PointerEvent) => {
       const d = dragRef.current;
-      if (!d) return;
-      const { docX, docY } = toDoc(e);
+      const { docX, docY, inRuler } = toDoc(e);
+      if (!d) {
+        const hit = inRuler
+          ? null
+          : hitTestAccessibleClip(
+              timeline,
+              docX,
+              docY,
+              zoomScale,
+              trackHeights,
+              docWidth,
+              docHeight,
+            );
+        setCanvasCursor(
+          timelineInteractionCursor({
+            toolMode,
+            inRuler,
+            shiftKey: e.shiftKey,
+            hitRegion: hit?.region,
+            disabled: compatibilityReadOnly && Boolean(hit),
+          }),
+        );
+        return;
+      }
+      setCanvasCursor(timelineInteractionCursor({ toolMode, dragKind: d.kind }));
 
       if (d.kind === "scrub") {
         // Interactive moves update only the playhead. The settled Rust
@@ -1635,7 +1693,20 @@ export function TimelineContainer() {
         forceTick((n) => n + 1);
       }
     },
-    [toDoc, zoomScale, timeline, trackHeights, activeFrame, setCurrentFrame, selectClips, updateRulerScrubFrame],
+    [
+      toDoc,
+      zoomScale,
+      timeline,
+      trackHeights,
+      activeFrame,
+      setCurrentFrame,
+      selectClips,
+      updateRulerScrubFrame,
+      docWidth,
+      docHeight,
+      toolMode,
+      compatibilityReadOnly,
+    ],
   );
 
   // Abandon an in-progress drag WITHOUT committing — fires on pointercancel (a
@@ -1649,6 +1720,7 @@ export function TimelineContainer() {
     setSnapFrame(null);
     maybeSnapFeedback(null); // re-arm snap feedback for the next gesture
     setScrubbing(false);
+    setCanvasCursor("default");
     const el = e.currentTarget as HTMLElement;
     if (el.hasPointerCapture?.(e.pointerId)) el.releasePointerCapture(e.pointerId);
   }, []);
@@ -1660,6 +1732,7 @@ export function TimelineContainer() {
       snapStateRef.current = null;
       setSnapFrame(null);
       setScrubbing(false);
+      setCanvasCursor("default");
       (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
       if (!d) return;
 
@@ -2137,12 +2210,15 @@ export function TimelineContainer() {
         onDoubleClick={onDoubleClick}
         onPointerCancel={endDrag}
         onLostPointerCapture={endDrag}
+        onPointerLeave={() => {
+          if (!dragRef.current) setCanvasCursor("default");
+        }}
         style={{
           position: "absolute",
           left: LAYOUT.trackHeaderWidth,
           top: 0,
           touchAction: "none",
-          cursor: toolMode === "razor" ? "crosshair" : "default",
+          cursor: canvasCursor,
         }}
       />
 

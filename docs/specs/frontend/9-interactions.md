@@ -115,6 +115,8 @@
 | scrub 条 | `pointingHand` + 变粗 | `PreviewContainerView.swift:655,677` |
 | 数字字段 | `resizeLeftRight`（ew-resize）| `ScrubbableNumberField.swift:185-187` |
 
+**OpenTake 代码门禁（2026-08-01）**:`timelineInteractionCursor` 统一投影刻度/Shift-range、trim、clip body、razor、move/scrub/trim/marquee drag 与只读禁用态；Transform/Crop、SplitPane、ScrubbableNumberField 和 HoverButton 的 enabled/disabled/dragging/focus 状态由同一 owning matrix 校验。数字字段同时暴露 spinbutton 语义与键盘增减/进入编辑路径，禁用 hover 不再着色。代码测试与生产构建已通过；鼠标、触控板、键盘焦点、高对比度的打包桌面快照仍是最终勾选前置。
+
 ### 9.8 右键菜单（汇总，见 §5.10 详表）
 
 时间线 clip / 空白 / range / 淡变拐点 / 音量 kf / 关键帧泳道，菜单项逐字照搬（`TimelineView.swift:641-799` + `KeyframesLane.swift:contextMenu`）。Media 面板资产/文件夹右键（`MediaTab` 各处）。

@@ -682,7 +682,7 @@
   - Focus order and restoration must remain deterministic across panels, menus, dialogs, project switches, and hidden/maximized panels.
   - Run keyboard-only focus traversal plus pointer-state visual snapshots at default and high-contrast themes, with no focus traps or unlabeled controls.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/preview/TransformOverlay.test.tsx#TransformOverlay` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `web/src/components/preview/TransformOverlay.test.tsx#renders 4 corner handles at the OpenTake spacing/opacity tokens matching upstream AppTheme.Spacing.smMd / Opacity.strong` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -692,7 +692,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/preview/TransformOverlay.test.tsx -t "TransformOverlay"`
   - Run: `pnpm -C web test -- --run src/components/preview/TransformOverlay.test.tsx -t "renders 4 corner handles at the OpenTake spacing/opacity tokens matching upstream AppTheme.Spacing.smMd / Opacity.strong"`
@@ -702,11 +702,11 @@
 
   Expected: FAIL because one or more of the 3 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/inspector/ScrubbableNumberField.tsx#ScrubbableNumberField`, `web/src/components/preview/CropOverlay.tsx#CropOverlay`, `web/src/components/preview/TransformOverlay.tsx#CORNER_CURSOR`, `web/src/components/preview/TransformOverlay.tsx#TransformOverlay`, `web/src/components/shell/SplitPane.tsx#SplitPane`, `web/src/components/timeline/TimelineContainer.tsx#TimelineContainer`, `web/src/components/timeline/TimelineContainer.tsx#toolMode`, `web/src/components/ui/HoverButton.tsx#HoverButton`, `web/src/styles/global.css`, `docs/modules/web/SPEC.md`, `docs/specs/frontend/13-implementation.md`, `docs/specs/frontend/9-interactions.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/preview/TransformOverlay.test.tsx -t "TransformOverlay"`
   - Run: `pnpm -C web test -- --run src/components/preview/TransformOverlay.test.tsx -t "renders 4 corner handles at the OpenTake spacing/opacity tokens matching upstream AppTheme.Spacing.smMd / Opacity.strong"`
@@ -716,11 +716,23 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: the two reviewed matrix owners first failed because the
+  shared timeline cursor projection and interaction-state attributes did not
+  exist. All five named focused owners passed after the cursor/focus/disabled
+  boundary was integrated. The full Web gate passed with 101 files / 839 tests
+  and the production build passed, with only the existing dynamic-import and
+  chunk-size advisories.
+
+- [ ] **Runtime evidence gate:** traverse the packaged app by keyboard and
+  pointer, then capture default/high-contrast hover, focus-visible, pressed,
+  disabled, resize, trim, razor, forbidden, loading and dragging states with no
+  focus traps or unlabeled controls before final parity reclassification.
 
 ### Task 7: AP-i18n-runtime-contract (implementation-slice-2123bc4e99fa84c2)
 

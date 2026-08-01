@@ -297,7 +297,7 @@ export function CropOverlay({
           top: rect.top,
           width: rect.width,
           height: rect.height,
-          cursor: "grab",
+          cursor: dragCrop ? "grabbing" : "grab",
           pointerEvents: "auto",
         }}
       />
