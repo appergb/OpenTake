@@ -573,7 +573,7 @@ mod chromium_backend {
 
         let target = cdp.command(
             "Target.createTarget",
-            json!({"url": "about:blank", "background": true}),
+            json!({"url": "about:blank", "background": false}),
             None,
         )?;
         let target_id = required_string(&target, "targetId")?;
@@ -588,6 +588,9 @@ mod chromium_backend {
         cdp.command("Page.enable", json!({}), Some(&session))?;
         cdp.command("Runtime.enable", json!({}), Some(&session))?;
         cdp.command("Log.enable", json!({}), Some(&session))?;
+        // A background target can have its compositor throttled on Windows,
+        // leaving a later surface screenshot pending indefinitely.
+        cdp.command("Page.bringToFront", json!({}), Some(&session))?;
         cdp.command(
             "Fetch.enable",
             json!({"patterns": [{"urlPattern": "*", "requestStage": "Request"}]}),
@@ -671,16 +674,6 @@ mod chromium_backend {
                 )));
             }
 
-            // Chromium's compositor can stop servicing a second screenshot on
-            // Windows when virtual time remains paused across captures. Author
-            // state is already pinned to `seconds` by the injected clock and
-            // completed seek callback; resume browser scheduling only for the
-            // compositor command, then freeze it again before the next frame.
-            cdp.command(
-                "Emulation.setVirtualTimePolicy",
-                json!({"policy": "advance"}),
-                Some(&session),
-            )?;
             let captured = cdp.command(
                 "Page.captureScreenshot",
                 json!({
@@ -689,11 +682,6 @@ mod chromium_backend {
                     "captureBeyondViewport": false,
                     "optimizeForSpeed": false
                 }),
-                Some(&session),
-            )?;
-            cdp.command(
-                "Emulation.setVirtualTimePolicy",
-                json!({"policy": "pause"}),
                 Some(&session),
             )?;
             trace(format!("frame {index}: screenshot captured"));
