@@ -269,7 +269,10 @@ export function KeyframesLaneRow({
   };
 
   const handleSetInterpolation = (frame: number, interp: Interpolation) => {
-    void edit.setKeyframeInterpolation(clip.id, property, frame, interp);
+    void edit.setKeyframeInterpolation(clip.id, property, frame, interp).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      pushToast(t("inspector.keyframes.interpolationFailed", { error: message }));
+    });
     closeMenu();
   };
 

@@ -263,3 +263,61 @@ it("control-c191a17716450b1a delete keyframe", async () => {
     "inspector.keyframes.deleteFailed:locked",
   );
 });
+
+async function exerciseInterpolation(
+  interpolation: "linear" | "hold" | "smooth",
+): Promise<void> {
+  await renderOpacityKeyframe();
+  const diamond = container.querySelector<HTMLElement>("[data-keyframe-diamond='105']")!;
+  diamond.focus();
+  await act(async () => {
+    diamond.dispatchEvent(new KeyboardEvent("keydown", { key: "ContextMenu", bubbles: true }));
+  });
+  const item = container.querySelector<HTMLButtonElement>(
+    `[data-keyframe-menu-action='${interpolation}']`,
+  )!;
+  expect(item.getAttribute("role")).toBe("menuitem");
+  await act(async () => item.click());
+  expect(editSpies.setKeyframeInterpolation).toHaveBeenCalledTimes(1);
+  expect(editSpies.setKeyframeInterpolation).toHaveBeenCalledWith(
+    "clip-1",
+    "opacity",
+    105,
+    interpolation,
+  );
+  expect(editSpies.moveKeyframe).not.toHaveBeenCalled();
+  expect(editSpies.removeKeyframe).not.toHaveBeenCalled();
+  expect(container.querySelector("[role='menu']")).toBeNull();
+  expect(document.activeElement).toBe(diamond);
+
+  vi.clearAllMocks();
+  editSpies.setKeyframeInterpolation.mockRejectedValueOnce(new Error("locked"));
+  await act(async () => {
+    diamond.dispatchEvent(new KeyboardEvent("keydown", { key: "ContextMenu", bubbles: true }));
+  });
+  const rejectedItem = container.querySelector<HTMLButtonElement>(
+    `[data-keyframe-menu-action='${interpolation}']`,
+  )!;
+  await act(async () => {
+    rejectedItem.click();
+    await Promise.resolve();
+  });
+  expect(editSpies.setKeyframeInterpolation).toHaveBeenCalledTimes(1);
+  expect(container.querySelector("[role='menu']")).toBeNull();
+  expect(document.activeElement).toBe(diamond);
+  expect(useEditorUiStore.getState().toast?.message).toBe(
+    "inspector.keyframes.interpolationFailed:locked",
+  );
+}
+
+it("control-3b4230aba22c9422 linear keyframe interpolation", async () => {
+  await exerciseInterpolation("linear");
+});
+
+it("control-16737eebbe9cb784 hold keyframe interpolation", async () => {
+  await exerciseInterpolation("hold");
+});
+
+it("control-ab879256f29c4e0a smooth keyframe interpolation", async () => {
+  await exerciseInterpolation("smooth");
+});

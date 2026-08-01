@@ -1271,7 +1271,7 @@
   - Visible/accessibility/return path: success=smooth keyframe interpolation: assert exactly onSetInterpolation('smooth') -> edit.setKeyframeInterpolation(clip.id, property, menu.frame, 'smooth'); then closeMenu() and no sibling branch/command.; accessibility={"focus":"Custom rendered element has no proven tabIndex/keyboard equivalent at this candidate.","label":"No explicit aria-label/title association was discovered at this candidate.","shortcut":"Escape/outside close exists where mounted, but arrow-key roving focus and invoking-control focus restoration are not proven."}; returnPath=["Close through selected item, Escape, or outside action exactly where implemented.","Restore focus to the invoking control; current code does not explicitly prove this."].
   - Outcome matrix: {"success":"smooth keyframe interpolation: assert exactly onSetInterpolation('smooth') -> edit.setKeyframeInterpolation(clip.id, property, menu.frame, 'smooth'); then closeMenu() and no sibling branch/command.","pending":"A promise may be pending, but this candidate exposes no explicit progress state.","empty":"N/A — owning visibility/handler guards prevent an absent target from emitting a command.","disabled":"No explicit disabled attribute beyond the listed visibility/handler guards.","cancel":"Dismiss/close leaves authoritative state unchanged; invoking-control focus restoration is not proven.","retry":"No automatic retry; repeated activation resubmits after the candidate becomes actionable.","failure":"Backend rejection is not caught/rendered at this fire-and-forget candidate; visible recovery evidence is required."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/inspector/KeyframesLaneRow.interaction.test.tsx#control-3b4230aba22c9422 linear keyframe interpolation` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
   - `web/src/components/inspector/KeyframesLaneRow.interaction.test.tsx#control-16737eebbe9cb784 hold keyframe interpolation` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
@@ -1279,7 +1279,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/inspector/KeyframesLaneRow.interaction.test.tsx -t "control-3b4230aba22c9422 linear keyframe interpolation"`
   - Run: `pnpm -C web test -- --run src/components/inspector/KeyframesLaneRow.interaction.test.tsx -t "control-16737eebbe9cb784 hold keyframe interpolation"`
@@ -1287,11 +1287,11 @@
 
   Expected: FAIL because one or more of the 3 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/inspector/KeyframesLaneRow.tsx`, `web/src/store/editActions.ts#setKeyframeInterpolation`, `web/src/store/editActions.ts#applyAndRefresh`, `web/src/lib/api.ts#editApply`, `src-tauri/src/commands.rs#edit_apply`, `crates/opentake-core/src/dto.rs#handle_edit_apply`, `crates/opentake-ops/src/command.rs#EditCommand::SetKeyframeInterpolation`, `web/src/components/inspector/KeyframesLaneRow.tsx#KeyframesLaneRow`, `crates/opentake-ops/src/command.rs#EditCommand` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/inspector/KeyframesLaneRow.interaction.test.tsx -t "control-3b4230aba22c9422 linear keyframe interpolation"`
   - Run: `pnpm -C web test -- --run src/components/inspector/KeyframesLaneRow.interaction.test.tsx -t "control-16737eebbe9cb784 hold keyframe interpolation"`
@@ -1299,11 +1299,24 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: all three focused owners first failed only on absent
+  failure recovery. Linear, hold and smooth now each prove one exact
+  interpolation command, no sibling command, native menuitem activation,
+  immediate close, trigger-focus restoration and a visible rejected-command
+  toast. The Web gate passes with 104 files / 848 tests plus a production build.
+  Formatting and the complete Rust workspace pass; only the seven pre-existing
+  real-device probes remain ignored.
+
+- [ ] **Runtime evidence gate:** set linear, hold and smooth on disposable
+  keyframes in the packaged menu using pointer and keyboard, verify focus
+  restoration and a safe rejection state before final control
+  reclassification.
 
 ### Task 15: control-acceptance (implementation-slice-112e03f8a358e250)
 
