@@ -23,7 +23,9 @@ mod lut;
 mod mcp;
 mod media;
 pub mod motion;
-mod render;
+// Public for the same reason as `export`: integration acceptance drives the
+// standalone compositing path against a generated project snapshot.
+pub mod render;
 mod samples;
 mod search;
 mod secret;

@@ -1903,6 +1903,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(bundle);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn motion_media_commit_rejects_symlink_without_mutation() {
+        use std::os::unix::fs::symlink;
+
+        let bundle = project_bundle("motion-symlink");
+        let core = AppCore::new();
+        core.open_project(&bundle).unwrap();
+        let media_dir = opentake_project::layout::media_dir(&bundle);
+        std::fs::create_dir_all(&media_dir).unwrap();
+        let target = media_dir.join("motion-target.mp4");
+        let linked = media_dir.join("motion-linked.mp4");
+        std::fs::write(&target, b"validated-render-fixture").unwrap();
+        symlink(&target, &linked).unwrap();
+        let before = core.runtime_snapshot();
+
+        let error = core
+            .commit_motion_media_for_project(
+                before.project_epoch,
+                &bundle,
+                &linked,
+                "Linked",
+                &ProbedMedia::default(),
+                GenerationInput::default(),
+                MotionPlacement::Add {
+                    start_frame: 0,
+                    duration_frames: 1,
+                    track_index: Some(0),
+                },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("regular non-symlink"));
+        let after = core.runtime_snapshot();
+        assert_eq!(after.timeline, before.timeline);
+        assert_eq!(after.media, before.media);
+        assert_eq!(after.version, before.version);
+
+        let _ = std::fs::remove_dir_all(bundle);
+    }
+
     #[test]
     fn project_identity_workflow_blocks_project_replacement_until_release() {
         let core = AppCore::new();

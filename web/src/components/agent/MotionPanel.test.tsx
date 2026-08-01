@@ -40,6 +40,17 @@ describe("MotionPanel", () => {
       assetId: "motion-asset",
       contentHash: "hash",
       actionName: "Add Motion Graphic",
+      output: {
+        renderer: "motion-canvas",
+        rendererVersion: "3.17.2",
+        outputFile: "output.mp4",
+        fps: 24,
+        width: 1920,
+        height: 1080,
+        durationFrames: 72,
+        durationSeconds: 3,
+        contentHash: "hash",
+      },
     });
     sync.forceRefresh.mockResolvedValue(undefined);
     container = document.createElement("div");

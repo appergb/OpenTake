@@ -6,7 +6,7 @@
 //! tool contract run against deterministic fakes without advertising a stub in
 //! hosts that do not provide the production bridge.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -34,13 +34,28 @@ pub struct EditMotionRequest {
     pub params: Option<Map<String, Value>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MotionCommit {
     pub clip_id: String,
     pub asset_id: String,
     pub content_hash: String,
     pub action_name: String,
+    pub output: MotionOutputMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MotionOutputMetadata {
+    pub renderer: String,
+    pub renderer_version: String,
+    pub output_file: String,
+    pub fps: f64,
+    pub width: u32,
+    pub height: u32,
+    pub duration_frames: i32,
+    pub duration_seconds: f64,
+    pub content_hash: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

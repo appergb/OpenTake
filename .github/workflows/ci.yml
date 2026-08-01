@@ -35,6 +35,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  motion-canvas:
+    name: Motion Canvas (locked build / audit / license)
+    if: github.event_name != 'workflow_dispatch' || inputs.red_task == 'none'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: plugins/motion-canvas-studio/package-lock.json
+
+      - name: Install locked Motion Canvas dependencies
+        run: npm --prefix plugins/motion-canvas-studio ci --ignore-scripts
+
+      - name: Audit dependencies and licenses
+        run: |
+          npm --prefix plugins/motion-canvas-studio audit --audit-level=moderate
+          npm --prefix plugins/motion-canvas-studio run licenses
+
+      - name: Test and reproduce embedded runner
+        run: |
+          npm --prefix plugins/motion-canvas-studio test
+          npm --prefix plugins/motion-canvas-studio run build
+          git diff --exit-code -- plugins/motion-canvas-studio/bundle/runner.html plugins/motion-canvas-studio/package-lock.json
+
   rust:
     name: Rust (fmt / clippy / test)
     if: github.event_name != 'workflow_dispatch' || inputs.red_task == 'none'

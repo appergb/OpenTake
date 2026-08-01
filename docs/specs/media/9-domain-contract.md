@@ -2,7 +2,7 @@
 
 - **路径**:全部用 `&Path`/`PathBuf`;缓存/模型根用 Tauri `app_cache_dir`/`app_data_dir`(替上游 `~/Library/Caches/PalmierPro`、`~/Library/Application Support/PalmierPro`)。缓存子目录名沿用 `MediaVisualCache`/`Embeddings`/`Transcripts`/`Models` 以便同机迁移可读(`MODULE-PORT-MAP` L923-927)。
 - **字节序**:`.waveform`/`.embed` 固定 little-endian(arm64 mac 写出可互读)。
-- **FFmpeg 架构与许可**:运行时通过独立的 **FFmpeg 子进程 sidecar** 驱动，不做 libav 动态链接。许可证判断必须针对实际随包二进制的 configure flags 与组件逐项完成，而不能由主项目许可证代替。Apple Silicon 供应现锁定 FFmpeg/ffprobe 7.0 的压缩包与解包后二进制双 SHA-256，配置为 GPL 且不含 `--enable-nonfree`；供应脚本在安装前拒绝任何报告不可再分发的构建。Windows/macOS Intel 仍须在各自原生发布门禁执行同一检查。
+- **FFmpeg 架构与许可**:运行时通过独立的 **FFmpeg 子进程 sidecar** 驱动，不做 libav 动态链接。许可证判断必须针对实际随包二进制的 configure flags 与组件逐项完成，而不能由主项目许可证代替。Apple Silicon 供应现锁定 FFmpeg/ffprobe 7.0 的压缩包与解包后二进制双 SHA-256，配置为 GPL 且不含 `--enable-nonfree`；供应脚本在安装前拒绝任何报告不可再分发的构建。**Beta 发布阻塞**：Windows/macOS Intel 仍须在各自原生发布门禁执行同一检查。
 - **模型许可/托管**:SigLIP2 与 whisper 权重需自托管为 ONNX/gguf;在 NOTICE/README 标注来源(对齐 `DECISIONS.md` 合规栏)。**唯一网络请求**是模型权重一次性下载(非闭源云);转写/索引/查询全本地(对齐 `Search` 模块「无闭源云接触」,`MODULE-PORT-MAP` L879)。
 - **遥测**:上游 `Log.*.notice(..., telemetry:)` 经 Sentry;OpenTake 改 `tracing` 本地结构化日志,内容仅计数/状态(MODULE-PORT-MAP L879/L1211)。
 - **隐私**:转写/embedding 不外发;只有模型权重下载是出网。

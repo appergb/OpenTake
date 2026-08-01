@@ -79,10 +79,11 @@
 - **进阶扩展 · AIGC 编排(ADVANCED-FEATURES E 层)**:智能剪口播(本地词级转写+静音检测→Rust 内算 ripple,高阶工具 `remove_filler_words`/`tighten_silences`)、图文成片(agent 编排既有工具+SigLIP2 选素材)、音色克隆(ElevenLabs 等)、虚拟数字人(HeyGen/fal,新增 catalog kind)、多语种字幕翻译(MT/LLM,保时码)。
 
 ## Phase 10 —(新)Motion Canvas 动效 / AI Video 插件
-对应 `plugins/motion-canvas-studio`(待新增)+ `opentake-motion` fallback。详见 [MOTION-GRAPHICS-PLUGIN.md](../modules/opentake-motion/MOTION-GRAPHICS-PLUGIN.md)。
+对应 `plugins/motion-canvas-studio` + `opentake-motion` fallback。详见 [MOTION-GRAPHICS-PLUGIN.md](../modules/opentake-motion/MOTION-GRAPHICS-PLUGIN.md)。
 - **做**:沿 issue #34,优先 fork / vendor Motion Canvas(MIT),作为独立 Motion / AI Video 插件。Agent 或 Motion Panel 生成 Motion Canvas scene/template → 插件渲染 `output.mp4` → OpenTake probe 并导入 media manifest → 单步落轨。`crates/opentake-motion` 现有 scaffold 保留为后续 PNG sequence / transparent alpha / HTML-CSS fallback,不再作为 v1 主渲染器 blocker。
 - **验证**:Motion Canvas sample template 能生成 mp4;OpenTake 自动导入并创建 timeline clip;`composite_frame` 和 `export_video` 都包含该片段;失败不污染 manifest/timeline;README/NOTICE 保留 Motion Canvas MIT license 与修改说明。
 - **时机**:v1 可复用普通视频导入/预览/导出链路,不阻塞 native alpha overlay。透明动效与 `ClipType::Motion`/frame sequence 放后续。
+- **进度(2026-08-01)**:Beta v1 竖切已完成。固定 `title-card` 使用锁定的 Motion Canvas 3.17.2 官方 `Renderer.renderFrame`，离线 Chromium 逐帧后由随包 FFmpeg 生成 `output.mp4`；Motion Panel、Agent add/edit、进度/取消、结果元数据校验、项目能力约束、单事务导入/落轨/替换/撤销/保存重开均已接通。自动化已验证重复构建与重复渲染确定性、异常/遍历/符号链接无污染，以及生成片段真实进入 `composite_frame` 和 `export_video`。透明输出、任意 TSX 和 frame-sequence 仍明确属于后续版本。
 
 ---
 

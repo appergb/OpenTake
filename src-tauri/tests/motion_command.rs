@@ -6,6 +6,10 @@ use opentake_agent::mcp::motion::{
 use opentake_core::{AppCore, EditCommand};
 use opentake_domain::{GenerationJobStatus, MediaResolver};
 use opentake_tauri_lib::motion::{MotionProgress, TauriMotionBridge};
+use opentake_tauri_lib::{
+    export::{run_export, ExportQuality, ExportRequest},
+    render::{composite_timeline_frame, RenderState},
+};
 
 #[test]
 fn sandbox_progress_cancel_validated_mp4_result() {
@@ -87,6 +91,172 @@ fn sandbox_progress_cancel_validated_mp4_result() {
     assert!(probe.has_video);
     assert_eq!((probe.width, probe.height), (Some(64), Some(36)));
     assert!((probe.duration_secs - 0.4).abs() <= 0.15);
+    let decode = |time_secs| {
+        opentake_media::decode_frame_at(
+            &path,
+            &opentake_media::FrameRequest {
+                time_secs,
+                max_size: (64, 36),
+                tolerance_secs: 0.0,
+                apply_rotation: true,
+            },
+        )
+        .unwrap()
+        .1
+    };
+    let first = decode(0.0);
+    let animated = decode(0.3);
+    assert_ne!(
+        first.rgba, animated.rgba,
+        "Motion Canvas template must change pixels across its deterministic timeline"
+    );
+    let distinct_colors = animated
+        .rgba
+        .chunks_exact(4)
+        .map(|pixel| [pixel[0], pixel[1], pixel[2]])
+        .collect::<std::collections::HashSet<_>>();
+    assert!(
+        distinct_colors.len() > 4,
+        "rendered template must contain real card/text/accent pixels, not a solid placeholder"
+    );
+    assert_eq!(added.output.renderer, "motion-canvas");
+    assert_eq!(added.output.renderer_version, "3.17.2");
+    assert_eq!((added.output.width, added.output.height), (64, 36));
+    assert_eq!(added.output.duration_frames, 4);
+    assert_eq!(added.output.content_hash, added.content_hash);
+
+    let preview_state = RenderState::new();
+    let preview_cancel = opentake_media::MediaCancelToken::new();
+    let preview_before = composite_timeline_frame(
+        &snapshot.timeline,
+        &snapshot.media,
+        &snapshot.project_dir,
+        &preview_state,
+        0,
+        64,
+        &preview_cancel,
+    );
+    let preview_motion = composite_timeline_frame(
+        &snapshot.timeline,
+        &snapshot.media,
+        &snapshot.project_dir,
+        &preview_state,
+        3,
+        64,
+        &preview_cancel,
+    );
+    match (preview_before, preview_motion) {
+        (Ok(before), Ok(motion)) => {
+            assert_ne!(
+                before.rgba, motion.rgba,
+                "preview composite must contain the generated clip"
+            );
+            assert!(
+                motion
+                    .rgba
+                    .chunks_exact(4)
+                    .map(|pixel| [pixel[0], pixel[1], pixel[2]])
+                    .collect::<std::collections::HashSet<_>>()
+                    .len()
+                    > 4,
+                "preview composite must retain the generated card/text/accent pixels"
+            );
+
+            let exported = root.path().join("motion-export.mp4");
+            let request = ExportRequest {
+                out_path: exported.to_string_lossy().into_owned(),
+                codec: Default::default(),
+                quality: ExportQuality::P720,
+            };
+            let summary = run_export(
+                &snapshot.timeline,
+                &snapshot.media,
+                &snapshot.project_dir,
+                &request,
+            )
+            .expect("generated motion timeline must export");
+            assert_eq!(summary.frame_count, 6);
+            let exported_before = opentake_media::decode_frame_at(
+                &exported,
+                &opentake_media::FrameRequest {
+                    time_secs: 0.0,
+                    max_size: (64, 36),
+                    tolerance_secs: 0.0,
+                    apply_rotation: true,
+                },
+            )
+            .unwrap()
+            .1;
+            let exported_motion = opentake_media::decode_frame_at(
+                &exported,
+                &opentake_media::FrameRequest {
+                    time_secs: 0.3,
+                    max_size: (64, 36),
+                    tolerance_secs: 0.0,
+                    apply_rotation: true,
+                },
+            )
+            .unwrap()
+            .1;
+            assert_ne!(
+                exported_before.rgba, exported_motion.rgba,
+                "export_video output must contain the generated motion clip"
+            );
+        }
+        (Err(error), _) | (_, Err(error)) if error.contains("no GPU device") => {
+            eprintln!("SKIP composite/export acceptance: {error}");
+        }
+        (Err(error), _) | (_, Err(error)) => panic!("motion composite failed: {error}"),
+    }
+
+    let duplicate = bridge
+        .add(
+            AddMotionRequest {
+                source: MotionSourceRequest::Template {
+                    template_id: "title-card".into(),
+                    params: serde_json::from_value(serde_json::json!({
+                        "title": "Deterministic",
+                        "subtitle": "OpenTake motion",
+                        "accent": "#FF3366"
+                    }))
+                    .unwrap(),
+                },
+                start_frame: 20,
+                duration_frames: 4,
+                transparent: false,
+                track_index: None,
+            },
+            &opentake_media::MediaCancelToken::new(),
+        )
+        .unwrap();
+    assert_eq!(duplicate.content_hash, added.content_hash);
+    assert_eq!(duplicate.output, added.output);
+    let duplicate_snapshot = core.runtime_snapshot();
+    let duplicate_entry = duplicate_snapshot
+        .media
+        .entries
+        .iter()
+        .find(|entry| entry.id == duplicate.asset_id)
+        .unwrap();
+    let duplicate_path = MediaResolver::new(
+        &duplicate_snapshot.media,
+        duplicate_snapshot.project_dir.as_deref(),
+    )
+    .expected_path(&duplicate_entry.id)
+    .unwrap();
+    let duplicate_frame = opentake_media::decode_frame_at(
+        &duplicate_path,
+        &opentake_media::FrameRequest {
+            time_secs: 0.3,
+            max_size: (64, 36),
+            tolerance_secs: 0.0,
+            apply_rotation: true,
+        },
+    )
+    .unwrap()
+    .1;
+    assert_eq!(duplicate_frame.rgba, animated.rgba);
+    core.undo().unwrap();
 
     phases.lock().unwrap().clear();
     let edited = bridge

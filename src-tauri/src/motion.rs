@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use opentake_agent::mcp::motion::{
     AddMotionRequest, EditMotionRequest, MotionBridge, MotionBridgeError, MotionBridgeErrorKind,
-    MotionCommit, MotionSourceRequest,
+    MotionCommit, MotionOutputMetadata, MotionSourceRequest,
 };
 use opentake_core::{AppCore, MotionPlacement, ProbedMedia};
 use opentake_domain::{GenerationInput, GenerationJobStatus};
@@ -27,7 +27,8 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, State};
 
 const MOTION_PROVIDER: &str = "opentake-motion";
-const MOTION_MODEL: &str = "opentake.motion-html-v1";
+const MOTION_MODEL: &str = "opentake.motion-v1";
+const LEGACY_MOTION_MODEL: &str = "opentake.motion-html-v1";
 
 #[derive(Clone)]
 pub struct TauriMotionBridge {
@@ -267,7 +268,6 @@ impl TauriMotionBridge {
                 "durationFrames must be at least 1",
             ));
         }
-        let html = source_document(stored_source)?;
         let fps = u32::try_from(snapshot.timeline.fps.max(1)).unwrap_or(30);
         let width = u32::try_from(snapshot.timeline.width.max(2)).map_err(|_| {
             MotionBridgeError::new(
@@ -287,6 +287,7 @@ impl TauriMotionBridge {
                 "durationFrames is invalid",
             )
         })?;
+        let html = source_document(stored_source, fps, width, height, frames)?;
         let request =
             MotionRenderRequest::new(MotionSource::code(html), fps, frames, width, height)
                 .with_transparent(false);
@@ -321,7 +322,7 @@ impl TauriMotionBridge {
             .prefix("opentake-motion-")
             .tempdir()
             .map_err(io_motion_error)?;
-        let output = output_dir.path().join("render.mp4");
+        let output = output_dir.path().join("output.mp4");
         (self.progress)(MotionProgress::Encoding);
         if let Err(error) = encode_frames(&rendered, &output, cancel) {
             let _ = std::fs::remove_file(&output);
@@ -377,6 +378,51 @@ impl TauriMotionBridge {
         })?;
         let (_temporary_output, output, probe, content_hash) =
             self.render_and_encode(&stored_source, duration_frames, transparent, cancel)?;
+        let motion_canvas = matches!(
+            &stored_source,
+            StoredMotionSource::Template { template_id, .. } if template_id == "title-card"
+        );
+        let output_metadata = MotionOutputMetadata {
+            renderer: if motion_canvas {
+                "motion-canvas".into()
+            } else {
+                "opentake-html-fallback".into()
+            },
+            renderer_version: if motion_canvas {
+                "3.17.2".into()
+            } else {
+                env!("CARGO_PKG_VERSION").into()
+            },
+            output_file: "output.mp4".into(),
+            fps: probe
+                .fps
+                .unwrap_or_else(|| f64::from(snapshot.timeline.fps.max(1))),
+            width: u32::try_from(probe.width.unwrap_or(snapshot.timeline.width)).unwrap_or(0),
+            height: u32::try_from(probe.height.unwrap_or(snapshot.timeline.height)).unwrap_or(0),
+            duration_frames,
+            duration_seconds: probe.duration_secs,
+            content_hash: content_hash.clone(),
+        };
+        let result_path = output
+            .parent()
+            .ok_or_else(|| {
+                MotionBridgeError::new(
+                    MotionBridgeErrorKind::RenderFailed,
+                    "motion result directory is missing",
+                )
+            })?
+            .join("motion-result.json");
+        let result_bytes = serde_json::to_vec_pretty(&output_metadata).map_err(|_| {
+            MotionBridgeError::new(
+                MotionBridgeErrorKind::RenderFailed,
+                "motion result metadata could not be encoded",
+            )
+        })?;
+        std::fs::write(&result_path, result_bytes).map_err(io_motion_error)?;
+        validate_motion_result(
+            &std::fs::read(&result_path).map_err(io_motion_error)?,
+            &output_metadata,
+        )?;
         let project_media = crate::library::ProjectMediaCapability::open_verified(
             &self.core,
             snapshot.project_epoch,
@@ -453,6 +499,7 @@ impl TauriMotionBridge {
             asset_id: committed.media.id,
             content_hash,
             action_name: committed.edit.action_name,
+            output: output_metadata,
         })
     }
 }
@@ -543,7 +590,8 @@ impl MotionBridge for TauriMotionBridge {
                 )
             })?;
         let provenance = entry.generation_input.as_ref().filter(|input| {
-            input.provider.as_deref() == Some(MOTION_PROVIDER) && input.model == MOTION_MODEL
+            input.provider.as_deref() == Some(MOTION_PROVIDER)
+                && matches!(input.model.as_str(), MOTION_MODEL | LEGACY_MOTION_MODEL)
         });
         let provenance = provenance.ok_or_else(|| {
             MotionBridgeError::new(
@@ -600,7 +648,13 @@ impl MotionBridge for TauriMotionBridge {
     }
 }
 
-fn source_document(source: &StoredMotionSource) -> Result<String, MotionBridgeError> {
+fn source_document(
+    source: &StoredMotionSource,
+    fps: u32,
+    width: u32,
+    height: u32,
+    frames: u32,
+) -> Result<String, MotionBridgeError> {
     match source {
         StoredMotionSource::Code { code } => {
             let trimmed = code.trim();
@@ -621,13 +675,17 @@ fn source_document(source: &StoredMotionSource) -> Result<String, MotionBridgeEr
         StoredMotionSource::Template {
             template_id,
             params,
-        } => template_document(template_id, params),
+        } => template_document(template_id, params, fps, width, height, frames),
     }
 }
 
 fn template_document(
     template_id: &str,
     params: &Map<String, Value>,
+    fps: u32,
+    width: u32,
+    height: u32,
+    frames: u32,
 ) -> Result<String, MotionBridgeError> {
     if !matches!(template_id, "title-card" | "lower-third.glass") {
         return Err(MotionBridgeError::new(
@@ -657,6 +715,31 @@ fn template_document(
     let subtitle = js_string(&string_param("subtitle", "Motion Graphic")?);
     let accent = js_string(&string_param("accent", "#7C5CFF")?);
     let background = js_string(&string_param("background", "#11131A")?);
+    if template_id == "title-card" {
+        let config = serde_json::json!({
+            "templateId": "title-card",
+            "params": {
+                "title": string_param("title", "OpenTake")?,
+                "subtitle": string_param("subtitle", "Motion Canvas")?,
+                "accent": string_param("accent", "#7C5CFF")?,
+                "background": string_param("background", "#11131A")?,
+            },
+            "durationSeconds": f64::from(frames) / f64::from(fps),
+            "durationFrames": frames,
+            "fps": fps,
+            "width": width,
+            "height": height,
+        });
+        let config = safe_inline_json(&config)?;
+        let runner = include_str!("../../plugins/motion-canvas-studio/bundle/runner.html");
+        if runner.matches("__OPENTAKE_MOTION_CONFIG_JSON__").count() != 1 {
+            return Err(MotionBridgeError::new(
+                MotionBridgeErrorKind::RenderFailed,
+                "embedded Motion Canvas runner has an invalid configuration boundary",
+            ));
+        }
+        return Ok(runner.replacen("__OPENTAKE_MOTION_CONFIG_JSON__", &config, 1));
+    }
     let lower_third = template_id == "lower-third.glass";
     Ok(format!(
         r#"<!doctype html><html><head><style>
@@ -673,6 +756,42 @@ document.getElementById('title').textContent=title;document.getElementById('subt
 OpenTake.onSeek((t)=>{{const p=Math.max(0,Math.min(1,t*2.4));const eased=1-Math.pow(1-p,3);card.style.opacity=String(p);card.style.transform=`translateY(${{(1-eased)*64}}px) scale(${{.96+.04*eased}})`;bar.style.width=`${{28+Math.sin(t*2.2)*3}}%`;}});</script></body></html>"#,
         align = if lower_third { "flex-end" } else { "center" },
     ))
+}
+
+fn safe_inline_json(value: &Value) -> Result<String, MotionBridgeError> {
+    serde_json::to_string(value)
+        .map(|json| {
+            json.replace('<', "\\u003c")
+                .replace('>', "\\u003e")
+                .replace('&', "\\u0026")
+                .replace('\u{2028}', "\\u2028")
+                .replace('\u{2029}', "\\u2029")
+        })
+        .map_err(|_| {
+            MotionBridgeError::new(
+                MotionBridgeErrorKind::InvalidArguments,
+                "motion template parameters could not be encoded",
+            )
+        })
+}
+
+fn validate_motion_result(
+    bytes: &[u8],
+    expected: &MotionOutputMetadata,
+) -> Result<(), MotionBridgeError> {
+    let result: MotionOutputMetadata = serde_json::from_slice(bytes).map_err(|_| {
+        MotionBridgeError::new(
+            MotionBridgeErrorKind::RenderFailed,
+            "motion-result.json is malformed",
+        )
+    })?;
+    if result != *expected {
+        return Err(MotionBridgeError::new(
+            MotionBridgeErrorKind::RenderFailed,
+            "motion-result.json did not match the validated output",
+        ));
+    }
+    Ok(())
 }
 
 fn js_string(value: &str) -> String {
@@ -776,4 +895,43 @@ fn io_motion_error(error: std::io::Error) -> MotionBridgeError {
         MotionBridgeErrorKind::RenderFailed,
         format!("motion output preparation failed: {error}"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn output_metadata() -> MotionOutputMetadata {
+        MotionOutputMetadata {
+            renderer: "motion-canvas".into(),
+            renderer_version: "3.17.2".into(),
+            output_file: "output.mp4".into(),
+            fps: 30.0,
+            width: 1920,
+            height: 1080,
+            duration_frames: 90,
+            duration_seconds: 3.0,
+            content_hash: "ab".repeat(32),
+        }
+    }
+
+    #[test]
+    fn motion_result_rejects_malformed_or_mismatched_metadata() {
+        let expected = output_metadata();
+        assert_eq!(
+            validate_motion_result(b"not-json", &expected)
+                .unwrap_err()
+                .message,
+            "motion-result.json is malformed"
+        );
+        let mut mismatched = expected.clone();
+        mismatched.output_file = "../output.mp4".into();
+        assert_eq!(
+            validate_motion_result(&serde_json::to_vec(&mismatched).unwrap(), &expected)
+                .unwrap_err()
+                .message,
+            "motion-result.json did not match the validated output"
+        );
+        validate_motion_result(&serde_json::to_vec(&expected).unwrap(), &expected).unwrap();
+    }
 }

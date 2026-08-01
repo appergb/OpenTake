@@ -199,7 +199,7 @@ default-off Rust renderer or to perform the then-missing first device check.
 | 布局常量(#148) | 对照上游 rulerHeight/dropZoneHeight/trackHeight 改 `theme.ts`,纯数值对齐 |
 | CSP 加固(#161) | null→非 null 白屏高风险,**必须真机逐项验证**,独立小 PR |
 | Storage/Models 设置页 | `SettingsView.tsx` 加两 pane:模型缓存管理(whisper/SigLIP 已下载模型列表+删除)、存储占用(项目/缓存目录大小) |
-| MCP 隐藏能力 | `InspectMedia` 已接 MediaBridge（剩 Lottie）；生成/超分四工具按凭据能力动态发布，Motion 两个兼容线名仍隐藏 |
+| MCP 动态能力 | `InspectMedia` 已接 MediaBridge（剩 Lottie）；生成/超分按凭据动态发布；Motion add/edit 于 2026-08-01 接生产桥并按 Chromium/FFmpeg 能力动态发布 |
 | 技术债 | `fcpxml.rs` 1489 行拆分;`export_fcpxml` 名实不符(产物 XMEML)可改名 `export_xml`;`library.rs:322` remove 静默吞错补 `tracing::warn!` |
 
 ---

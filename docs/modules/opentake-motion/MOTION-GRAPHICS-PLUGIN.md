@@ -1,6 +1,6 @@
-# Motion Canvas 外部动效 / AI Video 插件规划
+# Motion Canvas 动效 / AI Video 插件设计与 Beta v1 实施记录
 
-> 状态:设计规划已切换到 **Motion Canvas 优先**。已有 `opentake-motion` scaffold 作为后续原生 frame-cache / alpha fallback,不再作为 v1 主渲染器。
+> 状态:**Beta v1 已实现并通过代码/原生集成验收（2026-08-01）**。固定 `title-card` 使用 Motion Canvas 3.17.2；HTML/CSS 路径保留为受限 fallback，透明/frame-sequence 属后续版本。
 > Issue trail:#34 motion dispatch / motion graphics;已认领实现切片。
 > 决策:先 fork / vendor Motion Canvas(MIT)做独立外部模块或内置插件,让它产出可导入的视频文件;OpenTake 负责一站式导入、落轨、预览和导出。
 
@@ -46,16 +46,16 @@ Motion Panel
 
 ## 2. 模块边界
 
-### `plugins/motion-canvas-studio/`(待新增)
+### `plugins/motion-canvas-studio/`（已实现）
 
-建议作为 forked upstream 的独立目录,不要混入 Rust core:
+作为锁定上游版本的独立 wrapper，不混入 Rust core:
 
 ```
 plugins/motion-canvas-studio/
-├── upstream/ or src/             Motion Canvas fork / wrapper
-├── templates/                    OpenTake 内置动效模板
-├── renderer/                     render orchestration
-├── package.json
+├── src/templates/title-card.tsx  OpenTake 内置 Motion Canvas 模板
+├── renderer/                     官方 Renderer.renderFrame 宿主
+├── bundle/runner.html            可复现、自包含离线 release artifact
+├── package.json / package-lock.json
 ├── LICENSE                       Motion Canvas MIT license notice
 ├── THIRD_PARTY_NOTICES.md
 └── README.md                     upstream、license、修改说明
@@ -67,10 +67,10 @@ plugins/motion-canvas-studio/
 - 调用 Motion Canvas image-sequence 或 FFmpeg video exporter。
 - 输出 `motion-result.json`,包含文件路径、fps、尺寸、时长、模板/代码 hash、license 元数据。
 
-### `src-tauri/src/motion_canvas.rs`(待新增)
+### `src-tauri/src/motion.rs`（已实现）
 
 Tauri command 层,只做边界 glue:
-- `motion_canvas_render_job(job)` 启动插件进程或内置 runner。
+- `motion_add` / `motion_edit` 启动内置 runner，并由 `motion_cancel` 取消活动任务。
 - 限制 job 工作目录在 app cache / project cache 下。
 - 捕获 stdout/stderr/progress。
 - 返回输出文件路径和 metadata。
@@ -173,7 +173,7 @@ MyProject.opentake/
 
 ### v1:MP4 materialization
 
-优先使用 Motion Canvas FFmpeg video exporter 输出 `.mp4`。
+使用 Motion Canvas 官方 `Renderer.renderFrame` 按固定时间采样 RGBA 画面，再由 OpenTake 随包 FFmpeg 输出 H.264 `.mp4`。
 
 优点:
 - 直接复用现有 OpenTake import / preview / export。
@@ -201,36 +201,36 @@ MyProject.opentake/
 
 ## 6. 实施顺序
 
-1. **文档与 issue claim**
+1. **文档与 issue claim** ✅
    - #34 已认领。
    - 更新本文件、ROADMAP、ARCHITECTURE、README。
 
-2. **License spike**
+2. **License spike** ✅
    - 固定 Motion Canvas upstream tag/commit。
    - 生成第三方依赖 license 清单。
 
-3. **插件 skeleton**
+3. **插件 skeleton** ✅
    - 新增 `plugins/motion-canvas-studio/`。
    - 能跑一个固定 template,输出 mp4。
 
-4. **Tauri command**
+4. **Tauri command** ✅
    - 新增 `render_motion_canvas` 或 `add_motion_canvas_clip`。
    - 调插件生成输出。
 
-5. **导入 + 落轨**
+5. **导入 + 落轨** ✅
    - probe 输出 mp4。
    - 创建 media asset。
    - `EditCommand::AddClips` 放入 timeline。
 
-6. **Motion Panel**
+6. **Motion Panel** ✅
    - 新增独立面板入口。
    - prompt/template/params/render/status。
 
-7. **Agent tool wiring**
+7. **Agent tool wiring** ✅
    - `add_motion_graphic` 接 Motion Canvas v1。
    - `edit_motion_graphic` 接可识别的 motion metadata。
 
-8. **后续 alpha**
+8. **后续 alpha**（未纳入 Beta v1）
    - 图片序列 source。
    - `ClipType::Motion` 或 `TextureSource::FrameSequence`。
    - native `opentake-motion` renderer 再进入主流程。
@@ -268,13 +268,12 @@ v2:
 - 本规划文档已从旧 HTML/CSS/CDP 主线改为 Motion Canvas 优先方案。
 - README、README.zh-CN、ROADMAP、ARCHITECTURE、WORKFLOW-PLUGIN-SYSTEM、media-SPEC 已同步 Motion Canvas / fallback 边界。
 - `crates/opentake-motion` scaffold。
-- `add_motion_graphic` / `edit_motion_graphic` tool name、args、schema 描述已改成 Motion Canvas TS/TSX scene/template 语义。
-- preview/export 已能处理普通 video media,所以 Motion Canvas mp4 v1 能复用现有路径。
+- `plugins/motion-canvas-studio` 已锁定 Motion Canvas 3.17.2，包含 lockfile、模板、typed job、MIT LICENSE、THIRD_PARTY_NOTICES、依赖审计/许可证检查和可复现 runner bundle。
+- Tauri Motion 命令、进度/取消/验证、Core 单事务导入/落轨/替换、保存重开和一步撤销已接通。
+- Motion Panel 与 `add_motion_graphic` / `edit_motion_graphic` 已接同一生产桥，并按实际 Chromium/FFmpeg 能力动态发布。
+- 自动化已验证真实 Motion Canvas 像素、两次渲染确定性、错误无污染，以及 `composite_frame` / `export_video` 包含生成片段。
 
-待做:
-- 新增 Motion Canvas plugin 目录。
-- 新增 Tauri motion command。
-- 新增 Motion Panel。
-- 将 agent dispatch 从 `not yet implemented` 接到 Motion Canvas workflow。
-- 增加 license notice / dependency license report。
-- 后续再接透明 alpha / frame sequence / native CDP fallback。
+待做（后续版本）:
+- 透明 alpha / PNG frame sequence / `TextureSource::FrameSequence`。
+- 任意用户 TS/TSX 工程编译与更多受支持模板；Beta v1 仅保证固定 `title-card`。
+- 将临时 `motion-result.json` 升级为项目内长期保留的独立 motion job/metadata 模型。

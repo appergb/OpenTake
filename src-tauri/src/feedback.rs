@@ -144,16 +144,14 @@ fn non_empty_or<'a>(value: Option<&'a str>, fallback: &'a str) -> &'a str {
 }
 
 fn normalize_os_version(raw: &str) -> Option<String> {
-    let mut components = raw
-        .split(|character: char| character == '.' || character == '-')
-        .filter_map(|component| {
-            let digits: String = component
-                .chars()
-                .skip_while(|character| !character.is_ascii_digit())
-                .take_while(|character| character.is_ascii_digit())
-                .collect();
-            (!digits.is_empty()).then_some(digits)
-        });
+    let mut components = raw.split(['.', '-']).filter_map(|component| {
+        let digits: String = component
+            .chars()
+            .skip_while(|character| !character.is_ascii_digit())
+            .take_while(|character| character.is_ascii_digit())
+            .collect();
+        (!digits.is_empty()).then_some(digits)
+    });
     let major = components.next()?;
     let minor = components.next().unwrap_or_else(|| "0".into());
     let patch = components.next().unwrap_or_else(|| "0".into());

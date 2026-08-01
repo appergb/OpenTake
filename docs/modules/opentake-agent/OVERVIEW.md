@@ -122,13 +122,13 @@ MCP 客户端 → /mcp (loopback 守卫) → McpServer::call_tool
 ### 计划中 / 隐藏能力（如实标注）
 
 - `inspect_media` / `get_transcript` / `inspect_timeline` / `search_media` / `import_media` / `add_captions` 已接真实桌面媒体桥；`inspect_media` 的 Lottie 分支仍返回明确不支持。
-- `generate_video` / `generate_image` / `generate_audio` / `upscale_media` 在存在兼容托管或 BYOK 授权时动态进入 MCP/Chat 发现面；`add_motion_graphic` / `edit_motion_graphic`（Motion Canvas）仍仅保留于 `ToolName::KNOWN`。
+- `generate_video` / `generate_image` / `generate_audio` / `upscale_media` 在存在兼容托管或 BYOK 授权时动态进入 MCP/Chat 发现面；`add_motion_graphic` / `edit_motion_graphic` 在桌面 Chromium + FFmpeg 可用时动态进入发现面，并共享 Motion Panel 的确定性渲染、原子导入/落轨/替换与撤销路径。
 - `smart_reframe`：返回结构化不可用原因（需视觉/显著性分析后端）。
 - `get_timeline` 的 `canGenerate` 来自当前生成桥可用授权与 provider/model 能力，不再是常量。
 - `create_folder` / `move_to_folder` 的批量 `entries` 形式未接线（仅单条形式）。
 - **应用内聊天客户端**（`AgentService` 等价的 SSE 工具循环、BYOK Anthropic 直连）尚未落地。
 
-## 工具总数：**最多 39 个基础工具（主机能力过滤）+ 4 个动态生成工具 / 45 个兼容线名**
+## 工具总数：**最多 39 个基础工具（主机能力过滤）+ 4 个动态生成工具 + 2 个动态 Motion 工具 / 45 个兼容线名**
 
 源：`crates/opentake-agent/src/tools/names.rs` 的 `ALL`（39）/ `GENERATION`（4）/ `KNOWN`（45）/ `UPSTREAM`（31）常量。
 

@@ -60,12 +60,12 @@
 | **描述** | GPU 合成的 infrastructure 已就绪（`composite_frame` Tauri 命令、`useTimelineFrame` hook 均存在），但 `Preview.tsx` 仍然使用 DOM `<video>`/`<img>` 路径渲染，未接入 `useTimelineFrame`。后果：看不到关键帧动画、transform/crop/text/effects，preview ≠ export |
 | **当前状态** | 已有完整的 wgpu 合成管线，只需在 Preview.tsx 中接入 `useTimelineFrame` hook |
 
-### D2. Agent/MCP Motion/Lottie 能力仍待生产后端（中）
+### D2. Agent/MCP Lottie 检查仍待生产后端（中）
 
 | 属性 | 值 |
 |---|---|
 | **位置** | `crates/opentake-agent/src/tools/names.rs`、`crates/opentake-agent/src/mcp/dispatch.rs` |
-| **描述** | 基础目录最多发布 39 个真实路径工具，并按媒体桥能力过滤；GenerateVideo/Image/Audio/UpscaleMedia 已接生产桥且仅在兼容授权存在时动态发布。AddMotionGraphic/EditMotionGraphic 仍只保留兼容线名，Lottie 检查仍明确不支持；这两项不能按已交付计算。 |
+| **描述** | 基础目录最多发布 39 个真实路径工具，并按媒体桥能力过滤；生成四工具按授权动态发布，Motion 两工具按桌面 Chromium/FFmpeg 能力动态发布且已接生产渲染/导入/落轨工作流。剩余缺口是 `inspect_media` 的 Lottie 源检查仍返回明确不支持。 |
 
 ### D3. Media 缩略图始终返回 `None`（中）
 

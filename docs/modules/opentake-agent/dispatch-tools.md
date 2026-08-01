@@ -42,7 +42,7 @@
 - **桌面媒体桥**：`inspect_media`、`get_transcript`、`inspect_timeline`、`search_media`、`import_media`、`add_captions` 执行真实 Tauri/媒体路径；`inspect_media` 的 Lottie 分支返回明确不支持。
 - **结构化不可用**：`smart_reframe`（需视觉/显著性后端）。
 - **动态生成类**：存在兼容托管或 BYOK 凭据时，`generate_video`、`generate_image`、`generate_audio`、`upscale_media` 进入发现面并走持久化任务、进度/取消/重试/结果导入链路；无可用授权时不发布。
-- **发现面外兼容线名**：`add_motion_graphic`、`edit_motion_graphic` 保留 schema/严格解码覆盖，但不在生产目录和系统提示中出现。
+- **动态 Motion 类**：`add_motion_graphic`、`edit_motion_graphic` 在主机存在生产 Motion 桥时进入目录，执行 Motion Canvas/本地 fallback 渲染、验证、原子导入/落轨或替换；无能力主机 fail-closed 隐藏。
 
 帧/秒折算、`speed` 归一、`source↔timeline` 帧映射等纯数学集中在本文件的自由函数（如 `source_seconds_to_timeline_frame_clamped`），遵循移植铁律的取整方向。
 
@@ -56,7 +56,7 @@
 - **`KNOWN: [ToolName; 45]`** — 含动态生成与尚未发布 Motion 能力的全部兼容线名。
 - **`UPSTREAM: [ToolName; 31]`** — 上游对齐子集（Issue #9 的"31 工具"）。
 
-14 个 OpenTake 扩展由分析驱动 5 + 工作流 3 + A-tier 效果 4 + Motion Canvas 2 组成；Motion 2 当前仅在 `KNOWN`（详见 [总览](OVERVIEW.md)）。
+14 个 OpenTake 扩展由分析驱动 5 + 工作流 3 + A-tier 效果 4 + Motion Canvas 2 组成；Motion 2 由具备生产渲染桥的主机动态追加（详见 [总览](OVERVIEW.md)）。
 
 ### args.rs：类型化参数
 
@@ -97,7 +97,7 @@ token 友好的时间线表示（1:1 上游 `ToolExecutor+Timeline.swift`）：�
 ## 完成状态
 
 - 已实现：完整八步管线、21 类编辑/读工具接线、3 分析工具（预览式）、3 工作流工具、agent-undo 栈、工具层全文件。
-- 计划中：12 个 honest stub（媒体读 / 生成 / 导入 / 字幕 / Motion Canvas）+ `smart_reframe` 报错 + `create_folder`/`move_to_folder` 批量形式 + `get_timeline` 的 `canGenerate` 恒 `false`。详见 [总览](OVERVIEW.md) 完成状态。
+- 剩余能力缺口：`inspect_media` 的 Lottie 分支、`smart_reframe` 视觉后端，以及 `create_folder`/`move_to_folder` 的批量形式。生成、导入、字幕与 Motion 路径已由实时能力门控并接生产实现。详见 [总览](OVERVIEW.md) 完成状态。
 
 ---
 

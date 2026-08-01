@@ -5,6 +5,7 @@ use opentake_agent::mcp::core_handle::CoreHandle;
 use opentake_agent::mcp::dispatch::Dispatcher;
 use opentake_agent::mcp::motion::{
     AddMotionRequest, EditMotionRequest, MotionBridge, MotionBridgeError, MotionCommit,
+    MotionOutputMetadata,
 };
 use opentake_agent::plugin::registry::PluginRegistry;
 use opentake_agent::tools::names::ToolName;
@@ -14,6 +15,20 @@ use opentake_ops::{EditCommand, EditResult};
 struct ReadOnlyHandle;
 
 struct DeterministicMotionBridge;
+
+fn output_metadata(content_hash: &str) -> MotionOutputMetadata {
+    MotionOutputMetadata {
+        renderer: "fixture".into(),
+        renderer_version: "1".into(),
+        output_file: "output.mp4".into(),
+        fps: 30.0,
+        width: 64,
+        height: 36,
+        duration_frames: 30,
+        duration_seconds: 1.0,
+        content_hash: content_hash.into(),
+    }
+}
 
 impl MotionBridge for DeterministicMotionBridge {
     fn can_render_motion(&self) -> bool {
@@ -30,6 +45,7 @@ impl MotionBridge for DeterministicMotionBridge {
             asset_id: "motion-asset".into(),
             content_hash: "add-hash".into(),
             action_name: "Add Motion Graphic".into(),
+            output: output_metadata("add-hash"),
         })
     }
 
@@ -43,6 +59,7 @@ impl MotionBridge for DeterministicMotionBridge {
             asset_id: "edited-motion-asset".into(),
             content_hash: "edit-hash".into(),
             action_name: "Edit Motion Graphic".into(),
+            output: output_metadata("edit-hash"),
         })
     }
 }

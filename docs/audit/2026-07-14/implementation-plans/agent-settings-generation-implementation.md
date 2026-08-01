@@ -640,6 +640,15 @@ Completion evidence (2026-07-29): the four named focused tests pass; `generation
 
 ### Task 4: motion-canvas-production-runner + AG-motion-canvas-vertical (implementation-slice-0a5150eba626d02b)
 
+**2026-08-01 completion:** Beta v1 is closed. The pinned Motion Canvas 3.17.2
+wrapper, deterministic title-card render, validated `output.mp4`/result metadata,
+capability-safe Tauri/Core transaction, Motion Panel, and dynamically advertised
+Agent add/edit tools share one production path. Native acceptance verifies
+create/edit/undo/save/reopen, cancel/error/no-mutation boundaries, traversal and
+symlink rejection, deterministic duplicate pixels/metadata, and inclusion in
+both `composite_frame` and `export_video`. Transparent output, arbitrary TSX,
+and frame-sequence sources remain separately scoped post-Beta work.
+
 **Covered records:**
 - `requirement-62ed34afe0cbaddc` (requirement)
 - `requirement-8bde5113959f02c8` (requirement)
@@ -704,7 +713,7 @@ Completion evidence (2026-07-29): the four named focused tests pass; `generation
   - src-tauri/src/motion_canvas.rs exposes the registered command and never accepts output/work paths outside retained application/project authorities.
   - Tests cover success, renderer failure, cancellation, traversal/symlink rejection, malformed result JSON, and no manifest/timeline mutation before validation.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-motion/src/renderer.rs#chromium_skeleton_reports_unavailable_not_panic` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-motion/tests/pipeline.rs#full_pipeline_render_cache_and_ingest` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -712,7 +721,7 @@ Completion evidence (2026-07-29): the four named focused tests pass; `generation
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-motion chromium_skeleton_reports_unavailable_not_panic`
   - Run: `cargo test -p opentake-motion --test pipeline full_pipeline_render_cache_and_ingest -- --exact`
@@ -720,11 +729,11 @@ Completion evidence (2026-07-29): the four named focused tests pass; `generation
 
   Expected: FAIL because one or more of the 4 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-agent/src/mcp/dispatch.rs#Dispatcher::dispatch`, `crates/opentake-agent/src/mcp/dispatch.rs#run_body`, `crates/opentake-motion/src/cache.rs#MotionCache`, `crates/opentake-motion/src/integration.rs#MotionClipSource`, `crates/opentake-motion/src/renderer.rs#HeadlessChromiumRenderer`, `crates/opentake-motion/src/renderer.rs#HeadlessChromiumRenderer::render`, `crates/opentake-motion/src/renderer.rs#MotionRenderer`, `src-tauri/src/motion.rs#render_import_place`, `web/src/components/agent/MotionPanel.tsx#MotionPanel`, `docs/architecture/ROADMAP.md`, `docs/modules/opentake-motion/MOTION-GRAPHICS-PLUGIN.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-motion chromium_skeleton_reports_unavailable_not_panic`
   - Run: `cargo test -p opentake-motion --test pipeline full_pipeline_render_cache_and_ingest -- --exact`
@@ -732,7 +741,7 @@ Completion evidence (2026-07-29): the four named focused tests pass; `generation
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 

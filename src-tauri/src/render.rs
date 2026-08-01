@@ -768,7 +768,7 @@ fn encode_png_data_url(frame: &DecodedFrame) -> Result<String, String> {
 /// for the preview) and [`capture_frame_to_media`] (which writes it to disk and
 /// imports it as a still). Out-of-range frames / an empty timeline composite to
 /// opaque black — the correct clear color, not an error.
-fn composite_rgba_for_snapshot(
+pub fn composite_timeline_frame(
     timeline: &Timeline,
     manifest: &opentake_domain::MediaManifest,
     project_dir: &Option<PathBuf>,
@@ -944,7 +944,7 @@ fn composite_rgba(
             Ok::<_, String>(timeline)
         })
         .transpose()?;
-    composite_rgba_for_snapshot(
+    composite_timeline_frame(
         selected.as_ref().unwrap_or(&snapshot.timeline),
         &snapshot.media,
         &snapshot.project_dir,
@@ -1240,7 +1240,7 @@ fn capture_freeze_frame_workflow(
     let project_dir = snapshot.project_dir;
     let (solo_timeline, solo_manifest) =
         build_freeze_capture_snapshot(&timeline, &manifest, clip_id)?;
-    let composite = composite_rgba_for_snapshot(
+    let composite = composite_timeline_frame(
         &solo_timeline,
         &solo_manifest,
         &project_dir,

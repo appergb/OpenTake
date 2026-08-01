@@ -98,7 +98,7 @@ pub fn deterministic_clock_script() -> &'static str {
     // Current virtual time in seconds.
     currentTime: function () { return current; },
     // Host calls this once per frame with t = frameIndex / fps.
-    seek: function (seconds) {
+    seek: async function (seconds) {
       current = seconds;
       randomState = (0x6d2b79f5 ^ Math.round(seconds * 1000000)) | 0;
       try {
@@ -110,9 +110,11 @@ pub fn deterministic_clock_script() -> &'static str {
           });
         }
       } catch (e) { /* timeline may be read-only; listeners still fire */ }
+      var pending = [];
       for (var i = 0; i < listeners.length; i++) {
-        try { listeners[i](seconds); } catch (e) {}
+        try { pending.push(Promise.resolve(listeners[i](seconds))); } catch (e) {}
       }
+      await Promise.all(pending);
     },
     // Authors register frame callbacks: OpenTake.onSeek(t => { ... }).
     onSeek: function (fn) { if (typeof fn === 'function') listeners.push(fn); }
@@ -630,7 +632,7 @@ mod chromium_backend {
         {
             check_abort(renderer, deadline)?;
             let expression = format!(
-                "(() => {{ if (!window.OpenTake) throw new Error('OpenTake clock missing'); window.OpenTake.seek({seconds:.17}); return window.OpenTake.currentTime(); }})()"
+                "(async () => {{ if (!window.OpenTake) throw new Error('OpenTake clock missing'); await window.OpenTake.seek({seconds:.17}); return window.OpenTake.currentTime(); }})()"
             );
             let evaluated = cdp.command(
                 "Runtime.evaluate",

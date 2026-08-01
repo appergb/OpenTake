@@ -443,6 +443,17 @@ export interface MotionCommit {
   assetId: string;
   contentHash: string;
   actionName: string;
+  output: {
+    renderer: string;
+    rendererVersion: string;
+    outputFile: string;
+    fps: number;
+    width: number;
+    height: number;
+    durationFrames: number;
+    durationSeconds: number;
+    contentHash: string;
+  };
 }
 
 export async function motionCapability(): Promise<boolean> {

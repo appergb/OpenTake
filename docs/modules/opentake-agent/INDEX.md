@@ -44,7 +44,7 @@
 - [opentake-core](../opentake-core/INDEX.md) — `AppCore` 会话（`CoreHandle` 适配的权威真理）。
 - [opentake-media](../opentake-media/INDEX.md) — PCM 抽取 + 节拍/静音分析（分析驱动工具的后端）。
 - [opentake-gen](../opentake-gen/INDEX.md) — 生成模型静态目录（`list_models` 数据源）。
-- [opentake-motion](../opentake-motion/INDEX.md) — Motion Canvas（`add_motion_graphic` 计划接线目标，Issue #34）。
+- [opentake-motion](../opentake-motion/INDEX.md) — Motion Canvas 3.17.2 + 本地 fallback（`add_motion_graphic` / `edit_motion_graphic` 已接生产桥，Issue #34）。
 - [src-tauri](../src-tauri/INDEX.md) — 桌面壳：`src-tauri/src/mcp.rs` 构建注册表并启动 MCP server。
 
 ## 源码

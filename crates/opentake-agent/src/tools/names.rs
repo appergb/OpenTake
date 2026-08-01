@@ -131,9 +131,9 @@ impl ToolName {
         }
     }
 
-    /// Tools advertised to MCP and in-app Chat in registration order. Provider-
-    /// backed generation and Motion Canvas tools remain known wire names, but
-    /// stay out of discovery until their production backends are connected.
+    /// Base tools advertised to MCP and in-app Chat in registration order.
+    /// Provider-backed generation and Motion tools are appended only when the
+    /// current host reports their respective live capabilities.
     pub const ALL: [ToolName; 39] = [
         ToolName::GetTimeline,
         ToolName::GetMedia,
@@ -334,8 +334,8 @@ mod tests {
         for t in [ToolName::AddMotionGraphic, ToolName::EditMotionGraphic] {
             assert_eq!(ToolName::from_str(t.as_str()), Ok(t));
         }
-        // They remain known for schema compatibility, but are not advertised
-        // until the production Motion Canvas renderer is wired.
+        // They stay out of the unconditional base catalog: a capable desktop
+        // host appends MOTION, while non-rendering hosts remain fail-closed.
         assert_eq!(
             ToolName::KNOWN
                 .iter()

@@ -2,7 +2,7 @@
 
 > 上级：[模块目录 INDEX.md](INDEX.md) · [模块文档树](../INDEX.md) · [docs 总目录](../../INDEX.md)
 >
-> ⚠️ **本模块是 native fallback 层，尚未接入桌面时间线。** 动效 / AI Video 的 v1 主路径仍规划为外部 **Motion Canvas 插件**（待新增 `plugins/motion-canvas-studio/`）；本 crate 现已具备 feature-gated 的真实 Chromium HTML/CSS/JS → RGBA PNG 渲染器与 frame-source 适配器，但 app/core 尚未调用它。完整设计见 [Motion Graphics 插件设计](MOTION-GRAPHICS-PLUGIN.md)（只读规格）。
+> **Beta v1 已接入桌面时间线。** `plugins/motion-canvas-studio/` 提供锁定的 Motion Canvas 3.17.2 `title-card` runner；本 crate 提供离线 Chromium 帧宿主、缓存与 HTML/CSS fallback。Tauri/Core/Agent/Motion Panel 共用同一原子 Render → Import → Place/Replace 流程。完整设计与验收见 [Motion Graphics 插件设计](MOTION-GRAPHICS-PLUGIN.md)。
 
 ---
 
@@ -19,11 +19,11 @@ opentake-render          定义 DecodedFrame / SourceMetrics / FrameProvider 契
    ▲
 opentake-motion          ← 本模块：实现上述契约，提供 motion 帧序列 source
    ▲
-opentake-core / src-tauri / opentake-agent   未来的调用方（v1 走 Motion Canvas 插件，尚未接线）
+opentake-core / src-tauri / opentake-agent   已接 v1 调用方（渲染、验证、原子导入落轨）
 ```
 
 - **依赖**：`opentake-render`（**实现**它定义的 `DecodedFrame` / `SourceMetrics` / `FrameProvider` 三个 clip-source 契约，让 motion 帧序列对合成器零特殊处理）、`opentake-domain`（作为 workspace 依赖挂着，当前模块内未直接消费其类型）；纯逻辑依赖 `serde` / `serde_json` / `sha2` / `hex`（缓存键）/ `thiserror`（错误）；`chromium` feature 另启用 `tungstenite`（CDP WebSocket）与 `base64`（截图解码）。
-- **被调用**：设计上由 `opentake-core` / `src-tauri` / `opentake-agent` 调用（`add_motion_graphic` / `edit_motion_graphic`）；**但当前未接线**——v1 走外部 Motion Canvas 插件，原生 fallback 入口待后续阶段补。
+- **被调用**：`src-tauri::motion` 通过本 crate 的 Chromium 渲染器驱动嵌入式 Motion Canvas runner 或 HTML fallback，`opentake-core` 原子注册媒体并落轨/替换，`opentake-agent` 与 Motion Panel 共享该桥。
 - **可选后端**：真实 headless-Chromium（CDP）渲染藏在 `chromium` cargo feature 之后；启用后定位 Chrome / Chromium / Edge 并逐帧输出 PNG。**默认 build 与 CI 完全离线、不需要浏览器**，未启用 feature 时 `render()` 返回 `RendererUnavailable`。
 
 模块没有顶层"门面 struct"，公开 API 在 `lib.rs` 扁平 re-export（值类型 + 缓存 + 渲染 trait + 沙箱 + 集成桥）。
@@ -43,9 +43,9 @@ opentake-core / src-tauri / opentake-agent   未来的调用方（v1 走 Motion 
 
 **不做（有意省略 / 不在本模块）：**
 - **不渲染 Lottie**。Lottie 的 `TextureSource::Lottie` / `lottie_frame` / `lottie_frame_count` 在 [`opentake-render`](../opentake-render/INDEX.md)；上游 `LottieVideoGenerator`（`.json`/`.lottie`→ProRes4444 alpha）映射到 render/media，**不是本 crate**。`MotionClipSource` 虽实现了 render trait 里的 `lottie_frame` 方法签名，但其实现只是转发到自己的帧序列，并非真正的 Lottie 源（见 §3 澄清）。
-- **不是 v1 主渲染器**。完整片头 / 解释动画 / 数据动画走外部 Motion Canvas 插件产 `mp4`，复用普通视频导入/预览/导出链路；本 crate 不阻塞该路径。
+- **Motion Canvas 模板是 v1 主模板路径**。本 crate 的 Chromium 宿主负责逐帧执行其官方 renderer；HTML/CSS/JS 仍是兼容 fallback。二者产 `mp4` 后复用普通视频导入/预览/导出链路。
 - **默认 build 不启动浏览器**。真实 CDP 后端必须显式启用 `chromium` feature；默认路径仍 fail-closed 返回 `RendererUnavailable`。
-- **不持 UI 状态 / 不做时间线落轨**。导入 + 落轨的单事务（Render → Import Media → Place Clip）属 `opentake-core`/`opentake-ops`，本 crate 只产帧 + 提供 source。
+- **不持 UI 状态 / 不直接做时间线落轨**。导入 + 落轨的单事务（Render → Import Media → Place Clip）仍属 `src-tauri`/`opentake-core`，本 crate 负责安全、确定性的帧生产。
 - **不定义 `ClipType::Motion`**。透明动效与新 clip 类型 / frame sequence source 是后续目标。
 - **不做帧↔秒折算的真理**。本 crate 内部 `t = frame / fps` 仅用于渲染时间网格；时间线帧↔秒的真理在 domain / 调用层（移植铁律，见 §6）。
 
@@ -91,9 +91,8 @@ MotionSource (Code 内联文档 | Template id + params)
 > **Lottie 方法澄清**：`MotionClipSource` 为满足 render 的 `FrameProvider` trait 实现了 `lottie_frame`，但它只是把请求转发到自身的帧序列——motion clip 始终是帧序列，不存在真正的 Lottie 内部帧概念。真正的 Lottie 渲染在 render（`TextureSource::Lottie`，见 [opentake-render](../opentake-render/INDEX.md)）。
 
 > **2026-08-01 注入边界复核 PASS**：生产依赖仍不包含 image/ffmpeg
-> 解码器；解码完全由 `MotionClipSource::new` 的闭包注入。两个精确拥有者、
-> motion 全包 58 项测试及 warnings-denied Clippy 通过。此结论只关闭库边界，
-> 不代表桌面 motion/Lottie 物化已接线。
+> 解码器；解码完全由 `MotionClipSource::new` 的闭包注入。桌面 Motion MP4
+> 物化另由 Tauri 的随包 FFmpeg 路径完成；Lottie 检查仍是独立未完成能力。
 
 ---
 
@@ -128,10 +127,16 @@ MotionSource (Code 内联文档 | Template id + params)
 - 错误：`MotionError`（thiserror，含 `RendererUnavailable` / `Timeout` / `Sandbox` / `Io` 等可匹配变体）。
 - 集成桥：`MotionClipSource` 实现 `SourceMetrics` + `FrameProvider`，解码器注入、过末端钳位、缺帧返回 `None`。
 
+**Beta v1 已实现（集成验收）：**
+- `plugins/motion-canvas-studio/`：Motion Canvas 3.17.2 lockfile、MIT LICENSE/notice、typed job、`title-card.tsx`、确定性离线 runner 与可复现 bundle；npm audit 0，锁定依赖许可证门禁通过。
+- Tauri/Core：受控临时目录、离线 Chromium、进度/取消、FFmpeg `output.mp4`、`motion-result.json` 精确校验、项目 media capability 发布、单事务注册/落轨或替换、一步撤销与保存重开。
+- 产品入口：独立 Motion Panel 与动态发布的 Agent add/edit 工具共享生产桥；普通视频 preview/export 无需识别 Motion Canvas。
+- 自动化：两次固定模板渲染像素/哈希一致；失败、取消、遍历、符号链接、畸形/篡改元数据无 manifest/timeline 变更；`composite_frame` 与 `export_video` 均验证包含生成片段。
+
 **计划中 / 待做（明确未实现）：**
-- **v1 Motion Canvas 插件链路（主路径）**：`plugins/motion-canvas-studio/`（fork/vendor，MIT）、Tauri `motion_canvas.rs` 命令、独立 Motion Panel、agent dispatch 从 `not yet implemented` 接到 Motion Canvas workflow、license notice / 依赖 license report——**仓库中尚不存在**（无 `plugins/` 目录）。
-- **原生 fallback 接线**：把本 crate 的 `MotionClipSource` 真正接入合成器纹理层、引入 `ClipType::Motion` 或 `TextureSource::FrameSequence`、PNG 序列 source、透明 alpha overlay——属 v2/v3。
-- **持久化元数据**：`motion-result.json` / `media_metadata` 字段（engine/license/prompt/sourceHash…）为规划，未落地。
+- `MotionClipSource` 直接接入 `TextureSource::FrameSequence`、PNG sequence、透明 alpha overlay/ProRes4444——属 v2。
+- 用户提供的任意 TS/TSX 编译和通用模板工程宿主——Beta 仅开放固定 `title-card`；其他输入显式拒绝或走受限 HTML fallback。
+- 独立结构化 `motion_metadata`/长期保留 job 文件；Beta 使用 `generation_input` 保存可编辑来源，并在命令结果返回经验证的 output metadata。
 
 ---
 

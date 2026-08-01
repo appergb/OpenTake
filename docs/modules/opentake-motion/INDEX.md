@@ -3,14 +3,14 @@
 > 上级：[模块文档树](../INDEX.md) · [docs 总目录](../../INDEX.md)
 >
 > `opentake-motion` = **原生 web 动态图形 fallback 渲染原语层**：把内联 HTML/CSS/JS（或模板 + 参数）确定性逐帧栅格化为磁盘 RGBA PNG 帧序列、内容寻址缓存、安全沙箱，并适配成 `opentake-render` 的 clip source。
-> ⚠️ **当前是尚未接入桌面的 native fallback**：动效 / AI Video 的 **v1 主路径规划为外部 Motion Canvas 插件**（产 `mp4` 按普通视频导入；插件目录 `plugins/motion-canvas-studio/` **尚未存在**）。本 crate 已实现 feature-gated 的真实 HTML/CSS/JS → RGBA PNG 后端，但 app/core 尚未调用。**不是 Lottie 渲染器**（Lottie 在 [opentake-render](../opentake-render/INDEX.md)）。
-> 依赖只向下：依赖 `opentake-render`（实现其 source 契约）+ `opentake-domain`；设计上由 `opentake-core`/`src-tauri`/`opentake-agent` 调用（**v1 未接线**）。真实 headless-Chromium 后端在 `chromium` feature 后，**默认 build/CI 离线、不需浏览器**。
+> **Beta v1 已接入桌面**：`plugins/motion-canvas-studio/` 锁定 Motion Canvas 3.17.2，`title-card` 通过官方逐帧 renderer 产帧并编码 `mp4`；本 crate 的离线 Chromium 宿主也承载本地 HTML/CSS fallback。两条路径经 Tauri/Core/Agent/UI 共用的原子导入落轨流程进入普通视频预览与导出。**不是 Lottie 渲染器**（Lottie 在 [opentake-render](../opentake-render/INDEX.md)）。
+> 透明 alpha、任意 TSX 与 frame-sequence source 仍是后续能力；当前 Beta 对它们显式报不支持。
 
 ---
 
 ## 总览
 
-- **[OVERVIEW.md](OVERVIEW.md)** — 定位与依赖分层、职责边界（做什么/不做什么，含"不是 Lottie 渲染器""不是 v1 主渲染器"）、关键概念与数据流（fallback 管线、确定性时钟、沙箱、与 render 集成桥）、对应上游 Swift（**无直接对应**，上游动态图形=Lottie 落 render/media）、完成状态（真实 CDP 已实现；Motion Canvas/桌面接线仍计划中）、移植铁律。
+- **[OVERVIEW.md](OVERVIEW.md)** — 定位与依赖分层、职责边界、Motion Canvas + fallback 数据流、确定性时钟/沙箱、桌面原子落轨与完成状态、对应上游 Swift、移植铁律。
 
 ## 子系统文档
 
@@ -22,7 +22,7 @@
 
 ## 规格与设计
 
-- **[MOTION-GRAPHICS-PLUGIN.md](MOTION-GRAPHICS-PLUGIN.md)** — 动效 / AI Video 插件**设计规划**（Issue #34）：方向修正（Motion Canvas 优先 / 本 crate 转 fallback）、用户体验（Motion Panel）、模块边界（待新增 `plugins/motion-canvas-studio/` + Tauri `motion_canvas.rs`）、持久化、license/README 要求、v1 MP4 → v2 图片序列 → v3 原生 HTML/CSS fallback 的渲染策略、实施顺序、验证标准、风险、已完成/待做清单。⚠️ 只读规格，本目录文档以**代码现况**为准。
+- **[MOTION-GRAPHICS-PLUGIN.md](MOTION-GRAPHICS-PLUGIN.md)** — 动效 / AI Video 插件设计与 Beta v1 实施记录（Issue #34）：Motion Canvas wrapper、Motion Panel、Tauri/Core/Agent 边界、持久化、license、验证与后续 alpha/自由代码范围。
 
 ## 相关跨切面（架构）
 
@@ -35,7 +35,7 @@
 
 - [opentake-render](../opentake-render/INDEX.md) — **定义** `SourceMetrics`/`FrameProvider`/`DecodedFrame`（本 crate 实现之）；**真正的 Lottie 渲染**（`TextureSource::Lottie`）在此。
 - [opentake-domain](../opentake-domain/INDEX.md) — workspace 依赖（当前模块内未直接消费其类型）。
-- [opentake-agent](../opentake-agent/INDEX.md) — `add_motion_graphic` / `edit_motion_graphic` 工具（语义已改为 Motion Canvas scene/template；dispatch 待接线）。
+- [opentake-agent](../opentake-agent/INDEX.md) — `add_motion_graphic` / `edit_motion_graphic` 工具（按实时能力动态发布，已接生产桥）。
 
 ## 源码
 
