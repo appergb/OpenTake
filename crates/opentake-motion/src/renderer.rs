@@ -671,6 +671,16 @@ mod chromium_backend {
                 )));
             }
 
+            // Chromium's compositor can stop servicing a second screenshot on
+            // Windows when virtual time remains paused across captures. Author
+            // state is already pinned to `seconds` by the injected clock and
+            // completed seek callback; resume browser scheduling only for the
+            // compositor command, then freeze it again before the next frame.
+            cdp.command(
+                "Emulation.setVirtualTimePolicy",
+                json!({"policy": "advance"}),
+                Some(&session),
+            )?;
             let captured = cdp.command(
                 "Page.captureScreenshot",
                 json!({
@@ -679,6 +689,11 @@ mod chromium_backend {
                     "captureBeyondViewport": false,
                     "optimizeForSpeed": false
                 }),
+                Some(&session),
+            )?;
+            cdp.command(
+                "Emulation.setVirtualTimePolicy",
+                json!({"policy": "pause"}),
                 Some(&session),
             )?;
             trace(format!("frame {index}: screenshot captured"));
