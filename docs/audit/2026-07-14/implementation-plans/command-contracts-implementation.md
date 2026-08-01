@@ -905,7 +905,7 @@
   - Unknown fields, invalid frames/IDs/paths, unavailable capability, and cancellation must return typed errors without partial mutation.
   - Table-drive invoke registration/schema parity plus success/failure/undo for each mutating command and packaged desktop smoke the command surface.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `src-tauri/src/commands.rs#deserializes_camelcase_multiword_commands` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `src-tauri/src/commands.rs#deserializes_add_captions_camelcase_and_maps_to_command` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -916,7 +916,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and reconcile the historical baseline**
 
   - Run: `cargo test -p opentake-tauri deserializes_camelcase_multiword_commands`
   - Run: `cargo test -p opentake-tauri deserializes_add_captions_camelcase_and_maps_to_command`
@@ -927,11 +927,11 @@
 
   Expected: FAIL because one or more of the 7 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/lib/api.ts#editApply`, `src-tauri/src/commands.rs#EditRequest`, `src-tauri/src/commands.rs#edit_apply`, `docs/specs/core/6-tauri-commands.md`, `docs/specs/frontend/11-tauri.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-tauri deserializes_camelcase_multiword_commands`
   - Run: `cargo test -p opentake-tauri deserializes_add_captions_camelcase_and_maps_to_command`
@@ -942,11 +942,21 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Reconciled 2026-08-01 as an already-integrated baseline. Git history proves
+  the exhaustive Rust mapping owner, frontend invoke/handler parity owner,
+  typed error boundary, strict DTO updates, and both specification corrections
+  landed together in `f2805fc`; its parent contains neither planned owner, so
+  manufacturing a RED state would be dishonest. All six declared focused
+  owners pass on the current descendant, as do the four Node documentation
+  completion tests and the Agent-side Rust completion test. Rustfmt and the
+  full workspace gate pass, while the current full Web suite/build passed in
+  the immediately preceding control slice. No production change was required.
 
 ### Task 9: CC-authority-persistence-mixed (implementation-slice-9296b54263dc8038)
 
