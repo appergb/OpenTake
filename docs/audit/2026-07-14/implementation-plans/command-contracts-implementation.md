@@ -1368,33 +1368,40 @@
   - Visible/accessibility/return path: success=trim selected clip starts to playhead: edit.trimStartToPlayhead computes left-edge trim edits for selected/intersecting clips; accessibility={"focus":"Custom GlyphButton focus behavior depends on its implementation","label":"t(\"toolbar.trimStart\")","shortcut":"None declared on this control"}; returnPath=["Focus remains on the toolbar control; edit commands update the editor mirror/selection."].
   - Outcome matrix: {"success":"trim selected clip starts to playhead: edit.trimStartToPlayhead computes left-edge trim edits for selected/intersecting clips","pending":"Pending behavior is the concrete busy/phase/disabled state in web/src/components/toolbar/Toolbar.tsx:139; no additional state is inferred beyond the source.","empty":"Required empty/no-selection behavior is the render/handler guard in web/src/components/toolbar/Toolbar.tsx:139; the candidate-specific interaction test must assert that exact guard.","disabled":"No explicit disabled prop on this candidate.","cancel":"Not applicable — this immediate handler has no cancellable operation or dismissible transient surface.","retry":"Retry is another activation after the source-defined pending guard clears; no separate retry command exists unless named in edit.trimStartToPlayhead computes left-edge trim edits for selected/intersecting clips.","failure":"Failure behavior is limited to the catch/void-call behavior visible in web/src/components/toolbar/Toolbar.tsx:139; the missing DOM test must prove whether it is surfaced or silent."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/toolbar/Toolbar.interaction.test.tsx#control-f38c30bc83d65d2e trim selected clip starts to playhead` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and reconcile the historical baseline**
 
   - Run: `pnpm -C web test -- --run src/components/toolbar/Toolbar.interaction.test.tsx -t "control-f38c30bc83d65d2e trim selected clip starts to playhead"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/toolbar/Toolbar.tsx`, `web/src/store/editActions.ts#trimStartToPlayhead`, `web/src/lib/api.ts#editApply`, `src-tauri/src/commands.rs#edit_apply`, `crates/opentake-ops/src/command.rs`, `web/src/components/toolbar/Toolbar.tsx#Toolbar` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/toolbar/Toolbar.interaction.test.tsx -t "control-f38c30bc83d65d2e trim selected clip starts to playhead"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Reconciled 2026-08-01 as an already-integrated baseline. The exact left-trim
+  owner passes across selected/intersecting target calculation, empty no-op,
+  pending suppression, error feedback, retry, focus, and the typed trim command
+  chain. The owner and guard fix landed together in `56f8da1`; its parent lacks
+  the owner. Current Web/build and Rust gates pass. No production change was
+  required.
 
 ### Task 15: control-acceptance (implementation-slice-29b311273420852d)
 
@@ -1426,33 +1433,40 @@
   - Visible/accessibility/return path: success=trim selected clip ends to playhead: edit.trimEndToPlayhead computes right-edge trim edits for selected/intersecting clips; accessibility={"focus":"Custom GlyphButton focus behavior depends on its implementation","label":"t(\"toolbar.trimEnd\")","shortcut":"None declared on this control"}; returnPath=["Focus remains on the toolbar control; edit commands update the editor mirror/selection."].
   - Outcome matrix: {"success":"trim selected clip ends to playhead: edit.trimEndToPlayhead computes right-edge trim edits for selected/intersecting clips","pending":"Pending behavior is the concrete busy/phase/disabled state in web/src/components/toolbar/Toolbar.tsx:144; no additional state is inferred beyond the source.","empty":"Required empty/no-selection behavior is the render/handler guard in web/src/components/toolbar/Toolbar.tsx:144; the candidate-specific interaction test must assert that exact guard.","disabled":"No explicit disabled prop on this candidate.","cancel":"Not applicable — this immediate handler has no cancellable operation or dismissible transient surface.","retry":"Retry is another activation after the source-defined pending guard clears; no separate retry command exists unless named in edit.trimEndToPlayhead computes right-edge trim edits for selected/intersecting clips.","failure":"Failure behavior is limited to the catch/void-call behavior visible in web/src/components/toolbar/Toolbar.tsx:144; the missing DOM test must prove whether it is surfaced or silent."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/toolbar/Toolbar.interaction.test.tsx#control-eeff92d3d70361d9 trim selected clip ends to playhead` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and reconcile the historical baseline**
 
   - Run: `pnpm -C web test -- --run src/components/toolbar/Toolbar.interaction.test.tsx -t "control-eeff92d3d70361d9 trim selected clip ends to playhead"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/toolbar/Toolbar.tsx`, `web/src/store/editActions.ts#trimEndToPlayhead`, `web/src/lib/api.ts#editApply`, `src-tauri/src/commands.rs#edit_apply`, `crates/opentake-ops/src/command.rs`, `web/src/components/toolbar/Toolbar.tsx#Toolbar` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/toolbar/Toolbar.interaction.test.tsx -t "control-eeff92d3d70361d9 trim selected clip ends to playhead"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Reconciled 2026-08-01 as an already-integrated baseline. The exact right-trim
+  owner passes across selected/intersecting target calculation, empty no-op,
+  pending suppression, error feedback, retry, focus, and the typed trim command
+  chain. The owner and guard fix landed together in `d84009e`; its parent lacks
+  the owner. Current Web/build and Rust gates pass. No production change was
+  required.
 
 ### Task 16: control-acceptance (implementation-slice-10afd9e138d27853)
 
@@ -1484,33 +1498,40 @@
   - Visible/accessibility/return path: success=add a text clip: edit.addTextClip inserts/selects a new top-track text clip; accessibility={"focus":"Custom GlyphButton focus behavior depends on its implementation","label":"t(\"toolbar.addText\")","shortcut":"None declared on this control"}; returnPath=["Focus remains on the toolbar control; edit commands update the editor mirror/selection."].
   - Outcome matrix: {"success":"add a text clip: edit.addTextClip inserts/selects a new top-track text clip","pending":"Pending behavior is the concrete busy/phase/disabled state in web/src/components/toolbar/Toolbar.tsx:150; no additional state is inferred beyond the source.","empty":"Not applicable — this control does not consume a collection, selection, or free-form payload that has an empty state.","disabled":"No explicit disabled prop on this candidate.","cancel":"Not applicable — this immediate handler has no cancellable operation or dismissible transient surface.","retry":"Retry is another activation after the source-defined pending guard clears; no separate retry command exists unless named in edit.addTextClip inserts/selects a new top-track text clip.","failure":"Failure behavior is limited to the catch/void-call behavior visible in web/src/components/toolbar/Toolbar.tsx:150; the missing DOM test must prove whether it is surfaced or silent."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/toolbar/Toolbar.interaction.test.tsx#control-c6a658045b9e1d6c add a text clip` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and reconcile the historical baseline**
 
   - Run: `pnpm -C web test -- --run src/components/toolbar/Toolbar.interaction.test.tsx -t "control-c6a658045b9e1d6c add a text clip"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/toolbar/Toolbar.tsx`, `web/src/store/editActions.ts#addTextClip`, `web/src/lib/api.ts#editApply`, `src-tauri/src/commands.rs#edit_apply`, `crates/opentake-ops/src/command.rs`, `web/src/components/toolbar/Toolbar.tsx#Toolbar` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/toolbar/Toolbar.interaction.test.tsx -t "control-c6a658045b9e1d6c add a text clip"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Reconciled 2026-08-01 as an already-integrated baseline. The exact Add Text
+  owner passes across default entry construction, pending duplicate suppression,
+  successful selection, failure feedback, retry, focus, and the typed
+  `addTextsAutoTrack` command chain. The owner and guard fix landed together in
+  `8bea548`; its parent lacks the owner. Current Web/build and Rust gates pass.
+  No production change was required.
 
 ## Shared capability references
 
