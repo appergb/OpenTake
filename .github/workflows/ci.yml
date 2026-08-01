@@ -339,7 +339,7 @@ jobs:
           cargo test -p opentake-media --lib windows_cancelling_running_pcm_child_reaps_both_pipe_readers
           cargo test -p opentake-media --lib windows_cancelling_mux_wait_reaps_child
 
-      - name: Record Tauri test image imports
+      - name: Verify portable Tauri test image imports
         shell: pwsh
         run: |
           cargo test -p opentake-tauri --lib --no-run
@@ -354,6 +354,10 @@ jobs:
           if (-not $dumpbin) { throw 'dumpbin.exe not found' }
           & $dumpbin /DEPENDENTS $testImage.FullName | Set-Content windows-tauri-test-imports.txt
           & $dumpbin /IMPORTS $testImage.FullName | Add-Content windows-tauri-test-imports.txt
+          $imports = Get-Content windows-tauri-test-imports.txt -Raw
+          if ($imports -match '(?im)^\s*(MSVCP140|onnxruntime|DirectML)\.dll\s*$') {
+            throw 'Tauri test image retains a non-portable native runtime dependency'
+          }
 
       - name: Reserved output identity and reparse safety
         shell: pwsh

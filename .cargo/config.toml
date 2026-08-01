@@ -9,3 +9,12 @@
 # tauri.conf.json. Keep the two in sync.
 [env]
 MACOSX_DEPLOYMENT_TARGET = { value = "11.0", force = true }
+
+# whisper.cpp is compiled as a static library, but CMake otherwise selects the
+# dynamic MSVC C/C++ runtime on Windows. That leaves the installed application
+# dependent on whichever MSVCP140/VCRUNTIME140 version happens to be present on
+# the machine and can fail before Rust's main() with STATUS_ENTRYPOINT_NOT_FOUND.
+# CMP0091 makes CMAKE_MSVC_RUNTIME_LIBRARY authoritative for the older
+# whisper.cpp CMake project; non-MSVC generators ignore both values.
+CMAKE_POLICY_DEFAULT_CMP0091 = { value = "NEW", force = false }
+CMAKE_MSVC_RUNTIME_LIBRARY = { value = "MultiThreaded", force = false }
