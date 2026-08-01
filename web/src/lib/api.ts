@@ -24,6 +24,7 @@ import type {
   MattingModelStatus,
   GenerateMatteResult,
   RemoveObjectResult,
+  MatchColorResult,
   LutReference,
   LoudnessNormalization,
   DenoiseMode,
@@ -817,6 +818,28 @@ export async function removeObject(
     });
   }
   throw new Error("object removal requires the desktop app");
+}
+
+export async function matchColor(
+  clipId: string,
+  referenceMediaRef: string,
+  referenceFrame: number,
+  targetFrame: number,
+  apply: boolean,
+): Promise<MatchColorResult> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<MatchColorResult>("advanced_match_color", {
+      request: {
+        clipId,
+        referenceMediaRef,
+        referenceFrame,
+        targetFrame,
+        apply,
+      },
+    });
+  }
+  throw new Error("color match requires the desktop app");
 }
 
 export async function cancelAdvancedWorkflow(): Promise<boolean> {

@@ -30,6 +30,7 @@ import { TextTab } from "./TextTab";
 import { AiEditTab } from "./AiEditTab";
 import { MattingSection } from "./MattingSection";
 import { ObjectRemovalSection } from "./ObjectRemovalSection";
+import { ColorMatchSection } from "./ColorMatchSection";
 import { KeyframesPanel } from "./KeyframesPanel";
 import { SwapMediaSection } from "./SwapMediaSection";
 import { useProjectStore } from "../../store/projectStore";
@@ -1010,6 +1011,7 @@ function ShaderEffectsSection({ clip, t }: { clip: Clip; t: TFunction }) {
   return (
     <>
       <ColorGradeSection clip={clip} t={t} />
+      <ColorMatchSection clip={clip} />
       <ChromaKeySection clip={clip} t={t} />
       <MaskSection clip={clip} t={t} />
       {clip.mediaType === "video" && !clip.nestedSequenceId && (

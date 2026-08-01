@@ -194,6 +194,20 @@ export interface ColorGradeInput {
   hslSecondary?: Partial<HslSecondary>;
 }
 
+export interface ColorMatchInput {
+  referenceMediaRef: string;
+  referenceFrame: number;
+  targetFrame: number;
+  algorithm: string;
+  algorithmVersion: number;
+  targetMeanLinear: Rgb;
+  referenceMeanLinear: Rgb;
+  deltaEBefore: number;
+  deltaEAfter: number;
+  targetLumaBefore: number;
+  targetLumaAfter: number;
+}
+
 export interface ChromaKeyInput {
   keyColor?: Partial<Rgb>;
   similarity?: number;
@@ -281,6 +295,7 @@ export interface Clip {
   loudnessNormalization?: LoudnessNormalization;
   audioDenoise?: AudioDenoise;
   colorGrade?: ColorGrade;
+  colorMatchInput?: ColorMatchInput;
   lut?: LutReference;
   chromaKey?: ChromaKey;
   masks?: Mask[];
@@ -606,6 +621,27 @@ export interface RemoveObjectResult {
     maskIndex: number;
     startFrame: number;
     endFrame: number;
+  };
+  actionName?: string | null;
+}
+
+export interface MatchColorResult {
+  result: {
+    clipId: string;
+    referenceMediaRef: string;
+    referenceFrame: number;
+    targetFrame: number;
+    algorithm: string;
+    algorithmVersion: number;
+    grade: ColorGrade;
+    targetMeanLinear: Rgb;
+    referenceMeanLinear: Rgb;
+    matchedMeanLinear: Rgb;
+    deltaEBefore: number;
+    deltaEAfter: number;
+    targetLumaBefore: number;
+    targetLumaAfter: number;
+    applied: boolean;
   };
   actionName?: string | null;
 }

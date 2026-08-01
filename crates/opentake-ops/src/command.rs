@@ -19,10 +19,10 @@
 use std::collections::{HashMap, HashSet};
 
 use opentake_domain::{
-    AudioDenoise, ChromaKey, Clip, ClipType, ColorGrade, Crop, Effect, Interpolation,
-    LoudnessNormalization, LutReference, Mask, MaskShape, MediaManifestEntry, NestedSequence,
-    StabilizationTrack, Timeline, Track, Transform, Transition, TransitionKind, MAX_MASKS_PER_CLIP,
-    MAX_POLYGON_MASK_POINTS,
+    AudioDenoise, ChromaKey, Clip, ClipType, ColorGrade, ColorMatchInput, Crop, Effect,
+    Interpolation, LoudnessNormalization, LutReference, Mask, MaskShape, MediaManifestEntry,
+    NestedSequence, StabilizationTrack, Timeline, Track, Transform, Transition, TransitionKind,
+    MAX_MASKS_PER_CLIP, MAX_POLYGON_MASK_POINTS,
 };
 
 use crate::editor_state::EditorState;
@@ -228,6 +228,94 @@ mod motion_media_transaction_tests {
             "object-removed-b"
         );
         assert!(state.timeline.tracks[0].clips[0].masks.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod color_match_command_tests {
+    use super::*;
+    use crate::id::SeqIdGen;
+    use opentake_domain::Rgb;
+
+    fn input() -> ColorMatchInput {
+        ColorMatchInput {
+            reference_media_ref: "reference".into(),
+            reference_frame: 3,
+            target_frame: 12,
+            algorithm: "fixture-match".into(),
+            algorithm_version: 1,
+            target_mean_linear: Rgb::new(0.3, 0.2, 0.1),
+            reference_mean_linear: Rgb::new(0.1, 0.2, 0.3),
+            delta_e_before: 20.0,
+            delta_e_after: 1.0,
+            target_luma_before: 0.2,
+            target_luma_after: 0.2,
+        }
+    }
+
+    #[test]
+    fn apply_color_match_is_one_undoable_edit_and_manual_grade_clears_provenance() {
+        let mut state = EditorState::default();
+        let ids = SeqIdGen::default();
+        apply(
+            &mut state,
+            EditCommand::InsertTrack {
+                kind: ClipType::Video,
+                at: None,
+            },
+            &ids,
+        )
+        .unwrap();
+        let clip_id = ids.next_id();
+        state.timeline.tracks[0]
+            .clips
+            .push(Clip::new(clip_id.clone(), "target", 10, 20));
+        let grade = ColorGrade {
+            temperature: 0.2,
+            ..ColorGrade::default()
+        };
+        let undo_before = state.undo_depth();
+
+        let result = apply(
+            &mut state,
+            EditCommand::ApplyColorMatch {
+                clip_id: clip_id.clone(),
+                grade,
+                input: input(),
+            },
+            &ids,
+        )
+        .unwrap();
+        assert_eq!(result.action_name, "Match Color");
+        assert_eq!(state.undo_depth(), undo_before + 1);
+        assert_eq!(state.timeline.tracks[0].clips[0].color_grade, Some(grade));
+        assert_eq!(
+            state.timeline.tracks[0].clips[0]
+                .color_match_input
+                .as_ref()
+                .unwrap()
+                .reference_media_ref,
+            "reference"
+        );
+
+        apply(&mut state, EditCommand::Undo, &ids).unwrap();
+        assert!(state.timeline.tracks[0].clips[0].color_grade.is_none());
+        assert!(state.timeline.tracks[0].clips[0]
+            .color_match_input
+            .is_none());
+        apply(&mut state, EditCommand::Redo, &ids).unwrap();
+        apply(
+            &mut state,
+            EditCommand::SetColorGrade {
+                clip_ids: vec![clip_id],
+                grade: Some(ColorGrade::default()),
+            },
+            &ids,
+        )
+        .unwrap();
+        assert!(state.timeline.tracks[0].clips[0]
+            .color_match_input
+            .is_none());
     }
 }
 
@@ -695,6 +783,12 @@ pub enum EditCommand {
         clip_ids: Vec<String>,
         grade: Option<ColorGrade>,
     },
+    /// Apply a sampled reference match and its persisted provenance together.
+    ApplyColorMatch {
+        clip_id: String,
+        grade: ColorGrade,
+        input: ColorMatchInput,
+    },
     /// Set or clear one project-managed 3D LUT on one or more clips.
     SetLut {
         clip_ids: Vec<String>,
@@ -1008,6 +1102,11 @@ pub fn apply(
             interpolation,
         } => set_keyframe_interpolation(state, clip_id, property, frame, interpolation),
         EditCommand::SetColorGrade { clip_ids, grade } => set_color_grade(state, clip_ids, grade),
+        EditCommand::ApplyColorMatch {
+            clip_id,
+            grade,
+            input,
+        } => apply_color_match(state, clip_id, grade, input),
         EditCommand::SetLut { clip_ids, lut } => set_lut(state, clip_ids, lut),
         EditCommand::SetChromaKey {
             clip_ids,
@@ -3033,6 +3132,23 @@ fn set_color_grade(
     reject_compound_effect_targets(state, &clip_ids, grade.is_some())?;
     set_clip_effect_field(state, clip_ids, "Set Color Grade", move |clip| {
         clip.color_grade = grade;
+        clip.color_match_input = None;
+    })
+}
+
+fn apply_color_match(
+    state: &mut EditorState,
+    clip_id: String,
+    grade: ColorGrade,
+    input: ColorMatchInput,
+) -> Result<EditResult, EditError> {
+    grade
+        .validate()
+        .map_err(|error| EditError::Invalid(format!("invalid color match grade: {error}")))?;
+    reject_compound_effect_targets(state, std::slice::from_ref(&clip_id), true)?;
+    set_clip_effect_field(state, vec![clip_id], "Match Color", move |clip| {
+        clip.color_grade = Some(grade);
+        clip.color_match_input = Some(input.clone());
     })
 }
 

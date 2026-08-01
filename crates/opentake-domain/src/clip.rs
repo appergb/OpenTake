@@ -17,7 +17,7 @@ use crate::clip_wire::{
     deserialize_one_on_error, deserialize_optional_crop_track_on_error,
     deserialize_optional_f64_track_on_error, deserialize_optional_pair_track_on_error,
 };
-use crate::grade::{ChromaKey, ColorGrade, Effect, Mask};
+use crate::grade::{ChromaKey, ColorGrade, ColorMatchInput, Effect, Mask};
 use crate::keyframe::{AnimPair, AnimatableProperty, Interpolation, KeyframeTrack};
 use crate::lut::LutReference;
 use crate::stabilization::StabilizationTrack;
@@ -228,6 +228,9 @@ pub struct Clip {
     /// High-end floating-point color grade (linear-light chain). `None` = no grade.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_grade: Option<ColorGrade>,
+    /// Sampling inputs and measured result for an automatically matched grade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_match_input: Option<ColorMatchInput>,
     /// Project-managed 3D LUT reference. The persisted id maps only to the
     /// bundle's canonical `media/luts/<sha256>.cube` location.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -389,6 +392,7 @@ impl Clip {
             loudness_normalization: None,
             audio_denoise: None,
             color_grade: None,
+            color_match_input: None,
             lut: None,
             chroma_key: None,
             masks: Vec::new(),

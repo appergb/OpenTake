@@ -296,6 +296,25 @@ pub struct ColorGrade {
     pub hsl_secondary: Option<HslSecondary>,
 }
 
+/// Persisted provenance for an automatically generated reference color match.
+/// The grade remains fully editable; a later manual grade change clears this
+/// record so projects never claim an edited grade is still the sampled match.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ColorMatchInput {
+    pub reference_media_ref: String,
+    pub reference_frame: i32,
+    pub target_frame: i32,
+    pub algorithm: String,
+    pub algorithm_version: u32,
+    pub target_mean_linear: Rgb,
+    pub reference_mean_linear: Rgb,
+    pub delta_e_before: f64,
+    pub delta_e_after: f64,
+    pub target_luma_before: f64,
+    pub target_luma_after: f64,
+}
+
 /// Stable validation failure for authored color-grade parameters. The bounds
 /// mirror the Inspector controls and keep malformed persisted data out of the
 /// command and GPU paths.

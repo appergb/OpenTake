@@ -9,11 +9,14 @@ use opentake_agent::mcp::advanced::{
     AdvancedWorkflowBridge, AdvancedWorkflowCommit, AdvancedWorkflowError,
     AdvancedWorkflowErrorKind, AdvancedWorkflowRequest,
 };
-use opentake_agent::tools::args::{GenerateMatteArgs, RemoveObjectArgs, TrackMotionArgs};
+use opentake_agent::tools::args::{
+    GenerateMatteArgs, MatchColorArgs, RemoveObjectArgs, TrackMotionArgs,
+};
 use opentake_agent::tools::names::ToolName;
 use opentake_core::{AppCore, MotionPlacement, ProbedMedia, ProjectRevision};
 use opentake_domain::{
-    AnimPair, GenerationInput, GenerationJobStatus, Interpolation, Keyframe, KeyframeTrack, Mask,
+    luma709, AnimPair, ColorGrade, ColorMatchInput, GenerationInput, GenerationJobStatus,
+    Interpolation, Keyframe, KeyframeTrack, LiftGammaGain, Mask, Rgb,
 };
 use opentake_media::analysis::{
     track_region_motion, verify_rvm_model, NormalizedMotionRegion, RegionMotionTrack,
@@ -245,6 +248,28 @@ pub async fn advanced_remove_object(
             AdvancedWorkflowRequest::RemoveObject(request),
             &worker_token,
         )
+    })
+    .await
+    .map_err(|error| format!("advanced workflow worker failed: {error}"))
+    .and_then(|result| result.map_err(|error| error.message));
+    state.finish(&token);
+    let commit = result?;
+    Ok(GenerateMatteResultDto {
+        result: commit.result,
+        action_name: commit.action_name,
+    })
+}
+
+#[tauri::command]
+pub async fn advanced_match_color(
+    state: State<'_, AdvancedWorkflowCommandState>,
+    request: MatchColorArgs,
+) -> Result<GenerateMatteResultDto, String> {
+    let token = state.begin()?;
+    let bridge = Arc::clone(&state.bridge);
+    let worker_token = token.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        bridge.execute(AdvancedWorkflowRequest::MatchColor(request), &worker_token)
     })
     .await
     .map_err(|error| format!("advanced workflow worker failed: {error}"))
@@ -842,11 +867,242 @@ impl TauriAdvancedWorkflowBridge {
             action_name,
         })
     }
+
+    fn match_color(
+        &self,
+        args: MatchColorArgs,
+        cancel: &MediaCancelToken,
+    ) -> Result<AdvancedWorkflowCommit, AdvancedWorkflowError> {
+        if cancel.checkpoint() {
+            return Err(cancelled_workflow("color match cancelled"));
+        }
+        const ALGORITHM: &str = "opentake-luma-preserving-mean-match";
+        const ALGORITHM_VERSION: u32 = 1;
+        let snapshot = self.core.runtime_snapshot();
+        let clip = snapshot
+            .timeline
+            .tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .find(|clip| clip.id == args.clip_id)
+            .cloned()
+            .ok_or_else(|| advanced_resource(format!("clip not found: {}", args.clip_id)))?;
+        if !matches!(
+            clip.media_type,
+            opentake_domain::ClipType::Image | opentake_domain::ClipType::Video
+        ) || clip.nested_sequence_id.is_some()
+            || clip.reversed
+            || (clip.speed - 1.0).abs() > f64::EPSILON
+        {
+            return Err(AdvancedWorkflowError::new(
+                AdvancedWorkflowErrorKind::CapabilityUnavailable,
+                "color match requires an ordinary forward 1x visual clip",
+            ));
+        }
+        if clip.color_grade.is_some_and(|grade| !grade.is_identity())
+            || clip.lut.is_some()
+            || clip.chroma_key.is_some()
+            || !clip.masks.is_empty()
+            || !clip.effects.is_empty()
+        {
+            return Err(AdvancedWorkflowError::new(
+                AdvancedWorkflowErrorKind::CapabilityUnavailable,
+                "color match currently requires a target clip without active pixel effects",
+            ));
+        }
+        if args.reference_media_ref == clip.media_ref {
+            return Err(advanced_invalid(
+                "reference media must differ from the target source",
+            ));
+        }
+        let reference = snapshot
+            .media
+            .entries
+            .iter()
+            .find(|entry| entry.id == args.reference_media_ref)
+            .ok_or_else(|| {
+                advanced_resource(format!(
+                    "reference media not found: {}",
+                    args.reference_media_ref
+                ))
+            })?;
+        if !matches!(
+            reference.kind,
+            opentake_domain::ClipType::Image | opentake_domain::ClipType::Video
+        ) {
+            return Err(advanced_invalid(
+                "reference media must be an image or video",
+            ));
+        }
+        let target_frame = args.target_frame.unwrap_or(clip.start_frame);
+        if !clip.contains(target_frame) {
+            return Err(advanced_invalid(
+                "targetFrame must be inside the target clip",
+            ));
+        }
+        let reference_frame = args.reference_frame.unwrap_or(0);
+        if reference_frame < 0 {
+            return Err(advanced_invalid("referenceFrame must be non-negative"));
+        }
+        if reference.kind == opentake_domain::ClipType::Image && reference_frame != 0 {
+            return Err(advanced_invalid(
+                "image references support only referenceFrame=0",
+            ));
+        }
+
+        let (target_path, _) =
+            crate::transcribe::resolve_asset_from_snapshot(&snapshot, &clip.media_ref)
+                .map_err(advanced_resource)?;
+        let (reference_path, _) =
+            crate::transcribe::resolve_asset_from_snapshot(&snapshot, &args.reference_media_ref)
+                .map_err(advanced_resource)?;
+        let timeline_fps = snapshot.timeline.fps.max(1) as f64;
+        let target_time = (clip.trim_start_frame as f64
+            + (target_frame - clip.start_frame) as f64 * clip.speed)
+            / timeline_fps;
+        let reference_time = if reference.kind == opentake_domain::ClipType::Image {
+            0.0
+        } else {
+            reference_frame as f64 / reference.source_fps.unwrap_or(timeline_fps).max(0.001)
+        };
+        if reference.kind == opentake_domain::ClipType::Video
+            && reference.duration > 0.0
+            && reference_time >= reference.duration
+        {
+            return Err(advanced_invalid(
+                "referenceFrame must be inside the reference video",
+            ));
+        }
+        let request = FrameRequest {
+            max_size: (640, 640),
+            tolerance_secs: 0.1,
+            ..FrameRequest::default()
+        };
+        let target = decode_color_sample(
+            &target_path,
+            target_time,
+            clip.media_type == opentake_domain::ClipType::Image,
+            &request,
+            cancel,
+        )?;
+        let reference_frame_data = decode_color_sample(
+            &reference_path,
+            reference_time,
+            reference.kind == opentake_domain::ClipType::Image,
+            &request,
+            cancel,
+        )?;
+        let target_mean = mean_linear_rgb(&target)?;
+        let reference_mean = mean_linear_rgb(&reference_frame_data)?;
+        let target_luma = luma709(target_mean.r, target_mean.g, target_mean.b);
+        let reference_luma = luma709(reference_mean.r, reference_mean.g, reference_mean.b);
+        if target_luma <= 0.005
+            || reference_luma <= 0.005
+            || [target_mean.r, target_mean.g, target_mean.b]
+                .into_iter()
+                .any(|channel| channel <= 0.001)
+        {
+            return Err(AdvancedWorkflowError::new(
+                AdvancedWorkflowErrorKind::AnalysisLowConfidence,
+                "color match needs non-black samples with usable values in every channel",
+            ));
+        }
+        let luma_scale = target_luma / reference_luma;
+        let desired = Rgb::new(
+            reference_mean.r * luma_scale,
+            reference_mean.g * luma_scale,
+            reference_mean.b * luma_scale,
+        );
+        let grade = ColorGrade {
+            lift_gamma_gain: LiftGammaGain {
+                gain: Rgb::new(
+                    (desired.r / target_mean.r).clamp(0.0, 4.0),
+                    (desired.g / target_mean.g).clamp(0.0, 4.0),
+                    (desired.b / target_mean.b).clamp(0.0, 4.0),
+                ),
+                ..LiftGammaGain::default()
+            },
+            ..ColorGrade::default()
+        };
+        grade
+            .validate()
+            .map_err(|error| advanced_execution(error.to_string()))?;
+        let (matched_r, matched_g, matched_b) =
+            grade.apply_linear(target_mean.r, target_mean.g, target_mean.b);
+        let matched_mean = Rgb::new(matched_r, matched_g, matched_b);
+        let delta_e_before = delta_e76(target_mean, desired);
+        let delta_e_after = delta_e76(matched_mean, desired);
+        let target_luma_after = luma709(matched_r, matched_g, matched_b);
+        if delta_e_after >= delta_e_before || (target_luma_after - target_luma).abs() > 0.02 {
+            return Err(AdvancedWorkflowError::new(
+                AdvancedWorkflowErrorKind::AnalysisLowConfidence,
+                "color match could not improve the sample within the luma-preservation limit",
+            ));
+        }
+        let input = ColorMatchInput {
+            reference_media_ref: args.reference_media_ref.clone(),
+            reference_frame,
+            target_frame,
+            algorithm: ALGORITHM.into(),
+            algorithm_version: ALGORITHM_VERSION,
+            target_mean_linear: target_mean,
+            reference_mean_linear: reference_mean,
+            delta_e_before,
+            delta_e_after,
+            target_luma_before: target_luma,
+            target_luma_after,
+        };
+        let apply_requested = args.apply.unwrap_or(false);
+        let (applied, action_name) = if apply_requested {
+            let result = self
+                .core
+                .apply_at_revision(
+                    ProjectRevision {
+                        project_epoch: snapshot.project_epoch,
+                        version: snapshot.version,
+                    },
+                    EditCommand::ApplyColorMatch {
+                        clip_id: clip.id.clone(),
+                        grade,
+                        input: input.clone(),
+                    },
+                )
+                .map_err(|error| advanced_execution(error.to_string()))?;
+            (result.changed, result.changed.then_some(result.action_name))
+        } else {
+            (false, None)
+        };
+
+        Ok(AdvancedWorkflowCommit {
+            result: json!({
+                "clipId": clip.id,
+                "referenceMediaRef": args.reference_media_ref,
+                "referenceFrame": reference_frame,
+                "targetFrame": target_frame,
+                "algorithm": ALGORITHM,
+                "algorithmVersion": ALGORITHM_VERSION,
+                "grade": grade,
+                "targetMeanLinear": target_mean,
+                "referenceMeanLinear": reference_mean,
+                "matchedMeanLinear": matched_mean,
+                "deltaEBefore": delta_e_before,
+                "deltaEAfter": delta_e_after,
+                "targetLumaBefore": target_luma,
+                "targetLumaAfter": target_luma_after,
+                "applied": applied
+            }),
+            action_name,
+        })
+    }
 }
 
 impl AdvancedWorkflowBridge for TauriAdvancedWorkflowBridge {
     fn supported_tools(&self) -> Vec<ToolName> {
-        let mut tools = vec![ToolName::TrackMotion, ToolName::RemoveObject];
+        let mut tools = vec![
+            ToolName::TrackMotion,
+            ToolName::RemoveObject,
+            ToolName::MatchColor,
+        ];
         if verify_rvm_model(&self.models_dir).is_ok() {
             tools.push(ToolName::GenerateMatte);
         }
@@ -862,6 +1118,7 @@ impl AdvancedWorkflowBridge for TauriAdvancedWorkflowBridge {
             AdvancedWorkflowRequest::TrackMotion(args) => self.track_motion(args, cancel),
             AdvancedWorkflowRequest::GenerateMatte(args) => self.generate_matte(args, cancel),
             AdvancedWorkflowRequest::RemoveObject(args) => self.remove_object(args, cancel),
+            AdvancedWorkflowRequest::MatchColor(args) => self.match_color(args, cancel),
             _ => Err(AdvancedWorkflowError::new(
                 AdvancedWorkflowErrorKind::CapabilityUnavailable,
                 "advanced workflow is not supported by this desktop host",
@@ -925,6 +1182,83 @@ fn parse_mask_index(mask_id: &str) -> Result<usize, AdvancedWorkflowError> {
     numeric
         .parse::<usize>()
         .map_err(|_| advanced_invalid("maskId must be primary, a zero-based index, or mask-N"))
+}
+
+fn decode_color_sample(
+    path: &Path,
+    time: f64,
+    is_image: bool,
+    request: &FrameRequest,
+    cancel: &MediaCancelToken,
+) -> Result<RgbaFrame, AdvancedWorkflowError> {
+    if cancel.checkpoint() {
+        return Err(cancelled_workflow("color match cancelled"));
+    }
+    if is_image {
+        return opentake_media::thumbnail::image_thumbnail(path, 640).map_err(media_workflow_error);
+    }
+    let decoded = decode_frames_at_cancellable(path, &[time], request, cancel)
+        .into_iter()
+        .next()
+        .ok_or_else(|| advanced_execution("color sample decoder returned no frame"))?
+        .map_err(media_workflow_error)?;
+    Ok(decoded.1)
+}
+
+fn mean_linear_rgb(frame: &RgbaFrame) -> Result<Rgb, AdvancedWorkflowError> {
+    let mut sum = [0.0_f64; 3];
+    let mut weight = 0.0_f64;
+    for pixel in frame.rgba.chunks_exact(4) {
+        let alpha = f64::from(pixel[3]) / 255.0;
+        if alpha <= 0.01 {
+            continue;
+        }
+        sum[0] += bt709_to_linear(f64::from(pixel[0]) / 255.0) * alpha;
+        sum[1] += bt709_to_linear(f64::from(pixel[1]) / 255.0) * alpha;
+        sum[2] += bt709_to_linear(f64::from(pixel[2]) / 255.0) * alpha;
+        weight += alpha;
+    }
+    if weight <= f64::EPSILON {
+        return Err(AdvancedWorkflowError::new(
+            AdvancedWorkflowErrorKind::AnalysisLowConfidence,
+            "color sample contains no visible pixels",
+        ));
+    }
+    Ok(Rgb::new(sum[0] / weight, sum[1] / weight, sum[2] / weight))
+}
+
+fn bt709_to_linear(value: f64) -> f64 {
+    if value < 0.081 {
+        value / 4.5
+    } else {
+        ((value + 0.099) / 1.099).powf(1.0 / 0.45)
+    }
+}
+
+fn delta_e76(left: Rgb, right: Rgb) -> f64 {
+    let left = linear_rgb_to_lab(left);
+    let right = linear_rgb_to_lab(right);
+    ((left[0] - right[0]).powi(2) + (left[1] - right[1]).powi(2) + (left[2] - right[2]).powi(2))
+        .sqrt()
+}
+
+fn linear_rgb_to_lab(rgb: Rgb) -> [f64; 3] {
+    let x = (0.412_456_4 * rgb.r + 0.357_576_1 * rgb.g + 0.180_437_5 * rgb.b) / 0.950_47;
+    let y = 0.212_672_9 * rgb.r + 0.715_152_2 * rgb.g + 0.072_175 * rgb.b;
+    let z = (0.019_333_9 * rgb.r + 0.119_192 * rgb.g + 0.950_304_1 * rgb.b) / 1.088_83;
+    fn pivot(value: f64) -> f64 {
+        const EPSILON: f64 = 216.0 / 24_389.0;
+        const KAPPA: f64 = 24_389.0 / 27.0;
+        if value > EPSILON {
+            value.cbrt()
+        } else {
+            (KAPPA * value + 16.0) / 116.0
+        }
+    }
+    let fx = pivot(x);
+    let fy = pivot(y);
+    let fz = pivot(z);
+    [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1540,6 +1874,12 @@ mod tests {
     }
 
     #[test]
+    fn cie_delta_e_is_zero_for_identical_linear_samples() {
+        let sample = Rgb::new(0.2, 0.35, 0.5);
+        assert!(delta_e76(sample, sample) < 1e-12);
+    }
+
+    #[test]
     fn real_video_tracking_preview_apply_and_undo() {
         if !opentake_media::ffmpeg_status::ffmpeg_available() {
             eprintln!("SKIP: ffmpeg unavailable");
@@ -2121,6 +2461,182 @@ mod tests {
         let error = bridge
             .remove_object(request, &cancelled)
             .expect_err("pre-cancelled cached preview must fail");
+        assert_eq!(error.kind, AdvancedWorkflowErrorKind::Cancelled);
+    }
+
+    #[test]
+    fn color_match_improves_delta_e_preserves_luma_and_persists_editable_grade() {
+        let root = tempfile::tempdir().unwrap();
+        let target_path = root.path().join("target.png");
+        let reference_path = root.path().join("reference.png");
+        let black_path = root.path().join("black.png");
+        image::RgbaImage::from_pixel(64, 48, image::Rgba([130, 105, 90, 255]))
+            .save(&target_path)
+            .unwrap();
+        image::RgbaImage::from_pixel(64, 48, image::Rgba([95, 120, 145, 255]))
+            .save(&reference_path)
+            .unwrap();
+        image::RgbaImage::from_pixel(64, 48, image::Rgba([0, 0, 0, 255]))
+            .save(&black_path)
+            .unwrap();
+
+        let core = AppCore::new();
+        core.apply(EditCommand::SetTimelineSettings {
+            fps: 10,
+            width: 64,
+            height: 48,
+        })
+        .unwrap();
+        let bundle = root.path().join("ColorMatch.opentake");
+        core.save_project(Some(bundle.clone())).unwrap();
+        let runtime = core.runtime_snapshot();
+        let imported = core
+            .import_media_batch_for_project_persisted(
+                runtime.project_epoch,
+                &bundle,
+                vec![
+                    PreparedMediaImportOp::ImportFile {
+                        path: target_path,
+                        name: "target.png".into(),
+                        probe: ProbedMedia {
+                            duration_secs: 0.0,
+                            width: Some(64),
+                            height: Some(48),
+                            ..ProbedMedia::default()
+                        },
+                        folder: None,
+                    },
+                    PreparedMediaImportOp::ImportFile {
+                        path: reference_path,
+                        name: "reference.png".into(),
+                        probe: ProbedMedia {
+                            duration_secs: 0.0,
+                            width: Some(64),
+                            height: Some(48),
+                            ..ProbedMedia::default()
+                        },
+                        folder: None,
+                    },
+                    PreparedMediaImportOp::ImportFile {
+                        path: black_path,
+                        name: "black.png".into(),
+                        probe: ProbedMedia {
+                            duration_secs: 0.0,
+                            width: Some(64),
+                            height: Some(48),
+                            ..ProbedMedia::default()
+                        },
+                        folder: None,
+                    },
+                ],
+            )
+            .unwrap();
+        let target_id = imported[0].entry.id.clone();
+        let reference_id = imported[1].entry.id.clone();
+        let black_id = imported[2].entry.id.clone();
+        let placed = core
+            .apply(EditCommand::AddClipsAutoTrack {
+                entries: vec![ClipEntry {
+                    media_ref: target_id,
+                    media_type: ClipType::Image,
+                    source_clip_type: ClipType::Image,
+                    track_index: 0,
+                    start_frame: 10,
+                    duration_frames: 20,
+                    trim_start_frame: None,
+                    trim_end_frame: None,
+                    has_audio: false,
+                    add_linked_audio: false,
+                    transform: None,
+                }],
+            })
+            .unwrap();
+        let clip_id = placed.affected_clip_ids[0].clone();
+        core.save_project(None).unwrap();
+        let bridge = TauriAdvancedWorkflowBridge::new(
+            core.clone(),
+            root.path().join("cache"),
+            root.path().join("models"),
+        );
+        assert!(bridge.supported_tools().contains(&ToolName::MatchColor));
+        let request = MatchColorArgs {
+            clip_id: clip_id.clone(),
+            reference_media_ref: reference_id.clone(),
+            reference_frame: Some(0),
+            target_frame: Some(12),
+            apply: Some(false),
+        };
+        let before = core.runtime_snapshot();
+        let preview = bridge
+            .match_color(request.clone(), &MediaCancelToken::new())
+            .unwrap();
+        assert_eq!(preview.result["applied"], false);
+        assert!(preview.result["deltaEAfter"].as_f64().unwrap() < 0.01);
+        assert!(
+            preview.result["deltaEAfter"].as_f64().unwrap()
+                < preview.result["deltaEBefore"].as_f64().unwrap()
+        );
+        assert!(
+            (preview.result["targetLumaAfter"].as_f64().unwrap()
+                - preview.result["targetLumaBefore"].as_f64().unwrap())
+            .abs()
+                < 0.01
+        );
+        assert_eq!(core.runtime_snapshot().timeline, before.timeline);
+
+        let failure_before = core.runtime_snapshot();
+        let error = bridge
+            .match_color(
+                MatchColorArgs {
+                    reference_media_ref: black_id,
+                    ..request.clone()
+                },
+                &MediaCancelToken::new(),
+            )
+            .expect_err("black reference must be refused");
+        assert_eq!(error.kind, AdvancedWorkflowErrorKind::AnalysisLowConfidence);
+        let failure_after = core.runtime_snapshot();
+        assert_eq!(failure_after.timeline, failure_before.timeline);
+        assert_eq!(failure_after.version, failure_before.version);
+
+        let applied = bridge
+            .match_color(
+                MatchColorArgs {
+                    apply: Some(true),
+                    ..request.clone()
+                },
+                &MediaCancelToken::new(),
+            )
+            .unwrap();
+        assert_eq!(applied.action_name.as_deref(), Some("Match Color"));
+        let after_apply = core.runtime_snapshot();
+        let matched = &after_apply.timeline.tracks[0].clips[0];
+        assert!(matched.color_grade.is_some());
+        let provenance = matched.color_match_input.as_ref().unwrap();
+        assert_eq!(provenance.reference_media_ref, reference_id);
+        assert_eq!(provenance.reference_frame, 0);
+        assert_eq!(provenance.target_frame, 12);
+        assert!(provenance.delta_e_after < provenance.delta_e_before);
+
+        core.undo().unwrap();
+        let undone = core.runtime_snapshot();
+        assert!(undone.timeline.tracks[0].clips[0].color_grade.is_none());
+        assert!(undone.timeline.tracks[0].clips[0]
+            .color_match_input
+            .is_none());
+        core.redo().unwrap();
+        core.save_project(None).unwrap();
+        let reopened = AppCore::new();
+        reopened.open_project(&bundle).unwrap();
+        let reopened_clip = &reopened.runtime_snapshot().timeline.tracks[0].clips[0];
+        assert_eq!(reopened_clip.color_grade, matched.color_grade);
+        assert_eq!(reopened_clip.color_match_input, matched.color_match_input);
+
+        let cancelled = MediaCancelToken::new();
+        cancelled.cancel();
+        let error = bridge
+            .match_color(request, &cancelled)
+            .expect_err("pre-cancelled color match must fail");
         assert_eq!(error.kind, AdvancedWorkflowErrorKind::Cancelled);
     }
 }
