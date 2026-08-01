@@ -149,10 +149,14 @@ fn windows_bundle_ships_the_linked_onnxruntime_beside_the_executable() {
         .expect("the Windows bundle must map runtime resources explicitly");
     assert_eq!(
         resources
-            .get("../target/release/onnxruntime.dll")
+            .get("../target/opentake-runtime/onnxruntime.dll")
             .and_then(Value::as_str),
         Some("onnxruntime.dll")
     );
+
+    let build_script = include_str!("../build.rs");
+    assert!(build_script.contains("profile_dir.join(\"deps/onnxruntime.dll\")"));
+    assert!(build_script.contains("workspace_target.join(\"opentake-runtime/onnxruntime.dll\")"));
 }
 
 #[test]

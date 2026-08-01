@@ -8,7 +8,7 @@
       "../LICENSE": "LICENSE",
       "../NOTICE": "NOTICE",
       "resources/ffmpeg": "ffmpeg",
-      "../target/release/onnxruntime.dll": "onnxruntime.dll"
+      "../target/opentake-runtime/onnxruntime.dll": "onnxruntime.dll"
     },
     "windows": {
       "webviewInstallMode": {
