@@ -914,6 +914,17 @@
 
   Expected: PASS with no new warnings or unrelated changes.
 
+  Reverified 2026-08-01: both owning runners pass (2 files / 4 tests), covering
+  all three presets at 1600×1000 plus reduced viewport, documented initial
+  ratios, panel visibility/maximize behavior, keyboard-adjustable separators,
+  semantic regions and focus transfer. The full Web gate passes with 103 files
+  / 841 tests and the production build passes, with only the existing
+  dynamic-import and chunk-size advisories.
+
+- [ ] **Runtime evidence gate:** in the packaged app at 1600×1000, capture all
+  three presets with the five panels enabled and verify 5px gutters, 6px
+  surfaces, focused/unfocused rings, Tab focus and keyboard separator resize.
+
 ### Task 10: control-acceptance (implementation-slice-7729e824b5300938)
 
 **Covered records:**
