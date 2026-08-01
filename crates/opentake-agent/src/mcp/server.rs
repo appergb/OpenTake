@@ -24,6 +24,7 @@ use rmcp::service::RequestContext;
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler};
 use serde_json::{Map, Value};
 
+use crate::mcp::advanced::AdvancedWorkflowBridge;
 use crate::mcp::convert::to_call_tool_result;
 use crate::mcp::core_handle::CoreHandle;
 use crate::mcp::dispatch::Dispatcher;
@@ -92,17 +93,36 @@ impl McpServer {
         generation_bridge: Option<Arc<dyn GenerationBridge>>,
         motion_bridge: Option<Arc<dyn MotionBridge>>,
     ) -> Self {
+        Self::with_all_capability_bridges(
+            handle,
+            registry,
+            bridge,
+            generation_bridge,
+            motion_bridge,
+            None,
+        )
+    }
+
+    pub fn with_all_capability_bridges(
+        handle: Arc<dyn CoreHandle>,
+        registry: Arc<RwLock<PluginRegistry>>,
+        bridge: Option<Arc<dyn MediaBridge>>,
+        generation_bridge: Option<Arc<dyn GenerationBridge>>,
+        motion_bridge: Option<Arc<dyn MotionBridge>>,
+        advanced_bridge: Option<Arc<dyn AdvancedWorkflowBridge>>,
+    ) -> Self {
         let instructions = registry
             .read()
             .map(|r| assemble_system_prompt(&r, "default"))
             .unwrap_or_default();
         McpServer {
-            dispatcher: Arc::new(Dispatcher::with_capability_bridges(
+            dispatcher: Arc::new(Dispatcher::with_all_capability_bridges(
                 handle,
                 registry,
                 bridge,
                 generation_bridge,
                 motion_bridge,
+                advanced_bridge,
             )),
             instructions,
         }
@@ -511,6 +531,26 @@ pub fn build_router_with_capability_bridges_for_port(
     motion_bridge: Option<Arc<dyn MotionBridge>>,
     expected_port: u16,
 ) -> axum::Router {
+    build_router_with_all_capability_bridges_for_port(
+        handle,
+        registry,
+        bridge,
+        generation_bridge,
+        motion_bridge,
+        None,
+        expected_port,
+    )
+}
+
+pub fn build_router_with_all_capability_bridges_for_port(
+    handle: Arc<dyn CoreHandle>,
+    registry: Arc<RwLock<PluginRegistry>>,
+    bridge: Option<Arc<dyn MediaBridge>>,
+    generation_bridge: Option<Arc<dyn GenerationBridge>>,
+    motion_bridge: Option<Arc<dyn MotionBridge>>,
+    advanced_bridge: Option<Arc<dyn AdvancedWorkflowBridge>>,
+    expected_port: u16,
+) -> axum::Router {
     use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
     use rmcp::transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService,
@@ -520,12 +560,13 @@ pub fn build_router_with_capability_bridges_for_port(
 
     let service = StreamableHttpService::new(
         move || {
-            Ok(McpServer::with_capability_bridges(
+            Ok(McpServer::with_all_capability_bridges(
                 handle.clone(),
                 registry.clone(),
                 bridge.clone(),
                 generation_bridge.clone(),
                 motion_bridge.clone(),
+                advanced_bridge.clone(),
             ))
         },
         Arc::new(LocalSessionManager::default()),
@@ -589,6 +630,27 @@ pub async fn serve_with_capability_bridges(
     generation_bridge: Option<Arc<dyn GenerationBridge>>,
     motion_bridge: Option<Arc<dyn MotionBridge>>,
 ) -> std::io::Result<()> {
+    serve_with_all_capability_bridges(
+        addr,
+        handle,
+        registry,
+        bridge,
+        generation_bridge,
+        motion_bridge,
+        None,
+    )
+    .await
+}
+
+pub async fn serve_with_all_capability_bridges(
+    addr: SocketAddr,
+    handle: Arc<dyn CoreHandle>,
+    registry: Arc<RwLock<PluginRegistry>>,
+    bridge: Option<Arc<dyn MediaBridge>>,
+    generation_bridge: Option<Arc<dyn GenerationBridge>>,
+    motion_bridge: Option<Arc<dyn MotionBridge>>,
+    advanced_bridge: Option<Arc<dyn AdvancedWorkflowBridge>>,
+) -> std::io::Result<()> {
     if !addr.ip().is_loopback() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -597,12 +659,13 @@ pub async fn serve_with_capability_bridges(
     }
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound_addr = listener.local_addr()?;
-    let router = build_router_with_capability_bridges_for_port(
+    let router = build_router_with_all_capability_bridges_for_port(
         handle,
         registry,
         bridge,
         generation_bridge,
         motion_bridge,
+        advanced_bridge,
         bound_addr.port(),
     );
     tracing::info!("MCP server listening on http://{bound_addr}/mcp");

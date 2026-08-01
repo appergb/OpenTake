@@ -13,6 +13,20 @@ pub struct StabilizationMotionSample {
     pub rotation_degrees: f64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NormalizedMotionRegion {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegionMotionTrack {
+    pub samples: Vec<StabilizationMotionSample>,
+    pub minimum_confidence: f64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StabilizationConfig {
     /// Half-width of the centered moving-average window.
@@ -164,6 +178,159 @@ pub fn track_translation_motion(
     Ok(samples)
 }
 
+/// Track the selected subject rectangle rather than the dominant full-frame
+/// camera motion. The rectangle is normalized to the decoded frame and follows
+/// the previous match, so a static background cannot overpower a small moving
+/// subject. Translation samples are normalized to the full frame and can be
+/// applied directly as position-keyframe deltas.
+pub fn track_region_motion(
+    frames: &[(i32, RgbaFrame)],
+    region: NormalizedMotionRegion,
+    cancel: &MediaCancelToken,
+) -> Result<RegionMotionTrack> {
+    if frames.len() < 2 {
+        return Err(MediaError::Decode(
+            "motion tracking requires at least two decoded frames".to_string(),
+        ));
+    }
+    if ![region.x, region.y, region.width, region.height]
+        .into_iter()
+        .all(f64::is_finite)
+        || region.x < 0.0
+        || region.y < 0.0
+        || region.width <= 0.0
+        || region.height <= 0.0
+        || region.x + region.width > 1.0
+        || region.y + region.height > 1.0
+    {
+        return Err(MediaError::Decode(
+            "motion tracking region must be a positive normalized rectangle inside the frame"
+                .to_string(),
+        ));
+    }
+    let width = frames[0].1.width;
+    let height = frames[0].1.height;
+    if frames
+        .iter()
+        .any(|(_, frame)| frame.width != width || frame.height != height)
+    {
+        return Err(MediaError::Decode(
+            "motion tracking frames must have consistent dimensions".to_string(),
+        ));
+    }
+    let region_width = (region.width * width as f64).round() as i32;
+    let region_height = (region.height * height as f64).round() as i32;
+    if region_width < 8 || region_height < 8 {
+        return Err(MediaError::Decode(
+            "motion tracking region is too small".to_string(),
+        ));
+    }
+    let mut origin_x =
+        ((region.x * width as f64).round() as i32).clamp(0, width as i32 - region_width);
+    let mut origin_y =
+        ((region.y * height as f64).round() as i32).clamp(0, height as i32 - region_height);
+    let mut total_x = 0_i32;
+    let mut total_y = 0_i32;
+    let mut minimum_confidence = 1.0_f64;
+    let mut samples = vec![StabilizationMotionSample {
+        frame: frames[0].0,
+        translation_x: 0.0,
+        translation_y: 0.0,
+        rotation_degrees: 0.0,
+    }];
+    for pair in frames.windows(2) {
+        if cancel.checkpoint() {
+            return Err(MediaError::Cancelled);
+        }
+        let (dx, dy, confidence) = estimate_region_translation(
+            &pair[0].1,
+            &pair[1].1,
+            origin_x,
+            origin_y,
+            region_width,
+            region_height,
+            cancel,
+        )?;
+        origin_x += dx;
+        origin_y += dy;
+        total_x += dx;
+        total_y += dy;
+        minimum_confidence = minimum_confidence.min(confidence);
+        samples.push(StabilizationMotionSample {
+            frame: pair[1].0,
+            translation_x: total_x as f64 / width as f64,
+            translation_y: total_y as f64 / height as f64,
+            rotation_degrees: 0.0,
+        });
+    }
+    Ok(RegionMotionTrack {
+        samples,
+        minimum_confidence,
+    })
+}
+
+fn estimate_region_translation(
+    previous: &RgbaFrame,
+    current: &RgbaFrame,
+    origin_x: i32,
+    origin_y: i32,
+    region_width: i32,
+    region_height: i32,
+    cancel: &MediaCancelToken,
+) -> Result<(i32, i32, f64)> {
+    const SEARCH: i32 = 8;
+    const STEP: usize = 2;
+    let mut min_luma = u16::MAX;
+    let mut max_luma = 0_u16;
+    for y in (0..region_height).step_by(STEP) {
+        for x in (0..region_width).step_by(STEP) {
+            let value = luma(previous, (origin_x + x) as u32, (origin_y + y) as u32);
+            min_luma = min_luma.min(value);
+            max_luma = max_luma.max(value);
+        }
+    }
+    let texture = (max_luma.saturating_sub(min_luma) as f64 / 64.0).clamp(0.0, 1.0);
+    let mut best = (u64::MAX, i32::MAX, i32::MAX, i32::MAX, 0, 0);
+    for dy in -SEARCH..=SEARCH {
+        if cancel.checkpoint() {
+            return Err(MediaError::Cancelled);
+        }
+        for dx in -SEARCH..=SEARCH {
+            let candidate_x = origin_x + dx;
+            let candidate_y = origin_y + dy;
+            if candidate_x < 0
+                || candidate_y < 0
+                || candidate_x + region_width > current.width as i32
+                || candidate_y + region_height > current.height as i32
+            {
+                continue;
+            }
+            let mut error = 0_u64;
+            let mut count = 0_u64;
+            for y in (0..region_height).step_by(STEP) {
+                for x in (0..region_width).step_by(STEP) {
+                    let a = luma(previous, (origin_x + x) as u32, (origin_y + y) as u32);
+                    let b = luma(current, (candidate_x + x) as u32, (candidate_y + y) as u32);
+                    error += a.abs_diff(b) as u64;
+                    count += 1;
+                }
+            }
+            let normalized = error.checked_div(count).unwrap_or(u64::MAX);
+            let candidate = (normalized, dx.abs() + dy.abs(), dy.abs(), dx.abs(), dx, dy);
+            if candidate < best {
+                best = candidate;
+            }
+        }
+    }
+    if best.0 == u64::MAX {
+        return Err(MediaError::Decode(
+            "motion tracking region left the frame".to_string(),
+        ));
+    }
+    let match_quality = (1.0 - best.0 as f64 / 255.0).clamp(0.0, 1.0);
+    Ok((best.4, best.5, match_quality * texture))
+}
+
 fn estimate_translation(
     previous: &RgbaFrame,
     current: &RgbaFrame,
@@ -264,5 +431,45 @@ mod tests {
         assert!(samples[1].translation_x > 0.0);
         assert!(samples[2].translation_x > samples[1].translation_x);
         assert_eq!(samples[2].translation_y, 0.0);
+    }
+
+    #[test]
+    fn region_tracker_keeps_known_subject_center_within_five_pixels() {
+        let make_frame = |offset_x: u32, offset_y: u32| {
+            let mut frame = RgbaFrame::black(96, 72);
+            for y in offset_y..offset_y + 20 {
+                for x in offset_x..offset_x + 24 {
+                    let index = ((y * frame.width + x) * 4) as usize;
+                    let local_x = x - offset_x;
+                    let local_y = y - offset_y;
+                    frame.rgba[index..index + 3].copy_from_slice(&[
+                        (local_x * 9 + local_y * 3) as u8,
+                        (local_x * 2 + local_y * 11) as u8,
+                        (local_x * 7 + local_y * 5) as u8,
+                    ]);
+                }
+            }
+            frame
+        };
+        let tracked = track_region_motion(
+            &[
+                (0, make_frame(20, 24)),
+                (1, make_frame(24, 26)),
+                (2, make_frame(28, 28)),
+            ],
+            NormalizedMotionRegion {
+                x: 20.0 / 96.0,
+                y: 24.0 / 72.0,
+                width: 24.0 / 96.0,
+                height: 20.0 / 72.0,
+            },
+            &MediaCancelToken::new(),
+        )
+        .expect("track selected subject");
+
+        assert!(tracked.minimum_confidence >= 0.25);
+        let final_sample = tracked.samples.last().expect("final sample");
+        assert!((final_sample.translation_x * 96.0 - 8.0).abs() <= 5.0);
+        assert!((final_sample.translation_y * 72.0 - 4.0).abs() <= 5.0);
     }
 }

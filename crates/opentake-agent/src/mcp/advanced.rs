@@ -57,6 +57,7 @@ pub enum AdvancedWorkflowErrorKind {
     CapabilityUnavailable,
     ConsentRequired,
     CostAuthorizationRequired,
+    AnalysisLowConfidence,
     Cancelled,
     ExecutionFailed,
 }

@@ -66,8 +66,8 @@
 - **实现方案**:wgpu 片元着色器 + 纯几何,无需 AI。① 线性/圆形/矩形/椭圆蒙版:着色器内按当前像素 UV 到蒙版几何的有符号距离场(SDF)算 alpha,feather 用 smoothstep 在边界过渡带插值,invert 取 1-alpha,蒙版参数(中心/角度/半径/羽化)全部可挂关键帧(复用上面 easing 体系)。② 钢笔 mask:前端用贝塞尔锚点画闭合路径,Rust 端三角化(lyon crate)或在着色器里用 even-odd 环绕数判定内外 + 距离场做羽化。③ 蒙版作用对象 = 当前 clip 纹理的 alpha 通道,合成时按 z 序混合即可天然实现『局部显隐』。④ 与 Transform 解耦:蒙版坐标系绑定 clip 还是绑定画布需提供开关(剪映两种都有)。这是 wgpu 合成器最自然的扩展,上游因 AVFoundation layer 模型做不了,是 OpenTake 结构性优势点。
 - **前置依赖**:强依赖 wgpu 帧合成器(ROADMAP Phase 3)先落地;前端钢笔交互依赖 Phase 6 React Preview;关键帧化依赖 easing 体系
 
-### AI 运动追踪(自适应形变 motion tracking) — `missing` · 难度 high · 优先级 p2
-- **判定依据**:上游零实现且零基础设施:全目录 grep 不到 import Vision / VNTrackObjectRequest / VNDetectTrajectories / opticalFlow / 任何 tracking 相关(『tracking』命中全是 AppTheme 字间距 letter-spacing 与 NSTrackingArea 鼠标区,见 UI/AppTheme.swift:200、Timeline/TimelineView.swift:894)。关键帧只能手 K,无『跟踪点驱动关键帧』通路。
+### AI 运动追踪(自适应形变 motion tracking) — `partial` · 难度 high · 优先级 p2
+- **判定依据**:OpenTake Beta 已有本地区域块匹配的生产后端和能力门控 Agent 工具：在真实视频解码帧上跟踪归一化矩形，最多采样 48 帧，输出带算法版本与最低置信度的线性位置关键帧；低于 0.25 时返回稳定的 `MCP_ANALYSIS_LOW_CONFIDENCE`，取消、解码失败或工程版本竞争均不提交。`apply=true` 通过统一 `SetKeyframes` 事务写入可编辑 position track，并支持一步撤销。确定性移动目标测试在最终采样点保持小于等于 5 像素误差，真实 MP4 测试覆盖预览、应用、取消与撤销。Inspector 区域选取/进度交互和贴纸/文字绑定仍未完成，因此不判为 `has`。代码证据见 `docs/audit/2026-07-14/runtime-artifacts/automated/motion-tracking-agent-backend-2026-08-01.md`。
 - **落点(crate/层)**:opentake-media(新增追踪 worker:ort/candle 跑光流或点追踪模型,输出逐帧 2D 轨迹)→ opentake-domain(把轨迹烘焙成 position/scale/rotation 关键帧)+ opentake-render(贴合 clip/蒙版/文字到轨迹)
 - **实现方案**:本地推理优先,双轨可选。① 平面/点追踪(剪映主力场景:贴文字/贴 logo 跟随):本地用 CoTracker / TAPIR(点追踪)或经典 Lucas-Kanade 光流(OpenCV-rust 或纯 candle 实现 KLT),输出目标点逐帧 (x,y[,scale,rotation]),再烘焙成现有 position/scale/rotation 关键帧轨——下游复用既有合成,改动面小。② 复用先例:上游已用 SigLIP2 经 ort/candle 做视觉嵌入(Search/Models/VisualEmbedder.swift、VisualModelLoader.swift),OpenTake 推理栈(candle/ort)已就位,追踪模型走同一条 ONNX/CoreML 通道,不必新搭 ML 基础设施。③ 『自适应形变』(网格变形跟随)较重,可二期:用 RAFT 稠密光流 + 薄板样条/网格 warp,在 wgpu 着色器里做形变采样。④ 外部 API 兜底:对追踪质量要求极高时可接 runwayml/第三方,但作为可选 BYOK,默认本地。
 - **前置依赖**:依赖 candle/ort 推理栈(设计稿已含,Phase 8 语义搜索同栈);关键帧烘焙依赖 Phase 1 关键帧引擎;形变贴合依赖 wgpu 合成器

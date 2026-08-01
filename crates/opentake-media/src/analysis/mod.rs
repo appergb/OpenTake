@@ -20,7 +20,8 @@ pub use loudness::{
 };
 pub use silence::{detect_silences, SilenceDetectionConfig, SilenceRange};
 pub use stabilization::{
-    analyze_stabilization, track_translation_motion, StabilizationConfig, StabilizationMotionSample,
+    analyze_stabilization, track_region_motion, track_translation_motion, NormalizedMotionRegion,
+    RegionMotionTrack, StabilizationConfig, StabilizationMotionSample,
 };
 pub use stems::{
     ensure_local_stem_model, separate_stems, verify_local_stem_model, InstalledStemModel,

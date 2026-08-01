@@ -29,6 +29,7 @@ use std::io::Read;
 
 use base64::Engine as _;
 
+use opentake_agent::mcp::advanced::AdvancedWorkflowBridge;
 use opentake_agent::mcp::core_handle::{AppCoreHandle, CoreHandle};
 use opentake_agent::mcp::generation::GenerationBridge;
 use opentake_agent::mcp::media_bridge::{
@@ -262,6 +263,7 @@ pub fn spawn(
     models_dir: PathBuf,
     generation_bridge: Arc<dyn GenerationBridge>,
     motion_bridge: Arc<dyn MotionBridge>,
+    advanced_bridge: Arc<dyn AdvancedWorkflowBridge>,
 ) {
     let handle: Arc<dyn CoreHandle> = Arc::new(AppCoreHandle::new(core.clone()));
     let bridge = build_media_bridge(core, cache_root, models_dir);
@@ -274,13 +276,14 @@ pub fn spawn(
                 return;
             }
         };
-        if let Err(e) = server::serve_with_capability_bridges(
+        if let Err(e) = server::serve_with_all_capability_bridges(
             addr,
             handle,
             registry,
             Some(bridge),
             Some(generation_bridge),
             Some(motion_bridge),
+            Some(advanced_bridge),
         )
         .await
         {

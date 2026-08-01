@@ -7,6 +7,7 @@
 //! §2 — "真相源在 Rust，前端持镜像").
 
 mod account;
+mod advanced;
 mod captions;
 mod chat;
 mod commands;
@@ -158,6 +159,8 @@ pub fn run() {
                 core.clone(),
                 cache_root.clone(),
             ));
+            let advanced_bridge =
+                Arc::new(advanced::TauriAdvancedWorkflowBridge::new(core.clone()));
             mcp::spawn(
                 core.clone(),
                 workflows_dir.clone(),
@@ -165,6 +168,7 @@ pub fn run() {
                 models_dir.clone(),
                 generation_bridge.clone(),
                 motion_bridge.clone(),
+                advanced_bridge.clone(),
             );
             let chat_state = chat::ChatState::new_with_capabilities(
                 core.clone(),
@@ -173,6 +177,7 @@ pub fn run() {
                 models_dir.clone(),
                 generation_bridge.clone(),
                 motion_bridge.clone(),
+                advanced_bridge,
             );
 
             // A global favorite must never silently become a temporary file.

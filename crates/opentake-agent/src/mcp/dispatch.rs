@@ -2621,6 +2621,9 @@ fn advanced_workflow_error(tool: ToolName, error: AdvancedWorkflowError) -> Tool
         AdvancedWorkflowErrorKind::CapabilityUnavailable => {
             ToolResult::public_error(PublicErrorKind::CapabilityUnavailable(tool), error.message)
         }
+        AdvancedWorkflowErrorKind::AnalysisLowConfidence => {
+            ToolResult::public_error(PublicErrorKind::AnalysisLowConfidence(tool), error.message)
+        }
         AdvancedWorkflowErrorKind::ConsentRequired
         | AdvancedWorkflowErrorKind::CostAuthorizationRequired
         | AdvancedWorkflowErrorKind::ExecutionFailed => {
