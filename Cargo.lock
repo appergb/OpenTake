@@ -3859,7 +3859,6 @@ dependencies = [
  "cap-std",
  "cpal",
  "crossbeam-channel",
- "embed-resource",
  "futures",
  "futures-util",
  "image",

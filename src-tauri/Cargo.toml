@@ -20,7 +20,6 @@ path = "src/main.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
-embed-resource = "3"
 
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset"] }
