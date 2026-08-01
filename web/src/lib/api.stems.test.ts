@@ -41,4 +41,14 @@ describe("stem separation IPC", () => {
     await cancelStemSeparation();
     expect(mocks.invoke).toHaveBeenCalledWith("cancel_stem_separation");
   });
+
+  it("imports_reviewed_stems_to_aligned_tracks", async () => {
+    const { importStemsToTracks } = await import("./api");
+    await importStemsToTracks("vocals", "music", 42);
+    expect(mocks.invoke).toHaveBeenCalledWith("import_stems_to_tracks", {
+      vocalsAssetId: "vocals",
+      accompanimentAssetId: "music",
+      startFrame: 42,
+    });
+  });
 });

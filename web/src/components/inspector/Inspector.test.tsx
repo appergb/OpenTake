@@ -309,7 +309,7 @@ describe("Inspector completion surface", () => {
       importing: false,
       error: null,
     });
-    useEditorUiStore.setState({ selectedClipIds: new Set([clip.id]), inspectorTab: "audio" });
+    useEditorUiStore.setState({ selectedClipIds: new Set([clip.id]), inspectorTab: "audio", activeFrame: 42 });
     const normalization = {
       targetLufs: -16,
       truePeakCeilingDbtp: -1,
@@ -483,6 +483,11 @@ describe("Inspector completion surface", () => {
       vocalSdrImprovementDb: 60,
     });
     const cancel = vi.spyOn(api, "cancelStemSeparation").mockResolvedValue(true);
+    const importTracks = vi.spyOn(api, "importStemsToTracks").mockResolvedValue({
+      clipIds: ["vocal-clip", "music-clip"],
+      actionName: "Import Stems To Tracks",
+    });
+    const undo = vi.spyOn(edit, "undo").mockResolvedValue({} as never);
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -504,6 +509,24 @@ describe("Inspector completion surface", () => {
     expect(container.querySelector('[data-testid="stem-separation-result"]')?.textContent).toContain(
       "已将人声和伴奏添加到素材库",
     );
+    await act(async () => useMediaStore.setState((state) => ({
+      items: [
+        ...state.items,
+        { id: "vocals", name: "Vocals", type: "audio", duration: 5, hasAudio: true, path: "/tmp/vocals.wav" },
+        { id: "music", name: "Music", type: "audio", duration: 5, hasAudio: true, path: "/tmp/music.wav" },
+      ],
+    })));
+    expect(section?.querySelectorAll("audio")).toHaveLength(2);
+    const importButton = [...(section?.querySelectorAll("button") ?? [])].find(
+      (candidate) => candidate.textContent === "导入为两条对齐音轨",
+    );
+    await act(async () => importButton?.click());
+    expect(importTracks).toHaveBeenCalledWith("vocals", "music", 42);
+    const undoButton = [...(section?.querySelectorAll("button") ?? [])].find(
+      (candidate) => candidate.textContent === "撤销音轨导入",
+    );
+    await act(async () => undoButton?.click());
+    expect(undo).toHaveBeenCalledOnce();
 
     let rejectSeparation!: (reason: Error) => void;
     separate.mockImplementationOnce(
@@ -527,6 +550,8 @@ describe("Inspector completion surface", () => {
     listen.mockRestore();
     separate.mockRestore();
     cancel.mockRestore();
+    importTracks.mockRestore();
+    undo.mockRestore();
     await act(async () => root.unmount());
   });
 

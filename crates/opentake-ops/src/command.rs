@@ -320,6 +320,55 @@ mod color_match_command_tests {
 }
 
 #[cfg(test)]
+mod aligned_stem_track_tests {
+    use super::*;
+    use crate::id::SeqIdGen;
+
+    fn stem(media_ref: &str) -> ClipEntry {
+        ClipEntry {
+            media_ref: media_ref.into(),
+            media_type: ClipType::Audio,
+            source_clip_type: ClipType::Audio,
+            track_index: 0,
+            start_frame: 40,
+            duration_frames: 100,
+            trim_start_frame: None,
+            trim_end_frame: None,
+            has_audio: true,
+            add_linked_audio: false,
+            transform: None,
+        }
+    }
+
+    #[test]
+    fn aligned_stems_use_separate_tracks_and_one_undo_entry() {
+        let mut state = EditorState::default();
+        let ids = SeqIdGen::default();
+        let result = apply(
+            &mut state,
+            EditCommand::AddClipsToSeparateAutoTracks {
+                entries: vec![stem("vocals"), stem("accompaniment")],
+            },
+            &ids,
+        )
+        .unwrap();
+        assert_eq!(result.action_name, "Import Stems To Tracks");
+        assert_eq!(result.affected_clip_ids.len(), 2);
+        assert_eq!(state.timeline.tracks.len(), 2);
+        assert!(state.timeline.tracks.iter().all(|track| {
+            track.kind == ClipType::Audio
+                && track.clips.len() == 1
+                && track.clips[0].start_frame == 40
+                && track.clips[0].duration_frames == 100
+        }));
+        assert_eq!(state.undo_depth(), 1);
+
+        apply(&mut state, EditCommand::Undo, &ids).unwrap();
+        assert!(state.timeline.tracks.is_empty());
+    }
+}
+
+#[cfg(test)]
 mod loudness_command_tests {
     use super::*;
     use crate::id::SeqIdGen;
@@ -667,6 +716,9 @@ pub enum EditCommand {
     /// Visual entries share one new visual track; audio entries share one new
     /// audio track. Track insertion and placement commit as one transaction.
     AddClipsAutoTrack { entries: Vec<ClipEntry> },
+    /// Place each entry on its own fresh compatible track in one transaction.
+    /// Used for aligned stems that intentionally overlap in time.
+    AddClipsToSeparateAutoTracks { entries: Vec<ClipEntry> },
     /// Register one already validated project-managed video and place it in the
     /// same undo snapshot. Used by deterministic external renderers so undo
     /// removes both the generated clip and its manifest record.
@@ -1033,6 +1085,9 @@ pub fn apply(
         }
         EditCommand::AddClips { entries } => add_clips(state, entries, ids),
         EditCommand::AddClipsAutoTrack { entries } => add_clips_auto_track(state, entries, ids),
+        EditCommand::AddClipsToSeparateAutoTracks { entries } => {
+            add_clips_to_separate_auto_tracks(state, entries, ids)
+        }
         EditCommand::RegisterMediaAndAddClip {
             media,
             entry,
@@ -1906,6 +1961,54 @@ fn add_clips_auto_track(
                         ids,
                     ));
                 }
+            }
+            Ok(placed)
+        },
+    )
+}
+
+fn add_clips_to_separate_auto_tracks(
+    state: &mut EditorState,
+    entries: Vec<ClipEntry>,
+    ids: &dyn IdGen,
+) -> Result<EditResult, EditError> {
+    if entries.is_empty() {
+        return Err(EditError::Invalid(
+            "Missing or empty 'entries' array".into(),
+        ));
+    }
+    for (index, entry) in entries.iter().enumerate() {
+        validate_auto_track_entry(entry, index)?;
+    }
+    transact(
+        state,
+        "Import Stems To Tracks",
+        |added| {
+            format!(
+                "Imported {} aligned stem(s): {}",
+                added.len(),
+                added.join(", ")
+            )
+        },
+        |current| {
+            let mut placed = Vec::with_capacity(entries.len());
+            for entry in &entries {
+                let kind = if entry.source_clip_type == ClipType::Audio {
+                    ClipType::Audio
+                } else {
+                    ClipType::Video
+                };
+                let at = current.timeline.tracks.len();
+                let track_index = ops::insert_track(&mut current.timeline, at, kind, ids);
+                let mut entry = entry.clone();
+                entry.track_index = track_index;
+                placed.extend(ops::place_clip(
+                    &mut current.timeline,
+                    &entry.to_spec(),
+                    track_index,
+                    None,
+                    ids,
+                ));
             }
             Ok(placed)
         },

@@ -40,6 +40,7 @@ import * as edit from "../../store/editActions";
 import * as api from "../../lib/api";
 import { openDialog } from "../../lib/dialog";
 import { formatTimecode } from "../../lib/geometry";
+import { assetUrl } from "../../lib/asset";
 import {
   cropAt,
   liveVolumeKfLinearAt,
@@ -1345,12 +1346,20 @@ function StemSeparationSection({
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [result, setResult] = useState<api.StemSeparationResult | null>(null);
+  const [imported, setImported] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const activeFrame = useEditorUiStore((state) => state.activeFrame);
+  const items = useMediaStore((state) => state.items);
+  const vocals = result ? items.find((item) => item.id === result.vocalsAssetId) : undefined;
+  const accompaniment = result
+    ? items.find((item) => item.id === result.accompanimentAssetId)
+    : undefined;
 
   useEffect(() => {
     setRunning(false);
     setProgress(0);
     setResult(null);
+    setImported(false);
     setError(null);
   }, [sourceAssetId]);
 
@@ -1372,6 +1381,7 @@ function StemSeparationSection({
         execution === "hosted" && uploadConfirmed,
       );
       setResult(separated);
+      setImported(false);
       setProgress(1);
     } catch (reason) {
       const message = reason instanceof Error ? reason.message : String(reason);
@@ -1387,6 +1397,30 @@ function StemSeparationSection({
     } finally {
       unlisten();
       setRunning(false);
+    }
+  };
+
+  const importToTracks = async () => {
+    if (!result) return;
+    setError(null);
+    try {
+      await api.importStemsToTracks(
+        result.vocalsAssetId,
+        result.accompanimentAssetId,
+        Math.max(0, activeFrame),
+      );
+      setImported(true);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  const undoStemImport = async () => {
+    try {
+      await edit.undo();
+      setImported(false);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
     }
   };
 
@@ -1445,8 +1479,19 @@ function StemSeparationSection({
         </div>
       )}
       {result && (
-        <div data-testid="stem-separation-result" style={{ padding: `0 ${SPACE.lg}px ${SPACE.xs}px`, color: "var(--accent-primary)", fontSize: FS.xs }}>
-          {t("inspector.stems.complete")} · {result.execution}
+        <div data-testid="stem-separation-result" style={{ padding: `0 ${SPACE.lg}px ${SPACE.xs}px`, color: "var(--accent-primary)", fontSize: FS.xs, display: "flex", flexDirection: "column", gap: SPACE.xs }}>
+          <span>{t("inspector.stems.complete")} · {result.execution}</span>
+          {vocals?.path && <audio controls src={assetUrl(vocals.path) ?? undefined} aria-label={t("inspector.stems.auditionVocals")} />}
+          {accompaniment?.path && <audio controls src={assetUrl(accompaniment.path) ?? undefined} aria-label={t("inspector.stems.auditionAccompaniment")} />}
+          {imported ? (
+            <button type="button" style={controlStyle} onClick={() => void undoStemImport()}>
+              {t("inspector.stems.undoImport")}
+            </button>
+          ) : (
+            <button type="button" style={controlStyle} onClick={() => void importToTracks()}>
+              {t("inspector.stems.importTracks")}
+            </button>
+          )}
         </div>
       )}
       <div style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px` }}>

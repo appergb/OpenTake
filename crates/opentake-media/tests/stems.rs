@@ -147,6 +147,31 @@ fn local_or_explicit_provider_selection_cancellation_provenance_and_cleanup() {
         accompaniment_sdr >= 60.0,
         "decoded accompaniment must be mono-compatible, got {accompaniment_sdr:.3} dB SDR"
     );
+    let mut mono_compatible_mix = Vec::with_capacity(FRAMES * 2);
+    for frame in 0..FRAMES {
+        let t = frame as f32 / SAMPLE_RATE as f32;
+        let vocal = 0.28 * (std::f32::consts::TAU * 440.0 * t).sin();
+        let music = 0.22 * (std::f32::consts::TAU * 997.0 * t).sin();
+        mono_compatible_mix.extend_from_slice(&[vocal + music, vocal + music]);
+    }
+    let reconstruction_signal = mono_compatible_mix
+        .iter()
+        .map(|sample| f64::from(*sample) * f64::from(*sample))
+        .sum::<f64>();
+    let reconstruction_error = mono_compatible_mix
+        .iter()
+        .zip(separated_vocals.iter().zip(&separated_accompaniment))
+        .map(|(expected, (vocals, accompaniment))| {
+            let delta = f64::from(*expected - (*vocals + *accompaniment));
+            delta * delta
+        })
+        .sum::<f64>()
+        .max(1.0e-12);
+    let reconstruction_sdr = 10.0 * (reconstruction_signal / reconstruction_error).log10();
+    assert!(
+        reconstruction_sdr >= 60.0,
+        "stem sum must reconstruct the documented mono-compatible mixture at >= 60 dB SDR, got {reconstruction_sdr:.3} dB"
+    );
     let progress_values = progress_values.lock().unwrap();
     assert_eq!(progress_values.first().copied(), Some((0, 1000)));
     assert_eq!(progress_values.last().copied(), Some((1000, 1000)));

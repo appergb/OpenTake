@@ -302,6 +302,7 @@ pub fn run() {
             media::cancel_denoise_analysis,
             media::separate_audio_stems,
             media::cancel_stem_separation,
+            media::import_stems_to_tracks,
             media::create_media_proxy,
             media::cancel_media_proxy,
             media::remove_media_proxy,

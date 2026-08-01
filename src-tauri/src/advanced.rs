@@ -10,17 +10,20 @@ use opentake_agent::mcp::advanced::{
     AdvancedWorkflowErrorKind, AdvancedWorkflowRequest,
 };
 use opentake_agent::tools::args::{
-    GenerateMatteArgs, MatchColorArgs, RemoveObjectArgs, TrackMotionArgs,
+    GenerateMatteArgs, MatchColorArgs, RemoveObjectArgs, SeparateStemsArgs, TrackMotionArgs,
 };
 use opentake_agent::tools::names::ToolName;
-use opentake_core::{AppCore, MotionPlacement, ProbedMedia, ProjectRevision};
+use opentake_core::{
+    AppCore, DerivedStemProvenance, MotionPlacement, PreparedMediaImportOp, ProbedMedia,
+    ProjectRevision,
+};
 use opentake_domain::{
     luma709, AnimPair, ColorGrade, ColorMatchInput, GenerationInput, GenerationJobStatus,
     Interpolation, Keyframe, KeyframeTrack, LiftGammaGain, Mask, Rgb,
 };
 use opentake_media::analysis::{
     track_region_motion, verify_rvm_model, NormalizedMotionRegion, RegionMotionTrack,
-    RvmMattingSession,
+    RvmMattingSession, StemExecution, StemSeparationRequest,
 };
 use opentake_media::decode::spawn_video_stream;
 use opentake_media::{
@@ -28,7 +31,7 @@ use opentake_media::{
     ExportResolution, FrameRequest, MediaCancelToken, MediaError, PcmFormat, PcmSpec, RgbaFrame,
     StreamVideoFrame, VideoCodec, VideoEncoder, VideoStream, VideoStreamRequest,
 };
-use opentake_ops::{EditCommand, KeyframePayload, KeyframeProperty};
+use opentake_ops::{ClipEntry, EditCommand, KeyframePayload, KeyframeProperty};
 use same_file::Handle;
 use serde::Serialize;
 use serde_json::json;
@@ -669,7 +672,6 @@ impl TauriAdvancedWorkflowBridge {
                 "unsupported object-removal model; available model is {MODEL}"
             )));
         }
-
         let snapshot = self.core.runtime_snapshot();
         let clip = snapshot
             .timeline
@@ -1094,6 +1096,182 @@ impl TauriAdvancedWorkflowBridge {
             action_name,
         })
     }
+
+    fn separate_stems(
+        &self,
+        args: SeparateStemsArgs,
+        cancel: &MediaCancelToken,
+    ) -> Result<AdvancedWorkflowCommit, AdvancedWorkflowError> {
+        const MODEL: &str = "opentake-center-v1";
+        if cancel.checkpoint() {
+            return Err(cancelled_workflow("stem separation cancelled"));
+        }
+        if args
+            .provider
+            .as_deref()
+            .is_some_and(|provider| provider != "local" && provider != "opentake-local")
+        {
+            return Err(AdvancedWorkflowError::new(
+                AdvancedWorkflowErrorKind::CapabilityUnavailable,
+                "this build supports only the on-device stem provider",
+            ));
+        }
+        if args.model.as_deref().is_some_and(|model| model != MODEL) {
+            return Err(advanced_invalid(format!(
+                "unsupported local stem model; available model is {MODEL}"
+            )));
+        }
+        let requested_start_frame = args.start_frame.unwrap_or(0);
+        if args.import_to_tracks.unwrap_or(false) && requested_start_frame < 0 {
+            return Err(advanced_invalid("startFrame must be non-negative"));
+        }
+        let snapshot = self.core.runtime_snapshot();
+        let project_dir = snapshot
+            .project_dir
+            .clone()
+            .ok_or_else(|| advanced_invalid("save the project before separating stems"))?;
+        let source = snapshot
+            .media
+            .entries
+            .iter()
+            .find(|entry| entry.id == args.media_ref)
+            .cloned()
+            .ok_or_else(|| advanced_resource(format!("media not found: {}", args.media_ref)))?;
+        if !matches!(
+            source.kind,
+            opentake_domain::ClipType::Audio | opentake_domain::ClipType::Video
+        ) || !source
+            .has_audio
+            .unwrap_or(source.kind == opentake_domain::ClipType::Audio)
+        {
+            return Err(advanced_invalid("stem source must contain audio"));
+        }
+        let (source_path, _) =
+            crate::transcribe::resolve_asset_from_snapshot(&snapshot, &args.media_ref)
+                .map_err(advanced_resource)?;
+        let output_dir = project_dir
+            .join(opentake_project::layout::MEDIA_DIR)
+            .join(format!("stems-{}", uuid::Uuid::new_v4()));
+        let separated = opentake_media::analysis::separate_stems(
+            StemSeparationRequest {
+                source: &source_path,
+                output_dir: &output_dir,
+                execution: StemExecution::Local {
+                    model_dir: &self.models_dir,
+                },
+            },
+            cancel,
+            None,
+        )
+        .map_err(|error| {
+            let _ = std::fs::remove_dir_all(&output_dir);
+            media_workflow_error(error)
+        })?;
+        if cancel.checkpoint() {
+            let _ = std::fs::remove_dir_all(&output_dir);
+            return Err(cancelled_workflow("stem separation cancelled"));
+        }
+        let vocals_probe = probe(&separated.vocals.path).map_err(media_workflow_error)?;
+        let accompaniment_probe =
+            probe(&separated.accompaniment.path).map_err(media_workflow_error)?;
+        let probed = |value: &opentake_media::probe::MediaProbe| ProbedMedia {
+            duration_secs: value.duration_secs,
+            width: value.width.and_then(|width| i32::try_from(width).ok()),
+            height: value.height.and_then(|height| i32::try_from(height).ok()),
+            fps: value.fps,
+            has_audio: value.has_audio,
+            color: value.color.clone(),
+        };
+        let provenance = |stem: &str| DerivedStemProvenance {
+            source_asset_id: args.media_ref.clone(),
+            source_sha256: separated.provenance.source_sha256.clone(),
+            execution: separated.provenance.execution.clone(),
+            model_sha256: separated.provenance.model_sha256.clone(),
+            stem: stem.into(),
+        };
+        let committed = self
+            .core
+            .import_media_batch_for_project_persisted(
+                snapshot.project_epoch,
+                &project_dir,
+                vec![
+                    PreparedMediaImportOp::ImportDerivedStem {
+                        path: separated.vocals.path,
+                        name: separated.vocals.name,
+                        probe: probed(&vocals_probe),
+                        provenance: provenance("vocals"),
+                    },
+                    PreparedMediaImportOp::ImportDerivedStem {
+                        path: separated.accompaniment.path,
+                        name: separated.accompaniment.name,
+                        probe: probed(&accompaniment_probe),
+                        provenance: provenance("accompaniment"),
+                    },
+                ],
+            )
+            .map_err(|error| {
+                let _ = std::fs::remove_dir_all(&output_dir);
+                advanced_execution(error.to_string())
+            })?;
+        if committed.len() != 2 {
+            return Err(advanced_execution("stem import did not return two assets"));
+        }
+        let vocals_asset_id = committed[0].entry.id.clone();
+        let accompaniment_asset_id = committed[1].entry.id.clone();
+        let mut clip_ids = Vec::new();
+        let mut action_name = None;
+        if args.import_to_tracks.unwrap_or(false) {
+            let start_frame = requested_start_frame;
+            let current = self.core.runtime_snapshot();
+            let duration_frames = (vocals_probe.duration_secs * current.timeline.fps.max(1) as f64)
+                .round()
+                .max(1.0) as i32;
+            let entry = |media_ref: String| ClipEntry {
+                media_ref,
+                media_type: opentake_domain::ClipType::Audio,
+                source_clip_type: opentake_domain::ClipType::Audio,
+                track_index: 0,
+                start_frame,
+                duration_frames,
+                trim_start_frame: None,
+                trim_end_frame: None,
+                has_audio: true,
+                add_linked_audio: false,
+                transform: None,
+            };
+            let placed = self
+                .core
+                .apply_at_revision(
+                    ProjectRevision {
+                        project_epoch: current.project_epoch,
+                        version: current.version,
+                    },
+                    EditCommand::AddClipsToSeparateAutoTracks {
+                        entries: vec![
+                            entry(vocals_asset_id.clone()),
+                            entry(accompaniment_asset_id.clone()),
+                        ],
+                    },
+                )
+                .map_err(|error| advanced_execution(error.to_string()))?;
+            clip_ids = placed.affected_clip_ids;
+            action_name = Some(placed.action_name);
+        }
+        Ok(AdvancedWorkflowCommit {
+            result: json!({
+                "sourceMediaRef": args.media_ref,
+                "vocalsAssetId": vocals_asset_id,
+                "accompanimentAssetId": accompaniment_asset_id,
+                "sourceSha256": separated.provenance.source_sha256,
+                "execution": separated.provenance.execution,
+                "modelSha256": separated.provenance.model_sha256,
+                "vocalSdrImprovementDb": separated.metrics.vocal_sdr_improvement_db,
+                "importedToTracks": args.import_to_tracks.unwrap_or(false),
+                "clipIds": clip_ids
+            }),
+            action_name,
+        })
+    }
 }
 
 impl AdvancedWorkflowBridge for TauriAdvancedWorkflowBridge {
@@ -1102,6 +1280,7 @@ impl AdvancedWorkflowBridge for TauriAdvancedWorkflowBridge {
             ToolName::TrackMotion,
             ToolName::RemoveObject,
             ToolName::MatchColor,
+            ToolName::SeparateStems,
         ];
         if verify_rvm_model(&self.models_dir).is_ok() {
             tools.push(ToolName::GenerateMatte);
@@ -1119,6 +1298,7 @@ impl AdvancedWorkflowBridge for TauriAdvancedWorkflowBridge {
             AdvancedWorkflowRequest::GenerateMatte(args) => self.generate_matte(args, cancel),
             AdvancedWorkflowRequest::RemoveObject(args) => self.remove_object(args, cancel),
             AdvancedWorkflowRequest::MatchColor(args) => self.match_color(args, cancel),
+            AdvancedWorkflowRequest::SeparateStems(args) => self.separate_stems(args, cancel),
             _ => Err(AdvancedWorkflowError::new(
                 AdvancedWorkflowErrorKind::CapabilityUnavailable,
                 "advanced workflow is not supported by this desktop host",
@@ -2638,5 +2818,129 @@ mod tests {
             .match_color(request, &cancelled)
             .expect_err("pre-cancelled color match must fail");
         assert_eq!(error.kind, AdvancedWorkflowErrorKind::Cancelled);
+    }
+
+    #[test]
+    fn stem_bridge_imports_provenance_aligned_tracks_undo_reopen_and_cancel() {
+        if !opentake_media::ffmpeg_status::ffmpeg_available() {
+            eprintln!("SKIP: ffmpeg unavailable");
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("mixture.wav");
+        let sample_rate = 48_000_u32;
+        let frames = 4_800_usize;
+        let data_len = (frames * 2 * 2) as u32;
+        let mut wav = Vec::with_capacity(44 + data_len as usize);
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data_len).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16_u32.to_le_bytes());
+        wav.extend_from_slice(&1_u16.to_le_bytes());
+        wav.extend_from_slice(&2_u16.to_le_bytes());
+        wav.extend_from_slice(&sample_rate.to_le_bytes());
+        wav.extend_from_slice(&(sample_rate * 4).to_le_bytes());
+        wav.extend_from_slice(&4_u16.to_le_bytes());
+        wav.extend_from_slice(&16_u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data_len.to_le_bytes());
+        for frame in 0..frames {
+            let time = frame as f32 / sample_rate as f32;
+            let vocal = 0.25 * (std::f32::consts::TAU * 440.0 * time).sin();
+            let music = 0.18 * (std::f32::consts::TAU * 997.0 * time).sin();
+            for sample in [vocal + music, vocal - music] {
+                wav.extend_from_slice(&((sample.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
+            }
+        }
+        std::fs::write(&source, wav).unwrap();
+
+        let core = AppCore::new();
+        core.apply(EditCommand::SetTimelineSettings {
+            fps: 30,
+            width: 64,
+            height: 64,
+        })
+        .unwrap();
+        let bundle = root.path().join("Stems.opentake");
+        core.save_project(Some(bundle.clone())).unwrap();
+        let snapshot = core.runtime_snapshot();
+        let imported = core
+            .import_media_batch_for_project_persisted(
+                snapshot.project_epoch,
+                &bundle,
+                vec![PreparedMediaImportOp::ImportFile {
+                    path: source,
+                    name: "mixture.wav".into(),
+                    probe: ProbedMedia {
+                        duration_secs: 0.1,
+                        has_audio: true,
+                        ..ProbedMedia::default()
+                    },
+                    folder: None,
+                }],
+            )
+            .unwrap();
+        let source_id = imported[0].entry.id.clone();
+        let bridge = TauriAdvancedWorkflowBridge::new(
+            core.clone(),
+            root.path().join("cache"),
+            root.path().join("models"),
+        );
+        assert!(bridge.supported_tools().contains(&ToolName::SeparateStems));
+        let request = SeparateStemsArgs {
+            media_ref: source_id.clone(),
+            provider: Some("local".into()),
+            model: Some("opentake-center-v1".into()),
+            import_to_tracks: Some(true),
+            start_frame: Some(45),
+        };
+        let separated = bridge
+            .separate_stems(request.clone(), &MediaCancelToken::new())
+            .unwrap();
+        assert_eq!(
+            separated.action_name.as_deref(),
+            Some("Import Stems To Tracks")
+        );
+        assert_eq!(separated.result["importedToTracks"], true);
+        assert_eq!(separated.result["clipIds"].as_array().unwrap().len(), 2);
+        let after = core.runtime_snapshot();
+        assert_eq!(after.media.entries.len(), 3);
+        assert_eq!(after.timeline.tracks.len(), 2);
+        assert!(after.timeline.tracks.iter().all(|track| {
+            track.kind == ClipType::Audio
+                && track.clips.len() == 1
+                && track.clips[0].start_frame == 45
+                && track.clips[0].duration_frames == 3
+        }));
+        for stem in &after.media.entries[1..] {
+            let provenance = stem.generation_input.as_ref().unwrap();
+            assert_eq!(
+                provenance.source_asset_id.as_deref(),
+                Some(source_id.as_str())
+            );
+            assert_eq!(provenance.provider.as_deref(), Some("local"));
+            assert_eq!(provenance.model, "opentake-center-v1");
+        }
+
+        core.undo().unwrap();
+        assert!(core.runtime_snapshot().timeline.tracks.is_empty());
+        assert_eq!(core.media().entries.len(), 3);
+        core.redo().unwrap();
+        core.save_project(None).unwrap();
+        let reopened = AppCore::new();
+        reopened.open_project(&bundle).unwrap();
+        assert_eq!(reopened.runtime_snapshot().timeline.tracks.len(), 2);
+        assert_eq!(reopened.media().entries.len(), 3);
+
+        let before_cancel = core.runtime_snapshot();
+        let cancelled = MediaCancelToken::new();
+        cancelled.cancel();
+        let error = bridge
+            .separate_stems(request, &cancelled)
+            .expect_err("pre-cancelled separation must fail");
+        assert_eq!(error.kind, AdvancedWorkflowErrorKind::Cancelled);
+        let after_cancel = core.runtime_snapshot();
+        assert_eq!(after_cancel.timeline, before_cancel.timeline);
+        assert_eq!(after_cancel.media, before_cancel.media);
     }
 }

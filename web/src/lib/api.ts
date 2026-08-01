@@ -1358,6 +1358,27 @@ export async function cancelStemSeparation(): Promise<boolean> {
   return false;
 }
 
+export interface ImportStemsToTracksResult {
+  clipIds: string[];
+  actionName: string;
+}
+
+export async function importStemsToTracks(
+  vocalsAssetId: string,
+  accompanimentAssetId: string,
+  startFrame: number,
+): Promise<ImportStemsToTracksResult> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<ImportStemsToTracksResult>("import_stems_to_tracks", {
+      vocalsAssetId,
+      accompanimentAssetId,
+      startFrame,
+    });
+  }
+  throw new Error("stem track import requires the desktop app");
+}
+
 export interface MediaProxyResult {
   assetId: string;
   path: string;

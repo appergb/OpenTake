@@ -61,6 +61,7 @@ use opentake_media::{
     FrameRequest, MediaEngine, MediaError, PcmFormat, PcmSpec, ProxyProgressCallback, ProxyRequest,
     RgbaFrame,
 };
+use opentake_ops::{ClipEntry, EditCommand};
 use opentake_project::ProjectRoot;
 
 use crate::library::LibraryState;
@@ -3369,6 +3370,92 @@ pub async fn separate_audio_stems(
 #[tauri::command]
 pub fn cancel_stem_separation(state: State<'_, StemSeparationState>) -> bool {
     state.cancel()
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportStemsToTracksDto {
+    pub clip_ids: Vec<String>,
+    pub action_name: String,
+}
+
+/// Place an already reviewed aligned stem pair on separate fresh audio tracks
+/// as one undoable edit. The derived media remain reusable in the catalog when
+/// the placement is undone.
+#[tauri::command]
+pub fn import_stems_to_tracks(
+    core: State<'_, AppCore>,
+    vocals_asset_id: String,
+    accompaniment_asset_id: String,
+    start_frame: i32,
+) -> Result<ImportStemsToTracksDto, String> {
+    import_stems_to_tracks_core(&core, vocals_asset_id, accompaniment_asset_id, start_frame)
+}
+
+fn import_stems_to_tracks_core(
+    core: &AppCore,
+    vocals_asset_id: String,
+    accompaniment_asset_id: String,
+    start_frame: i32,
+) -> Result<ImportStemsToTracksDto, String> {
+    if start_frame < 0 || vocals_asset_id == accompaniment_asset_id {
+        return Err("stem_track_import_invalid_arguments".to_string());
+    }
+    let snapshot = core.runtime_snapshot();
+    let find = |id: &str, expected_stem: &str| {
+        let entry = snapshot
+            .media
+            .entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .ok_or_else(|| format!("stem_track_import_asset_not_found:{id}"))?;
+        if entry.kind != ClipType::Audio
+            || entry
+                .generation_input
+                .as_ref()
+                .is_none_or(|input| input.prompt != format!("stem:{expected_stem}"))
+        {
+            return Err(format!("stem_track_import_asset_invalid:{id}"));
+        }
+        Ok(entry)
+    };
+    let vocals = find(&vocals_asset_id, "vocals")?;
+    let accompaniment = find(&accompaniment_asset_id, "accompaniment")?;
+    let fps = snapshot.timeline.fps.max(1) as f64;
+    let vocals_duration = (vocals.duration * fps).round().max(1.0) as i32;
+    let accompaniment_duration = (accompaniment.duration * fps).round().max(1.0) as i32;
+    if (vocals_duration - accompaniment_duration).abs() > 1 {
+        return Err("stem_track_import_duration_mismatch".to_string());
+    }
+    let duration_frames = vocals_duration.max(accompaniment_duration);
+    let entry = |media_ref: String| ClipEntry {
+        media_ref,
+        media_type: ClipType::Audio,
+        source_clip_type: ClipType::Audio,
+        track_index: 0,
+        start_frame,
+        duration_frames,
+        trim_start_frame: None,
+        trim_end_frame: None,
+        has_audio: true,
+        add_linked_audio: false,
+        transform: None,
+    };
+    let result = core
+        .apply_at_revision(
+            opentake_core::ProjectRevision {
+                project_epoch: snapshot.project_epoch,
+                version: snapshot.version,
+            },
+            EditCommand::AddClipsToSeparateAutoTracks {
+                entries: vec![entry(vocals_asset_id), entry(accompaniment_asset_id)],
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(ImportStemsToTracksDto {
+        clip_ids: result.affected_clip_ids,
+        action_name: result.action_name,
+    })
 }
 
 #[derive(Clone, Serialize)]
