@@ -135,13 +135,13 @@ fn windows_bundle_installs_webview2_without_network_access() {
 }
 
 #[test]
-fn windows_bundle_does_not_expect_an_unpublished_onnxruntime_dll() {
+fn windows_bundle_uses_the_pure_rust_ort_backend() {
     let media_manifest = include_str!("../../crates/opentake-media/Cargo.toml");
     assert!(
-        media_manifest
-            .contains("features = [\"std\", \"ndarray\", \"download-binaries\", \"copy-dylibs\"]"),
-        "ort-sys must expose the pinned DirectML provider companion"
+        media_manifest.contains("features = [\"std\", \"ndarray\", \"alternative-backend\"]"),
+        "Windows ort must not link the native ONNX Runtime"
     );
+    assert!(media_manifest.contains("version = \"=0.1.0\""));
 
     let config = windows_config();
     let resources = config["bundle"]["resources"]
@@ -150,21 +150,14 @@ fn windows_bundle_does_not_expect_an_unpublished_onnxruntime_dll() {
     assert!(
         resources
             .keys()
-            .all(|source| !source.contains("onnxruntime")),
-        "the static Windows archive does not publish an onnxruntime DLL"
-    );
-    assert_eq!(
-        resources
-            .get("../target/opentake-runtime/DirectML.dll")
-            .and_then(Value::as_str),
-        Some("DirectML.dll")
+            .all(|source| { !source.contains("onnxruntime") && !source.contains("DirectML") }),
+        "the pure-Rust Windows backend must not package native ORT providers"
     );
 
     let manifest = include_str!("../Cargo.toml");
-    assert!(manifest.contains("[target.'cfg(windows)'.build-dependencies]"));
+    assert!(!manifest.contains("ort-sys"));
     let build_script = include_str!("../build.rs");
-    assert!(build_script.contains("profile_dir.join(\"deps/DirectML.dll\")"));
-    assert!(build_script.contains("workspace_target.join(\"opentake-runtime/DirectML.dll\")"));
+    assert!(!build_script.contains("DirectML"));
 }
 
 #[test]

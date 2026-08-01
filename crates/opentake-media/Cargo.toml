@@ -71,10 +71,11 @@ default = []
 # Test-only cross-crate fault boundaries. Shipped builds do not expose these
 # hooks; integration tests opt in through a dev-dependency feature union.
 test-faults = []
-# Real SigLIP2 inference via ONNX Runtime. `download-binaries` lets ort fetch a
-# prebuilt onnxruntime *when this feature is explicitly enabled* — it is off by
-# default, so plain `cargo build`/`cargo test` never touch the network.
-ort-backend = ["dep:ort"]
+# Real SigLIP2 inference through ort. Windows uses ort's official pure-Rust
+# tract backend so the installed product does not depend on Server-only
+# DirectX/ONNX Runtime entry points. Other platforms keep the pinned native
+# ONNX Runtime backend. Both remain off in the default, fully-offline build.
+ort-backend = ["dep:ort", "dep:ort-tract"]
 # Real on-device transcription via whisper.cpp (compiles native C++ on enable).
 whisper-backend = ["dep:whisper-rs"]
 # Model weight download/verify/unzip (reqwest + zip + sha1). Off by default so
@@ -82,10 +83,20 @@ whisper-backend = ["dep:whisper-rs"]
 # ggml downloads against whisper.cpp's published SHA-1 checksums.
 model-download = ["dep:reqwest", "dep:zip", "dep:futures-util", "dep:sha1"]
 
-[dependencies.ort]
+[target.'cfg(not(windows))'.dependencies.ort]
 version = "=2.0.0-rc.10"
 default-features = false
 features = ["std", "ndarray", "download-binaries", "copy-dylibs"]
+optional = true
+
+[target.'cfg(windows)'.dependencies.ort]
+version = "=2.0.0-rc.10"
+default-features = false
+features = ["std", "ndarray", "alternative-backend"]
+optional = true
+
+[target.'cfg(windows)'.dependencies.ort-tract]
+version = "=0.1.0"
 optional = true
 
 [dependencies.whisper-rs]

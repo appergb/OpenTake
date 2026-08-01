@@ -33,14 +33,7 @@ class WindowsProductCiContractTests(unittest.TestCase):
         )
         self.assert_rejected(mutated, "product cache excludes target")
 
-    def test_installed_product_must_launch_with_directml_provider(self) -> None:
-        without_provider = WORKFLOW.replace(
-            "          $directml = Join-Path $installDirectory 'DirectML.dll'\n",
-            "          $directml = Join-Path $installDirectory 'missing.dll'\n",
-            1,
-        )
-        self.assert_rejected(without_provider, "installed product launch smoke test")
-
+    def test_installed_product_must_launch(self) -> None:
         without_launch = WORKFLOW.replace(
             "          $app = Start-Process -FilePath $application -PassThru\n",
             "          $app = $null\n",

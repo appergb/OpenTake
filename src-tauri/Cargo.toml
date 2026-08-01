@@ -21,9 +21,6 @@ path = "src/main.rs"
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
-[target.'cfg(windows)'.build-dependencies]
-ort-sys = { version = "=2.0.0-rc.10", default-features = false, features = ["download-binaries", "copy-dylibs"] }
-
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
@@ -40,12 +37,10 @@ opentake-ops = { workspace = true }
 opentake-domain = { workspace = true }
 # Transcription + visual semantic search are ON for the shipped app:
 # `whisper-backend` compiles the whisper.cpp CPU backend (via cmake —
-# preinstalled on GitHub runners, no CUDA); `ort-backend` links ONNX Runtime for
-# the SigLIP2 dual-encoder — its `download-binaries` feature fetches a
-# checksum-pinned prebuilt onnxruntime at build time. The pinned Apple Silicon
-# and Windows x64 distributions bake ONNX Runtime into the executable. Windows
-# also ships the checksum-pinned distribution's DirectML provider companion;
-# it does not publish a separate onnxruntime DLL. `model-download` pulls the
+# preinstalled on GitHub runners, no CUDA); `ort-backend` runs the SigLIP2
+# dual-encoder through a checksum-pinned native ONNX Runtime on macOS/Linux and
+# ort's official pure-Rust tract backend on Windows. The Windows package has no
+# native ONNX Runtime or DirectX provider dependency. `model-download` pulls the
 # model files over HTTPS with checksum verification. All three stay optional at
 # the opentake-media level (its own default tests run offline, without them);
 # ort-inference tests are feature-gated + runtime-skipped like the GPU/ffmpeg

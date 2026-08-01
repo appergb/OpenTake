@@ -13,7 +13,7 @@ pub mod tensor;
 pub use tensor::{frame_to_hwc, hwc_to_nchw_normalized, mean_pool};
 
 /// Execution provider preference; the loader falls back to CPU when an
-/// accelerator is unavailable.
+/// accelerator is unavailable. Windows ships the pure-Rust tract CPU backend.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExecutionProvider {
     Cpu,
@@ -24,8 +24,8 @@ pub enum ExecutionProvider {
 }
 
 impl ExecutionProvider {
-    /// The platform-preferred provider (CoreML on macOS, DirectML on Windows,
-    /// CUDA on Linux), used as the first choice before CPU fallback.
+    /// The platform-preferred provider (CoreML on macOS, CPU tract on Windows,
+    /// CPU on Linux), used as the first choice before CPU fallback.
     pub fn platform_default() -> Self {
         #[cfg(target_os = "macos")]
         {
@@ -33,7 +33,7 @@ impl ExecutionProvider {
         }
         #[cfg(target_os = "windows")]
         {
-            ExecutionProvider::DirectMl
+            ExecutionProvider::Cpu
         }
         #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
         {
@@ -616,6 +616,7 @@ mod model {
     impl OrtModel {
         /// Load `path` with the given EP preference, falling back to CPU.
         pub fn load(path: &Path, _ep: ExecutionProvider) -> Result<Self> {
+            crate::initialize_ort_backend();
             let builder =
                 Session::builder().map_err(|e| MediaError::ModelInstall(format!("ort: {e}")))?;
             let builder = builder

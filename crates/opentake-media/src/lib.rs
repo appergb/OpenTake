@@ -27,6 +27,29 @@
 
 mod ff;
 
+#[cfg(all(feature = "ort-backend", target_os = "windows"))]
+pub(crate) fn initialize_ort_backend() {
+    static INITIALIZE: std::sync::Once = std::sync::Once::new();
+    INITIALIZE.call_once(|| {
+        assert!(
+            ort::set_api(ort_tract::api()),
+            "ort API was initialized before the Windows tract backend"
+        );
+    });
+}
+
+#[cfg(all(feature = "ort-backend", not(target_os = "windows")))]
+pub(crate) fn initialize_ort_backend() {}
+
+#[cfg(all(test, feature = "ort-backend", target_os = "windows"))]
+mod windows_ort_backend_tests {
+    #[test]
+    fn tract_backend_initializes_before_ort_session_use() {
+        crate::initialize_ort_backend();
+        ort::session::Session::builder().expect("tract must provide the ort session API");
+    }
+}
+
 pub mod analysis;
 pub mod cache_key;
 pub mod cancel;
