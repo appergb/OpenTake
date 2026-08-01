@@ -39,11 +39,12 @@ opentake-domain = { workspace = true }
 # `whisper-backend` compiles the whisper.cpp CPU backend (via cmake —
 # preinstalled on GitHub runners, no CUDA); `ort-backend` links ONNX Runtime for
 # the SigLIP2 dual-encoder — its `download-binaries` feature fetches a
-# *statically* linked prebuilt onnxruntime at build time and bakes it into the
-# binary (no runtime .so/.dylib to ship; same build-time-network shape as
-# whisper.cpp / model-download); `model-download` pulls the model files over
-# HTTPS with checksum verification. All three stay optional at the
-# opentake-media level (its own default tests run offline, without them);
+# checksum-pinned prebuilt onnxruntime at build time. Platforms with a static
+# archive bake it into the binary; platforms such as Windows copy the matching
+# runtime DLL next to tests and the application, with the Windows bundle config
+# shipping that DLL beside the installed executable. `model-download` pulls the
+# model files over HTTPS with checksum verification. All three stay optional at
+# the opentake-media level (its own default tests run offline, without them);
 # ort-inference tests are feature-gated + runtime-skipped like the GPU/ffmpeg
 # integration tests.
 opentake-media = { workspace = true, features = ["whisper-backend", "ort-backend", "model-download"] }

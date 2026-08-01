@@ -235,7 +235,7 @@ jobs:
           Remove-Item 'target/release/bundle/nsis' -Recurse -Force -ErrorAction SilentlyContinue
           & .\web\node_modules\.bin\tauri.cmd build --ci --bundles msi,nsis
 
-      - name: Install NSIS package and execute installed sidecars without PATH
+      - name: Install NSIS package and execute installed product without PATH
         shell: pwsh
         run: |
           $installer = @(Get-ChildItem 'target/release/bundle/nsis/*.exe' -File)
@@ -257,9 +257,21 @@ jobs:
             }
           }
           if (-not $application) { throw "installed OpenTake executable not found: $($candidates -join ', ')" }
+          $installDirectory = Split-Path -Parent $application
+          $ortRuntime = Join-Path $installDirectory 'onnxruntime.dll'
+          if (-not (Test-Path $ortRuntime -PathType Leaf)) {
+            throw "installed ONNX Runtime not found beside OpenTake: $ortRuntime"
+          }
           ruby scripts/tests/packaged-sidecars-test.rb `
             --name packaged_macos_windows_sidecars_resolve_and_execute `
-            --package (Split-Path -Parent $application)
+            --package $installDirectory
+          $app = Start-Process -FilePath $application -PassThru
+          Start-Sleep -Seconds 5
+          if ($app.HasExited) {
+            throw "installed OpenTake exited during launch smoke test: $($app.ExitCode)"
+          }
+          Stop-Process -Id $app.Id -Force
+          Wait-Process -Id $app.Id -ErrorAction SilentlyContinue
 
       - name: Bind installers to the exact source SHA
         shell: pwsh

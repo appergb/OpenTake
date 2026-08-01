@@ -85,7 +85,7 @@ model-download = ["dep:reqwest", "dep:zip", "dep:futures-util", "dep:sha1"]
 [dependencies.ort]
 version = "=2.0.0-rc.10"
 default-features = false
-features = ["std", "ndarray", "download-binaries"]
+features = ["std", "ndarray", "download-binaries", "copy-dylibs"]
 optional = true
 
 [dependencies.whisper-rs]

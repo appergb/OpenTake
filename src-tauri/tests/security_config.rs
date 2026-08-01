@@ -135,6 +135,27 @@ fn windows_bundle_installs_webview2_without_network_access() {
 }
 
 #[test]
+fn windows_bundle_ships_the_linked_onnxruntime_beside_the_executable() {
+    let media_manifest = include_str!("../../crates/opentake-media/Cargo.toml");
+    assert!(
+        media_manifest
+            .contains("features = [\"std\", \"ndarray\", \"download-binaries\", \"copy-dylibs\"]"),
+        "ort-sys must copy the exact downloaded runtime beside Windows binaries"
+    );
+
+    let config = windows_config();
+    let resources = config["bundle"]["resources"]
+        .as_object()
+        .expect("the Windows bundle must map runtime resources explicitly");
+    assert_eq!(
+        resources
+            .get("../target/release/onnxruntime.dll")
+            .and_then(Value::as_str),
+        Some("onnxruntime.dll")
+    );
+}
+
+#[test]
 fn every_windows_tauri_ci_job_provisions_packaged_sidecars_first() {
     // Git may materialize the workflow with CRLF on Windows runners. Normalize
     // before finding YAML job boundaries so this contract tests the workflow,

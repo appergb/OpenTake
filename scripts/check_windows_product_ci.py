@@ -174,6 +174,22 @@ def validate_workflow(workflow: str) -> list[str]:
     if bundle is None or not all(_has_line(bundle, line) for line in bundle_lines):
         errors.append("clean native Tauri bundle")
 
+    installed_product = _named_step(
+        steps, "Install NSIS package and execute installed product without PATH"
+    )
+    installed_product_fragments = (
+        "onnxruntime.dll",
+        "installed ONNX Runtime not found beside OpenTake",
+        "packaged_macos_windows_sidecars_resolve_and_execute",
+        "Start-Process -FilePath $application -PassThru",
+        "installed OpenTake exited during launch smoke test",
+    )
+    if installed_product is None or not all(
+        fragment in _active(installed_product)
+        for fragment in installed_product_fragments
+    ):
+        errors.append("installed product launch smoke test")
+
     receipt = _named_step(steps, "Bind installers to the exact source SHA")
     if receipt is None or not _has_line(
         receipt, "RECEIPT_SHA: ${{ steps.bind.outputs.sha }}"

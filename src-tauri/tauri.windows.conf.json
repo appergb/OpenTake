@@ -4,6 +4,12 @@
       "binaries/ffmpeg",
       "binaries/ffprobe"
     ],
+    "resources": {
+      "../LICENSE": "LICENSE",
+      "../NOTICE": "NOTICE",
+      "resources/ffmpeg": "ffmpeg",
+      "../target/release/onnxruntime.dll": "onnxruntime.dll"
+    },
     "windows": {
       "webviewInstallMode": {
         "type": "offlineInstaller",

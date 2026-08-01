@@ -115,9 +115,14 @@ mod live {
                             "HTTP/1.1 200 OK\r\nContent-Type: image/svg+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                             svg.len()
                         );
-                        stream.write_all(response.as_bytes()).unwrap();
-                        stream.write_all(svg).unwrap();
+                        // Chromium may close the socket as soon as the image is
+                        // decoded and the frame is captured. A late BrokenPipe
+                        // therefore confirms neither a server nor render
+                        // failure; accepting the request is the network-policy
+                        // boundary this fixture needs to prove.
                         server_observed.store(true, Ordering::Release);
+                        let _ = stream.write_all(response.as_bytes());
+                        let _ = stream.write_all(svg);
                         return;
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {

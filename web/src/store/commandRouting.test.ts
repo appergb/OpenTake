@@ -337,7 +337,10 @@ describe("edit gesture command routing", () => {
     const src = fileURLToPath(new URL("..", import.meta.url));
     const forbidden = /(?:\.tracks|\.clips)\.(?:push|splice)\s*\(|\.(?:startFrame|durationFrames|trimStartFrame|trimEndFrame)\s*=(?!=)|useProjectStore\.setState\s*\(/;
     const illegal = sourceFiles(src)
-      .filter((path) => !path.endsWith("/lib/fallback.ts") && !path.endsWith("/store/projectStore.ts"))
+      .filter((path) => {
+        const portablePath = path.replaceAll("\\", "/");
+        return !portablePath.endsWith("/lib/fallback.ts") && !portablePath.endsWith("/store/projectStore.ts");
+      })
       .filter((path) => forbidden.test(readFileSync(path, "utf8")));
     expect(illegal).toEqual([]);
   });
