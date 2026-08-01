@@ -9,9 +9,9 @@ fn main() {
     // harness; Cargo's `rustc-link-arg-tests` does not.
     if std::env::var("TARGET").is_ok_and(|target| target.contains("windows-msvc")) {
         println!(
-            "cargo:rustc-link-arg=/MANIFESTDEPENDENCY:\"type='win32' \
+            "cargo:rustc-link-arg=/MANIFESTDEPENDENCY:type='win32' \
              name='Microsoft.Windows.Common-Controls' version='6.0.0.0' \
-             processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\""
+             processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'"
         );
     }
 }
