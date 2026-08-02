@@ -63,7 +63,7 @@ mod live {
     pub(super) fn run() {
         let profiles_before = live_profiles();
         let animation = r#"<!doctype html><html><body style="margin:0;background:transparent">
-          <div id="box" style="width:48px;height:32px"></div>
+          <div id="box" style="width:24px;height:16px"></div>
           <script>
             OpenTake.onSeek((t) => {
               const value = Math.round(t * 1000);
@@ -91,6 +91,13 @@ mod live {
             fs::read(&first.frames[0]).unwrap(),
             fs::read(&first.frames[2]).unwrap(),
             "virtual time must advance the visible animation"
+        );
+        let first_png = image::open(&first.frames[0]).unwrap().to_rgba8();
+        assert_eq!(first_png.get_pixel(0, 0)[3], 255);
+        assert_eq!(
+            first_png.get_pixel(47, 31)[3],
+            0,
+            "surface capture must preserve the transparent canvas outside content"
         );
         let source = MotionClipSource::new(first.clone(), decoded);
         let composited = source

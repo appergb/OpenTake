@@ -54,6 +54,14 @@ class WindowsProductCiContractTests(unittest.TestCase):
         )
         self.assert_rejected(mutated, "Rust workspace tests command")
 
+    def test_chromium_gate_must_include_the_live_security_integration(self) -> None:
+        mutated = WORKFLOW.replace(
+            "            virtual_time_network_csp_timeout_cleanup_and_frame_identity \\\n",
+            "",
+            1,
+        )
+        self.assert_rejected(mutated, "complete Windows Chromium motion regression")
+
     def test_product_cache_cannot_restore_target_outputs(self) -> None:
         mutated = WORKFLOW.replace(
             "            ~/.cargo/git\n          key: windows-product-",

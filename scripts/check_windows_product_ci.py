@@ -167,6 +167,18 @@ def validate_workflow(workflow: str) -> list[str]:
         if step is None or not _has_line(step, command):
             errors.append(label)
 
+    chromium_motion = _named_step(steps, "Windows Chromium motion capture regression")
+    chromium_motion_fragments = (
+        "renderer::tests::chromium_skeleton_reports_unavailable_not_panic",
+        "virtual_time_network_csp_timeout_cleanup_and_frame_identity",
+        "sandbox_progress_cancel_validated_mp4_result",
+    )
+    if chromium_motion is None or not all(
+        fragment in _active(chromium_motion)
+        for fragment in chromium_motion_fragments
+    ):
+        errors.append("complete Windows Chromium motion regression")
+
     bundle = _named_step(steps, "Build native MSI and NSIS installers")
     bundle_lines = (
         "Remove-Item 'target/release/bundle/msi' -Recurse -Force -ErrorAction SilentlyContinue",
