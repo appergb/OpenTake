@@ -340,9 +340,6 @@ jobs:
       - name: Provision checksum-pinned packaged FFmpeg sidecars
         run: python scripts/provision_ffmpeg_sidecars.py --target x86_64-pc-windows-msvc
 
-      - name: Install FFmpeg
-        run: choco install ffmpeg --no-progress -y
-
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -354,7 +351,11 @@ jobs:
 
       - name: Portable FFmpeg cancellation lifecycle
         shell: pwsh
+        env:
+          OPENTAKE_FFMPEG: ${{ github.workspace }}\src-tauri\binaries\ffmpeg-x86_64-pc-windows-msvc.exe
         run: |
+          & $env:OPENTAKE_FFMPEG -version
+          if ($LASTEXITCODE -ne 0) { throw 'checksum-pinned packaged FFmpeg is not runnable' }
           cargo test -p opentake-media --lib windows_cancelling_running_pcm_child_reaps_both_pipe_readers
           cargo test -p opentake-media --lib windows_cancelling_mux_wait_reaps_child
 

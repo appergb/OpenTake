@@ -62,6 +62,14 @@ class WindowsProductCiContractTests(unittest.TestCase):
         )
         self.assert_rejected(mutated, "complete Windows Chromium motion regression")
 
+    def test_cancellation_gate_must_use_the_pinned_packaged_ffmpeg(self) -> None:
+        mutated = WORKFLOW.replace(
+            "          OPENTAKE_FFMPEG: ${{ github.workspace }}\\src-tauri\\binaries\\ffmpeg-x86_64-pc-windows-msvc.exe\n",
+            "",
+            1,
+        )
+        self.assert_rejected(mutated, "pinned FFmpeg cancellation lifecycle")
+
     def test_product_cache_cannot_restore_target_outputs(self) -> None:
         mutated = WORKFLOW.replace(
             "            ~/.cargo/git\n          key: windows-product-",

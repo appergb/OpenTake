@@ -18,12 +18,16 @@ TARGET_SHA_EXPRESSION = (
 )
 
 
-def _job_body(workflow: str) -> str | None:
+def _named_job_body(workflow: str, job_name: str) -> str | None:
     match = re.search(
-        r"(?ms)^  windows-product:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)",
+        rf"(?ms)^  {re.escape(job_name)}:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)",
         workflow,
     )
     return None if match is None else match.group("body")
+
+
+def _job_body(workflow: str) -> str | None:
+    return _named_job_body(workflow, "windows-product")
 
 
 def _steps(job: str) -> list[str]:
@@ -241,6 +245,28 @@ def validate_workflow(workflow: str) -> list[str]:
         errors.append("upload includes receipt")
     if upload is None or not _has_line(upload, "if-no-files-found: error"):
         errors.append("missing-artifact failure")
+
+    security_job = _named_job_body(workflow, "windows-security")
+    if security_job is None:
+        errors.append("Windows cancellation security job")
+        return errors
+    if "choco install ffmpeg" in _active(security_job):
+        errors.append("no external Chocolatey FFmpeg dependency")
+    security_steps = _steps(security_job)
+    cancellation = _named_step(
+        security_steps, "Portable FFmpeg cancellation lifecycle"
+    )
+    cancellation_fragments = (
+        "OPENTAKE_FFMPEG: ${{ github.workspace }}\\src-tauri\\binaries\\ffmpeg-x86_64-pc-windows-msvc.exe",
+        "& $env:OPENTAKE_FFMPEG -version",
+        "checksum-pinned packaged FFmpeg is not runnable",
+        "windows_cancelling_running_pcm_child_reaps_both_pipe_readers",
+        "windows_cancelling_mux_wait_reaps_child",
+    )
+    if cancellation is None or not all(
+        fragment in _active(cancellation) for fragment in cancellation_fragments
+    ):
+        errors.append("pinned FFmpeg cancellation lifecycle")
 
     return errors
 
