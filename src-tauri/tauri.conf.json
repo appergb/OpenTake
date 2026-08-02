@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "OpenTake",
-  "version": "1.0.0",
+  "version": "1.0.0-beta.1",
   "identifier": "com.opentake.desktop",
   "build": {
     "frontendDist": "../web/dist",
@@ -35,18 +35,55 @@
       }
     ],
     "security": {
-      "csp": null,
+      "csp": {
+        "default-src": "'self'",
+        "base-uri": "'self'",
+        "connect-src": "'self' ipc: http://ipc.localhost http://127.0.0.1:*",
+        "font-src": "'self' data:",
+        "frame-ancestors": "'none'",
+        "img-src": "'self' asset: http://asset.localhost blob: data:",
+        "media-src": "'self' asset: http://asset.localhost blob: data:",
+        "object-src": "'none'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'"
+      },
+      "devCsp": {
+        "default-src": "'self'",
+        "base-uri": "'self'",
+        "connect-src": "'self' ipc: http://ipc.localhost http://127.0.0.1:* ws://127.0.0.1:* ws://localhost:*",
+        "font-src": "'self' data:",
+        "frame-ancestors": "'none'",
+        "img-src": "'self' asset: http://asset.localhost blob: data:",
+        "media-src": "'self' asset: http://asset.localhost blob: data:",
+        "object-src": "'none'",
+        "script-src": "'self'",
+        "style-src": "'self' 'unsafe-inline'"
+      },
       "assetProtocol": {
         "enable": true,
-        "scope": [
-          "**"
-        ]
+        "scope": {
+          "allow": [
+            "$APPCACHE/**/*",
+            "$APPDATA/OpenTake/Library/**/*",
+            "$RESOURCE/**/*"
+          ],
+          "deny": [
+            "$HOME/.ssh/**/*",
+            "$HOME/.gnupg/**/*",
+            "$HOME/.aws/**/*"
+          ]
+        }
       }
     }
   },
   "bundle": {
     "active": true,
     "targets": "all",
+    "resources": [
+      "../LICENSE",
+      "../NOTICE",
+      "resources/ffmpeg"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -56,6 +93,11 @@
     ],
     "macOS": {
       "minimumSystemVersion": "11.0"
+    },
+    "windows": {
+      "wix": {
+        "version": "1.0.0.1"
+      }
     }
   }
 }

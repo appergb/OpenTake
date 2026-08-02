@@ -1,7 +1,9 @@
 import { useEffect } from "react";
 import { TitleBar } from "./components/shell/TitleBar";
+import { ApplicationMenuBridge } from "./components/shell/ViewMenu";
 import { ExportDialog } from "./components/shell/ExportDialog";
 import { SaveAsProgress } from "./components/shell/SaveAsProgress";
+import { ProjectSettingsMismatchDialog } from "./components/shell/ProjectSettingsMismatchDialog";
 import { EditorSplit } from "./components/shell/EditorSplit";
 import { CompatibilityBanner } from "./components/shell/CompatibilityBanner";
 import { HomeView } from "./components/home/HomeView";
@@ -14,7 +16,7 @@ import { startSync } from "./store/sync";
 import { startMediaSync } from "./store/mediaStore";
 import { useEditorUiStore } from "./store/uiStore";
 import { initI18n } from "./i18n";
-import { initTheme, initWindowSize } from "./store/settingsStore";
+import { initProxyPlayback, initTheme, initWindowSize } from "./store/settingsStore";
 import { onGoHome } from "./lib/api";
 
 function Toast() {
@@ -65,6 +67,7 @@ export default function App() {
     initI18n();
     initTheme();
     initWindowSize();
+    initProxyPlayback();
     void startSync();
     void startMediaSync();
     // Window closed → app stays resident; return to the launcher (so a
@@ -104,6 +107,7 @@ export default function App() {
       }}
     >
       <CompatibilityBanner />
+      <ApplicationMenuBridge />
       {view === "home" ? (
         <HomeView />
       ) : view === "library" ? (
@@ -119,6 +123,7 @@ export default function App() {
       {settingsOpen && <SettingsView />}
       <ExportDialog />
       <SaveAsProgress />
+      <ProjectSettingsMismatchDialog />
       <Toast />
     </div>
   );

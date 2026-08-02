@@ -7,11 +7,11 @@
 //! base64 PNG data URL the WebView paints onto a `<canvas>` (replacing the black
 //! placeholder shown on the Timeline tab).
 //!
-//! Scope: **video + image + text** layers. Text clips rasterize through
+//! Scope: **video + image + text + Lottie** layers. Text clips rasterize through
 //! `CosmicTextRasterizer` (cosmic-text glyph layout + swash raster) to a
 //! premultiplied-RGBA box texture composited last, like upstream's `CATextLayer`
-//! (#65). **Lottie** layers are still skipped (the resolver returns `None`, so
-//! the compositor omits them) until the bake path is wired (#65 follow-up).
+//! (#65). Lottie JSON is parsed by Velato and rasterized by Vello into the same
+//! device-local premultiplied-RGBA texture contract used by playback/export.
 //!
 //! The GPU device + compositor are acquired once and cached in Tauri managed
 //! state ([`RenderState`]); only the per-frame texture cache is short-lived. A
@@ -19,7 +19,8 @@
 //! (one frame at a time, no GPU contention). The continuous playback engine
 //! (#53) will move this onto a dedicated render thread.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -27,20 +28,27 @@ use std::sync::Mutex;
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tauri::State;
 
 use opentake_core::{AppCore, EditCommand, ProjectRevision};
-use opentake_domain::{ClipType, MediaSource, TextStyle, Timeline};
+use opentake_domain::{ClipType, LutReference, MediaSource, TextStyle, Timeline};
 use opentake_media::{
-    decode_frame_at, decode_frame_at_cancellable, FrameRequest, MediaCancelToken,
+    decode_frame_at, decode_frame_at_cancellable, interpolate_frame_pair,
+    FrameInterpolationFallback, FrameInterpolationMode, FrameRequest, MediaCancelToken,
 };
 use opentake_ops::command::RenameEntry;
+use opentake_project::ProjectRoot;
+use opentake_render::gpu::compositor::{
+    TextureInterpolationConfig, TextureInterpolationFallback, TextureInterpolationMode,
+    TextureResolveRequest,
+};
 use opentake_render::gpu::texture::upload_rgba;
 use opentake_render::wgpu;
 use opentake_render::{
-    build_render_plan, even, Compositor, CosmicTextRasterizer, DecodedFrame, GpuTexture,
-    RenderDevice, RenderSize, SourceMetrics, TextRasterRequest, TextRasterizer, TextureCache,
-    TextureResolver, TextureSource,
+    even, try_build_render_plan, Compositor, CosmicTextRasterizer, DecodedFrame, GpuLutTexture,
+    GpuTexture, RenderDevice, RenderSize, SourceMetrics, TextRasterRequest, TextRasterizer,
+    TextureCache, TextureResolver, TextureSource,
 };
 
 /// Cap (longest canvas side, px) for a composite when the caller passes no
@@ -74,6 +82,8 @@ pub struct CompositeFrameRequest {
     pub session_id: String,
     pub session_generation: u64,
     pub seek_generation: u64,
+    #[serde(default)]
+    pub sequence_id: Option<String>,
 }
 
 /// Lazily-acquired GPU device + compositor, cached across composite calls.
@@ -83,6 +93,10 @@ struct GpuContext {
     compositor: Compositor,
     /// Text rasterizer (system fonts discovered once on first composite).
     text_rasterizer: CosmicTextRasterizer,
+    /// Vector pipelines are discarded when the GPU context is rebuilt, so they
+    /// never cross a device-loss boundary. Rc texture caches remain local to a
+    /// composite call because Tauri managed state must be Send + Sync.
+    lottie: LottieMaterializer,
 }
 
 /// Tauri managed state holding the (lazily created) GPU context. `None` until the
@@ -243,6 +257,7 @@ impl PreviewCompositeCoordinator {
 /// Resolvable info for one media asset, projected from the manifest.
 struct MediaInfo {
     path: PathBuf,
+    source_fps: Option<f64>,
 }
 
 /// A text clip projected from the timeline, keyed by clip id. The box's width /
@@ -259,21 +274,274 @@ struct TextInfo {
 /// auto-rotates on decode in this first cut).
 struct ManifestMetrics {
     sizes: HashMap<String, (u32, u32)>,
+    straight_alpha: HashSet<String>,
 }
 
 impl SourceMetrics for ManifestMetrics {
     fn natural_size(&self, media_ref: &str) -> Option<(u32, u32)> {
         self.sizes.get(media_ref).copied()
     }
+
+    fn needs_premultiply(&self, media_ref: &str) -> bool {
+        self.straight_alpha.contains(media_ref)
+    }
+}
+
+const MAX_LOTTIE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_LOTTIE_DIMENSION: usize = 4096;
+
+struct CachedLottie {
+    content_hash: String,
+    composition: velato::Composition,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LottieMetadata {
+    pub width: u32,
+    pub height: u32,
+    pub frame_rate: f64,
+    pub frame_count: i64,
+    pub duration_seconds: f64,
+}
+
+/// Device-lifetime Lottie JSON parser/rasterizer shared by preview, playback,
+/// and export. GPU textures live in the caller's [`TextureCache`]; parsed
+/// documents live here and are replaced whenever the source content hash
+/// changes. Dropping the owning GPU context drops both halves, so a recovered
+/// device never receives a texture or Vello pipeline created by the old device.
+pub(crate) struct LottieMaterializer {
+    documents: HashMap<PathBuf, CachedLottie>,
+    scene_renderer: velato::Renderer,
+    gpu_renderer: Option<velato::vello::Renderer>,
+}
+
+impl LottieMaterializer {
+    pub(crate) fn new() -> Self {
+        Self {
+            documents: HashMap::new(),
+            scene_renderer: velato::Renderer::new(),
+            gpu_renderer: None,
+        }
+    }
+
+    fn ensure_document(&mut self, path: &std::path::Path) -> Result<(), String> {
+        let bytes = std::fs::read(path)
+            .map_err(|error| format!("read Lottie document {}: {error}", path.display()))?;
+        if bytes.is_empty() || bytes.len() > MAX_LOTTIE_BYTES {
+            return Err(format!(
+                "Lottie document {} must be 1..={MAX_LOTTIE_BYTES} bytes (got {})",
+                path.display(),
+                bytes.len()
+            ));
+        }
+        let content_hash = format!("{:x}", Sha256::digest(&bytes));
+        let needs_parse = self
+            .documents
+            .get(path)
+            .is_none_or(|cached| cached.content_hash != content_hash);
+        if needs_parse {
+            let composition = std::panic::catch_unwind(|| velato::Composition::from_slice(&bytes))
+                .map_err(|_| {
+                    format!(
+                        "Lottie document {} uses an unsupported or malformed feature",
+                        path.display()
+                    )
+                })?
+                .map_err(|error| format!("parse Lottie document {}: {error}", path.display()))?;
+            validate_lottie(&composition, path)?;
+            self.documents.insert(
+                path.to_path_buf(),
+                CachedLottie {
+                    content_hash,
+                    composition,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn metadata(&mut self, path: &std::path::Path) -> Result<LottieMetadata, String> {
+        self.ensure_document(path)?;
+        let composition = &self
+            .documents
+            .get(path)
+            .expect("document inserted or already cached")
+            .composition;
+        let frame_count = lottie_frame_count(composition);
+        Ok(LottieMetadata {
+            width: composition.width as u32,
+            height: composition.height as u32,
+            frame_rate: composition.frame_rate,
+            frame_count,
+            duration_seconds: frame_count as f64 / composition.frame_rate,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn resolve(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        textures: &mut TextureCache,
+        path: &std::path::Path,
+        source_frame: i64,
+        render_box: (u32, u32),
+        label: &str,
+    ) -> Result<Rc<GpuTexture>, String> {
+        self.ensure_document(path)?;
+
+        let cached = self
+            .documents
+            .get(path)
+            .expect("document inserted or already cached");
+        let content_hash = cached.content_hash.clone();
+        let composition = &cached.composition;
+        let frame_count = lottie_frame_count(composition);
+        let internal_frame = source_frame.rem_euclid(frame_count);
+        let (width, height) = lottie_texture_size(composition, render_box);
+        let key = format!("l:{content_hash}:{internal_frame}:{width}x{height}");
+        if let Some(texture) = textures.get(&key) {
+            return Ok(texture);
+        }
+
+        let transform = velato::vello::kurbo::Affine::scale_non_uniform(
+            width as f64 / composition.width as f64,
+            height as f64 / composition.height as f64,
+        );
+        let frame = composition.frames.start + internal_frame as f64;
+        let scene = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.scene_renderer
+                .render(composition, frame, transform, 1.0)
+        }))
+        .map_err(|_| {
+            format!(
+                "render Lottie document {} failed on an unsupported feature",
+                path.display()
+            )
+        })?;
+        if self.gpu_renderer.is_none() {
+            self.gpu_renderer = Some(
+                velato::vello::Renderer::new(
+                    device,
+                    velato::vello::RendererOptions {
+                        surface_format: None,
+                        use_cpu: false,
+                        antialiasing_support: velato::vello::AaSupport::area_only(),
+                        num_init_threads: NonZeroUsize::new(1),
+                    },
+                )
+                .map_err(|error| format!("initialize Lottie GPU renderer: {error}"))?,
+            );
+        }
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        self.gpu_renderer
+            .as_mut()
+            .expect("renderer initialized above")
+            .render_to_texture(
+                device,
+                queue,
+                &scene,
+                &view,
+                &velato::vello::RenderParams {
+                    base_color: velato::vello::peniko::color::palette::css::TRANSPARENT,
+                    width,
+                    height,
+                    antialiasing_method: velato::vello::AaConfig::Area,
+                },
+            )
+            .map_err(|error| format!("render Lottie frame {internal_frame}: {error}"))?;
+
+        Ok(textures.insert(
+            key,
+            GpuTexture {
+                texture,
+                view,
+                width,
+                height,
+            },
+        ))
+    }
+}
+
+impl Default for LottieMaterializer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn validate_lottie(
+    composition: &velato::Composition,
+    path: &std::path::Path,
+) -> Result<(), String> {
+    if composition.width == 0
+        || composition.height == 0
+        || composition.width > MAX_LOTTIE_DIMENSION
+        || composition.height > MAX_LOTTIE_DIMENSION
+    {
+        return Err(format!(
+            "Lottie document {} canvas must be within 1..={MAX_LOTTIE_DIMENSION} (got {}x{})",
+            path.display(),
+            composition.width,
+            composition.height
+        ));
+    }
+    if !composition.frames.start.is_finite()
+        || !composition.frames.end.is_finite()
+        || composition.frames.end <= composition.frames.start
+        || !composition.frame_rate.is_finite()
+        || composition.frame_rate <= 0.0
+    {
+        return Err(format!(
+            "Lottie document {} has an invalid frame range or frame rate",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+fn lottie_frame_count(composition: &velato::Composition) -> i64 {
+    (composition.frames.end - composition.frames.start)
+        .ceil()
+        .clamp(1.0, i64::MAX as f64) as i64
+}
+
+fn lottie_texture_size(composition: &velato::Composition, render_box: (u32, u32)) -> (u32, u32) {
+    let max_width = render_box.0.max(1) as f64;
+    let max_height = render_box.1.max(1) as f64;
+    let scale = (max_width / composition.width as f64)
+        .min(max_height / composition.height as f64)
+        .min(1.0);
+    (
+        (composition.width as f64 * scale).round().max(1.0) as u32,
+        (composition.height as f64 * scale).round().max(1.0) as u32,
+    )
 }
 
 /// `TextureResolver` that decodes a layer's pixels on demand via ffmpeg and
-/// uploads them to the GPU (with a small LRU cache). Video/image only; text and
-/// Lottie return `None` (skipped by the compositor) in this cut.
+/// uploads them to the GPU (with a small LRU cache). Image and Lottie cache keys
+/// include source content hashes, so edited files cannot reuse stale textures.
 struct MediaResolver<'d> {
     device: &'d wgpu::Device,
     queue: &'d wgpu::Queue,
-    cache: TextureCache,
+    cache: &'d mut TextureCache,
+    lottie: &'d mut LottieMaterializer,
     media: &'d HashMap<String, MediaInfo>,
     timeline_fps: i32,
     /// Text clips by id (content + style + box) for on-demand rasterization.
@@ -283,6 +551,9 @@ struct MediaResolver<'d> {
     /// Downscale box for decoded source frames (matches the preview render size).
     preview_box: (u32, u32),
     cancel: &'d MediaCancelToken,
+    project_root: Option<&'d ProjectRoot>,
+    lut_cache: &'d mut HashMap<String, Rc<GpuLutTexture>>,
+    materialization_error: Option<String>,
 }
 
 impl MediaResolver<'_> {
@@ -308,26 +579,117 @@ impl MediaResolver<'_> {
         let tex = upload_rgba(self.device, self.queue, &frame, false, Some("preview-text"));
         Some(self.cache.insert(key, tex))
     }
+
+    fn resolve_interpolated_video(
+        &mut self,
+        media_ref: &str,
+        source_frame: i64,
+        interpolation: TextureInterpolationConfig,
+    ) -> Option<Rc<GpuTexture>> {
+        let key = format!(
+            "vf:{media_ref}:{source_frame}:{:?}:{:.6}:{:.6}",
+            interpolation.mode, interpolation.source_fps, interpolation.target_fps
+        );
+        if let Some(tex) = self.cache.get(&key) {
+            return Some(tex);
+        }
+        let info = self.media.get(media_ref)?;
+        let source_fps = info.source_fps.unwrap_or(interpolation.source_fps);
+        if !source_fps.is_finite() || source_fps <= 0.0 {
+            return None;
+        }
+        let timestamp = source_frame.max(0) as f64 / interpolation.target_fps;
+        let source_position = timestamp * source_fps;
+        let first_index = source_position.floor().max(0.0) as i64;
+        let next_index = source_position.ceil().max(0.0) as i64;
+        let alpha = source_position - first_index as f64;
+        let decode = |index: i64| {
+            decode_frame_at_cancellable(
+                &info.path,
+                &FrameRequest {
+                    time_secs: index as f64 / source_fps,
+                    max_size: self.preview_box,
+                    tolerance_secs: 0.0,
+                    apply_rotation: true,
+                },
+                self.cancel,
+            )
+            .ok()
+            .map(|(_, frame)| frame)
+        };
+        let first = decode(first_index)?;
+        let last = if next_index == first_index {
+            first.clone()
+        } else {
+            // A half-open media duration may not expose the mathematical next
+            // frame at the tail. Hold the last decodable endpoint instead of
+            // dropping the whole layer to black.
+            decode(next_index).unwrap_or_else(|| first.clone())
+        };
+        let requested = match interpolation.mode {
+            TextureInterpolationMode::Nearest => FrameInterpolationMode::Nearest,
+            TextureInterpolationMode::Blend => FrameInterpolationMode::Blend,
+            TextureInterpolationMode::OpticalFlow => FrameInterpolationMode::OpticalFlow,
+        };
+        let fallback = match interpolation.fallback {
+            TextureInterpolationFallback::Nearest => FrameInterpolationFallback::Nearest,
+            TextureInterpolationFallback::Blend => FrameInterpolationFallback::Blend,
+            TextureInterpolationFallback::Error => FrameInterpolationFallback::Error,
+        };
+        let frame = interpolate_frame_pair(&first, &last, alpha, requested, fallback, true)
+            .ok()?
+            .frame;
+        let decoded = DecodedFrame::new(frame.width, frame.height, frame.rgba, false);
+        let tex = upload_rgba(
+            self.device,
+            self.queue,
+            &decoded,
+            false,
+            Some("preview-optical-flow"),
+        );
+        Some(self.cache.insert(key, tex))
+    }
 }
 
 impl TextureResolver for MediaResolver<'_> {
     fn resolve(&mut self, source: &TextureSource, source_frame: i64) -> Option<Rc<GpuTexture>> {
-        // Map the source to (asset id, cache key). Video keys per frame; images
-        // key once. Text rasterizes its box; Lottie is not supported yet.
-        let (media_ref, key, is_image) = match source {
-            TextureSource::Decoded { media_ref } => {
-                (media_ref, format!("v:{media_ref}:{source_frame}"), false)
-            }
-            TextureSource::Image { media_ref } => (media_ref, format!("i:{media_ref}"), true),
+        let (media_ref, is_image) = match source {
+            TextureSource::Decoded { media_ref } => (media_ref, false),
+            TextureSource::Image { media_ref } => (media_ref, true),
             TextureSource::Text { clip_id } => return self.resolve_text(clip_id),
-            TextureSource::Lottie { .. } => return None,
+            TextureSource::Lottie { media_ref } => {
+                let info = self.media.get(media_ref)?;
+                return match self.lottie.resolve(
+                    self.device,
+                    self.queue,
+                    self.cache,
+                    &info.path,
+                    source_frame,
+                    self.preview_box,
+                    "preview-lottie",
+                ) {
+                    Ok(texture) => Some(texture),
+                    Err(error) => {
+                        eprintln!("[render] {error}");
+                        self.materialization_error = Some(error);
+                        None
+                    }
+                };
+            }
+        };
+
+        let info = self.media.get(media_ref)?;
+        let key = if is_image {
+            let content_hash = opentake_media::file_sha256(&info.path).ok()?;
+            format!("i:{content_hash}")
+        } else {
+            format!("v:{media_ref}:{source_frame}")
         };
 
         if let Some(tex) = self.cache.get(&key) {
             return Some(tex);
         }
 
-        let info = self.media.get(media_ref)?;
         let time_secs = if is_image {
             0.0
         } else {
@@ -357,6 +719,44 @@ impl TextureResolver for MediaResolver<'_> {
             Some("preview-src"),
         );
         Some(self.cache.insert(key, tex))
+    }
+
+    fn resolve_with_interpolation(
+        &mut self,
+        request: TextureResolveRequest<'_>,
+    ) -> Option<Rc<GpuTexture>> {
+        match request.source {
+            TextureSource::Decoded { media_ref }
+                if request.interpolation.mode != TextureInterpolationMode::Nearest =>
+            {
+                self.resolve_interpolated_video(
+                    media_ref,
+                    request.source_frame,
+                    request.interpolation,
+                )
+            }
+            _ => self.resolve(request.source, request.source_frame),
+        }
+    }
+
+    fn resolve_lut(
+        &mut self,
+        reference: &LutReference,
+    ) -> Result<Option<Rc<GpuLutTexture>>, opentake_render::RenderError> {
+        if let Some(cached) = self.lut_cache.get(&reference.id) {
+            return Ok(Some(cached.clone()));
+        }
+        let resolved = crate::lut::resolve_project_lut(
+            self.project_root,
+            reference,
+            self.device,
+            self.queue,
+            "preview-lut",
+        )?;
+        if let Some(texture) = &resolved {
+            self.lut_cache.insert(reference.id.clone(), texture.clone());
+        }
+        Ok(resolved)
     }
 }
 
@@ -405,7 +805,7 @@ fn encode_png_data_url(frame: &DecodedFrame) -> Result<String, String> {
 /// for the preview) and [`capture_frame_to_media`] (which writes it to disk and
 /// imports it as a still). Out-of-range frames / an empty timeline composite to
 /// opaque black — the correct clear color, not an error.
-fn composite_rgba_for_snapshot(
+pub fn composite_timeline_frame(
     timeline: &Timeline,
     manifest: &opentake_domain::MediaManifest,
     project_dir: &Option<PathBuf>,
@@ -417,30 +817,41 @@ fn composite_rgba_for_snapshot(
     // Project text clips (content + style + box) so the resolver can rasterize
     // them on demand. Keyed by clip id, matching `TextureSource::Text { clip_id }`.
     let mut text: HashMap<String, TextInfo> = HashMap::new();
-    for track in &timeline.tracks {
-        for clip in &track.clips {
-            if clip.media_type != ClipType::Text {
-                continue;
+    for candidate in std::iter::once(timeline).chain(
+        timeline
+            .nested_sequences
+            .iter()
+            .map(|sequence| &sequence.timeline),
+    ) {
+        for track in &candidate.tracks {
+            for clip in &track.clips {
+                if clip.media_type != ClipType::Text {
+                    continue;
+                }
+                let (Some(content), Some(style)) = (&clip.text_content, &clip.text_style) else {
+                    continue;
+                };
+                let tl = clip.transform.top_left();
+                text.insert(
+                    clip.id.clone(),
+                    TextInfo {
+                        content: content.clone(),
+                        style: style.clone(),
+                        box_norm: (tl.x, tl.y, clip.transform.width, clip.transform.height),
+                    },
+                );
             }
-            let (Some(content), Some(style)) = (&clip.text_content, &clip.text_style) else {
-                continue;
-            };
-            let tl = clip.transform.top_left();
-            text.insert(
-                clip.id.clone(),
-                TextInfo {
-                    content: content.clone(),
-                    style: style.clone(),
-                    box_norm: (tl.x, tl.y, clip.transform.width, clip.transform.height),
-                },
-            );
         }
     }
 
     // Project the manifest into render-side lookups.
     let mut sizes: HashMap<String, (u32, u32)> = HashMap::new();
+    let mut straight_alpha = HashSet::new();
     let mut media: HashMap<String, MediaInfo> = HashMap::new();
     for entry in &manifest.entries {
+        if entry.carries_straight_alpha() {
+            straight_alpha.insert(entry.id.clone());
+        }
         let path = match &entry.source {
             MediaSource::External { absolute_path } => PathBuf::from(absolute_path),
             MediaSource::Project { relative_path } => match &project_dir {
@@ -453,14 +864,29 @@ fn composite_rgba_for_snapshot(
                 sizes.insert(entry.id.clone(), (w as u32, h as u32));
             }
         }
-        media.insert(entry.id.clone(), MediaInfo { path });
+        media.insert(
+            entry.id.clone(),
+            MediaInfo {
+                path,
+                source_fps: entry.source_fps,
+            },
+        );
     }
 
     let render_size = preview_render_size(timeline.width, timeline.height, max_size);
 
-    let metrics = ManifestMetrics { sizes };
-    let plan = build_render_plan(timeline, render_size, &metrics);
+    let metrics = ManifestMetrics {
+        sizes,
+        straight_alpha,
+    };
+    let plan = try_build_render_plan(timeline, render_size, &metrics)
+        .map_err(|error| format!("invalid timeline graph: {error}"))?;
     let frame_plan = plan.frame(timeline, frame);
+    let project_root = project_dir
+        .as_deref()
+        .map(ProjectRoot::open)
+        .transpose()
+        .map_err(|error| format!("open project LUT storage: {error}"))?;
 
     // Acquire (or reuse) the GPU context, then composite + read back. The lock is
     // held across the render so the `Rc`-based texture cache never crosses threads.
@@ -480,30 +906,58 @@ fn composite_rgba_for_snapshot(
             queue: dev.queue,
             compositor,
             text_rasterizer,
+            lottie: LottieMaterializer::new(),
         });
     }
-    let ctx = guard.as_ref().expect("ctx set above");
-
-    let mut resolver = MediaResolver {
-        device: &ctx.device,
-        queue: &ctx.queue,
-        cache: TextureCache::new(TEXTURE_CACHE_CAP),
-        media: &media,
-        timeline_fps: plan.fps,
-        text: &text,
-        text_rasterizer: &ctx.text_rasterizer,
-        preview_box: (render_size.width, render_size.height),
-        cancel,
-    };
-    ctx.compositor
-        .render_to_rgba(
-            &ctx.device,
-            &ctx.queue,
-            render_size,
-            &frame_plan,
-            &mut resolver,
+    let result = {
+        let ctx = guard.as_mut().expect("ctx set above");
+        let mut texture_cache = TextureCache::new(TEXTURE_CACHE_CAP);
+        let mut lut_cache = HashMap::new();
+        let mut resolver = MediaResolver {
+            device: &ctx.device,
+            queue: &ctx.queue,
+            cache: &mut texture_cache,
+            lottie: &mut ctx.lottie,
+            media: &media,
+            timeline_fps: plan.fps,
+            text: &text,
+            text_rasterizer: &ctx.text_rasterizer,
+            preview_box: (render_size.width, render_size.height),
+            cancel,
+            project_root: project_root.as_ref(),
+            lut_cache: &mut lut_cache,
+            materialization_error: None,
+        };
+        let interpolation = TextureInterpolationConfig::new(
+            plan.fps as f64,
+            plan.fps as f64,
+            TextureInterpolationMode::OpticalFlow,
+            TextureInterpolationFallback::Blend,
         )
-        .map_err(|e| format!("composite render failed: {e}"))
+        .map_err(str::to_string)?;
+        let composite = ctx
+            .compositor
+            .render_to_rgba_with_interpolation(
+                &ctx.device,
+                &ctx.queue,
+                render_size,
+                &frame_plan,
+                &mut resolver,
+                interpolation,
+            )
+            .map_err(|e| format!("composite render failed: {e}"));
+        match resolver.materialization_error.take() {
+            Some(error) => Err(format!("Lottie materialization failed: {error}")),
+            None => composite,
+        }
+    };
+    if result.is_err() {
+        // A wgpu device loss or validation failure invalidates every pipeline
+        // and parsed-document renderer bound to this context. The next preview
+        // request reacquires a fresh device and starts with empty caches.
+        guard.take();
+    }
+    result
 }
 
 fn composite_rgba(
@@ -512,10 +966,30 @@ fn composite_rgba(
     frame: i32,
     max_size: u32,
     cancel: &MediaCancelToken,
+    sequence_id: Option<&str>,
 ) -> Result<DecodedFrame, String> {
     let snapshot = core.runtime_snapshot();
-    composite_rgba_for_snapshot(
-        &snapshot.timeline,
+    let selected = sequence_id
+        .map(|sequence_id| {
+            let mut timeline = snapshot
+                .timeline
+                .nested_sequences
+                .iter()
+                .find(|sequence| sequence.id == sequence_id)
+                .map(|sequence| sequence.timeline.clone())
+                .ok_or_else(|| format!("nested sequence not found: {sequence_id}"))?;
+            timeline.nested_sequences = snapshot.timeline.nested_sequences.clone();
+            timeline
+                .nested_sequences
+                .iter_mut()
+                .find(|sequence| sequence.id == sequence_id)
+                .expect("selected sequence came from this registry")
+                .timeline = opentake_domain::Timeline::new();
+            Ok::<_, String>(timeline)
+        })
+        .transpose()?;
+    composite_timeline_frame(
+        selected.as_ref().unwrap_or(&snapshot.timeline),
         &snapshot.media,
         &snapshot.project_dir,
         render,
@@ -554,6 +1028,7 @@ pub fn composite_frame(
         request.frame,
         max_size.unwrap_or(DEFAULT_PREVIEW_CAP),
         &cancel,
+        request.sequence_id.as_deref(),
     )?;
     if cancel.is_cancelled()
         || core.project_revision() != revision
@@ -666,7 +1141,7 @@ fn capture_frame_to_media_workflow(
 ) -> Result<crate::media::MediaListDto, String> {
     // Frame → RGBA. Timeline tab composites; video tab decodes the source frame.
     let composite = match source_media_id {
-        None => composite_rgba(core, render, frame, 0, &MediaCancelToken::new())?,
+        None => composite_rgba(core, render, frame, 0, &MediaCancelToken::new(), None)?,
         Some(id) => decode_source_frame(core, id, frame)?,
     };
 
@@ -809,7 +1284,7 @@ fn capture_freeze_frame_workflow(
     let project_dir = snapshot.project_dir;
     let (solo_timeline, solo_manifest) =
         build_freeze_capture_snapshot(&timeline, &manifest, clip_id)?;
-    let composite = composite_rgba_for_snapshot(
+    let composite = composite_timeline_frame(
         &solo_timeline,
         &solo_manifest,
         &project_dir,
@@ -1084,6 +1559,8 @@ mod tests {
             source_height: Some(1080),
             source_fps: Some(30.0),
             has_audio: Some(false),
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
@@ -1101,6 +1578,8 @@ mod tests {
             source_height: Some(1080),
             source_fps: Some(30.0),
             has_audio: Some(false),
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,

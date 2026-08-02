@@ -113,7 +113,9 @@ mod tests {
         assert_eq!(job.id, "j1");
         assert_eq!(job.status, JobStatus::Running);
         assert_eq!(job.result_urls, None);
+        assert_eq!(job.error_message, None);
         assert_eq!(job.cost_credits, None);
+        assert_eq!(job.completed_at, None);
     }
 
     #[test]

@@ -24,34 +24,45 @@
 
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use image::ImageEncoder;
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
 use opentake_core::{
     importable_clip_type, AppCore, CommittedMediaImport, CoreError, DeferredCoreEvents,
-    PreparedMediaFolderRef, PreparedMediaImportOp, ProbedMedia,
+    DerivedStemProvenance, PreparedMediaFolderRef, PreparedMediaImportOp, ProbedMedia,
 };
 use opentake_domain::{
-    ClipType, GenerationInput, GenerationJobStatus, MediaManifest, MediaManifestEntry, MediaSource,
-    Timeline,
+    AudioDenoise, Clip, ClipType, DenoiseMode, GenerationInput, GenerationJobStatus,
+    LoudnessNormalization, MediaManifest, MediaManifestEntry, MediaProxy, MediaSource,
+    StabilizationTrack, Timeline,
 };
 use opentake_media::library::{FavoriteRequest, LibraryStore, PreparedFavorite};
 #[cfg(test)]
 use opentake_media::MediaCancelToken;
 use opentake_media::{
+    analysis::{
+        analyze_loudness_with_progress, analyze_stabilization as build_stabilization,
+        denoise_interleaved, separate_stems, track_translation_motion, LoudnessNormalizationConfig,
+        StabilizationConfig, StemExecution, StemSeparationRequest,
+    },
     cache_key::visual_file_identity_key,
-    decode_frame_at, decode_frame_at_cancellable, decode_frames_at,
+    create_proxy, decode_frame_at, decode_frame_at_cancellable, decode_frames_at,
+    decode_frames_at_cancellable, extract_pcm_cancellable_with_progress,
     thumbnail::{
         encode_sprite, representative_thumbnail_times, save_sprite, sprite::grid_geometry,
         video_thumbnail_times, EncodedSpriteArtifact, ThumbnailCacheMeta, VideoThumb,
         MAX_VIDEO_THUMBNAILS, THUMB_MAX_SIZE, THUMB_TOLERANCE_SECS,
     },
     waveform::store::CACHE_SUBDIR,
-    FrameRequest, MediaEngine, MediaError, RgbaFrame,
+    FrameRequest, MediaEngine, MediaError, PcmFormat, PcmSpec, ProxyProgressCallback, ProxyRequest,
+    RgbaFrame,
 };
+use opentake_ops::{ClipEntry, EditCommand};
+use opentake_project::ProjectRoot;
 
 use crate::library::LibraryState;
 
@@ -62,6 +73,244 @@ pub mod prewarm;
 /// state.
 pub struct MediaState {
     engine: MediaEngine,
+}
+
+/// Single-flight cooperative cancellation for an Inspector stabilization run.
+#[derive(Default)]
+pub struct StabilizationAnalysisState {
+    active: Mutex<Option<opentake_media::MediaCancelToken>>,
+}
+
+/// Single-flight cooperative cancellation for an Inspector loudness run.
+#[derive(Default)]
+pub struct LoudnessAnalysisState {
+    active: Mutex<Option<opentake_media::MediaCancelToken>>,
+}
+
+/// Single-flight cooperative cancellation for an Inspector denoise validation.
+#[derive(Default)]
+pub struct DenoiseAnalysisState {
+    active: Mutex<Option<opentake_media::MediaCancelToken>>,
+}
+
+/// Single-flight cooperative cancellation for a two-stem separation job.
+#[derive(Default)]
+pub struct StemSeparationState {
+    active: Mutex<Option<opentake_media::MediaCancelToken>>,
+}
+
+/// Single-flight proxy transcode plus the app-level playback preference. The
+/// preference is mirrored from localStorage at startup; it changes playback
+/// source selection only and never changes export resolution.
+#[derive(Default)]
+pub struct MediaProxyState {
+    active: Mutex<Option<opentake_media::MediaCancelToken>>,
+    enabled: AtomicBool,
+}
+
+impl MediaProxyState {
+    fn begin(&self) -> Result<opentake_media::MediaCancelToken, String> {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active.is_some() {
+            return Err("media_proxy_busy".to_string());
+        }
+        let token = opentake_media::MediaCancelToken::new();
+        *active = Some(token.clone());
+        Ok(token)
+    }
+
+    fn finish(&self, token: &opentake_media::MediaCancelToken) {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active
+            .as_ref()
+            .is_some_and(|current| current.same_instance(token))
+        {
+            *active = None;
+        }
+    }
+
+    pub(crate) fn cancel(&self) -> bool {
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        active.as_ref().is_some_and(|token| {
+            token.cancel();
+            true
+        })
+    }
+
+    pub(crate) fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::Acquire)
+    }
+
+    fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Release);
+    }
+}
+
+impl StemSeparationState {
+    fn begin(&self) -> Result<opentake_media::MediaCancelToken, String> {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active.is_some() {
+            return Err("stem_separation_busy".to_string());
+        }
+        let token = opentake_media::MediaCancelToken::new();
+        *active = Some(token.clone());
+        Ok(token)
+    }
+
+    fn finish(&self, token: &opentake_media::MediaCancelToken) {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active
+            .as_ref()
+            .is_some_and(|current| current.same_instance(token))
+        {
+            *active = None;
+        }
+    }
+
+    fn cancel(&self) -> bool {
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        active.as_ref().is_some_and(|token| {
+            token.cancel();
+            true
+        })
+    }
+}
+
+impl DenoiseAnalysisState {
+    fn begin(&self) -> Result<opentake_media::MediaCancelToken, String> {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active.is_some() {
+            return Err("denoise_analysis_busy".to_string());
+        }
+        let token = opentake_media::MediaCancelToken::new();
+        *active = Some(token.clone());
+        Ok(token)
+    }
+
+    fn finish(&self, token: &opentake_media::MediaCancelToken) {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active
+            .as_ref()
+            .is_some_and(|current| current.same_instance(token))
+        {
+            *active = None;
+        }
+    }
+
+    fn cancel(&self) -> bool {
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        active.as_ref().is_some_and(|token| {
+            token.cancel();
+            true
+        })
+    }
+}
+
+impl LoudnessAnalysisState {
+    fn begin(&self) -> Result<opentake_media::MediaCancelToken, String> {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active.is_some() {
+            return Err("loudness_analysis_busy".to_string());
+        }
+        let token = opentake_media::MediaCancelToken::new();
+        *active = Some(token.clone());
+        Ok(token)
+    }
+
+    fn finish(&self, token: &opentake_media::MediaCancelToken) {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active
+            .as_ref()
+            .is_some_and(|current| current.same_instance(token))
+        {
+            *active = None;
+        }
+    }
+
+    fn cancel(&self) -> bool {
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        active.as_ref().is_some_and(|token| {
+            token.cancel();
+            true
+        })
+    }
+}
+
+impl StabilizationAnalysisState {
+    fn begin(&self) -> Result<opentake_media::MediaCancelToken, String> {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active.is_some() {
+            return Err("a stabilization analysis is already running".to_string());
+        }
+        let token = opentake_media::MediaCancelToken::new();
+        *active = Some(token.clone());
+        Ok(token)
+    }
+
+    fn finish(&self, token: &opentake_media::MediaCancelToken) {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if active
+            .as_ref()
+            .is_some_and(|current| current.same_instance(token))
+        {
+            *active = None;
+        }
+    }
+
+    fn cancel(&self) -> bool {
+        let active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(token) = active.as_ref() {
+            token.cancel();
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl MediaState {
@@ -96,11 +345,21 @@ pub struct MediaItemDto {
     pub width: Option<i32>,
     /// Source height in pixels, when known.
     pub height: Option<i32>,
+    /// Probed source frame rate, used by the first-video settings decision.
+    pub source_fps: Option<f64>,
     /// Whether the asset carries audio.
     pub has_audio: bool,
-    /// Absolute path to the source file, when resolvable (external assets only
-    /// in this phase, which is all importing produces).
+    /// Original source color signalling retained for HDR-aware UI.
+    pub color: Option<opentake_domain::MediaColorMetadata>,
+    /// True for PQ/HLG sources. The current compositor delivers SDR BT.709.
+    pub is_hdr: bool,
+    /// Absolute path to the source file, when resolvable. Project-relative
+    /// derived assets are resolved against the open project bundle.
     pub path: Option<String>,
+    /// Absolute project-local playback proxy path when one is materialized.
+    pub proxy_path: Option<String>,
+    pub proxy_width: Option<u32>,
+    pub proxy_height: Option<u32>,
     /// On-disk thumbnail path, or `None` to render a type placeholder.
     pub thumbnail: Option<String>,
     /// Library folder this asset lives in (`None` = root), for the folder view.
@@ -143,12 +402,13 @@ impl MediaItemDto {
         favorite: bool,
     ) -> Self {
         let resolved = resolve_source_path(entry, project_dir);
-        let path = match &entry.source {
-            MediaSource::External { absolute_path } => Some(absolute_path.clone()),
-            // Project-relative assets need the bundle base to resolve; not
-            // produced by importing (always external) but handled for safety.
-            MediaSource::Project { .. } => None,
-        };
+        let path = resolved
+            .as_deref()
+            .map(|path| path.to_string_lossy().into_owned());
+        let resolved_proxy = entry
+            .proxy
+            .as_ref()
+            .and_then(|proxy| trusted_project_proxy_path(project_dir?, &proxy.relative_path));
         let generation_input = entry.generation_input.as_ref();
         let generation_status = match generation_input.and_then(|input| input.status) {
             Some(GenerationJobStatus::Queued | GenerationJobStatus::Generating) => "generating",
@@ -198,8 +458,16 @@ impl MediaItemDto {
             duration: entry.duration,
             width: entry.source_width,
             height: entry.source_height,
+            source_fps: entry.source_fps,
             has_audio: entry.has_audio.unwrap_or(false),
+            color: entry.color.clone(),
+            is_hdr: entry.color.as_ref().is_some_and(|color| color.is_hdr()),
             path,
+            proxy_path: resolved_proxy
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            proxy_width: entry.proxy.as_ref().map(|proxy| proxy.width),
+            proxy_height: entry.proxy.as_ref().map(|proxy| proxy.height),
             thumbnail,
             folder_id: entry.folder_id.clone(),
             file_size,
@@ -721,6 +989,7 @@ fn probe_media(engine: &MediaEngine, path: &Path) -> ProbedMedia {
             height: p.height.map(|h| h as i32),
             fps: p.fps,
             has_audio: p.has_audio,
+            color: p.color,
         },
         Err(_) => ProbedMedia::default(),
     }
@@ -759,6 +1028,7 @@ impl SavedMediaMetadata {
                     height: Some(height),
                     fps: Some(f64::from(summary.fps)),
                     has_audio: summary.has_audio,
+                    color: None,
                 })
             }
             Self::Wav {
@@ -774,6 +1044,7 @@ impl SavedMediaMetadata {
                     height: None,
                     fps: None,
                     has_audio: true,
+                    color: None,
                 })
             }
         }
@@ -1336,8 +1607,14 @@ fn import_media_impl(
 
 /// `get_media`: the current media catalog for the panel. Infallible.
 #[tauri::command]
-pub fn get_media(core: State<'_, AppCore>, media: State<'_, MediaState>) -> MediaListDto {
-    MediaListDto::from_core(&core, Some(media.engine().cache_root()))
+pub fn get_media(
+    app: AppHandle,
+    core: State<'_, AppCore>,
+    media: State<'_, MediaState>,
+) -> MediaListDto {
+    let mut catalog = MediaListDto::from_core(&core, Some(media.engine().cache_root()));
+    grant_catalog_proxy_asset_scope(&app, &mut catalog);
+    catalog
 }
 
 /// Persist one project asset in the content-addressed global library and mirror
@@ -2057,26 +2334,19 @@ fn save_clip_as_media_workflow(
             SavedMediaMetadata::Video(summary)
         }
         "wav" => {
-            let pcm = crate::export::mix_timeline_audio_for_manifest_with_control(
+            let mut writer = output.writer()?;
+            let sample_count = crate::export::write_timeline_audio_wav_for_manifest_with_control(
                 &single_timeline,
                 &subset,
                 &project_dir_option,
+                &mut writer,
                 control,
                 Some(Arc::clone(&on_progress)),
             )?
             .ok_or_else(|| "audio clip contains no decodable audio".to_string())?;
-            let mut writer = output.writer()?;
-            crate::export::write_wav_s16le_cancellable_to_file(
-                &pcm.samples_f32,
-                pcm.spec.sample_rate,
-                &mut writer,
-                guard.cancel_token(),
-                Some(on_progress.as_ref()),
-                None,
-            )?;
             SavedMediaMetadata::Wav {
-                sample_count: pcm.samples_f32.len(),
-                sample_rate: pcm.spec.sample_rate,
+                sample_count,
+                sample_rate: opentake_media::encode::MIX_SAMPLE_RATE,
             }
         }
         _ => unreachable!("save clip extension is fixed by clip type"),
@@ -2196,6 +2466,7 @@ pub fn extract_audio(
 /// entry. Returns the updated catalog (with `missing` recomputed → now `false`).
 #[tauri::command]
 pub fn relink_media(
+    app: AppHandle,
     core: State<'_, AppCore>,
     media: State<'_, MediaState>,
     media_ref: String,
@@ -2205,11 +2476,13 @@ pub fn relink_media(
     if !new.is_file() {
         return Err(format!("file not found: {new_path}"));
     }
+    let _identity = core.lock_project_identity_workflow();
     // Validate the target type matches before touching the catalog (upstream
     // rejects relinking across types). `relink_media_file` re-checks, but doing
     // it here yields a precise message and avoids a needless probe.
-    let manifest = core.media();
-    let entry = manifest
+    let snapshot = core.runtime_snapshot();
+    let entry = snapshot
+        .media
         .entries
         .iter()
         .find(|e| e.id == media_ref)
@@ -2224,8 +2497,28 @@ pub fn relink_media(
     }
 
     let probe = probe_media(media.engine(), &new);
+    let old_proxy = entry.proxy.clone();
+    if old_proxy.is_some() {
+        let project_dir = snapshot
+            .project_dir
+            .as_deref()
+            .ok_or_else(|| "media_proxy_project_must_be_saved".to_string())?;
+        let project_root = ProjectRoot::open(project_dir).map_err(|error| error.to_string())?;
+        core.ensure_project_root_identity_for_project(
+            snapshot.project_epoch,
+            project_dir,
+            project_root.identity(),
+        )
+        .map_err(|error| error.to_string())?;
+    }
     core.relink_media_file(&media_ref, &new, &probe)
         .map_err(|e| e.to_string())?;
+    if let (Some(project_dir), Some(proxy)) = (snapshot.project_dir, old_proxy) {
+        if let Some(path) = trusted_project_proxy_path(&project_dir, &proxy.relative_path) {
+            let _ = std::fs::remove_file(&path);
+            revoke_proxy_asset_file(&app, &path);
+        }
+    }
     Ok(MediaListDto::from_core(
         &core,
         Some(media.engine().cache_root()),
@@ -2519,6 +2812,1049 @@ pub fn get_waveform(
     })
 }
 
+/// Analyze one video clip into a source-bound editable stabilization track.
+/// Decoding is bounded to at most 48 downscaled frames; the source file is
+/// strictly read-only and the caller applies the returned solution separately
+/// through `edit_apply`.
+#[tauri::command]
+pub async fn analyze_stabilization(
+    app: AppHandle,
+    clip_id: String,
+) -> Result<StabilizationTrack, String> {
+    let cancel = app.state::<StabilizationAnalysisState>().begin()?;
+    let prepared = (|| {
+        let snapshot = app.state::<AppCore>().runtime_snapshot();
+        let clip = find_runtime_clip(&snapshot.timeline, &clip_id)
+            .ok_or_else(|| format!("clip not found: {clip_id}"))?;
+        if clip.media_type != ClipType::Video || clip.nested_sequence_id.is_some() {
+            return Err("stabilization requires an ordinary video clip".to_string());
+        }
+        let (path, is_video) =
+            crate::transcribe::resolve_asset_from_snapshot(&snapshot, &clip.media_ref)?;
+        if !is_video {
+            return Err("stabilization source is not a video".to_string());
+        }
+        let fps = snapshot.timeline.fps.max(1) as f64;
+        let sample_count = (clip.duration_frames.max(2) as usize).min(48);
+        let last_relative_frame = (clip.duration_frames - 1).max(1);
+        let relative_frames = (0..sample_count)
+            .map(|index| {
+                ((index as f64 * last_relative_frame as f64 / (sample_count - 1) as f64).round()
+                    as i32)
+                    .clamp(0, last_relative_frame)
+            })
+            .collect::<Vec<_>>();
+        let source_start = clip.trim_start_frame as f64 / fps;
+        let times = relative_frames
+            .iter()
+            .map(|frame| source_start + *frame as f64 * clip.speed.max(0.0001) / fps)
+            .collect::<Vec<_>>();
+        Ok((
+            path,
+            times,
+            relative_frames,
+            source_start,
+            fps,
+            clip.speed,
+            last_relative_frame,
+            clip.media_ref.clone(),
+        ))
+    })();
+
+    let result = match prepared {
+        Err(error) => Err(error),
+        Ok((
+            path,
+            times,
+            relative_frames,
+            source_start,
+            fps,
+            speed,
+            last_relative_frame,
+            source_identity,
+        )) => {
+            let worker_cancel = cancel.clone();
+            match tauri::async_runtime::spawn_blocking(move || {
+                let request = FrameRequest {
+                    max_size: (320, 180),
+                    tolerance_secs: 0.1,
+                    ..FrameRequest::default()
+                };
+                let decoded = decode_frames_at_cancellable(&path, &times, &request, &worker_cancel);
+                let mut frames = decoded
+                    .into_iter()
+                    .filter_map(|result| result.ok())
+                    .map(|(actual, frame)| {
+                        let relative =
+                            ((actual - source_start) * fps / speed.max(0.0001)).round() as i32;
+                        (relative.clamp(0, last_relative_frame), frame)
+                    })
+                    .collect::<Vec<_>>();
+                if frames.len() < relative_frames.len() && worker_cancel.is_cancelled() {
+                    return Err(MediaError::Cancelled.to_string());
+                }
+                frames.sort_by_key(|(frame, _)| *frame);
+                frames.dedup_by_key(|(frame, _)| *frame);
+                let motion = track_translation_motion(&frames, &worker_cancel)
+                    .map_err(|error| error.to_string())?;
+                build_stabilization(
+                    &motion,
+                    source_identity,
+                    StabilizationConfig::default(),
+                    &worker_cancel,
+                )
+                .map_err(|error| error.to_string())
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => Err(format!("stabilization analysis task failed: {error}")),
+            }
+        }
+    };
+    app.state::<StabilizationAnalysisState>().finish(&cancel);
+    result
+}
+
+#[tauri::command]
+pub fn cancel_stabilization_analysis(analysis: State<'_, StabilizationAnalysisState>) -> bool {
+    analysis.cancel()
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LoudnessProgressEvent {
+    clip_id: String,
+    done: usize,
+    total: usize,
+}
+
+/// Analyze the selected clip's exact visible source window. The returned value
+/// is applied in a separate `edit_apply` call so analysis failures never mutate
+/// project history and a successful apply remains one undoable transaction.
+#[tauri::command]
+pub async fn analyze_loudness(
+    app: AppHandle,
+    clip_id: String,
+    target_lufs: f64,
+    true_peak_ceiling_dbtp: f64,
+) -> Result<LoudnessNormalization, String> {
+    let cancel = app.state::<LoudnessAnalysisState>().begin()?;
+    let prepared = (|| {
+        let snapshot = app.state::<AppCore>().runtime_snapshot();
+        let clip = find_runtime_clip(&snapshot.timeline, &clip_id)
+            .ok_or_else(|| format!("loudness_clip_not_found: {clip_id}"))?;
+        if !matches!(clip.media_type, ClipType::Audio | ClipType::Video)
+            || clip.nested_sequence_id.is_some()
+        {
+            return Err(
+                "loudness_unreadable_audio: requires an ordinary audio-bearing clip".to_string(),
+            );
+        }
+        let (path, _) = crate::transcribe::resolve_asset_from_snapshot(&snapshot, &clip.media_ref)
+            .map_err(|error| format!("loudness_unreadable_audio: {error}"))?;
+        let fps = snapshot.timeline.fps.max(1) as f64;
+        let start = clip.trim_start_frame.max(0) as f64 / fps;
+        let duration = clip.source_frames_consumed().max(0) as f64 / fps;
+        if duration <= 0.0 {
+            return Err("loudness_unreadable_audio: clip has no visible duration".to_string());
+        }
+        if duration > 600.0 {
+            return Err(
+                "loudness_audio_too_long: analysis is limited to 10 minutes per clip".to_string(),
+            );
+        }
+        Ok((path, (start, start + duration)))
+    })();
+
+    let result = match prepared {
+        Err(error) => Err(error),
+        Ok((path, range)) => {
+            let worker_cancel = cancel.clone();
+            let worker_app = app.clone();
+            let worker_clip_id = clip_id.clone();
+            match tauri::async_runtime::spawn_blocking(move || {
+                const ANALYSIS_SAMPLE_RATE: u32 = 48_000;
+                let decode_app = worker_app.clone();
+                let decode_clip_id = worker_clip_id.clone();
+                let decode_progress = Arc::new(move |done: usize, total: usize| {
+                    let mapped = done.min(total.max(1)).saturating_mul(60) / total.max(1);
+                    let _ = decode_app.emit(
+                        "loudness://progress",
+                        LoudnessProgressEvent {
+                            clip_id: decode_clip_id.clone(),
+                            done: mapped,
+                            total: 100,
+                        },
+                    );
+                });
+                let pcm = extract_pcm_cancellable_with_progress(
+                    &path,
+                    &PcmSpec {
+                        sample_rate: ANALYSIS_SAMPLE_RATE,
+                        channels: 1,
+                        format: PcmFormat::F32,
+                    },
+                    Some(range),
+                    &worker_cancel,
+                    Some(decode_progress),
+                )
+                .map_err(|error| match error {
+                    MediaError::Cancelled => "loudness_cancelled".to_string(),
+                    other => format!("loudness_unreadable_audio: {other}"),
+                })?;
+                let analysis_app = worker_app.clone();
+                let analysis_clip_id = worker_clip_id.clone();
+                let analysis_progress = Arc::new(move |done: usize, total: usize| {
+                    let mapped = 60 + done.min(total.max(1)).saturating_mul(40) / total.max(1);
+                    let _ = analysis_app.emit(
+                        "loudness://progress",
+                        LoudnessProgressEvent {
+                            clip_id: analysis_clip_id.clone(),
+                            done: mapped,
+                            total: 100,
+                        },
+                    );
+                });
+                let measured = analyze_loudness_with_progress(
+                    &pcm.samples_f32,
+                    ANALYSIS_SAMPLE_RATE,
+                    LoudnessNormalizationConfig {
+                        target_lufs,
+                        true_peak_ceiling_dbtp,
+                    },
+                    &worker_cancel,
+                    Some(analysis_progress),
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(LoudnessNormalization {
+                    target_lufs: measured.target_lufs,
+                    true_peak_ceiling_dbtp: measured.true_peak_ceiling_dbtp,
+                    input_integrated_lufs: measured.input_integrated_lufs,
+                    input_true_peak_dbtp: measured.input_true_peak_dbtp,
+                    gain_db: measured.gain_db,
+                    output_integrated_lufs: measured.output_integrated_lufs,
+                    output_true_peak_dbtp: measured.output_true_peak_dbtp,
+                })
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => Err(format!("loudness_analysis_task_failed: {error}")),
+            }
+        }
+    };
+    app.state::<LoudnessAnalysisState>().finish(&cancel);
+    result
+}
+
+#[tauri::command]
+pub fn cancel_loudness_analysis(analysis: State<'_, LoudnessAnalysisState>) -> bool {
+    analysis.cancel()
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DenoiseProgressEvent {
+    clip_id: String,
+    done: usize,
+    total: usize,
+}
+
+/// Decode and process the exact visible source window before an Inspector apply.
+/// The processed copy is discarded: success proves the configured operation is
+/// runnable, while the source stays immutable and the separate edit command is
+/// the only history mutation.
+#[tauri::command]
+pub async fn prepare_denoise(
+    app: AppHandle,
+    clip_id: String,
+    mode: DenoiseMode,
+    strength: f64,
+    preview_enabled: bool,
+) -> Result<AudioDenoise, String> {
+    let cancel = app.state::<DenoiseAnalysisState>().begin()?;
+    let config = AudioDenoise {
+        mode,
+        strength,
+        preview_enabled,
+    };
+    let prepared = (|| {
+        config
+            .validate()
+            .map_err(|error| format!("denoise_invalid_config: {error}"))?;
+        let snapshot = app.state::<AppCore>().runtime_snapshot();
+        let clip = find_runtime_clip(&snapshot.timeline, &clip_id)
+            .ok_or_else(|| format!("denoise_clip_not_found: {clip_id}"))?;
+        if !matches!(clip.media_type, ClipType::Audio | ClipType::Video)
+            || clip.nested_sequence_id.is_some()
+        {
+            return Err(
+                "denoise_unreadable_audio: requires an ordinary audio-bearing clip".to_string(),
+            );
+        }
+        let (path, _) = crate::transcribe::resolve_asset_from_snapshot(&snapshot, &clip.media_ref)
+            .map_err(|error| format!("denoise_unreadable_audio: {error}"))?;
+        let fps = snapshot.timeline.fps.max(1) as f64;
+        let start = clip.trim_start_frame.max(0) as f64 / fps;
+        let duration = clip.source_frames_consumed().max(0) as f64 / fps;
+        if duration <= 0.0 {
+            return Err("denoise_unreadable_audio: clip has no visible duration".to_string());
+        }
+        if duration > 600.0 {
+            return Err(
+                "denoise_audio_too_long: validation is limited to 10 minutes per clip".to_string(),
+            );
+        }
+        Ok((path, (start, start + duration)))
+    })();
+
+    let result = match prepared {
+        Err(error) => Err(error),
+        Ok((path, range)) => {
+            let worker_cancel = cancel.clone();
+            let worker_app = app.clone();
+            let worker_clip_id = clip_id.clone();
+            match tauri::async_runtime::spawn_blocking(move || {
+                const SAMPLE_RATE: u32 = 48_000;
+                let decode_app = worker_app.clone();
+                let decode_clip_id = worker_clip_id.clone();
+                let decode_progress = Arc::new(move |done: usize, total: usize| {
+                    let mapped = done.min(total.max(1)).saturating_mul(60) / total.max(1);
+                    let _ = decode_app.emit(
+                        "denoise://progress",
+                        DenoiseProgressEvent {
+                            clip_id: decode_clip_id.clone(),
+                            done: mapped,
+                            total: 100,
+                        },
+                    );
+                });
+                let pcm = extract_pcm_cancellable_with_progress(
+                    &path,
+                    &PcmSpec {
+                        sample_rate: SAMPLE_RATE,
+                        channels: 1,
+                        format: PcmFormat::F32,
+                    },
+                    Some(range),
+                    &worker_cancel,
+                    Some(decode_progress),
+                )
+                .map_err(|error| match error {
+                    MediaError::Cancelled => "denoise_cancelled".to_string(),
+                    other => format!("denoise_unreadable_audio: {other}"),
+                })?;
+                let process_app = worker_app.clone();
+                let process_clip_id = worker_clip_id.clone();
+                let process_progress = Arc::new(move |done: usize, total: usize| {
+                    let mapped = 60 + done.min(total.max(1)).saturating_mul(40) / total.max(1);
+                    let _ = process_app.emit(
+                        "denoise://progress",
+                        DenoiseProgressEvent {
+                            clip_id: process_clip_id.clone(),
+                            done: mapped,
+                            total: 100,
+                        },
+                    );
+                });
+                let _processed = denoise_interleaved(
+                    &pcm.samples_f32,
+                    1,
+                    SAMPLE_RATE,
+                    config,
+                    &worker_cancel,
+                    Some(process_progress),
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(config)
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(error) => Err(format!("denoise_analysis_task_failed: {error}")),
+            }
+        }
+    };
+    app.state::<DenoiseAnalysisState>().finish(&cancel);
+    result
+}
+
+#[tauri::command]
+pub fn cancel_denoise_analysis(analysis: State<'_, DenoiseAnalysisState>) -> bool {
+    analysis.cancel()
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StemProgressEvent {
+    source_asset_id: String,
+    done: usize,
+    total: usize,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StemSeparationDto {
+    pub vocals_asset_id: String,
+    pub accompaniment_asset_id: String,
+    pub source_sha256: String,
+    pub execution: String,
+    pub model_sha256: Option<String>,
+    pub vocal_sdr_improvement_db: f64,
+}
+
+/// Run local stem separation off the UI thread, import both outputs atomically,
+/// and persist their source/model provenance. Hosted mode is fail-closed until
+/// a concrete provider adapter is configured; no upload occurs in this command.
+#[tauri::command]
+pub async fn separate_audio_stems(
+    app: AppHandle,
+    source_asset_id: String,
+    execution: String,
+    provider: Option<String>,
+    model: Option<String>,
+    upload_confirmed: bool,
+) -> Result<StemSeparationDto, String> {
+    if execution != "local" {
+        if provider.as_deref().is_none_or(str::is_empty)
+            || model.as_deref().is_none_or(str::is_empty)
+        {
+            return Err("stem_hosted_provider_and_model_required".to_string());
+        }
+        if !upload_confirmed {
+            return Err("stem_hosted_privacy_confirmation_required".to_string());
+        }
+        return Err("stem_hosted_provider_not_configured".to_string());
+    }
+
+    let cancel = app.state::<StemSeparationState>().begin()?;
+    let result = async {
+        let core = app.state::<AppCore>();
+        core.ensure_project_mutable()
+            .map_err(|error| error.to_string())?;
+        let snapshot = core.runtime_snapshot();
+        let project_dir = snapshot
+            .project_dir
+            .clone()
+            .ok_or_else(|| "stem_project_must_be_saved".to_string())?;
+        let source_entry = snapshot
+            .media
+            .entries
+            .iter()
+            .find(|entry| entry.id == source_asset_id)
+            .cloned()
+            .ok_or_else(|| format!("stem_source_not_found:{source_asset_id}"))?;
+        if !matches!(source_entry.kind, ClipType::Audio | ClipType::Video)
+            || !source_entry
+                .has_audio
+                .unwrap_or(source_entry.kind == ClipType::Audio)
+        {
+            return Err("stem_source_has_no_audio".to_string());
+        }
+        let source_path = source_path_for_entry(&source_entry, Some(&project_dir))?;
+        if !source_path.is_file() {
+            return Err("stem_source_unreadable".to_string());
+        }
+        let output_dir = project_dir
+            .join("media")
+            .join(format!("stems-{}", uuid::Uuid::new_v4()));
+        let model_dir = app
+            .state::<MediaState>()
+            .engine()
+            .models_dir()
+            .to_path_buf();
+        let worker_app = app.clone();
+        let worker_asset_id = source_asset_id.clone();
+        let worker_cancel = cancel.clone();
+        let worker_output_dir = output_dir.clone();
+        let separated = match tauri::async_runtime::spawn_blocking(move || {
+            let progress_app = worker_app.clone();
+            let progress_asset_id = worker_asset_id.clone();
+            let progress = Arc::new(move |done: usize, total: usize| {
+                let _ = progress_app.emit(
+                    "stems://progress",
+                    StemProgressEvent {
+                        source_asset_id: progress_asset_id.clone(),
+                        done,
+                        total,
+                    },
+                );
+            });
+            separate_stems(
+                StemSeparationRequest {
+                    source: &source_path,
+                    output_dir: &worker_output_dir,
+                    execution: StemExecution::Local {
+                        model_dir: &model_dir,
+                    },
+                },
+                &worker_cancel,
+                Some(progress),
+            )
+        })
+        .await
+        {
+            Ok(Ok(result)) => result,
+            Ok(Err(MediaError::Cancelled)) => {
+                let _ = std::fs::remove_dir_all(&output_dir);
+                return Err("stem_separation_cancelled".to_string());
+            }
+            Ok(Err(error)) => {
+                let _ = std::fs::remove_dir_all(&output_dir);
+                return Err(format!("stem_separation_failed:{error}"));
+            }
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(&output_dir);
+                return Err(format!("stem_separation_task_failed:{error}"));
+            }
+        };
+        if cancel.is_cancelled() {
+            let _ = std::fs::remove_dir_all(&output_dir);
+            return Err("stem_separation_cancelled".to_string());
+        }
+        let media = app.state::<MediaState>();
+        let vocals_probe = probe_media(media.engine(), &separated.vocals.path);
+        let accompaniment_probe = probe_media(media.engine(), &separated.accompaniment.path);
+        if !vocals_probe.has_audio || !accompaniment_probe.has_audio {
+            let _ = std::fs::remove_dir_all(&output_dir);
+            return Err("stem_output_probe_failed".to_string());
+        }
+        let common = |stem: &str| DerivedStemProvenance {
+            source_asset_id: source_asset_id.clone(),
+            source_sha256: separated.provenance.source_sha256.clone(),
+            execution: separated.provenance.execution.clone(),
+            model_sha256: separated.provenance.model_sha256.clone(),
+            stem: stem.to_string(),
+        };
+        let committed = core
+            .import_media_batch_for_project_persisted(
+                snapshot.project_epoch,
+                &project_dir,
+                vec![
+                    PreparedMediaImportOp::ImportDerivedStem {
+                        path: separated.vocals.path.clone(),
+                        name: separated.vocals.name.clone(),
+                        probe: vocals_probe,
+                        provenance: common("vocals"),
+                    },
+                    PreparedMediaImportOp::ImportDerivedStem {
+                        path: separated.accompaniment.path.clone(),
+                        name: separated.accompaniment.name.clone(),
+                        probe: accompaniment_probe,
+                        provenance: common("accompaniment"),
+                    },
+                ],
+            )
+            .map_err(|error| {
+                let _ = std::fs::remove_dir_all(&output_dir);
+                format!("stem_import_failed:{error}")
+            })?;
+        if committed.len() != 2 {
+            return Err("stem_import_incomplete".to_string());
+        }
+        Ok(StemSeparationDto {
+            vocals_asset_id: committed[0].entry.id.clone(),
+            accompaniment_asset_id: committed[1].entry.id.clone(),
+            source_sha256: separated.provenance.source_sha256,
+            execution: separated.provenance.execution,
+            model_sha256: separated.provenance.model_sha256,
+            vocal_sdr_improvement_db: separated.metrics.vocal_sdr_improvement_db,
+        })
+    }
+    .await;
+    app.state::<StemSeparationState>().finish(&cancel);
+    result
+}
+
+#[tauri::command]
+pub fn cancel_stem_separation(state: State<'_, StemSeparationState>) -> bool {
+    state.cancel()
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportStemsToTracksDto {
+    pub clip_ids: Vec<String>,
+    pub action_name: String,
+}
+
+/// Place an already reviewed aligned stem pair on separate fresh audio tracks
+/// as one undoable edit. The derived media remain reusable in the catalog when
+/// the placement is undone.
+#[tauri::command]
+pub fn import_stems_to_tracks(
+    core: State<'_, AppCore>,
+    vocals_asset_id: String,
+    accompaniment_asset_id: String,
+    start_frame: i32,
+) -> Result<ImportStemsToTracksDto, String> {
+    import_stems_to_tracks_core(&core, vocals_asset_id, accompaniment_asset_id, start_frame)
+}
+
+fn import_stems_to_tracks_core(
+    core: &AppCore,
+    vocals_asset_id: String,
+    accompaniment_asset_id: String,
+    start_frame: i32,
+) -> Result<ImportStemsToTracksDto, String> {
+    if start_frame < 0 || vocals_asset_id == accompaniment_asset_id {
+        return Err("stem_track_import_invalid_arguments".to_string());
+    }
+    let snapshot = core.runtime_snapshot();
+    let find = |id: &str, expected_stem: &str| {
+        let entry = snapshot
+            .media
+            .entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .ok_or_else(|| format!("stem_track_import_asset_not_found:{id}"))?;
+        if entry.kind != ClipType::Audio
+            || entry
+                .generation_input
+                .as_ref()
+                .is_none_or(|input| input.prompt != format!("stem:{expected_stem}"))
+        {
+            return Err(format!("stem_track_import_asset_invalid:{id}"));
+        }
+        Ok(entry)
+    };
+    let vocals = find(&vocals_asset_id, "vocals")?;
+    let accompaniment = find(&accompaniment_asset_id, "accompaniment")?;
+    let fps = snapshot.timeline.fps.max(1) as f64;
+    let vocals_duration = (vocals.duration * fps).round().max(1.0) as i32;
+    let accompaniment_duration = (accompaniment.duration * fps).round().max(1.0) as i32;
+    if (vocals_duration - accompaniment_duration).abs() > 1 {
+        return Err("stem_track_import_duration_mismatch".to_string());
+    }
+    let duration_frames = vocals_duration.max(accompaniment_duration);
+    let entry = |media_ref: String| ClipEntry {
+        media_ref,
+        media_type: ClipType::Audio,
+        source_clip_type: ClipType::Audio,
+        track_index: 0,
+        start_frame,
+        duration_frames,
+        trim_start_frame: None,
+        trim_end_frame: None,
+        has_audio: true,
+        add_linked_audio: false,
+        transform: None,
+    };
+    let result = core
+        .apply_at_revision(
+            opentake_core::ProjectRevision {
+                project_epoch: snapshot.project_epoch,
+                version: snapshot.version,
+            },
+            EditCommand::AddClipsToSeparateAutoTracks {
+                entries: vec![entry(vocals_asset_id), entry(accompaniment_asset_id)],
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(ImportStemsToTracksDto {
+        clip_ids: result.affected_clip_ids,
+        action_name: result.action_name,
+    })
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaProxyProgressEvent {
+    asset_id: String,
+    done: usize,
+    total: usize,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaProxyDto {
+    pub asset_id: String,
+    pub path: String,
+    pub source_sha256: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+fn resolved_project_proxy_path(project_dir: &Path, relative_path: &str) -> Option<PathBuf> {
+    let relative = Path::new(relative_path);
+    if relative.is_absolute() {
+        return None;
+    }
+    let components: Vec<_> = relative.components().collect();
+    if components.len() != 3
+        || components[0] != std::path::Component::Normal(std::ffi::OsStr::new("media"))
+        || components[1] != std::path::Component::Normal(std::ffi::OsStr::new("proxies"))
+        || !matches!(components[2], std::path::Component::Normal(_))
+        || relative
+            .extension()
+            .and_then(|extension| extension.to_str())
+            != Some("mp4")
+    {
+        return None;
+    }
+    Some(project_dir.join(relative))
+}
+
+fn metadata_is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+fn project_proxy_directory(project_dir: &Path, create: bool) -> Result<PathBuf, String> {
+    let project_metadata = std::fs::symlink_metadata(project_dir)
+        .map_err(|error| format!("media_proxy_project_metadata_failed:{error}"))?;
+    if !project_metadata.is_dir() || metadata_is_symlink_or_reparse(&project_metadata) {
+        return Err("media_proxy_project_directory_required".to_string());
+    }
+    let project_root = project_dir
+        .canonicalize()
+        .map_err(|error| format!("media_proxy_project_resolve_failed:{error}"))?;
+
+    let media_dir = project_dir.join("media");
+    match std::fs::symlink_metadata(&media_dir) {
+        Ok(metadata) if metadata.is_dir() && !metadata_is_symlink_or_reparse(&metadata) => {}
+        Ok(_) => return Err("media_proxy_media_directory_required".to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => {
+            std::fs::create_dir(&media_dir)
+                .map_err(|error| format!("media_proxy_media_create_failed:{error}"))?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err("media_proxy_media_directory_missing".to_string());
+        }
+        Err(error) => return Err(format!("media_proxy_media_metadata_failed:{error}")),
+    }
+    let media_metadata = std::fs::symlink_metadata(&media_dir)
+        .map_err(|error| format!("media_proxy_media_metadata_failed:{error}"))?;
+    if !media_metadata.is_dir() || metadata_is_symlink_or_reparse(&media_metadata) {
+        return Err("media_proxy_media_directory_required".to_string());
+    }
+    let resolved_media = media_dir
+        .canonicalize()
+        .map_err(|error| format!("media_proxy_media_resolve_failed:{error}"))?;
+    if resolved_media.parent() != Some(project_root.as_path()) {
+        return Err("media_proxy_media_directory_escape".to_string());
+    }
+
+    let proxy_dir = media_dir.join("proxies");
+    match std::fs::symlink_metadata(&proxy_dir) {
+        Ok(metadata) if metadata.is_dir() && !metadata_is_symlink_or_reparse(&metadata) => {}
+        Ok(_) => return Err("media_proxy_directory_required".to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => {
+            std::fs::create_dir(&proxy_dir)
+                .map_err(|error| format!("media_proxy_directory_create_failed:{error}"))?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err("media_proxy_directory_missing".to_string());
+        }
+        Err(error) => return Err(format!("media_proxy_directory_metadata_failed:{error}")),
+    }
+    let proxy_metadata = std::fs::symlink_metadata(&proxy_dir)
+        .map_err(|error| format!("media_proxy_directory_metadata_failed:{error}"))?;
+    if !proxy_metadata.is_dir() || metadata_is_symlink_or_reparse(&proxy_metadata) {
+        return Err("media_proxy_directory_required".to_string());
+    }
+    let resolved_proxy = proxy_dir
+        .canonicalize()
+        .map_err(|error| format!("media_proxy_directory_resolve_failed:{error}"))?;
+    if resolved_proxy.parent() != Some(resolved_media.as_path()) {
+        return Err("media_proxy_directory_escape".to_string());
+    }
+    Ok(proxy_dir)
+}
+
+pub(crate) fn trusted_project_proxy_path(
+    project_dir: &Path,
+    relative_path: &str,
+) -> Option<PathBuf> {
+    let candidate = resolved_project_proxy_path(project_dir, relative_path)?;
+    let proxy_dir = project_proxy_directory(project_dir, false).ok()?;
+    if candidate.parent() != Some(proxy_dir.as_path()) {
+        return None;
+    }
+    let metadata = std::fs::symlink_metadata(&candidate).ok()?;
+    if !metadata.is_file() || metadata_is_symlink_or_reparse(&metadata) {
+        return None;
+    }
+    Some(candidate)
+}
+
+fn grant_proxy_asset_file<R: Runtime>(app: &AppHandle<R>, path: &Path) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|error| format!("media_proxy_scope_metadata_failed:{error}"))?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err("media_proxy_scope_regular_file_required".to_string());
+    }
+    app.asset_protocol_scope()
+        .allow_file(path)
+        .map_err(|error| format!("media_proxy_scope_grant_failed:{error}"))
+}
+
+fn revoke_proxy_asset_file<R: Runtime>(app: &AppHandle<R>, path: &Path) {
+    let scope = app.asset_protocol_scope();
+    // persisted-scope writes on PathAllowed events. Add the exact-file deny
+    // first, then re-emit the exact allow so both patterns are durably saved;
+    // deny precedence keeps the removed path inaccessible after restart.
+    if scope.forbid_file(path).is_ok() {
+        let _ = scope.allow_file(path);
+    }
+}
+
+fn grant_catalog_proxy_asset_scope<R: Runtime>(app: &AppHandle<R>, catalog: &mut MediaListDto) {
+    for item in &mut catalog.items {
+        let Some(path) = item.proxy_path.as_deref().map(Path::new) else {
+            continue;
+        };
+        if grant_proxy_asset_file(app, path).is_err() {
+            item.proxy_path = None;
+        }
+    }
+}
+
+/// Create a bounded project-local H.264 proxy off the UI thread, then persist
+/// its path + source digest in one manifest commit. The original source remains
+/// untouched and is still the only input used by export.
+fn create_media_proxy_blocking(
+    app: AppHandle,
+    asset_id: String,
+    max_width: Option<u32>,
+    max_height: Option<u32>,
+    cancel: opentake_media::MediaCancelToken,
+) -> Result<MediaProxyDto, String> {
+    let core = app.state::<AppCore>();
+    let _identity = core.lock_project_identity_workflow();
+    core.ensure_project_mutable()
+        .map_err(|error| error.to_string())?;
+    let snapshot = core.runtime_snapshot();
+    let project_dir = snapshot
+        .project_dir
+        .clone()
+        .ok_or_else(|| "media_proxy_project_must_be_saved".to_string())?;
+    let entry = snapshot
+        .media
+        .entries
+        .iter()
+        .find(|entry| entry.id == asset_id)
+        .cloned()
+        .ok_or_else(|| format!("media_proxy_source_not_found:{asset_id}"))?;
+    if entry.kind != ClipType::Video {
+        return Err("media_proxy_video_required".to_string());
+    }
+    let source = source_path_for_entry(&entry, Some(&project_dir))?;
+    if !source.is_file() {
+        return Err("media_proxy_source_unreadable".to_string());
+    }
+
+    let project_root = ProjectRoot::open(&project_dir).map_err(|error| error.to_string())?;
+    core.ensure_project_root_identity_for_project(
+        snapshot.project_epoch,
+        &project_dir,
+        project_root.identity(),
+    )
+    .map_err(|error| error.to_string())?;
+    let proxy_dir = project_proxy_directory(&project_dir, true)?;
+    let leaf = format!("{}.mp4", uuid::Uuid::new_v4());
+    let relative_path = format!("media/proxies/{leaf}");
+    let output = proxy_dir.join(leaf);
+    let progress_app = app.clone();
+    let progress_asset_id = asset_id.clone();
+    let progress: ProxyProgressCallback = Arc::new(move |done, total| {
+        let _ = progress_app.emit(
+            "proxy://progress",
+            MediaProxyProgressEvent {
+                asset_id: progress_asset_id.clone(),
+                done,
+                total,
+            },
+        );
+    });
+    let created = match create_proxy(
+        ProxyRequest {
+            source: &source,
+            output: &output,
+            max_size: (max_width.unwrap_or(1280), max_height.unwrap_or(720)),
+        },
+        &cancel,
+        Some(progress),
+    ) {
+        Ok(created) => created,
+        Err(MediaError::Cancelled) => return Err("media_proxy_cancelled".to_string()),
+        Err(error) => return Err(format!("media_proxy_failed:{error}")),
+    };
+    let proxy = MediaProxy {
+        relative_path: relative_path.clone(),
+        source_sha256: created.source_sha256.clone(),
+        width: created.width,
+        height: created.height,
+    };
+    if let Err(error) = core.ensure_project_root_identity_for_project(
+        snapshot.project_epoch,
+        &project_dir,
+        project_root.identity(),
+    ) {
+        let _ = std::fs::remove_file(&output);
+        return Err(error.to_string());
+    }
+    if let Err(error) = core.set_media_proxy_for_project(
+        snapshot.project_epoch,
+        &project_dir,
+        &asset_id,
+        Some(proxy),
+    ) {
+        let _ = std::fs::remove_file(&output);
+        return Err(format!("media_proxy_persist_failed:{error}"));
+    }
+    if let Err(error) = grant_proxy_asset_file(&app, &output) {
+        let rollback = core.set_media_proxy_for_project(
+            snapshot.project_epoch,
+            &project_dir,
+            &asset_id,
+            entry.proxy.clone(),
+        );
+        let _ = std::fs::remove_file(&output);
+        return match rollback {
+            Ok(_) => Err(error),
+            Err(rollback_error) => Err(format!(
+                "{error};media_proxy_scope_rollback_failed:{rollback_error}"
+            )),
+        };
+    }
+    if let Some(old) = entry
+        .proxy
+        .as_ref()
+        .and_then(|proxy| trusted_project_proxy_path(&project_dir, &proxy.relative_path))
+    {
+        if old != output {
+            let _ = std::fs::remove_file(&old);
+            revoke_proxy_asset_file(&app, &old);
+        }
+    }
+    Ok(MediaProxyDto {
+        asset_id,
+        path: output.to_string_lossy().into_owned(),
+        source_sha256: created.source_sha256,
+        width: created.width,
+        height: created.height,
+    })
+}
+
+#[tauri::command]
+pub async fn create_media_proxy(
+    app: AppHandle,
+    asset_id: String,
+    max_width: Option<u32>,
+    max_height: Option<u32>,
+) -> Result<MediaProxyDto, String> {
+    let cancel = app.state::<MediaProxyState>().begin()?;
+    let worker_app = app.clone();
+    let worker_cancel = cancel.clone();
+    let result = match tauri::async_runtime::spawn_blocking(move || {
+        create_media_proxy_blocking(worker_app, asset_id, max_width, max_height, worker_cancel)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(format!("media_proxy_task_failed:{error}")),
+    };
+    app.state::<MediaProxyState>().finish(&cancel);
+    result
+}
+
+#[tauri::command]
+pub fn cancel_media_proxy(state: State<'_, MediaProxyState>) -> bool {
+    state.cancel()
+}
+
+#[tauri::command]
+pub fn set_proxy_playback_enabled(state: State<'_, MediaProxyState>, enabled: bool) -> bool {
+    state.set_enabled(enabled);
+    state.enabled()
+}
+
+#[tauri::command]
+pub fn get_proxy_playback_enabled(state: State<'_, MediaProxyState>) -> bool {
+    state.enabled()
+}
+
+fn remove_media_proxy_impl(
+    core: &AppCore,
+    asset_id: &str,
+    cleanup: impl FnOnce(&Path),
+) -> Result<bool, String> {
+    let _identity = core.lock_project_identity_workflow();
+    core.ensure_project_mutable()
+        .map_err(|error| error.to_string())?;
+    let snapshot = core.runtime_snapshot();
+    let project_dir = snapshot
+        .project_dir
+        .clone()
+        .ok_or_else(|| "media_proxy_project_must_be_saved".to_string())?;
+    let old = snapshot
+        .media
+        .entries
+        .iter()
+        .find(|entry| entry.id == asset_id)
+        .ok_or_else(|| format!("media_proxy_source_not_found:{asset_id}"))?
+        .proxy
+        .clone();
+    if old.is_none() {
+        return Ok(false);
+    }
+    let project_root = ProjectRoot::open(&project_dir).map_err(|error| error.to_string())?;
+    core.ensure_project_root_identity_for_project(
+        snapshot.project_epoch,
+        &project_dir,
+        project_root.identity(),
+    )
+    .map_err(|error| error.to_string())?;
+    core.set_media_proxy_for_project(snapshot.project_epoch, &project_dir, asset_id, None)
+        .map_err(|error| error.to_string())?;
+    if let Some(path) = old
+        .as_ref()
+        .and_then(|proxy| trusted_project_proxy_path(&project_dir, &proxy.relative_path))
+    {
+        cleanup(&path);
+    }
+    Ok(true)
+}
+
+#[tauri::command]
+pub fn remove_media_proxy(
+    app: AppHandle,
+    core: State<'_, AppCore>,
+    asset_id: String,
+) -> Result<bool, String> {
+    remove_media_proxy_impl(&core, &asset_id, |path| {
+        let _ = std::fs::remove_file(path);
+        revoke_proxy_asset_file(&app, path);
+    })
+}
+
+fn find_runtime_clip<'a>(timeline: &'a Timeline, clip_id: &str) -> Option<&'a Clip> {
+    timeline
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .find(|clip| clip.id == clip_id)
+        .or_else(|| {
+            timeline
+                .nested_sequences
+                .iter()
+                .flat_map(|sequence| &sequence.timeline.tracks)
+                .flat_map(|track| &track.clips)
+                .find(|clip| clip.id == clip_id)
+        })
+}
+
 /// `preload_media`: enqueue the smallest cache that makes the selected media
 /// immediately useful — a hi-res first-frame poster for video or a waveform for
 /// audio. The bounded project scheduler keeps this fire-and-forget work off the
@@ -2632,6 +3968,8 @@ mod tests {
             source_height: Some(240),
             source_fps: Some(30.0),
             has_audio: Some(false),
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
@@ -3464,6 +4802,7 @@ mod tests {
                 height: Some(1080),
                 fps: Some(30.0),
                 has_audio: true,
+                color: None,
             }
         );
     }
@@ -3516,6 +4855,8 @@ mod tests {
             source_height: Some(240),
             source_fps: Some(30.0),
             has_audio: Some(false),
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
@@ -3592,6 +4933,7 @@ mod tests {
                 height: None,
                 fps: None,
                 has_audio: true,
+                color: None,
             }
         );
     }
@@ -4071,6 +5413,8 @@ mod tests {
             source_height: Some(480),
             source_fps: Some(24.0),
             has_audio: Some(true),
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
@@ -4091,6 +5435,40 @@ mod tests {
     }
 
     #[test]
+    fn dto_projects_project_relative_entry_with_resolved_path() {
+        let bundle = tempfile::tempdir().unwrap();
+        let relative_path = PathBuf::from("media/stems/job/vocals.wav");
+        let source = bundle.path().join(&relative_path);
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::write(&source, b"derived-audio").unwrap();
+        let entry = MediaManifestEntry {
+            id: "stem-vocals".into(),
+            name: "Mix Vocals".into(),
+            kind: ClipType::Audio,
+            source: MediaSource::Project {
+                relative_path: relative_path.to_string_lossy().into_owned(),
+            },
+            duration: 5.0,
+            generation_input: None,
+            source_width: None,
+            source_height: None,
+            source_fps: None,
+            has_audio: Some(true),
+            color: None,
+            proxy: None,
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        };
+
+        let dto = MediaItemDto::from_entry(&entry, Some(bundle.path()), None, false);
+
+        assert_eq!(dto.path.as_deref(), Some(source.to_string_lossy().as_ref()));
+        assert!(!dto.missing);
+        assert_eq!(dto.file_size, Some(13));
+    }
+
+    #[test]
     fn dto_reports_file_size_for_present_source() {
         let tmp = tempfile::tempdir().unwrap();
         let source = tmp.path().join("clip.mp4");
@@ -4108,6 +5486,8 @@ mod tests {
             source_height: Some(480),
             source_fps: Some(24.0),
             has_audio: Some(true),
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
@@ -4126,8 +5506,14 @@ mod tests {
             duration: 0.0,
             width: Some(10),
             height: Some(20),
+            source_fps: Some(24.0),
             has_audio: false,
+            color: None,
+            is_hdr: false,
             path: Some("/p.png".into()),
+            proxy_path: None,
+            proxy_width: None,
+            proxy_height: None,
             thumbnail: None,
             folder_id: None,
             file_size: Some(2048),
@@ -4144,6 +5530,7 @@ mod tests {
         assert!(json.contains("\"thumbnail\":null"));
         assert!(json.contains("\"folderId\":null"));
         assert!(json.contains("\"fileSize\":2048"));
+        assert!(json.contains("\"sourceFps\":24.0"));
         assert!(json.contains("\"generationInput\":null"));
         assert!(json.contains("\"missing\":false"));
         assert!(json.contains("\"favorite\":true"));
@@ -4172,6 +5559,8 @@ mod tests {
             source_height: Some(1080),
             source_fps: Some(30.0),
             has_audio: Some(true),
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
@@ -4534,6 +5923,8 @@ mod tests {
                 source_height: Some(480),
                 source_fps: Some(30.0),
                 has_audio: Some(true),
+                color: None,
+                proxy: None,
                 folder_id: None,
                 cached_remote_url: None,
                 cached_remote_url_expires_at: None,
@@ -4614,6 +6005,112 @@ mod tests {
             Vec::new(),
         );
         assert_eq!(dto.skipped, vec!["note.txt", "archive.zip"]);
+    }
+
+    #[test]
+    fn proxy_asset_scope_grants_only_regular_file_and_revoke_denies_it() {
+        let app = tauri::test::mock_app();
+        let handle = app.handle();
+        let temp = tempfile::tempdir().unwrap();
+        let proxy = temp.path().join("proxy.mp4");
+        fs::write(&proxy, b"proxy").unwrap();
+
+        assert!(!handle.asset_protocol_scope().is_allowed(&proxy));
+        grant_proxy_asset_file(handle, &proxy).expect("grant exact proxy file");
+        assert!(handle.asset_protocol_scope().is_allowed(&proxy));
+        revoke_proxy_asset_file(handle, &proxy);
+        assert!(!handle.asset_protocol_scope().is_allowed(&proxy));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proxy_asset_scope_rejects_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let app = tauri::test::mock_app();
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("outside.mp4");
+        let proxy = temp.path().join("proxy.mp4");
+        fs::write(&target, b"outside").unwrap();
+        symlink(&target, &proxy).unwrap();
+
+        assert_eq!(
+            grant_proxy_asset_file(app.handle(), &proxy).unwrap_err(),
+            "media_proxy_scope_regular_file_required"
+        );
+        assert!(!app.handle().asset_protocol_scope().is_allowed(&target));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_proxy_path_rejects_symlinked_ancestor_directory() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = temp.path().join("ProxyPath.opentake");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(bundle.join("media")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("proxy.mp4"), b"outside").unwrap();
+        symlink(&outside, bundle.join("media/proxies")).unwrap();
+
+        assert!(trusted_project_proxy_path(&bundle, "media/proxies/proxy.mp4").is_none());
+    }
+
+    #[test]
+    fn remove_proxy_holds_project_identity_through_file_cleanup() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let temp = tempfile::tempdir().unwrap();
+        let project_a_root = temp.path().join("project-a");
+        let project_b_root = temp.path().join("project-b");
+        fs::create_dir_all(&project_a_root).unwrap();
+        fs::create_dir_all(&project_b_root).unwrap();
+        let (core, _bundle_a, _source_a, asset_id) = saved_core_with_media(&project_a_root);
+        let (_other, bundle_b, _source_b, _asset_b) = saved_core_with_media(&project_b_root);
+        let core = Arc::new(core);
+        let snapshot = core.runtime_snapshot();
+        let project_dir = snapshot.project_dir.clone().unwrap();
+        let proxy_path = project_dir.join("media/proxies/proxy.mp4");
+        fs::create_dir_all(proxy_path.parent().unwrap()).unwrap();
+        fs::write(&proxy_path, b"proxy").unwrap();
+        core.set_media_proxy_for_project(
+            snapshot.project_epoch,
+            &project_dir,
+            &asset_id,
+            Some(MediaProxy {
+                relative_path: "media/proxies/proxy.mp4".into(),
+                source_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .into(),
+                width: 1280,
+                height: 720,
+            }),
+        )
+        .unwrap();
+
+        let (start_tx, start_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let replacement_core = Arc::clone(&core);
+        let replacement = std::thread::spawn(move || {
+            start_rx.recv().unwrap();
+            replacement_core.open_project(bundle_b).unwrap();
+            done_tx.send(()).unwrap();
+        });
+
+        remove_media_proxy_impl(&core, &asset_id, |path| {
+            fs::remove_file(path).unwrap();
+            start_tx.send(()).unwrap();
+            assert!(
+                done_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+                "project replacement must stay blocked until proxy cleanup returns"
+            );
+        })
+        .unwrap();
+
+        done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        replacement.join().unwrap();
+        assert!(!proxy_path.exists());
     }
 
     #[test]
@@ -4754,5 +6251,58 @@ mod tests {
             err.contains("no extension"),
             "extensionless path must be rejected: got {err}"
         );
+    }
+
+    #[test]
+    fn stabilization_analysis_state_cancels_and_releases_single_flight_slot() {
+        let state = StabilizationAnalysisState::default();
+        let first = state.begin().expect("first analysis reserves the slot");
+        assert!(state.begin().is_err(), "a concurrent analysis is rejected");
+
+        assert!(state.cancel(), "the active analysis is cancellable");
+        assert!(first.is_cancelled());
+        state.finish(&first);
+        assert!(!state.cancel(), "finishing clears the active token");
+
+        let second = state.begin().expect("the slot can be reused after finish");
+        assert!(!second.is_cancelled());
+        state.finish(&second);
+    }
+
+    #[test]
+    fn denoise_analysis_state_cancels_and_releases_single_flight_slot() {
+        let state = DenoiseAnalysisState::default();
+        let first = state.begin().expect("first analysis reserves the slot");
+        let concurrent = match state.begin() {
+            Ok(_) => panic!("a concurrent analysis must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(concurrent, "denoise_analysis_busy");
+
+        assert!(state.cancel(), "the active analysis is cancellable");
+        assert!(first.is_cancelled());
+        state.finish(&first);
+        assert!(!state.cancel(), "finishing clears the active token");
+
+        let second = state.begin().expect("the slot can be reused after finish");
+        assert!(!second.is_cancelled());
+        state.finish(&second);
+    }
+
+    #[test]
+    fn stem_separation_state_cancels_and_releases_single_flight_slot() {
+        let state = StemSeparationState::default();
+        let first = state.begin().expect("first separation reserves the slot");
+        let concurrent = match state.begin() {
+            Ok(_) => panic!("a concurrent separation must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(concurrent, "stem_separation_busy");
+        assert!(state.cancel());
+        assert!(first.is_cancelled());
+        state.finish(&first);
+        assert!(!state.cancel());
+        let second = state.begin().expect("slot is reusable");
+        state.finish(&second);
     }
 }

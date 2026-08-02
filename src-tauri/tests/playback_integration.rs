@@ -118,6 +118,8 @@ fn external_entry(id: &str, path: &Path, w: i32, h: i32, fps: f64) -> MediaManif
         source_height: Some(h),
         source_fps: Some(fps),
         has_audio: Some(false),
+        color: None,
+        proxy: None,
         folder_id: None,
         cached_remote_url: None,
         cached_remote_url_expires_at: None,

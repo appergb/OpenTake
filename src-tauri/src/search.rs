@@ -202,11 +202,13 @@ fn moment_dto(h: &opentake_media::Hit, fps: i32) -> MomentHitDto {
 
 /// One indexable/searchable asset resolved from the live manifest: id, absolute
 /// source path, and kind (drives visual vs. spoken candidacy).
+#[derive(Clone)]
 struct ResolvedAsset {
     id: String,
     name: String,
     path: PathBuf,
     kind: ClipType,
+    has_audio: bool,
 }
 
 /// Resolve every manifest asset to `(id, name, path, kind)`, dropping any whose
@@ -233,6 +235,7 @@ fn resolve_assets_from_snapshot(
                 name: e.name.clone(),
                 path,
                 kind: e.kind,
+                has_audio: e.has_audio.unwrap_or(false),
             })
         })
         .collect()
@@ -336,11 +339,62 @@ pub fn search_index_start(
     media: State<'_, MediaState>,
 ) -> Result<SearchIndexStatusDto, String> {
     let engine = media.engine();
-    let embedder = load_embedder(engine)?;
     let assets = resolve_assets(&core);
-    index_assets(app, engine, &assets, &embedder)?;
-    // Return a fresh status snapshot so the UI settles on the final counts.
-    Ok(index_status_snapshot(engine, &assets))
+    let cache_root = engine.cache_root().to_path_buf();
+    let models_dir = engine.models_dir().to_path_buf();
+    let pressure = engine.export_pause();
+    let worker = production_index_worker(pressure.clone());
+    let spec = search_config::embedder_spec();
+    let source_identity = assets
+        .iter()
+        .map(|asset| {
+            opentake_media::cache_key::file_identity_key(&asset.path)
+                .unwrap_or_else(|| format!("missing:{}", asset.id))
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+    let request = opentake_media::ort_worker::JobRequest::new(
+        opentake_media::ort_worker::JobKind::Index,
+        format!("{}@{}", spec.model, spec.version),
+        format!(
+            "{}:{}@{}:{source_identity}",
+            cache_root.display(),
+            spec.model,
+            spec.version
+        ),
+        opentake_media::ort_worker::JobPriority::Background,
+    );
+    let handle = worker
+        .submit(request, move |models, cancel| {
+            let job_engine = MediaEngine::new(cache_root, models_dir.clone());
+            let model_key = format!("{}@{}:{}", spec.model, spec.version, models_dir.display());
+            let embedder = models.get_or_try_init(&model_key, || {
+                load_embedder(&job_engine).map_err(opentake_media::ort_worker::WorkerError::Model)
+            })?;
+            index_assets(
+                app,
+                &job_engine,
+                &assets,
+                embedder.as_ref(),
+                cancel,
+                &pressure,
+            )
+            .map_err(opentake_media::ort_worker::WorkerError::Job)?;
+            Ok(index_status_snapshot(&job_engine, &assets))
+        })
+        .map_err(|error| error.to_string())?;
+    handle.wait().map_err(|error| error.to_string())
+}
+
+/// One process-wide production worker. `MediaState` itself is process-wide, so
+/// the first command supplies the same shared playback/export pressure counter
+/// observed by every later request.
+fn production_index_worker(
+    pressure: opentake_media::ExportPause,
+) -> &'static opentake_media::ort_worker::OrtWorker {
+    static WORKER: std::sync::OnceLock<opentake_media::ort_worker::OrtWorker> =
+        std::sync::OnceLock::new();
+    WORKER.get_or_init(|| opentake_media::ort_worker::OrtWorker::spawn(pressure, 8))
 }
 
 /// `search_query`: run the three-group content query — Moments (visual, when the
@@ -518,21 +572,29 @@ fn index_assets(
     engine: &MediaEngine,
     assets: &[ResolvedAsset],
     embedder: &opentake_media::search::OrtEmbedder,
+    cancel: &opentake_media::search::CancelToken,
+    pressure: &opentake_media::ExportPause,
 ) -> Result<(), String> {
     use opentake_media::search::Embedder;
-    use opentake_media::search::{
-        index_image, index_video, needs_index, CancelToken, SamplerOptions,
-    };
+    use opentake_media::search::{index_image, index_video, needs_index, SamplerOptions};
 
     let spec = Embedder::spec(embedder).clone();
     let cache_root = engine.cache_root();
-    let cancel = CancelToken::new();
     let opts = SamplerOptions::default();
 
-    // Only assets that actually need work (idempotent), preserving order.
+    // Only assets that actually need visual or transcript work (idempotent),
+    // preserving manifest order. File identity plus model/sampler versions are
+    // encoded in the two stores, so changed media and model upgrades invalidate
+    // themselves and an interrupted run resumes only missing work.
     let pending: Vec<&ResolvedAsset> = assets
         .iter()
-        .filter(|a| is_visual(a.kind) && needs_index(cache_root, &a.path, &spec))
+        .filter(|a| {
+            let visual = is_visual(a.kind) && needs_index(cache_root, &a.path, &spec);
+            let transcript = (a.kind == ClipType::Audio
+                || (a.kind == ClipType::Video && a.has_audio))
+                && !opentake_media::transcribe::cache::has_cached_on_disk(cache_root, &a.path);
+            visual || transcript
+        })
         .collect();
     let total = pending.len();
     if total == 0 {
@@ -548,6 +610,13 @@ fn index_assets(
     }
 
     for (i, a) in pending.iter().enumerate() {
+        if cancel.is_cancelled() {
+            return Err("indexing cancelled".into());
+        }
+        if !pressure.wait_while_active(|| cancel.is_cancelled()) {
+            return Err("indexing cancelled while yielding to playback/export".into());
+        }
+
         // Per-asset progress: forward the sampler's fraction into the batch.
         let base = i;
         let on_progress = |frac: f64| {
@@ -563,11 +632,11 @@ fn index_assets(
 
         // A per-asset failure (offline file, decode error) is skipped — one bad
         // clip must not abort the batch (upstream `failedIds.insert` + continue).
-        let result = match a.kind {
+        let visual_result = match a.kind {
             ClipType::Image => match engine.image_thumbnail(&a.path) {
                 // Reuse the decoded thumbnail as the still's frame; a full-res
                 // decode is unnecessary for a single squash-resized embedding.
-                Ok(frame) => index_image(cache_root, &a.path, &frame, embedder, &cancel),
+                Ok(frame) => index_image(cache_root, &a.path, &frame, embedder, cancel),
                 Err(e) => Err(e),
             },
             ClipType::Video => {
@@ -589,14 +658,40 @@ fn index_assets(
                     height,
                     embedder,
                     &opts,
-                    &cancel,
+                    cancel,
                     Some(&on_progress),
                 )
             }
             _ => Ok(()),
         };
-        if let Err(e) = result {
+        if let Err(e) = visual_result {
+            if cancel.is_cancelled() {
+                return Err("indexing cancelled".into());
+            }
             eprintln!("[search] index failed {}: {e}", a.path.display());
+        }
+
+        // Automatic spoken indexing shares the same one-worker boundary. A
+        // missing whisper model or bad audio marks only this asset failed; the
+        // visual store and remaining assets still converge on restart.
+        let needs_transcript = (a.kind == ClipType::Audio
+            || (a.kind == ClipType::Video && a.has_audio))
+            && !opentake_media::transcribe::cache::has_cached_on_disk(cache_root, &a.path);
+        if needs_transcript {
+            if cancel.is_cancelled() {
+                return Err("transcription cancelled".into());
+            }
+            if let Err(error) = crate::transcribe::transcribe_with_cache(
+                engine,
+                &a.path,
+                a.kind == ClipType::Video,
+                None,
+            ) {
+                eprintln!(
+                    "[search] transcription failed {}: {error}",
+                    a.path.display()
+                );
+            }
         }
         emit_completed(&app, i + 1, total);
     }
@@ -641,6 +736,233 @@ fn index_status_snapshot(engine: &MediaEngine, assets: &[ResolvedAsset]) -> Sear
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_single_worker_cancels_skips_stale_and_yields_to_playback_export() {
+        use opentake_media::ort_worker::{
+            JobKind, JobPriority, JobRequest, JobState, OrtWorker, WorkerError,
+        };
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+
+        let pause = opentake_media::ExportPause::new();
+        let worker = OrtWorker::spawn(pause.clone(), 4);
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let order = Arc::new(Mutex::new(Vec::new()));
+
+        let submit = |key: &str, priority: JobPriority, marker: usize| {
+            let active = active.clone();
+            let max_active = max_active.clone();
+            let order = order.clone();
+            worker.submit(
+                JobRequest::new(JobKind::Index, "siglip2@1", key, priority),
+                move |_models, cancel| {
+                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_active.fetch_max(now, Ordering::SeqCst);
+                    for _ in 0..20 {
+                        if cancel.is_cancelled() {
+                            active.fetch_sub(1, Ordering::SeqCst);
+                            return Err(WorkerError::Cancelled);
+                        }
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    order.lock().unwrap().push(marker);
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    Ok(marker)
+                },
+            )
+        };
+
+        // Playback/export pressure prevents any queued inference from starting.
+        let pressure = pause.guard();
+        let low = submit("asset-low", JobPriority::Background, 1).unwrap();
+        let high_a = submit("asset-high-a", JobPriority::Interactive, 2).unwrap();
+        let high_b = submit("asset-high-b", JobPriority::Interactive, 3).unwrap();
+        let duplicate = submit("asset-high-a", JobPriority::Interactive, 99).unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(low.state(), JobState::Queued);
+        assert!(order.lock().unwrap().is_empty());
+        drop(pressure);
+
+        assert_eq!(high_a.wait().unwrap(), 2);
+        assert_eq!(duplicate.wait().unwrap(), 2); // one persisted result, no duplicate work
+        assert_eq!(high_b.wait().unwrap(), 3);
+        assert_eq!(low.wait().unwrap(), 1);
+        assert_eq!(*order.lock().unwrap(), vec![2, 3, 1]); // FIFO within priority
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+
+        // A queued cancellation never runs; a running cancellation cooperates
+        // at a batch boundary and the next model error/panic cannot kill worker.
+        let blocker = submit("blocker", JobPriority::Interactive, 4).unwrap();
+        let queued = submit("queued-cancel", JobPriority::Background, 5).unwrap();
+        queued.cancel();
+        assert_eq!(blocker.wait().unwrap(), 4);
+        assert_eq!(queued.wait(), Err(WorkerError::Cancelled));
+        assert_eq!(queued.state(), JobState::Cancelled);
+
+        let running = submit("running-cancel", JobPriority::Interactive, 6).unwrap();
+        running.wait_until_running(Duration::from_secs(1)).unwrap();
+        running.cancel();
+        assert_eq!(running.wait(), Err(WorkerError::Cancelled));
+
+        let model_failure = worker
+            .submit::<usize, _>(
+                JobRequest::new(
+                    JobKind::Transcribe,
+                    "whisper@1",
+                    "model-failure",
+                    JobPriority::Background,
+                ),
+                |_models, _cancel| Err(WorkerError::Model("fixture failure".into())),
+            )
+            .unwrap();
+        assert!(matches!(model_failure.wait(), Err(WorkerError::Model(_))));
+        let retried = submit("model-failure", JobPriority::Background, 12).unwrap();
+        assert_eq!(retried.wait().unwrap(), 12);
+        let panicked = worker
+            .submit::<usize, _>(
+                JobRequest::new(
+                    JobKind::Index,
+                    "siglip2@1",
+                    "panic",
+                    JobPriority::Background,
+                ),
+                |_models, _cancel| panic!("fixture panic"),
+            )
+            .unwrap();
+        assert_eq!(panicked.wait(), Err(WorkerError::Panicked));
+        let recovered = submit("recovered", JobPriority::Background, 7).unwrap();
+        assert_eq!(recovered.wait().unwrap(), 7);
+
+        let model_loads = Arc::new(AtomicUsize::new(0));
+        for key in ["registry-a", "registry-b"] {
+            let model_loads = model_loads.clone();
+            let handle = worker
+                .submit(
+                    JobRequest::new(
+                        JobKind::Search,
+                        "shared-model@1",
+                        key,
+                        JobPriority::Interactive,
+                    ),
+                    move |models, _cancel| {
+                        let model = models.get_or_try_init("shared-model@1", || {
+                            model_loads.fetch_add(1, Ordering::SeqCst);
+                            Ok::<_, WorkerError>(42usize)
+                        })?;
+                        Ok::<_, WorkerError>(*model)
+                    },
+                )
+                .unwrap();
+            assert_eq!(handle.wait().unwrap(), 42);
+        }
+        assert_eq!(model_loads.load(Ordering::SeqCst), 1);
+
+        // Changing either source fingerprint or model version forms a new key;
+        // a restarted worker can resume only the missing key and converge on the
+        // same final result.
+        let v1 = submit("media-fingerprint-a@siglip2-1", JobPriority::Background, 8).unwrap();
+        assert_eq!(v1.wait().unwrap(), 8);
+        let changed = submit("media-fingerprint-b@siglip2-1", JobPriority::Background, 9).unwrap();
+        let upgraded =
+            submit("media-fingerprint-b@siglip2-2", JobPriority::Background, 10).unwrap();
+        assert_eq!(changed.wait().unwrap(), 9);
+        assert_eq!(upgraded.wait().unwrap(), 10);
+
+        worker.shutdown().unwrap();
+        assert_eq!(worker.active_jobs(), 0);
+        assert!(matches!(
+            submit("after-shutdown", JobPriority::Background, 11),
+            Err(WorkerError::Shutdown)
+        ));
+
+        // Admission is truly bounded even while pressure holds the worker.
+        let bounded_pause = opentake_media::ExportPause::new();
+        let bounded_guard = bounded_pause.guard();
+        let bounded = OrtWorker::spawn(bounded_pause, 2);
+        let first = bounded
+            .submit(
+                JobRequest::new(JobKind::Index, "m@1", "first", JobPriority::Background),
+                |_models, _cancel| Ok::<_, WorkerError>(1usize),
+            )
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(25));
+        let second = bounded
+            .submit(
+                JobRequest::new(JobKind::Index, "m@1", "second", JobPriority::Background),
+                |_models, _cancel| Ok::<_, WorkerError>(2usize),
+            )
+            .unwrap();
+        assert_eq!(bounded.queued_jobs(), 2);
+        assert!(matches!(
+            bounded.submit(
+                JobRequest::new(JobKind::Index, "m@1", "third", JobPriority::Background),
+                |_models, _cancel| Ok::<_, WorkerError>(3usize),
+            ),
+            Err(WorkerError::QueueFull)
+        ));
+        drop(bounded_guard);
+        assert_eq!(first.wait().unwrap(), 1);
+        assert_eq!(second.wait().unwrap(), 2);
+        bounded.shutdown().unwrap();
+
+        // Four interactive jobs is the explicit starvation bound.
+        let fairness_pause = opentake_media::ExportPause::new();
+        let fairness_guard = fairness_pause.guard();
+        let fairness = OrtWorker::spawn(fairness_pause, 8);
+        let fairness_order = Arc::new(Mutex::new(Vec::new()));
+        let enqueue = |key: &'static str, priority, marker| {
+            let fairness_order = fairness_order.clone();
+            fairness
+                .submit(
+                    JobRequest::new(JobKind::Index, "m@1", key, priority),
+                    move |_models, _cancel| {
+                        fairness_order.lock().unwrap().push(marker);
+                        Ok::<_, WorkerError>(marker)
+                    },
+                )
+                .unwrap()
+        };
+        let low = enqueue("fair-low", JobPriority::Background, 0usize);
+        let highs = [1usize, 2, 3, 4, 5]
+            .into_iter()
+            .map(|marker| {
+                let key = match marker {
+                    1 => "fair-high-1",
+                    2 => "fair-high-2",
+                    3 => "fair-high-3",
+                    4 => "fair-high-4",
+                    _ => "fair-high-5",
+                };
+                enqueue(key, JobPriority::Interactive, marker)
+            })
+            .collect::<Vec<_>>();
+        drop(fairness_guard);
+        for high in &highs {
+            let _ = high.wait().unwrap();
+        }
+        assert_eq!(low.wait().unwrap(), 0);
+        assert_eq!(*fairness_order.lock().unwrap(), vec![1, 2, 3, 4, 0, 5]);
+        fairness.shutdown().unwrap();
+
+        let restarted = OrtWorker::spawn(pause, 1);
+        let resumed = restarted
+            .submit(
+                JobRequest::new(
+                    JobKind::Index,
+                    "siglip2@2",
+                    "media-fingerprint-b@siglip2-2",
+                    JobPriority::Background,
+                ),
+                |_models, _cancel| Ok::<_, WorkerError>(10usize),
+            )
+            .unwrap();
+        assert_eq!(resumed.wait().unwrap(), 10);
+        restarted.shutdown().unwrap();
+        assert_eq!(restarted.active_jobs(), 0);
+    }
 
     // --- pure DTO / merge / cap logic (no ort, no ffmpeg) ---
 

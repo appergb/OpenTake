@@ -276,7 +276,10 @@ fn validate_intent_entry(
                 "entries[{index}]: track index {track_index} out of range"
             )));
         };
-        if !entry.source_clip_type.is_compatible(track.kind) {
+        // A placed audio lane can come from a video asset (linked audio), so
+        // track compatibility follows the placed media type rather than the
+        // source container type.
+        if !entry.media_type.is_compatible(track.kind) {
             return Err(EditError::Invalid(format!(
                 "entries[{index}]: asset type is not compatible with the destination track"
             )));

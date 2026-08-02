@@ -174,6 +174,11 @@ impl Project {
     }
 
     /// Decode every project component from one retained root capability.
+    ///
+    /// Persisted compatibility is applied by each component's deserializer:
+    /// missing optional fields receive their legacy defaults, while explicit
+    /// schema versions are preserved. Saving the returned project therefore
+    /// writes the decoded state without silently promoting legacy versions.
     pub fn open_from_root(root: &ProjectRoot) -> Result<Self> {
         Self::open_from_root_with_hook(root, |_| {})
     }
@@ -192,6 +197,12 @@ impl Project {
         let (mut timeline, timeline_blockers, timeline_document) =
             decode_component::<Timeline>(&timeline_bytes, layout::TIMELINE_FILE)?;
         compatibility::repair_timeline_ids(&mut timeline, &timeline_document);
+        timeline
+            .validate_nested_sequences()
+            .map_err(|reason| ProjectError::InvalidTimeline {
+                file: layout::TIMELINE_FILE,
+                reason,
+            })?;
         after_component(layout::TIMELINE_FILE);
         let mut compatibility = ProjectCompatibility::default();
         compatibility.extend(timeline_blockers);
@@ -396,6 +407,13 @@ impl EncodedProject {
     /// Produce the exact byte snapshot before any destination path is created.
     fn prepare(project: &Project) -> Result<Self> {
         project.compatibility.ensure_writable()?;
+        project
+            .timeline
+            .validate_nested_sequences()
+            .map_err(|reason| ProjectError::InvalidTimeline {
+                file: layout::TIMELINE_FILE,
+                reason,
+            })?;
         Ok(Self {
             timeline: encode_component(layout::TIMELINE_FILE, &project.timeline)?,
             manifest: encode_component(layout::MANIFEST_FILE, &project.manifest)?,

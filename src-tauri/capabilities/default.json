@@ -10,6 +10,7 @@
     "core:event:default",
     "core:event:allow-listen",
     "core:event:allow-emit",
+    "core:window:allow-set-fullscreen",
     "dialog:default",
     "dialog:allow-open",
     "dialog:allow-save"

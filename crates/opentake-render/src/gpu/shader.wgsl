@@ -26,28 +26,39 @@
 //   on the (sampled) color directly, matching the domain reference which is
 //   space-agnostic for those stages.
 //
-// MASK CAP: up to MASK_CAP masks are evaluated in-shader (linear + circle SDF).
-// Polygon masks are carried in the domain/plan and fully unit-tested there, but
-// their variable-length point list does not fit this fixed uniform; wiring
-// polygon points through a storage buffer is a documented render-side TODO.
+// MASK CAP: up to MASK_CAP masks and POLY_POINT_CAP pen points per mask are
+// evaluated in-shader. The fixed point cap keeps the uniform layout portable.
 
 const MASK_CAP: u32 = 4u;
+const POLY_POINT_CAP: u32 = 16u;
+const EFFECT_CAP: u32 = 8u;
 
 // Flag bits packed into U.canvas_op_flags.w (bitcast to u32).
 const FLAG_PREMULTIPLY: u32 = 1u;   // straight-alpha source needs premultiply
 const FLAG_GRADE: u32 = 2u;         // color grade active
 const FLAG_CHROMA: u32 = 4u;        // chroma key active
 
-// Mask kind tags (mirror MaskShape; poly is not evaluated in-shader).
+// Mask kind tags (mirror MaskShape).
 const MASK_LINEAR: u32 = 0u;
 const MASK_CIRCLE: u32 = 1u;
+const MASK_POLY: u32 = 2u;
 
 struct MaskGpu {
-    // (kind-as-f32, feather, invert-as-f32, pad)
+    // (kind-as-f32, feather, invert-as-f32, polygon-point-count)
     head: vec4<f32>,
     // linear: (point.x, point.y, normal.x, normal.y)
     // circle: (center.x, center.y, radius.x, radius.y)
     geo: vec4<f32>,
+    // (offset.x, offset.y, scale.x, scale.y)
+    transform: vec4<f32>,
+    // (rotation radians, pad, pad, pad)
+    transform_meta: vec4<f32>,
+    points: array<vec4<f32>, POLY_POINT_CAP>,
+};
+
+struct EffectGpu {
+    // (kind, amount, pad, pad)
+    data: vec4<f32>,
 };
 
 // Laid out as vec4s so every field is 16-byte aligned (no implicit WGSL padding)
@@ -62,17 +73,43 @@ struct U {
     grade_lift: vec4<f32>,     // lift_r, lift_g, lift_b, contrast
     grade_gamma: vec4<f32>,    // gamma_r, gamma_g, gamma_b, saturation
     grade_gain: vec4<f32>,     // gain_r, gain_g, gain_b, pad
+    hsl_secondary_meta: vec4<f32>, // enabled, hue center, full width, feather
+    hsl_secondary_adjust: vec4<f32>, // hue shift, saturation, lightness, pad
+    lut_meta: vec4<f32>,       // enabled, intensity, table size, pad
+    lut_domain_min: vec4<f32>, // min r/g/b, pad
+    lut_domain_scale: vec4<f32>, // reciprocal domain span r/g/b, pad
     // Chroma key.
     chroma0: vec4<f32>,        // key_r, key_g, key_b, similarity
     chroma1: vec4<f32>,        // smoothness, spill, pad, pad
     // Mask count (x) + padding.
     mask_meta: vec4<f32>,      // mask_count, pad, pad, pad
     masks: array<MaskGpu, MASK_CAP>,
+    effect_meta: vec4<f32>,    // effect_count, pad, pad, pad
+    effects: array<EffectGpu, EFFECT_CAP>,
 };
 
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var t_color: texture_2d<f32>;
 @group(0) @binding(2) var s_color: sampler;
+@group(0) @binding(3) var t_lut: texture_3d<f32>;
+@group(0) @binding(4) var s_lut: sampler;
+
+fn apply_lut(rgb: vec3<f32>) -> vec3<f32> {
+    if (u.lut_meta.x < 0.5 || u.lut_meta.y <= 0.0) {
+        return rgb;
+    }
+    let normalized = clamp(
+        (rgb - u.lut_domain_min.xyz) * u.lut_domain_scale.xyz,
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
+    let table_size = u.lut_meta.z;
+    // Align authored grid points i/(N-1) with texel centers before hardware
+    // trilinear filtering.
+    let coordinate = (normalized * (table_size - 1.0) + vec3<f32>(0.5)) / table_size;
+    let transformed = textureSample(t_lut, s_lut, coordinate).rgb;
+    return mix(rgb, transformed, clamp(u.lut_meta.y, 0.0, 1.0));
+}
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -112,15 +149,84 @@ fn smoothstep01(edge0: f32, edge1: f32, x: f32) -> f32 {
 const CONTRAST_PIVOT: f32 = 0.18;
 
 fn apply_channel_lgg(x: f32, lift: f32, gamma: f32, gain: f32) -> f32 {
-    let v = gain * (x + lift);
+    let shaped = x + lift * (1.0 - x);
     if (abs(gamma - 1.0) > 1e-6 && gamma > 0.0) {
-        return pow(max(v, 0.0), 1.0 / gamma);
+        return gain * pow(max(shaped, 0.0), 1.0 / gamma);
     }
-    return v;
+    return gain * shaped;
+}
+
+fn rgb_to_hsl(c: vec3<f32>) -> vec3<f32> {
+    let maximum = max(c.r, max(c.g, c.b));
+    let minimum = min(c.r, min(c.g, c.b));
+    let delta = maximum - minimum;
+    let lightness = (maximum + minimum) * 0.5;
+    if (delta <= 1e-7) {
+        return vec3<f32>(0.0, 0.0, lightness);
+    }
+    let saturation = delta / max(1.0 - abs(2.0 * lightness - 1.0), 1e-7);
+    var sector = 0.0;
+    if (maximum == c.r) {
+        sector = ((c.g - c.b) / delta) % 6.0;
+        if (sector < 0.0) {
+            sector = sector + 6.0;
+        }
+    } else if (maximum == c.g) {
+        sector = (c.b - c.r) / delta + 2.0;
+    } else {
+        sector = (c.r - c.g) / delta + 4.0;
+    }
+    return vec3<f32>(sector / 6.0, saturation, lightness);
+}
+
+fn hsl_to_rgb(hsl: vec3<f32>) -> vec3<f32> {
+    let chroma = (1.0 - abs(2.0 * hsl.z - 1.0)) * hsl.y;
+    let sector = fract(hsl.x) * 6.0;
+    let x = chroma * (1.0 - abs((sector % 2.0) - 1.0));
+    var rgb = vec3<f32>(0.0);
+    if (sector < 1.0) {
+        rgb = vec3<f32>(chroma, x, 0.0);
+    } else if (sector < 2.0) {
+        rgb = vec3<f32>(x, chroma, 0.0);
+    } else if (sector < 3.0) {
+        rgb = vec3<f32>(0.0, chroma, x);
+    } else if (sector < 4.0) {
+        rgb = vec3<f32>(0.0, x, chroma);
+    } else if (sector < 5.0) {
+        rgb = vec3<f32>(x, 0.0, chroma);
+    } else {
+        rgb = vec3<f32>(chroma, 0.0, x);
+    }
+    return rgb + vec3<f32>(hsl.z - chroma * 0.5);
+}
+
+fn apply_hsl_secondary(c: vec3<f32>) -> vec3<f32> {
+    if (u.hsl_secondary_meta.x < 0.5) {
+        return c;
+    }
+    var hsl = rgb_to_hsl(c);
+    if (hsl.y <= 1e-7) {
+        return c;
+    }
+    let delta = abs(fract(hsl.x - u.hsl_secondary_meta.y + 0.5) - 0.5);
+    let outer = u.hsl_secondary_meta.z * 0.5;
+    if (delta > outer) {
+        return c;
+    }
+    let feather = u.hsl_secondary_meta.w;
+    var weight = 1.0;
+    if (feather > 1e-7) {
+        weight = 1.0 - smoothstep01(max(outer - feather, 0.0), outer, delta);
+    }
+    hsl.x = fract(hsl.x + u.hsl_secondary_adjust.x * weight + 1.0);
+    hsl.y = clamp(hsl.y * (1.0 + u.hsl_secondary_adjust.y * weight), 0.0, 1.0);
+    hsl.z = clamp(hsl.z + u.hsl_secondary_adjust.z * weight, 0.0, 1.0);
+    return hsl_to_rgb(hsl);
 }
 
 // Applies the grade to a LINEAR-rgb triple, returning clamped linear rgb. Mirror
-// of ColorGrade::apply_linear (exposure -> wb -> lgg -> contrast -> saturation).
+// of ColorGrade::apply_linear
+// (exposure -> wb -> lgg -> contrast -> saturation -> HSL secondary).
 fn apply_grade_linear(rgb_in: vec3<f32>) -> vec3<f32> {
     var c = rgb_in;
 
@@ -150,6 +256,9 @@ fn apply_grade_linear(rgb_in: vec3<f32>) -> vec3<f32> {
     let saturation = u.grade_gamma.w;
     let l = luma709(c);
     c = vec3<f32>(l) + (c - vec3<f32>(l)) * saturation;
+
+    // 6. Feathered HSL secondary qualifier.
+    c = apply_hsl_secondary(c);
 
     return clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
 }
@@ -193,10 +302,60 @@ fn suppress_spill(c: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(nr, c.g, c.b);
 }
 
-// ---- Masks (mirror of Mask::coverage; linear + circle in-shader) ------------
+// ---- Masks (mirror of Mask::coverage) ---------------------------------------
+
+fn mask_local_point(m: MaskGpu, p: vec2<f32>) -> vec2<f32> {
+    let scale = max(abs(m.transform.zw), vec2<f32>(1e-6));
+    let radians = m.transform_meta.x;
+    let c = cos(radians);
+    let s = sin(radians);
+    let delta = p - vec2<f32>(0.5) - m.transform.xy;
+    let unrotated = vec2<f32>(
+        c * delta.x + s * delta.y,
+        -s * delta.x + c * delta.y,
+    );
+    return unrotated / scale + vec2<f32>(0.5);
+}
+
+fn point_segment_dist2(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
+    let ab = b - a;
+    let denom = dot(ab, ab);
+    var t = 0.0;
+    if (denom > 1e-12) {
+        t = clamp(dot(p - a, ab) / denom, 0.0, 1.0);
+    }
+    let delta = p - (a + ab * t);
+    return dot(delta, delta);
+}
+
+fn polygon_signed_distance(m: MaskGpu, p: vec2<f32>) -> f32 {
+    let count = min(u32(m.head.w + 0.5), POLY_POINT_CAP);
+    if (count < 3u) {
+        return 1e6;
+    }
+    var inside = false;
+    var min_d2 = 1e12;
+    var j = count - 1u;
+    for (var i: u32 = 0u; i < count; i = i + 1u) {
+        let a = m.points[i].xy;
+        let b = m.points[j].xy;
+        let crosses_y = (a.y > p.y) != (b.y > p.y);
+        if (crosses_y) {
+            let edge_x = (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x;
+            if (p.x < edge_x) {
+                inside = !inside;
+            }
+        }
+        min_d2 = min(min_d2, point_segment_dist2(p, a, b));
+        j = i;
+    }
+    let distance = sqrt(min_d2);
+    return select(distance, -distance, inside);
+}
 
 fn mask_signed_distance(m: MaskGpu, p: vec2<f32>) -> f32 {
     let kind = u32(m.head.x + 0.5);
+    let local = mask_local_point(m, p);
     if (kind == MASK_LINEAR) {
         let point = m.geo.xy;
         let normal = m.geo.zw;
@@ -205,12 +364,15 @@ fn mask_signed_distance(m: MaskGpu, p: vec2<f32>) -> f32 {
             return 0.0;
         }
         let n = normal / nlen;
-        return -dot(p - point, n);
+        return -dot(local - point, n);
+    }
+    if (kind == MASK_POLY) {
+        return polygon_signed_distance(m, local);
     }
     // Circle (default for any other tag).
     let center = m.geo.xy;
     let radius = max(m.geo.zw, vec2<f32>(1e-6));
-    let d = length((p - center) / radius);
+    let d = length((local - center) / radius);
     return (d - 1.0) * min(radius.x, radius.y);
 }
 
@@ -235,6 +397,39 @@ fn masks_coverage(p: vec2<f32>) -> f32 {
         cov = cov * mask_coverage(u.masks[i], p);
     }
     return cov;
+}
+
+// ---- Closed generic effect chain ------------------------------------------
+
+const EFFECT_GRAYSCALE: u32 = 0u;
+const EFFECT_SEPIA: u32 = 1u;
+const EFFECT_INVERT: u32 = 2u;
+
+fn apply_effect(effect: EffectGpu, input: vec3<f32>) -> vec3<f32> {
+    let kind = u32(effect.data.x + 0.5);
+    let amount = clamp(effect.data.y, 0.0, 1.0);
+    var transformed = input;
+    if (kind == EFFECT_GRAYSCALE) {
+        transformed = vec3<f32>(luma709(input));
+    } else if (kind == EFFECT_SEPIA) {
+        transformed = vec3<f32>(
+            dot(input, vec3<f32>(0.393, 0.769, 0.189)),
+            dot(input, vec3<f32>(0.349, 0.686, 0.168)),
+            dot(input, vec3<f32>(0.272, 0.534, 0.131)),
+        );
+    } else if (kind == EFFECT_INVERT) {
+        transformed = vec3<f32>(1.0) - input;
+    }
+    return clamp(mix(input, transformed, amount), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+fn apply_effect_chain(input: vec3<f32>) -> vec3<f32> {
+    let count = min(u32(u.effect_meta.x + 0.5), EFFECT_CAP);
+    var result = input;
+    for (var i: u32 = 0u; i < count; i = i + 1u) {
+        result = apply_effect(u.effects[i], result);
+    }
+    return result;
 }
 
 @vertex
@@ -333,7 +528,13 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         rgb = linear_to_srgb(graded);
     }
 
-    // 3. Masks (intersected coverage) scale alpha.
+    // 3. Project-managed 3D LUT in display-encoded RGB.
+    rgb = apply_lut(rgb);
+
+    // 4. Ordered, schema-validated generic effects.
+    rgb = apply_effect_chain(rgb);
+
+    // 5. Masks (intersected coverage) scale alpha.
     alpha = alpha * masks_coverage(in.canvas_uv);
 
     // Premultiply once (the compositor blends premultiplied over), then apply the

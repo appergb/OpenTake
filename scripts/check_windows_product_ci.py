@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Fail closed when the native Windows product gate loses required coverage."""
 
+import json
 import re
 from pathlib import Path
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml"
+TAURI_CONFIG_PATH = REPOSITORY_ROOT / "src-tauri" / "tauri.conf.json"
 NORMAL_JOB_CONDITION = (
     "if: github.event_name != 'workflow_dispatch' || inputs.red_task == 'none'"
 )
@@ -16,12 +18,16 @@ TARGET_SHA_EXPRESSION = (
 )
 
 
-def _job_body(workflow: str) -> str | None:
+def _named_job_body(workflow: str, job_name: str) -> str | None:
     match = re.search(
-        r"(?ms)^  windows-product:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)",
+        rf"(?ms)^  {re.escape(job_name)}:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)",
         workflow,
     )
     return None if match is None else match.group("body")
+
+
+def _job_body(workflow: str) -> str | None:
+    return _named_job_body(workflow, "windows-product")
 
 
 def _steps(job: str) -> list[str]:
@@ -165,6 +171,18 @@ def validate_workflow(workflow: str) -> list[str]:
         if step is None or not _has_line(step, command):
             errors.append(label)
 
+    chromium_motion = _named_step(steps, "Windows Chromium motion capture regression")
+    chromium_motion_fragments = (
+        "renderer::tests::chromium_skeleton_reports_unavailable_not_panic",
+        "virtual_time_network_csp_timeout_cleanup_and_frame_identity",
+        "sandbox_progress_cancel_validated_mp4_result",
+    )
+    if chromium_motion is None or not all(
+        fragment in _active(chromium_motion)
+        for fragment in chromium_motion_fragments
+    ):
+        errors.append("complete Windows Chromium motion regression")
+
     bundle = _named_step(steps, "Build native MSI and NSIS installers")
     bundle_lines = (
         "Remove-Item 'target/release/bundle/msi' -Recurse -Force -ErrorAction SilentlyContinue",
@@ -173,6 +191,20 @@ def validate_workflow(workflow: str) -> list[str]:
     )
     if bundle is None or not all(_has_line(bundle, line) for line in bundle_lines):
         errors.append("clean native Tauri bundle")
+
+    installed_product = _named_step(
+        steps, "Install NSIS package and execute installed product without PATH"
+    )
+    installed_product_fragments = (
+        "packaged_macos_windows_sidecars_resolve_and_execute",
+        "Start-Process -FilePath $application -PassThru",
+        "installed OpenTake exited during launch smoke test",
+    )
+    if installed_product is None or not all(
+        fragment in _active(installed_product)
+        for fragment in installed_product_fragments
+    ):
+        errors.append("installed product launch smoke test")
 
     receipt = _named_step(steps, "Bind installers to the exact source SHA")
     if receipt is None or not _has_line(
@@ -214,12 +246,68 @@ def validate_workflow(workflow: str) -> list[str]:
     if upload is None or not _has_line(upload, "if-no-files-found: error"):
         errors.append("missing-artifact failure")
 
+    security_job = _named_job_body(workflow, "windows-security")
+    if security_job is None:
+        errors.append("Windows cancellation security job")
+        return errors
+    if "choco install ffmpeg" in _active(security_job):
+        errors.append("no external Chocolatey FFmpeg dependency")
+    security_steps = _steps(security_job)
+    cancellation = _named_step(
+        security_steps, "Portable FFmpeg cancellation lifecycle"
+    )
+    cancellation_fragments = (
+        "OPENTAKE_FFMPEG: ${{ github.workspace }}\\src-tauri\\binaries\\ffmpeg-x86_64-pc-windows-msvc.exe",
+        "& $env:OPENTAKE_FFMPEG -version",
+        "checksum-pinned packaged FFmpeg is not runnable",
+        "windows_cancelling_running_pcm_child_reaps_both_pipe_readers",
+        "windows_cancelling_mux_wait_reaps_child",
+    )
+    if cancellation is None or not all(
+        fragment in _active(cancellation) for fragment in cancellation_fragments
+    ):
+        errors.append("pinned FFmpeg cancellation lifecycle")
+
+    return errors
+
+
+def validate_tauri_config(config_text: str) -> list[str]:
+    try:
+        config = json.loads(config_text)
+    except json.JSONDecodeError:
+        return ["valid Tauri JSON config"]
+
+    app_version = config.get("version")
+    wix_version = (
+        config.get("bundle", {}).get("windows", {}).get("wix", {}).get("version")
+    )
+    errors: list[str] = []
+    if not isinstance(app_version, str) or not app_version:
+        errors.append("public Beta app version")
+    if not isinstance(wix_version, str) or not re.fullmatch(
+        r"\d+\.\d+\.\d+(?:\.\d+)?", wix_version
+    ):
+        errors.append("MSI-compatible numeric Beta version")
+        return errors
+
+    wix_fields = [int(field) for field in wix_version.split(".")]
+    if (
+        wix_fields[0] > 255
+        or wix_fields[1] > 255
+        or any(field > 65_535 for field in wix_fields[2:])
+    ):
+        errors.append("MSI-compatible numeric Beta version")
+    if isinstance(app_version, str):
+        app_core = app_version.split("+", 1)[0].split("-", 1)[0]
+        if app_core != ".".join(str(field) for field in wix_fields[:3]):
+            errors.append("MSI version tracks public app version")
     return errors
 
 
 def main() -> None:
     workflow = WORKFLOW_PATH.read_text(encoding="utf-8")
     errors = validate_workflow(workflow)
+    errors.extend(validate_tauri_config(TAURI_CONFIG_PATH.read_text(encoding="utf-8")))
     if errors:
         raise SystemExit("windows-product is missing: " + ", ".join(errors))
 

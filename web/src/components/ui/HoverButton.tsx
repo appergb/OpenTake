@@ -32,6 +32,7 @@ export function HoverButton({
       title={title}
       aria-label={title}
       disabled={disabled}
+      data-interaction-state={disabled ? "disabled" : active ? "active" : "enabled"}
       onClick={onClick}
       className={`hover-area${active ? " is-active" : ""}${className ? " " + className : ""}`}
       style={{
@@ -43,7 +44,7 @@ export function HoverButton({
         flex: "0 0 auto",
         color: active ? "var(--text-primary)" : "var(--text-secondary)",
         opacity: disabled ? 0.35 : 1,
-        cursor: disabled ? "default" : "pointer",
+        cursor: disabled ? "not-allowed" : "pointer",
         ...style,
       }}
     >

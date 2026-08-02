@@ -24,7 +24,7 @@ use super::audio::{
 use super::engine::{
     BoundedReaper, FrameSink, PlaybackClock, PlaybackEngine, PlayheadEmitter, ReapPermit,
 };
-use super::project::{project_media, project_text};
+use super::project::{project_media_with_proxies, project_text};
 use super::session::{
     PlaybackCommandError, PlaybackIdentity, ProjectTransition, SessionControl, SessionRegistry,
     StartDecision, StartTicket,
@@ -564,11 +564,24 @@ pub async fn playback_start(
 
     // Snapshot the session synchronously — no managed-state guard is held across
     // the await below (Tauri async commands require a Send future).
-    let (timeline, sizes, media, text, render_size, fps, sink, emitter, publication, server) = {
+    let (
+        timeline,
+        sizes,
+        media,
+        text,
+        render_size,
+        fps,
+        sink,
+        emitter,
+        publication,
+        server,
+        project_dir,
+    ) = {
         let timeline = snapshot.timeline;
         let manifest = snapshot.media;
         let project_dir = snapshot.project_dir;
-        let (sizes, media) = project_media(&manifest, &project_dir);
+        let prefer_proxy = app.state::<crate::media::MediaProxyState>().enabled();
+        let (sizes, media) = project_media_with_proxies(&manifest, &project_dir, prefer_proxy);
         let text = project_text(&timeline);
         let render_size =
             playback_render_size(timeline.width, timeline.height, PLAYBACK_PREVIEW_CAP);
@@ -593,6 +606,7 @@ pub async fn playback_start(
             emitter,
             publication,
             server,
+            project_dir,
         )
     };
 
@@ -637,7 +651,7 @@ pub async fn playback_start(
 
     let ready_cancel = cancel.clone();
     let engine = match spawn_ready_off_executor(move || {
-        PlaybackEngine::spawn_ready_cancellable(
+        PlaybackEngine::spawn_ready_cancellable_with_project(
             timeline,
             media,
             text,
@@ -648,6 +662,7 @@ pub async fn playback_start(
             emitter,
             start_at,
             ready_cancel,
+            project_dir,
         )
     })
     .await

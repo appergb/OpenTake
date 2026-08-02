@@ -319,7 +319,7 @@ describe("browser fallback edit store", () => {
     const result = fallback.editApply({
       type: "setEffects",
       clipIds: ["c1", "missing"],
-      effects: [{ name: "gaussianBlur", params: { radius: 4 }, enabled: true }],
+      effects: [{ name: "grayscale", params: { amount: 0.4 }, enabled: true }],
     });
     const clip = fallback
       .getTimeline()
@@ -328,6 +328,163 @@ describe("browser fallback edit store", () => {
 
     expect(result.changed).toBe(false);
     expect(clip?.effects).toBeUndefined();
+  });
+
+  it("rejects an invalid color grade before browser fallback mutation", () => {
+    const fallback = createFallbackStore();
+
+    const result = fallback.editApply({
+      type: "setColorGrade",
+      clipIds: ["c1"],
+      grade: { liftGammaGain: { gamma: { r: 0, g: 1, b: 1 } } },
+    });
+    const clip = fallback
+      .getTimeline()
+      .timeline.tracks.flatMap((track) => track.clips)
+      .find((candidate) => candidate.id === "c1");
+
+    expect(result.changed).toBe(false);
+    expect(clip?.colorGrade).toBeUndefined();
+  });
+
+  it("normalizes and validates HSL secondary authored state", () => {
+    const fallback = createFallbackStore();
+    const applied = fallback.editApply({
+      type: "setColorGrade",
+      clipIds: ["c1"],
+      grade: { hslSecondary: { hueCenter: 0.98, hueShift: 0.2 } },
+    });
+    const clip = fallback
+      .getTimeline()
+      .timeline.tracks.flatMap((track) => track.clips)
+      .find((candidate) => candidate.id === "c1");
+    expect(applied.changed).toBe(true);
+    expect(clip?.colorGrade?.hslSecondary).toEqual({
+      hueCenter: 0.98,
+      hueWidth: 0.24,
+      feather: 0.08,
+      hueShift: 0.2,
+      saturation: 0,
+      lightness: 0,
+    });
+
+    const rejected = fallback.editApply({
+      type: "setColorGrade",
+      clipIds: ["c1"],
+      grade: { hslSecondary: { hueWidth: 0 } },
+    });
+    expect(rejected.changed).toBe(false);
+    expect(clip?.colorGrade?.hslSecondary?.hueCenter).toBe(0.98);
+  });
+
+  it("sets, adjusts, and removes a path-free managed LUT reference", () => {
+    const fallback = createFallbackStore();
+    const id = "0123456789abcdef".repeat(4);
+    const applied = fallback.editApply({
+      type: "setLut",
+      clipIds: ["c1"],
+      lut: { id, name: "Known Transform", intensity: 1 },
+    });
+    expect(applied.changed).toBe(true);
+    expect(fallback.getTimeline().timeline.tracks[0].clips[0].lut).toEqual({
+      id,
+      name: "Known Transform",
+      intensity: 1,
+    });
+
+    expect(
+      fallback.editApply({
+        type: "setLut",
+        clipIds: ["c1"],
+        lut: { id, name: "Known Transform", intensity: 1.5 },
+      }).changed,
+    ).toBe(false);
+    expect(
+      fallback.editApply({
+        type: "setLut",
+        clipIds: ["c1"],
+        lut: { id, name: "bad\u0000name", intensity: 0.5 },
+      }).changed,
+    ).toBe(false);
+    expect(
+      fallback.editApply({
+        type: "setLut",
+        clipIds: ["c1"],
+        lut: { id, name: "界".repeat(43), intensity: 0.5 },
+      }).changed,
+    ).toBe(false);
+    expect(fallback.editApply({ type: "setLut", clipIds: ["c1"], lut: null }).changed).toBe(true);
+    expect(fallback.getTimeline().timeline.tracks[0].clips[0].lut).toBeUndefined();
+  });
+
+  it("stores both pair ids and rejects an oversized adjacent cross dissolve", () => {
+    const fallback = createFallbackStore();
+    fallback.reset();
+    fallback.editApply({ type: "insertTrack", kind: "video" });
+    const first = fallback.editApply({
+      type: "addClips",
+      entries: [{ mediaRef: "a", mediaType: "video", sourceClipType: "video", trackIndex: 0, startFrame: 0, durationFrames: 60 }],
+    }).affectedClipIds[0];
+    const second = fallback.editApply({
+      type: "addClips",
+      entries: [{ mediaRef: "b", mediaType: "video", sourceClipType: "video", trackIndex: 0, startFrame: 60, durationFrames: 30 }],
+    }).affectedClipIds[0];
+
+    const result = fallback.editApply({
+      type: "setTransition",
+      fromClipId: first,
+      toClipId: second,
+      kind: "crossDissolve",
+      durationFrames: 15,
+    });
+
+    expect(result.changed).toBe(true);
+    expect(fallback.getTimeline().timeline.tracks[0].clips[0].transitionOut).toEqual({
+      fromClipId: first,
+      toClipId: second,
+      kind: "crossDissolve",
+      durationFrames: 15,
+    });
+    expect(fallback.editApply({
+      type: "setTransition",
+      fromClipId: first,
+      toClipId: second,
+      kind: "crossDissolve",
+      durationFrames: 16,
+    }).changed).toBe(false);
+  });
+
+  it("rejects an invalid or non-successor fallback transition", () => {
+    const fallback = createFallbackStore();
+    fallback.reset();
+    fallback.editApply({ type: "insertTrack", kind: "video" });
+    const first = fallback.editApply({
+      type: "addClips",
+      entries: [{ mediaRef: "a", mediaType: "video", sourceClipType: "video", trackIndex: 0, startFrame: 0, durationFrames: 60 }],
+    }).affectedClipIds[0];
+    const blocker = fallback.editApply({
+      type: "addClips",
+      entries: [{ mediaRef: "b", mediaType: "video", sourceClipType: "video", trackIndex: 0, startFrame: 30, durationFrames: 30 }],
+    }).affectedClipIds[0];
+    const successor = fallback.editApply({
+      type: "addClips",
+      entries: [{ mediaRef: "c", mediaType: "video", sourceClipType: "video", trackIndex: 0, startFrame: 60, durationFrames: 30 }],
+    }).affectedClipIds[0];
+
+    expect(fallback.editApply({
+      type: "setTransition",
+      fromClipId: first,
+      toClipId: successor,
+      kind: "crossDissolve",
+      durationFrames: 15,
+    }).changed).toBe(false);
+    expect(fallback.editApply({
+      type: "setTransition",
+      fromClipId: blocker,
+      toClipId: successor,
+      kind: "crossDissolve",
+      durationFrames: 0,
+    }).changed).toBe(false);
   });
 
   it("does not emulate swapMedia without the Tauri media manifest", () => {

@@ -45,13 +45,14 @@ pub mod session;
 // --- Assembly façade ---
 pub use crate::core::{
     AppCore, BundleExportSnapshot, CapabilityImportCommit, CommittedMediaImport,
-    DeferredCoreEvents, ImportCommitWarning, PreparedMediaFolderRef, PreparedMediaImportOp,
-    ProjectRevision, ProjectRuntimeSnapshot, TimelineSnapshot,
+    DeferredCoreEvents, ImportCommitWarning, MotionMediaCommit, MotionPlacement,
+    PreparedMediaFolderRef, PreparedMediaImportOp, ProjectRevision, ProjectRuntimeSnapshot,
+    TimelineSnapshot,
 };
 pub use session::{
-    importable_clip_type, EditorSession, GenerationJobCommit, GenerationStateUpdate,
-    PreparedGenerationJob, PreparedGenerationOutput, ProbedMedia, SUPPORTED_AUDIO_EXTENSIONS,
-    SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS,
+    importable_clip_type, DerivedStemProvenance, EditorSession, GenerationJobCommit,
+    GenerationStateUpdate, PreparedGenerationJob, PreparedGenerationOutput, ProbedMedia,
+    SUPPORTED_AUDIO_EXTENSIONS, SUPPORTED_IMAGE_EXTENSIONS, SUPPORTED_VIDEO_EXTENSIONS,
 };
 
 // --- Events ---

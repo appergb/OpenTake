@@ -37,6 +37,7 @@ const srv = vi.hoisted(() => {
     playbackResponses: [] as Array<Promise<void>>,
     order: [] as string[],
     onProjectOpened: null as null | ((path: string, projectEpoch: number, version: number) => Promise<void> | void),
+    onTimelineChanged: null as null | ((projectEpoch: number, version: number) => Promise<void> | void),
     invalidate: vi.fn(async () => {
       srv.order.push("invalidate");
       const queued = srv.playbackResponses.shift();
@@ -71,8 +72,11 @@ vi.mock("../lib/api", () => ({
     srv.redoCalls += 1;
     return (await srv.redoResponses.shift()) ?? false;
   },
-  onTimelineChanged: async () => {
+  onTimelineChanged: async (
+    handler: (projectEpoch: number, version: number) => Promise<void> | void,
+  ) => {
     srv.timelineListenerCalls += 1;
+    srv.onTimelineChanged = handler;
     return (await srv.timelineListenerResponses.shift()) ?? (() => {});
   },
   onProjectOpened: async (
@@ -127,6 +131,7 @@ beforeEach(() => {
   srv.openedListenerCalls = 0;
   srv.mediaError = null;
   srv.projectOpenedHandlers.length = 0;
+  srv.onTimelineChanged = null;
   srv.playbackResponses.length = 0;
   srv.resetMediaTransient.mockClear();
   srv.refreshMedia.mockClear();
@@ -156,10 +161,13 @@ describe("project event sync", () => {
     });
 
     srv.projectPath = "/tmp/snapshot.opentake";
+    srv.snapshotResponses.push(
+      Promise.resolve(snapshot(7, 0, "/tmp/snapshot.opentake")),
+    );
     await srv.onProjectOpened?.("/tmp/event-payload.opentake", 7, 0);
 
     expect(srv.order.slice(0, 2)).toEqual(["invalidate", "refresh"]);
-    expect(useProjectStore.getState().projectEpoch).toBe(1);
+    expect(useProjectStore.getState().projectEpoch).toBe(7);
     expect(useProjectStore.getState().projectPath).toBe("/tmp/snapshot.opentake");
     const ui = useEditorUiStore.getState();
     expect(ui.isPlaying).toBe(false);
@@ -236,6 +244,48 @@ describe("project event sync", () => {
     expect(state.projectEpoch).toBe(2);
     expect(state.projectPath).toBe("/tmp/new.opentake");
     expect(state.compatibilityReadOnly).toBe(true);
+  });
+
+  it("refetches when an event-promised version is newer than the first snapshot", async () => {
+    await startSync();
+    srv.snapshotResponses.push(
+      Promise.resolve(snapshot(1, 1, null)),
+      Promise.resolve(snapshot(1, 2, null)),
+    );
+
+    await srv.onTimelineChanged?.(1, 2);
+
+    expect(useProjectStore.getState().timelineVersion).toBe(2);
+    expect(srv.order.filter((entry) => entry === "refresh")).toHaveLength(3);
+  });
+
+  it("converges to N+2 when N+1 and N+2 event refreshes complete out of order", async () => {
+    await startSync();
+    const n1 = deferred<RuntimeTimelineSnapshot>();
+    const n2 = deferred<RuntimeTimelineSnapshot>();
+    srv.snapshotResponses.push(n1.promise, n2.promise);
+
+    const first = srv.onTimelineChanged?.(1, 1);
+    const second = srv.onTimelineChanged?.(1, 2);
+    n2.resolve(snapshot(1, 2, null));
+    await second;
+    n1.resolve(snapshot(1, 1, null));
+    await first;
+
+    expect(useProjectStore.getState().timelineVersion).toBe(2);
+  });
+
+  it("never publishes a stale snapshot when catch-up retries are exhausted", async () => {
+    await startSync();
+    srv.snapshotResponses.push(
+      Promise.resolve(snapshot(1, 1, null)),
+      Promise.resolve(snapshot(1, 2, null)),
+      Promise.resolve(snapshot(1, 2, null)),
+    );
+
+    await srv.onTimelineChanged?.(1, 3);
+
+    expect(useProjectStore.getState().timelineVersion).toBe(0);
   });
 
   it("does not let late history results cross a project epoch", async () => {
@@ -444,6 +494,9 @@ describe("project event sync", () => {
     expect(useProjectStore.getState().projectPath).toBe("/tmp/saved.opentake");
 
     srv.projectPath = "/tmp/refreshed.opentake";
+    srv.snapshotResponses.push(
+      Promise.resolve(snapshot(5, 0, "/tmp/refreshed.opentake")),
+    );
     await forceRefresh();
     expect(useProjectStore.getState().projectPath).toBe("/tmp/refreshed.opentake");
   });

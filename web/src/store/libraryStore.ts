@@ -10,7 +10,7 @@
 
 import { create } from "zustand";
 import * as lib from "../lib/libraryApi";
-import type { LibraryEntry, LibraryImportWarning } from "../lib/libraryApi";
+import type { LibraryEntry, LibraryImport, LibraryImportWarning } from "../lib/libraryApi";
 import { t } from "../i18n";
 import { refreshMedia } from "./mediaStore";
 import { useEditorUiStore } from "./uiStore";
@@ -53,8 +53,8 @@ interface LibraryState {
   categorize: (id: string, category: string | null) => Promise<void>;
   renameCategory: (from: string, to: string | null) => Promise<void>;
   remove: (id: string) => Promise<void>;
-  /** 把库条目导入当前项目;成功后刷新项目媒体目录。返回新资产名(失败返回 null)。 */
-  importToProject: (id: string) => Promise<string | null>;
+  /** 把库条目导入当前项目;成功后刷新项目媒体目录。返回新资产引用(失败返回 null)。 */
+  importToProject: (id: string) => Promise<LibraryImport | null>;
 }
 
 export const useLibraryStore = create<LibraryState>((set, get) => ({
@@ -140,7 +140,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
       // must not turn that success into null or encourage an unsafe retry.
       set({ error: getErrorMessage(error) });
     }
-    return imported.name;
+    return imported;
   },
 }));
 

@@ -199,7 +199,13 @@ fn probe_realtime_playback_with_audio_or_safe_fallback() {
     tl.tracks.push(track);
 
     let mut media = HashMap::new();
-    media.insert("m-1".to_string(), MediaInfo { path: src.into() });
+    media.insert(
+        "m-1".to_string(),
+        MediaInfo {
+            path: src.into(),
+            straight_alpha: false,
+        },
+    );
     let mut sizes = HashMap::new();
     sizes.insert("m-1".to_string(), (1584u32, 1080u32));
 
@@ -280,7 +286,13 @@ fn probe_main10_playback_has_no_black_or_green_frames() {
     timeline.tracks.push(track);
 
     let mut media = HashMap::new();
-    media.insert("m-1".to_string(), MediaInfo { path: src });
+    media.insert(
+        "m-1".to_string(),
+        MediaInfo {
+            path: src,
+            straight_alpha: false,
+        },
+    );
     let mut sizes = HashMap::new();
     sizes.insert("m-1".to_string(), source_size);
 
@@ -358,7 +370,13 @@ fn probe_prores_playback() {
     tl.tracks.push(track);
 
     let mut media = HashMap::new();
-    media.insert("m-1".to_string(), MediaInfo { path: src });
+    media.insert(
+        "m-1".to_string(),
+        MediaInfo {
+            path: src,
+            straight_alpha: false,
+        },
+    );
     let mut sizes = HashMap::new();
     sizes.insert("m-1".to_string(), (1280u32, 720u32));
 
@@ -434,7 +452,13 @@ fn probe_color_grade_visible_in_playback() {
     tl.tracks.push(track);
 
     let mut media = HashMap::new();
-    media.insert("m-1".to_string(), MediaInfo { path: src });
+    media.insert(
+        "m-1".to_string(),
+        MediaInfo {
+            path: src,
+            straight_alpha: false,
+        },
+    );
     let mut sizes = HashMap::new();
     sizes.insert("m-1".to_string(), (640u32, 360u32));
 

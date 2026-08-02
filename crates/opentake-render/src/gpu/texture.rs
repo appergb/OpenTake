@@ -9,6 +9,7 @@ use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 use crate::source::DecodedFrame;
+use opentake_domain::CubeLut;
 
 /// A GPU texture plus a bindable view, reference-counted so a cache entry and an
 /// in-flight draw can share it.
@@ -17,6 +18,90 @@ pub struct GpuTexture {
     pub view: wgpu::TextureView,
     pub width: u32,
     pub height: u32,
+}
+
+/// A filterable 3D LUT texture plus its bindable D3 view.
+pub struct GpuLutTexture {
+    pub texture: wgpu::Texture,
+    pub view: wgpu::TextureView,
+    pub size: u32,
+    pub domain_min: [f32; 3],
+    pub domain_max: [f32; 3],
+}
+
+/// Upload a validated `.cube` table as RGBA16F. The alpha lane is padding.
+pub fn upload_lut_3d(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    lut: &CubeLut,
+    label: Option<&str>,
+) -> GpuLutTexture {
+    upload_lut_table_3d(
+        device,
+        queue,
+        lut.size(),
+        lut.domain_min(),
+        lut.domain_max(),
+        lut.table(),
+        label,
+    )
+}
+
+pub(crate) fn upload_lut_table_3d(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    lut_size: u32,
+    domain_min: [f32; 3],
+    domain_max: [f32; 3],
+    table: &[[f32; 3]],
+    label: Option<&str>,
+) -> GpuLutTexture {
+    let extent = wgpu::Extent3d {
+        width: lut_size,
+        height: lut_size,
+        depth_or_array_layers: lut_size,
+    };
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label,
+        size: extent,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D3,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let mut rgba = Vec::<u16>::with_capacity(table.len() * 4);
+    for value in table {
+        rgba.extend(value.map(|channel| half::f16::from_f32(channel).to_bits()));
+        rgba.push(half::f16::ONE.to_bits());
+    }
+    queue.write_texture(
+        wgpu::ImageCopyTexture {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        bytemuck::cast_slice(&rgba),
+        wgpu::ImageDataLayout {
+            offset: 0,
+            bytes_per_row: Some(lut_size * 8),
+            rows_per_image: Some(lut_size),
+        },
+        extent,
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor {
+        dimension: Some(wgpu::TextureViewDimension::D3),
+        ..Default::default()
+    });
+    GpuLutTexture {
+        texture,
+        view,
+        size: lut_size,
+        domain_min,
+        domain_max,
+    }
 }
 
 /// Upload a [`DecodedFrame`] as an RGBA8 texture.

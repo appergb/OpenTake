@@ -8,18 +8,22 @@
 //!   each frame a solid color derived from `(frame, content-hash)`. It exists so
 //!   the whole pipeline (validation → cache → frame files → compositor ingest)
 //!   is unit-testable offline with **no browser**.
-//! - [`HeadlessChromiumRenderer`] — the real backend skeleton. It documents and
-//!   sequences the deterministic CDP flow (virtual time + per-frame screenshot
-//!   with alpha, docs §3) but the live Chromium calls are gated behind the
-//!   `chromium` cargo feature. Without that feature (the default, and in CI) it
-//!   returns a clear [`MotionError::RendererUnavailable`] instead of pretending
-//!   to render.
+//! - [`HeadlessChromiumRenderer`] — the live CDP backend (virtual time +
+//!   per-frame screenshot with alpha), gated behind the `chromium` cargo
+//!   feature. Without that feature it returns a clear
+//!   [`MotionError::RendererUnavailable`].
 //!
 //! Both share [`deterministic_clock_script`] — the injected JS that freezes the
 //! page clock and exposes `OpenTake.seek(seconds)`, the render contract authors
 //! animate against.
 
+#[cfg(feature = "chromium")]
+use std::path::Path;
 use std::path::PathBuf;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use crate::cache::{content_hash, MotionCache};
 use crate::error::{MotionError, MotionResult};
@@ -39,6 +43,25 @@ pub trait MotionRenderer {
     fn render(&self, req: &MotionRenderRequest) -> MotionResult<RenderedClip>;
 }
 
+/// Cooperative cancellation shared between the caller and a live browser
+/// render. Cancelling is idempotent and may happen from any thread.
+#[derive(Clone, Debug, Default)]
+pub struct MotionCancellationToken(Arc<AtomicBool>);
+
+impl MotionCancellationToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
 /// The deterministic clock contract injected into every native fallback
 /// rendered document. It:
 /// 1. Pauses CSS/Web animations by pinning `document.timeline.currentTime`.
@@ -54,13 +77,30 @@ pub fn deterministic_clock_script() -> &'static str {
   if (window.OpenTake && window.OpenTake.__installed) return;
   var current = 0;
   var listeners = [];
+  var randomState = 0x6d2b79f5;
+  try { Date.now = function () { return Math.round(current * 1000); }; } catch (e) {}
+  try {
+    Object.defineProperty(performance, 'now', {
+      configurable: true,
+      value: function () { return current * 1000; }
+    });
+  } catch (e) {}
+  try {
+    Math.random = function () {
+      randomState = (randomState + 0x6d2b79f5) | 0;
+      var n = Math.imul(randomState ^ (randomState >>> 15), 1 | randomState);
+      n = (n + Math.imul(n ^ (n >>> 7), 61 | n)) ^ n;
+      return ((n ^ (n >>> 14)) >>> 0) / 4294967296;
+    };
+  } catch (e) {}
   window.OpenTake = {
     __installed: true,
     // Current virtual time in seconds.
     currentTime: function () { return current; },
     // Host calls this once per frame with t = frameIndex / fps.
-    seek: function (seconds) {
+    seek: async function (seconds) {
       current = seconds;
+      randomState = (0x6d2b79f5 ^ Math.round(seconds * 1000000)) | 0;
       try {
         if (document.timeline) {
           // Freeze the document timeline to the virtual clock (ms).
@@ -70,9 +110,11 @@ pub fn deterministic_clock_script() -> &'static str {
           });
         }
       } catch (e) { /* timeline may be read-only; listeners still fire */ }
+      var pending = [];
       for (var i = 0; i < listeners.length; i++) {
-        try { listeners[i](seconds); } catch (e) {}
+        try { pending.push(Promise.resolve(listeners[i](seconds))); } catch (e) {}
       }
+      await Promise.all(pending);
     },
     // Authors register frame callbacks: OpenTake.onSeek(t => { ... }).
     onSeek: function (fn) { if (typeof fn === 'function') listeners.push(fn); }
@@ -272,9 +314,9 @@ impl Crc32 {
     }
 }
 
-/// The real headless-Chromium backend (skeleton).
+/// The real headless-Chromium backend.
 ///
-/// The deterministic fallback flow this skeleton documents, step by step, is:
+/// Its deterministic fallback flow is:
 /// 1. Launch an offscreen Chromium with no network, an empty profile, and no
 ///    filesystem access beyond the served document — applying [`SandboxPolicy`].
 /// 2. `Emulation.setDeviceMetricsOverride` to the requested `width`×`height`.
@@ -290,26 +332,102 @@ impl Crc32 {
 ///    when `transparent`), writing the PNG to `cache_dir/frame_iiiii.png`.
 /// 7. Return the [`RenderedClip`].
 ///
-/// The live CDP wiring is gated behind the `chromium` cargo feature so neither
-/// the default build nor CI needs a browser. Without the feature, [`render`]
+/// The CDP wiring is gated behind the `chromium` cargo feature so the default
+/// build does not require a browser or websocket dependency. The live path
+/// locates Chrome/Chromium/Edge, uses a fresh disposable profile, injects a
+/// strict CSP, intercepts every request with `Fetch`, and kills the browser on
+/// cancellation, timeout, or protocol failure. Without the feature, [`render`]
 /// returns [`MotionError::RendererUnavailable`].
-///
-/// TODO(#34, native fallback): implement the steps above against a CDP
-/// client (e.g. `chromiumoxide`) under `#[cfg(feature = "chromium")]`, including:
-///   - locating/launching the browser binary and surfacing a clear error if absent,
-///   - enforcing the network allowlist via `Fetch.enable` + request interception,
-///   - applying the CSP and timeout fuse,
-///   - mapping CDP failures to `MotionError::RenderFailed` / `::Timeout`.
 #[derive(Clone, Debug)]
 pub struct HeadlessChromiumRenderer {
     cache: MotionCache,
     policy: SandboxPolicy,
+    browser_path: Option<PathBuf>,
+    cancellation: MotionCancellationToken,
 }
 
 impl HeadlessChromiumRenderer {
     /// Build the renderer with a cache and sandbox policy.
     pub fn new(cache: MotionCache, policy: SandboxPolicy) -> Self {
-        HeadlessChromiumRenderer { cache, policy }
+        HeadlessChromiumRenderer {
+            cache,
+            policy,
+            browser_path: None,
+            cancellation: MotionCancellationToken::new(),
+        }
+    }
+
+    /// Override browser discovery. Useful for portable app bundles and for
+    /// deterministic crash-path tests.
+    pub fn with_browser_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.browser_path = Some(path.into());
+        self
+    }
+
+    /// Attach a cooperative cancellation token.
+    pub fn with_cancellation_token(mut self, token: MotionCancellationToken) -> Self {
+        self.cancellation = token;
+        self
+    }
+
+    /// Locate Chrome, Chromium, or Edge without launching it. An explicit
+    /// `OPENTAKE_CHROMIUM_PATH` wins, followed by platform install locations and
+    /// finally PATH.
+    pub fn find_browser() -> Option<PathBuf> {
+        if let Some(path) = std::env::var_os("OPENTAKE_CHROMIUM_PATH").map(PathBuf::from) {
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+
+        const COMMON: &[&str] = &[
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/google-chrome",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/usr/bin/microsoft-edge",
+        ];
+        if let Some(path) = COMMON.iter().map(PathBuf::from).find(|path| path.is_file()) {
+            return Some(path);
+        }
+
+        for base in ["PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA"] {
+            let Some(base) = std::env::var_os(base) else {
+                continue;
+            };
+            for relative in [
+                "Google/Chrome/Application/chrome.exe",
+                "Microsoft/Edge/Application/msedge.exe",
+                "Chromium/Application/chrome.exe",
+            ] {
+                let path = PathBuf::from(&base).join(relative);
+                if path.is_file() {
+                    return Some(path);
+                }
+            }
+        }
+
+        let path = std::env::var_os("PATH")?;
+        for dir in std::env::split_paths(&path) {
+            for name in [
+                "google-chrome-stable",
+                "google-chrome",
+                "chromium",
+                "chromium-browser",
+                "microsoft-edge",
+                "chrome.exe",
+                "msedge.exe",
+            ] {
+                let candidate = dir.join(name);
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+        None
     }
 
     /// The sandbox policy in effect.
@@ -355,13 +473,7 @@ impl MotionRenderer for HeadlessChromiumRenderer {
 
         #[cfg(feature = "chromium")]
         {
-            // TODO(#34): real CDP render. Until implemented, fail loudly rather
-            // than silently — a half-done browser path must never masquerade as
-            // a successful render.
-            let _ = (&self.cache, Self::frame_time_grid(req));
-            Err(MotionError::renderer_unavailable(
-                "headless-Chromium backend is enabled but not yet implemented (Issue #34 native fallback TODO)",
-            ))
+            chromium_backend::render(self, req)
         }
         #[cfg(not(feature = "chromium"))]
         {
@@ -370,6 +482,716 @@ impl MotionRenderer for HeadlessChromiumRenderer {
                 "headless-Chromium backend is not compiled in; build with the \
                  `chromium` feature, or use StubRenderer for offline/deterministic rendering",
             ))
+        }
+    }
+}
+
+#[cfg(feature = "chromium")]
+mod chromium_backend {
+    use std::io::{BufRead, BufReader};
+    use std::net::TcpStream;
+    use std::process::{Child, Command, Stdio};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    use base64::Engine as _;
+    use serde_json::{json, Value};
+    use tungstenite::stream::MaybeTlsStream;
+    use tungstenite::{Message, WebSocket};
+
+    use super::*;
+
+    static PROFILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn trace(message: impl AsRef<str>) {
+        if std::env::var_os("OPENTAKE_MOTION_TRACE").is_some() {
+            eprintln!("[opentake-motion] {}", message.as_ref());
+        }
+    }
+
+    pub(super) fn render(
+        renderer: &HeadlessChromiumRenderer,
+        req: &MotionRenderRequest,
+    ) -> MotionResult<RenderedClip> {
+        if renderer.cancellation.is_cancelled() {
+            return Err(MotionError::Cancelled);
+        }
+
+        let browser_path = renderer
+            .browser_path
+            .clone()
+            .or_else(HeadlessChromiumRenderer::find_browser)
+            .ok_or_else(|| {
+                MotionError::renderer_unavailable(
+                    "no supported Chrome, Chromium, or Edge executable was found; set OPENTAKE_CHROMIUM_PATH",
+                )
+            })?;
+        trace(format!("browser={}", browser_path.display()));
+
+        let document = match &req.source {
+            MotionSource::Code { html_css_js } => sandboxed_document(html_css_js, &renderer.policy),
+            MotionSource::Template { id, .. } => {
+                return Err(MotionError::unknown_template(format!(
+                    "{id} (HeadlessChromiumRenderer requires the caller to resolve templates to inline Code)"
+                )));
+            }
+        };
+
+        let hash = content_hash(req);
+        if renderer.cache.is_cached(req) {
+            return Ok(clip_from_cache(req, hash, renderer.cache.dir_for(req)));
+        }
+
+        let dir = renderer.cache.ensure_dir(req)?;
+        remove_partial_frames(&dir)?;
+        let mut partial = PartialFrames::new(dir.clone());
+        let deadline = Instant::now()
+            .checked_add(renderer.policy.timeout)
+            .unwrap_or_else(Instant::now);
+        check_abort(renderer, deadline)?;
+
+        let (mut browser, websocket_url) = BrowserProcess::launch(
+            &browser_path,
+            deadline,
+            renderer.policy.timeout,
+            &renderer.cancellation,
+        )?;
+        trace("browser launched and CDP endpoint is ready");
+        let (socket, _) = tungstenite::connect(websocket_url.as_str()).map_err(|error| {
+            MotionError::render_failed(format!("failed to connect to Chromium CDP: {error}"))
+        })?;
+        trace("connected to browser CDP");
+        set_socket_poll_timeout(&socket)?;
+        let mut cdp = Cdp::new(
+            socket,
+            renderer.policy.clone(),
+            renderer.cancellation.clone(),
+            deadline,
+        );
+
+        let target = cdp.command(
+            "Target.createTarget",
+            json!({"url": "about:blank", "background": false}),
+            None,
+        )?;
+        let target_id = required_string(&target, "targetId")?;
+        let attached = cdp.command(
+            "Target.attachToTarget",
+            json!({"targetId": target_id, "flatten": true}),
+            None,
+        )?;
+        let session = required_string(&attached, "sessionId")?;
+        trace("created and attached render target");
+
+        cdp.command("Page.enable", json!({}), Some(&session))?;
+        cdp.command("Runtime.enable", json!({}), Some(&session))?;
+        cdp.command("Log.enable", json!({}), Some(&session))?;
+        // A background target can have its compositor throttled on Windows,
+        // leaving a later surface screenshot pending indefinitely.
+        cdp.command("Page.bringToFront", json!({}), Some(&session))?;
+        cdp.command(
+            "Fetch.enable",
+            json!({"patterns": [{"urlPattern": "*", "requestStage": "Request"}]}),
+            Some(&session),
+        )?;
+        cdp.command(
+            "Emulation.setDeviceMetricsOverride",
+            json!({
+                "width": req.width,
+                "height": req.height,
+                "deviceScaleFactor": 1,
+                "mobile": false,
+                "screenWidth": req.width,
+                "screenHeight": req.height
+            }),
+            Some(&session),
+        )?;
+        let alpha = if req.transparent { 0.0 } else { 1.0 };
+        cdp.command(
+            "Emulation.setDefaultBackgroundColorOverride",
+            json!({"color": {"r": 255, "g": 255, "b": 255, "a": alpha}}),
+            Some(&session),
+        )?;
+        cdp.command(
+            "Page.addScriptToEvaluateOnNewDocument",
+            json!({"source": deterministic_clock_script()}),
+            Some(&session),
+        )?;
+
+        let url = HeadlessChromiumRenderer::data_url_for_code(&document);
+        cdp.command("Page.navigate", json!({"url": url}), Some(&session))?;
+        cdp.wait_for_event("Page.loadEventFired", Some(&session))?;
+        trace("inline motion document loaded");
+        // Pausing before navigation also pauses the load lifecycle itself in
+        // recent Chromium. The deterministic clock is already installed before
+        // author code; freeze the browser's own timeline immediately after the
+        // synchronous inline document has loaded and before any frame capture.
+        cdp.command(
+            "Emulation.setVirtualTimePolicy",
+            json!({"policy": "pause"}),
+            Some(&session),
+        )?;
+        if let Some(blocked) = cdp.take_blocked_url() {
+            return Err(MotionError::sandbox(format!(
+                "network access to {blocked:?} is not in the allowlist"
+            )));
+        }
+
+        let mut frames = Vec::with_capacity(req.duration_frames as usize);
+        for (index, seconds) in HeadlessChromiumRenderer::frame_time_grid(req)
+            .into_iter()
+            .enumerate()
+        {
+            check_abort(renderer, deadline)?;
+            trace(format!("frame {index}: seek start at {seconds:.17}s"));
+            let expression = format!(
+                "(async () => {{ if (!window.OpenTake) throw new Error('OpenTake clock missing'); await window.OpenTake.seek({seconds:.17}); return window.OpenTake.currentTime(); }})()"
+            );
+            let evaluated = cdp.command(
+                "Runtime.evaluate",
+                json!({
+                    "expression": expression,
+                    "returnByValue": true,
+                    "awaitPromise": true
+                }),
+                Some(&session),
+            )?;
+            trace(format!("frame {index}: seek complete"));
+            if evaluated
+                .get("exceptionDetails")
+                .and_then(Value::as_object)
+                .is_some()
+            {
+                return Err(MotionError::render_failed(format!(
+                    "author document failed while seeking frame {index}: {evaluated}"
+                )));
+            }
+            if let Some(blocked) = cdp.take_blocked_url() {
+                return Err(MotionError::sandbox(format!(
+                    "network access to {blocked:?} is not in the allowlist"
+                )));
+            }
+
+            let captured = cdp.command(
+                "Page.captureScreenshot",
+                json!({
+                    "format": "png",
+                    "fromSurface": true,
+                    "captureBeyondViewport": false,
+                    "optimizeForSpeed": false
+                }),
+                Some(&session),
+            )?;
+            trace(format!("frame {index}: screenshot captured"));
+            let encoded = required_string(&captured, "data")?;
+            let png = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|error| {
+                    MotionError::render_failed(format!(
+                        "Chromium returned malformed screenshot data for frame {index}: {error}"
+                    ))
+                })?;
+            if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+                return Err(MotionError::render_failed(format!(
+                    "Chromium returned a non-PNG screenshot for frame {index}"
+                )));
+            }
+            let path = MotionCache::frame_file(&dir, index);
+            std::fs::write(&path, png)?;
+            frames.push(path);
+        }
+
+        cdp.command("Target.closeTarget", json!({"targetId": target_id}), None)?;
+        partial.commit();
+        browser.shutdown();
+
+        Ok(RenderedClip {
+            content_hash: hash,
+            frames,
+            fps: req.fps,
+            width: req.width,
+            height: req.height,
+            transparent: req.transparent,
+        })
+    }
+
+    fn clip_from_cache(
+        req: &MotionRenderRequest,
+        content_hash: String,
+        dir: PathBuf,
+    ) -> RenderedClip {
+        RenderedClip {
+            content_hash,
+            frames: (0..req.duration_frames as usize)
+                .map(|index| MotionCache::frame_file(&dir, index))
+                .collect(),
+            fps: req.fps,
+            width: req.width,
+            height: req.height,
+            transparent: req.transparent,
+        }
+    }
+
+    fn sandboxed_document(document: &str, policy: &SandboxPolicy) -> String {
+        let origins = policy
+            .allowed_origins
+            .iter()
+            .map(|origin| origin.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let sources = if origins.is_empty() {
+            "'none'".to_owned()
+        } else {
+            origins
+        };
+        let csp = format!(
+            "default-src 'none'; script-src 'unsafe-inline' data: {sources}; style-src 'unsafe-inline' data: {sources}; img-src data: {sources}; media-src data: {sources}; font-src data: {sources}; connect-src {sources}; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; worker-src 'none'"
+        );
+        format!(
+            "<meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\"><style>html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}}</style>{document}"
+        )
+    }
+
+    fn check_abort(renderer: &HeadlessChromiumRenderer, deadline: Instant) -> MotionResult<()> {
+        if renderer.cancellation.is_cancelled() {
+            return Err(MotionError::Cancelled);
+        }
+        if Instant::now() >= deadline {
+            return Err(MotionError::Timeout(renderer.policy.timeout));
+        }
+        Ok(())
+    }
+
+    fn required_string(value: &Value, key: &str) -> MotionResult<String> {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                MotionError::render_failed(format!(
+                    "Chromium CDP response is missing string field {key:?}: {value}"
+                ))
+            })
+    }
+
+    fn remove_partial_frames(dir: &Path) -> MotionResult<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("frame_") && name.ends_with(".png") {
+                std::fs::remove_file(entry.path())?;
+            }
+        }
+        Ok(())
+    }
+
+    struct PartialFrames {
+        dir: PathBuf,
+        committed: bool,
+    }
+
+    impl PartialFrames {
+        fn new(dir: PathBuf) -> Self {
+            Self {
+                dir,
+                committed: false,
+            }
+        }
+
+        fn commit(&mut self) {
+            self.committed = true;
+        }
+    }
+
+    impl Drop for PartialFrames {
+        fn drop(&mut self) {
+            if !self.committed {
+                let _ = remove_partial_frames(&self.dir);
+            }
+        }
+    }
+
+    struct BrowserProcess {
+        child: Child,
+        profile: PathBuf,
+    }
+
+    impl BrowserProcess {
+        fn launch(
+            executable: &Path,
+            deadline: Instant,
+            timeout: Duration,
+            cancellation: &MotionCancellationToken,
+        ) -> MotionResult<(Self, String)> {
+            let profile = unique_profile_dir();
+            std::fs::create_dir_all(&profile)?;
+            let mut command = Command::new(executable);
+            command
+                .args([
+                    "--headless=new",
+                    "--remote-debugging-port=0",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--disable-background-networking",
+                    "--disable-component-update",
+                    "--disable-client-side-phishing-detection",
+                    "--disable-domain-reliability",
+                    "--disable-sync",
+                    "--disable-background-timer-throttling",
+                    "--disable-backgrounding-occluded-windows",
+                    "--disable-renderer-backgrounding",
+                    "--run-all-compositor-stages-before-draw",
+                    "--metrics-recording-only",
+                    "--disable-breakpad",
+                    "--disable-extensions",
+                    "--disable-dev-shm-usage",
+                    "--disable-features=FileSystemAccessAPI,InterestFeedContentSuggestions,OptimizationHints,MediaRouter",
+                    "--password-store=basic",
+                    "--use-mock-keychain",
+                    "about:blank",
+                ])
+                .arg(format!("--user-data-dir={}", profile.display()))
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped());
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                command.process_group(0);
+            }
+            let mut child = command.spawn().map_err(|error| {
+                let _ = std::fs::remove_dir_all(&profile);
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    MotionError::renderer_unavailable(format!(
+                        "Chromium executable does not exist at {}",
+                        executable.display()
+                    ))
+                } else {
+                    MotionError::render_failed(format!(
+                        "failed to launch Chromium at {}: {error}",
+                        executable.display()
+                    ))
+                }
+            })?;
+            let stderr = child
+                .stderr
+                .take()
+                .ok_or_else(|| MotionError::render_failed("Chromium stderr was not captured"))?;
+            let (sender, receiver) = mpsc::channel();
+            thread::spawn(move || {
+                for line in BufReader::new(stderr).lines() {
+                    match line {
+                        Ok(line) => {
+                            if sender.send(line).is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            let mut process = BrowserProcess { child, profile };
+            loop {
+                if cancellation.is_cancelled() {
+                    return Err(MotionError::Cancelled);
+                }
+                if Instant::now() >= deadline {
+                    return Err(MotionError::Timeout(timeout));
+                }
+                if let Some(status) = process.child.try_wait()? {
+                    return Err(MotionError::render_failed(format!(
+                        "Chromium exited before CDP was ready: {status}"
+                    )));
+                }
+                match receiver.recv_timeout(Duration::from_millis(20)) {
+                    Ok(line) => {
+                        if let Some((_, url)) = line.split_once("DevTools listening on ") {
+                            return Ok((process, url.trim().to_owned()));
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        return Err(MotionError::render_failed(
+                            "Chromium closed stderr before publishing its CDP endpoint",
+                        ));
+                    }
+                }
+            }
+        }
+
+        fn shutdown(&mut self) {
+            #[cfg(unix)]
+            {
+                // Chrome launches renderer and utility helpers. Terminate the
+                // isolated process group so a wedged author script cannot
+                // outlive the browser root and keep mutating its profile.
+                let process_group = -(self.child.id() as i32);
+                // SAFETY: launch places this child in a process group whose id
+                // is the child's pid; a negative pid targets that group only.
+                unsafe {
+                    libc::kill(process_group, libc::SIGKILL);
+                }
+            }
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+
+        fn remove_profile(&self) {
+            // Chromium can keep helper processes alive for a few milliseconds
+            // after its root process exits. Those helpers may race a one-shot
+            // remove_dir_all by creating a final state file, leaving profiles
+            // behind on Linux timeout and cancellation paths.
+            const CLEANUP_ATTEMPTS: usize = 100;
+            for attempt in 0..CLEANUP_ATTEMPTS {
+                match std::fs::remove_dir_all(&self.profile) {
+                    Ok(()) => return,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+                    Err(_) if attempt + 1 < CLEANUP_ATTEMPTS => {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => return,
+                }
+            }
+        }
+    }
+
+    impl Drop for BrowserProcess {
+        fn drop(&mut self) {
+            self.shutdown();
+            self.remove_profile();
+        }
+    }
+
+    fn unique_profile_dir() -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let counter = PROFILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "opentake-chromium-{}-{nanos}-{counter}",
+            std::process::id()
+        ))
+    }
+
+    type CdpSocket = WebSocket<MaybeTlsStream<TcpStream>>;
+
+    fn set_socket_poll_timeout(socket: &CdpSocket) -> MotionResult<()> {
+        match socket.get_ref() {
+            MaybeTlsStream::Plain(stream) => stream
+                .set_read_timeout(Some(Duration::from_millis(50)))
+                .map_err(MotionError::Io),
+            _ => Err(MotionError::render_failed(
+                "the local Chromium CDP endpoint unexpectedly used TLS",
+            )),
+        }
+    }
+
+    struct Cdp {
+        socket: CdpSocket,
+        next_id: u64,
+        policy: SandboxPolicy,
+        cancellation: MotionCancellationToken,
+        deadline: Instant,
+        blocked_url: Option<String>,
+        pending_events: Vec<Value>,
+    }
+
+    impl Cdp {
+        fn new(
+            socket: CdpSocket,
+            policy: SandboxPolicy,
+            cancellation: MotionCancellationToken,
+            deadline: Instant,
+        ) -> Self {
+            Self {
+                socket,
+                next_id: 1,
+                policy,
+                cancellation,
+                deadline,
+                blocked_url: None,
+                pending_events: Vec::new(),
+            }
+        }
+
+        fn command(
+            &mut self,
+            method: &str,
+            params: Value,
+            session: Option<&str>,
+        ) -> MotionResult<Value> {
+            let id = self.next_id;
+            self.next_id += 1;
+            let mut message = json!({"id": id, "method": method, "params": params});
+            if let Some(session) = session {
+                message["sessionId"] = Value::String(session.to_owned());
+            }
+            self.send(message)?;
+
+            loop {
+                let value = self.read()?;
+                if value.get("id").and_then(Value::as_u64) == Some(id) {
+                    if let Some(error) = value.get("error") {
+                        return Err(MotionError::render_failed(format!(
+                            "Chromium CDP {method} failed: {error}"
+                        )));
+                    }
+                    return Ok(value.get("result").cloned().unwrap_or_else(|| json!({})));
+                }
+                self.handle_event_or_queue(value)?;
+            }
+        }
+
+        fn wait_for_event(&mut self, method: &str, session: Option<&str>) -> MotionResult<Value> {
+            if let Some(index) = self.pending_events.iter().position(|event| {
+                event.get("method").and_then(Value::as_str) == Some(method)
+                    && session.is_none_or(|expected| {
+                        event.get("sessionId").and_then(Value::as_str) == Some(expected)
+                    })
+            }) {
+                return Ok(self.pending_events.remove(index));
+            }
+            loop {
+                let value = self.read()?;
+                if value.get("method").and_then(Value::as_str) == Some(method)
+                    && session.is_none_or(|expected| {
+                        value.get("sessionId").and_then(Value::as_str) == Some(expected)
+                    })
+                {
+                    return Ok(value);
+                }
+                self.handle_event_or_queue(value)?;
+            }
+        }
+
+        fn take_blocked_url(&mut self) -> Option<String> {
+            self.blocked_url.take()
+        }
+
+        fn send(&mut self, value: Value) -> MotionResult<()> {
+            self.socket
+                .send(Message::text(value.to_string()))
+                .map_err(|error| {
+                    MotionError::render_failed(format!(
+                        "failed to send Chromium CDP command: {error}"
+                    ))
+                })
+        }
+
+        fn read(&mut self) -> MotionResult<Value> {
+            loop {
+                if self.cancellation.is_cancelled() {
+                    return Err(MotionError::Cancelled);
+                }
+                if Instant::now() >= self.deadline {
+                    return Err(MotionError::Timeout(self.policy.timeout));
+                }
+                match self.socket.read() {
+                    Ok(Message::Text(text)) => {
+                        return serde_json::from_str(text.as_ref()).map_err(|error| {
+                            MotionError::render_failed(format!(
+                                "Chromium sent malformed CDP JSON: {error}"
+                            ))
+                        });
+                    }
+                    Ok(Message::Ping(payload)) => {
+                        self.socket.send(Message::Pong(payload)).map_err(|error| {
+                            MotionError::render_failed(format!(
+                                "failed to answer Chromium CDP ping: {error}"
+                            ))
+                        })?;
+                    }
+                    Ok(Message::Close(reason)) => {
+                        return Err(MotionError::render_failed(format!(
+                            "Chromium CDP connection closed unexpectedly: {reason:?}"
+                        )));
+                    }
+                    Ok(_) => {}
+                    Err(tungstenite::Error::Io(error))
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) => {}
+                    Err(error) => {
+                        return Err(MotionError::render_failed(format!(
+                            "failed to read Chromium CDP response: {error}"
+                        )));
+                    }
+                }
+            }
+        }
+
+        fn handle_event_or_queue(&mut self, value: Value) -> MotionResult<()> {
+            match value.get("method").and_then(Value::as_str) {
+                Some("Fetch.requestPaused") => self.handle_request(&value),
+                Some("Log.entryAdded") => {
+                    let text = value
+                        .get("params")
+                        .and_then(|params| params.get("entry"))
+                        .and_then(|entry| entry.get("text"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    if (text.contains("Content Security Policy")
+                        || text.contains("Refused to load")
+                        || text.contains("Not allowed to load local resource")
+                        || text.contains("violates the following"))
+                        && self.blocked_url.is_none()
+                    {
+                        self.blocked_url = Some(text.to_owned());
+                    }
+                    Ok(())
+                }
+                Some("Inspector.targetCrashed" | "Target.targetCrashed") => {
+                    Err(MotionError::render_failed("Chromium render target crashed"))
+                }
+                Some(_) => {
+                    if self.pending_events.len() >= 256 {
+                        self.pending_events.remove(0);
+                    }
+                    self.pending_events.push(value);
+                    Ok(())
+                }
+                None => Ok(()),
+            }
+        }
+
+        fn handle_request(&mut self, event: &Value) -> MotionResult<()> {
+            let params = event.get("params").ok_or_else(|| {
+                MotionError::render_failed("Fetch.requestPaused event has no params")
+            })?;
+            let request_id = required_string(params, "requestId")?;
+            let url = params
+                .get("request")
+                .and_then(|request| request.get("url"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    MotionError::render_failed("Fetch.requestPaused event has no request URL")
+                })?;
+            let session = event.get("sessionId").and_then(Value::as_str);
+            let allowed = url == "about:blank" || self.policy.check_url(url).is_ok();
+            let id = self.next_id;
+            self.next_id += 1;
+            let (method, params) = if allowed {
+                ("Fetch.continueRequest", json!({"requestId": request_id}))
+            } else {
+                if self.blocked_url.is_none() {
+                    self.blocked_url = Some(url.to_owned());
+                }
+                (
+                    "Fetch.failRequest",
+                    json!({"requestId": request_id, "errorReason": "BlockedByClient"}),
+                )
+            };
+            let mut message = json!({"id": id, "method": method, "params": params});
+            if let Some(session) = session {
+                message["sessionId"] = Value::String(session.to_owned());
+            }
+            self.send(message)
         }
     }
 }
@@ -444,6 +1266,7 @@ mod tests {
         for (fa, fb) in ca.frames.iter().zip(cb.frames.iter()) {
             let ba = std::fs::read(fa).unwrap();
             let bb = std::fs::read(fb).unwrap();
+            assert!(ba.starts_with(b"\x89PNG\r\n\x1a\n"));
             assert_eq!(ba, bb, "same request must produce identical bytes");
         }
     }
@@ -463,6 +1286,20 @@ mod tests {
         assert_eq!(first.get_pixel(0, 0)[3], 0);
         let last = image::open(clip.frames.last().unwrap()).unwrap().to_rgba8();
         assert_eq!(last.get_pixel(0, 0)[3], 255);
+
+        // 200x100 RGBA scanlines exceed one 65,535-byte stored-deflate block.
+        // Decode a direct encoder result to prove multi-block zlib framing and
+        // exact RGBA values, not just the tiny single-block fixture above.
+        let rgba = [17, 34, 51, 68];
+        let big_a = encode_solid_rgba_png(200, 100, rgba);
+        let big_b = encode_solid_rgba_png(200, 100, rgba);
+        assert_eq!(big_a, big_b);
+        let big = image::load_from_memory_with_format(&big_a, image::ImageFormat::Png)
+            .unwrap()
+            .to_rgba8();
+        assert_eq!(big.dimensions(), (200, 100));
+        assert_eq!(big.get_pixel(0, 0).0, rgba);
+        assert_eq!(big.get_pixel(199, 99).0, rgba);
     }
 
     #[test]
@@ -481,17 +1318,43 @@ mod tests {
         let r =
             HeadlessChromiumRenderer::new(MotionCache::new(tmp.path()), SandboxPolicy::default());
         let req = MotionRenderRequest::new(MotionSource::code("<x/>"), 30, 2, 10, 10);
-        let err = r.render(&req).unwrap_err();
-        assert!(
-            matches!(err, MotionError::RendererUnavailable(_)),
-            "expected RendererUnavailable, got {err:?}"
-        );
+        #[cfg(not(feature = "chromium"))]
+        {
+            let err = r.render(&req).unwrap_err();
+            assert!(
+                matches!(err, MotionError::RendererUnavailable(_)),
+                "expected RendererUnavailable, got {err:?}"
+            );
+        }
+        #[cfg(feature = "chromium")]
+        {
+            if HeadlessChromiumRenderer::find_browser().is_some() {
+                let clip = r.render(&req).expect("feature-enabled browser render");
+                assert_eq!(clip.frame_count(), 2);
+            } else {
+                assert!(matches!(
+                    r.render(&req),
+                    Err(MotionError::RendererUnavailable(_))
+                ));
+            }
+        }
     }
 
     #[test]
     fn chromium_applies_sandbox_size_before_unavailable() {
-        // A document over the ceiling fails with a Sandbox error, proving the
-        // policy is enforced even though no browser runs.
+        // Stub checks the default ceiling before creating its content-hash dir.
+        let stub_tmp = tempfile::tempdir().unwrap();
+        let stub = StubRenderer::new(MotionCache::new(stub_tmp.path()));
+        let oversized = "x".repeat(crate::sandbox::DEFAULT_MAX_DOCUMENT_BYTES + 1);
+        let stub_req = MotionRenderRequest::new(MotionSource::code(oversized), 30, 1, 10, 10);
+        assert!(matches!(
+            stub.render(&stub_req),
+            Err(MotionError::Sandbox(_))
+        ));
+        assert_eq!(std::fs::read_dir(stub_tmp.path()).unwrap().count(), 0);
+
+        // Chromium checks its policy before browser discovery/launch and before
+        // creating a content-hash dir, in both feature configurations.
         let tmp = tempfile::tempdir().unwrap();
         let policy = SandboxPolicy {
             max_document_bytes: 4,
@@ -502,6 +1365,7 @@ mod tests {
             MotionRenderRequest::new(MotionSource::code("<this-is-too-long/>"), 30, 1, 10, 10);
         let err = r.render(&req).unwrap_err();
         assert!(matches!(err, MotionError::Sandbox(_)), "got {err:?}");
+        assert_eq!(std::fs::read_dir(tmp.path()).unwrap().count(), 0);
     }
 
     #[test]

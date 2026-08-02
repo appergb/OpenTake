@@ -39,6 +39,7 @@
   --accent-primary: rgb(245, 239, 228);
   --accent-spotlight: rgb(255, 69, 69);
   --status-error: rgb(229, 79, 79);
+  --status-success: rgb(88, 168, 34);
   /* SwiftUI .yellow (matches ACCENT.systemYellow in theme.ts / the main
      timeline's SnapIndicator dashed snap-guide line) */
   --status-warning: rgb(255, 204, 0);
@@ -153,6 +154,35 @@
   --panel-gap: 5px;
   --tab-rail-width: 38px;
   --context-row-height: 22px;
+  --project-card-width: 150px;
+  --project-card-height: 120px;
+  --caption-preview-max-height: 150px;
+  --tool-image-preview-max-height: 50px;
+  --caption-default-font-size: 48px;
+  --caption-min-font-size: 12px;
+  --caption-max-font-size: 300px;
+  --caption-center-snap-threshold: 0.02;
+  --caption-default-center-y: 0.9;
+  --generation-reference-tile-width: 80px;
+  --generation-reference-tile-height: 56px;
+  --keyframe-row-height: 22px;
+  --keyframe-ruler-height: 18px;
+  --keyframe-strip-height: 14px;
+  --keyframe-header-height: 32px;
+  --keyframe-diamond-size: 8px;
+
+  /* Compatibility aliases used by older panels. They resolve to the canonical
+     upstream token instead of defining a second literal value. */
+  --accent-danger: var(--status-error);
+  --danger: var(--status-error);
+  --destructive: var(--status-error);
+  --bg-secondary: var(--bg-raised);
+  --bg-hover: rgba(255, 255, 255, var(--op-faint));
+  --bg-selected: rgba(255, 255, 255, var(--op-soft));
+  --text-disabled: var(--text-muted);
+  --font-sans: var(--font-ui);
+  --duration-fast: var(--anim-hover);
+  --ease-out-expo: var(--ease-out);
 
   /* §5.2 Timeline geometry constants */
   --ruler-height: 24px;

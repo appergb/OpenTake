@@ -55,11 +55,13 @@ pub fn description(tool: ToolName) -> &'static str {
 
         ToolName::DetectBeats => "Detects musical beat positions for a clip or media asset using lightweight PCM energy/onset analysis. Returns project-frame beat hints and strengths; it does not mutate the timeline.",
 
-        ToolName::AutoCutToBeats => "Plans beat-synced cuts for one or more clips against an audio or music source. Returns beat frames, suggested cut frames, and optional clip placement hints; it does not mutate the timeline. Apply the plan with existing edit tools.",
+        ToolName::AutoCutToBeats => "Plans beat-synced alignment for visual clips against an audio or music source. The default write=false returns beat frames, suggested cut frames, and clip placement hints without mutation. Set write=true to align the selected visual clips and their linked A/V partners through one atomic MoveClips command.",
 
         ToolName::SmartReframe => "Plans subject-aware reframing for target aspect ratios such as 9:16 or 1:1. The typed surface is present, but MCP frame sampling / vision analysis is not wired yet; calls return a deterministic needs-vision-backend error and do not mutate the timeline.",
 
         ToolName::TightenSilences => "Plans silence tightening by finding low-energy PCM spans and converting them into ripple_delete_ranges candidate commands. Returns a preview only; it does not mutate the timeline.",
+
+        ToolName::RemoveFillerWords => "Transcribes the current spoken timeline and returns reviewable filler-word cuts aligned to word timestamps. Supports an exact configurable lexicon including multi-word phrases. It does not mutate the timeline: remove rejected cuts, then call each returned ripple_delete_ranges command to apply the accepted ranges as one undoable edit per track.",
 
         ToolName::GenerateVideo => "Starts an async AI video generation. Returns a placeholder asset ID immediately; generation runs in the background and the asset becomes usable in add_clips once ready. Costs real money and is not undoable.",
 
@@ -101,12 +103,22 @@ pub fn description(tool: ToolName) -> &'static str {
 
         ToolName::SetMask => "Sets the vector mask(s) on one or more clips in one undoable action — the masks generate a per-pixel alpha that hides everything outside them (intersection of all masks). Each mask is one of: a linear/gradient split (a line through a point with a normal), a circle/ellipse (center + per-axis radius), or a polygon/pen shape (a list of points). feather softens the edge in normalized canvas units; invert flips inside/outside. Coordinates are 0–1 normalized canvas space. Pass an empty masks array to clear all masks. Applies to every clip in clipIds.",
 
-        ToolName::ApplyEffect => "Sets the effect chain on one or more clips in one undoable action — an ordered list of named pixel effects, each a shader pass with named numeric parameters. Each effect is { name, params } where name selects the effect (e.g. 'gaussianBlur') and params are its scalar inputs (e.g. { radius: 4 }); pass enabled:false to keep a disabled effect in the chain. The list replaces the clip's current effects; pass an empty array to clear them. Applies to every clip in clipIds.",
+        ToolName::ApplyEffect => "Sets the effect chain on one or more clips in one undoable action. The closed effect registry is grayscale, sepia, and invert; each accepts an optional amount from 0 to 1 (default 1). Effects execute in list order in the shared preview/export GPU compositor. Pass enabled:false to retain a disabled effect. The list replaces the current chain; pass an empty array to clear it. Unknown names, parameters, non-finite values, and out-of-range values are rejected instead of rendering unchanged. Applies to every clip in clipIds.",
 
-        // --- OpenTake Motion Canvas graphics (docs/MOTION-GRAPHICS-PLUGIN.md, Issue #34) ---
-        ToolName::AddMotionGraphic => "Adds a Motion Canvas-generated animation/video segment (animated title, explainer card, data callout, timeline insert, or transition card) to the timeline as a single undoable workflow, and returns its clipId. In v1, OpenTake asks the Motion Canvas plugin to render a materialized .mp4, imports that output as a normal media asset, then places it on the timeline. Preview and export therefore reuse the ordinary video pipeline.\n\nThe 'source' object is exactly one of:\n  • { code: \"<Motion Canvas TS/TSX scene or project source>\" } — a self-contained Motion Canvas scene/project snippet. Prefer deterministic frame-driven animation, not wall-clock timers.\n  • { templateId, params } — instantiate a registered Motion Canvas template by id with typed params (string/number/bool/color; colors are hex '#RRGGBB'/'#RRGGBBAA'). The template declares which params it accepts.\n\nstartFrame/durationFrames are project frames (from get_timeline). trackIndex is optional — omit to auto-create a new video track at the top for the generated segment; set it to target an existing non-audio track. transparent is accepted for forward compatibility, but v1 mp4 materialization is opaque; transparent overlays are a later PNG-sequence/native-motion path.",
+        // --- OpenTake deterministic motion graphics (Issue #34 fallback vertical) ---
+        ToolName::AddMotionGraphic => "Renders a deterministic motion graphic to MP4, imports it, and places it on the timeline as one durable undoable workflow. Returns the new clipId. The packaged Beta uses the pinned Motion Canvas 3.17.2 runner for 'title-card'; it also supports the local 'lower-third.glass' template and self-contained HTML/CSS/JS fallback (animated through OpenTake.onSeek). Raw TypeScript/TSX and transparent output are reported as unsupported instead of being accepted as placeholders.\n\nstartFrame/durationFrames are project frames (from get_timeline). trackIndex is optional — omit to auto-create a new visual track; set it to target an existing non-audio track.",
 
-        ToolName::EditMotionGraphic => "Edits an existing Motion Canvas-generated clip and re-renders it as a single undoable workflow. Pass the clipId (from add_motion_graphic or get_timeline) and at least one of:\n  • code — replace the Motion Canvas TS/TSX source of a code-authored graphic.\n  • params — override template params (merged over the current bindings) of a template-authored graphic.\n\nThe clip must carry Motion Canvas metadata from add_motion_graphic; ordinary video clips are rejected. Re-rendering should update or replace the generated media asset and keep the timeline placement stable so later agent steps can keep using the same clip context.",
+        ToolName::EditMotionGraphic => "Re-renders an existing OpenTake motion graphic as one durable undoable workflow while preserving its timeline clipId and placement. Pass the clipId and either replacement self-contained HTML/CSS/JS for a code-authored graphic or parameter overrides for a template-authored graphic. Ordinary video clips and unsupported source types are rejected with typed errors.",
+
+        ToolName::TrackMotion => "Analyzes a bounded source region and returns editable position keyframes that follow the subject. Defaults to preview-only; set apply=true only after reviewing confidence and samples. Applying is one undoable edit. The tool is advertised only when a production tracking backend is available.",
+        ToolName::GenerateMatte => "Generates a frame-aligned reusable alpha matte for one clip without modifying the source asset. Defaults to preview-only and reports model/version/progress metadata. Applying the matte is one undoable edit. The tool is advertised only when an installed compatible model is available.",
+        ToolName::RemoveObject => "Produces a non-destructive derivative for the selected mask and frame range. Defaults to preview-only; provider costs require costAuthorized=true. Apply imports and swaps the reviewed derivative as one undoable workflow. Cancellation or failure leaves media and timeline unchanged.",
+        ToolName::MatchColor => "Analyzes a target clip and reference frame, then returns an editable ColorGrade plus deterministic comparison metrics. Defaults to preview-only; apply=true accepts the grade in one undoable edit. Source media and the previous grade remain recoverable.",
+        ToolName::SeparateStems => "Separates an audio-bearing asset into aligned vocals and accompaniment derivatives with source/model provenance. Optionally imports both stems to synchronized tracks in one undoable workflow. Cancellation or failure adds no media or tracks.",
+        ToolName::TranslateCaptions => "Translates selected caption clips while preserving every clip id and frame range. Defaults to a reviewable per-caption diff; apply=true accepts only the returned changes as one undoable edit. Provider costs require costAuthorized=true.",
+        ToolName::ScriptToVideo => "Builds and validates a persisted, reviewable multi-segment assembly plan from exact media and narration references. Defaults to planning only; apply=true places the reviewed segments and transitions through existing edit commands as one undoable workflow.",
+        ToolName::GenerateAvatar => "Generates a lip-synchronized avatar video from a portrait and narration through a configured provider. Requires explicit recorded consent and costAuthorized=true. Success imports the result; cancellation or failure imports nothing.",
+        ToolName::CloneVoice => "Enrolls, uses, or revokes a provider voice model. Every action requires a recorded consent id; paid enrollment/generation requires costAuthorized=true. Raw credentials and reference-audio bytes are never persisted in project metadata, and revoked voices cannot generate.",
     }
 }
 
@@ -374,7 +386,8 @@ pub fn input_schema(tool: ToolName) -> Value {
                 "endFrame": {"type": "integer", "description": "Optional project-frame window end (exclusive)."},
                 "minClipFrames": {"type": "integer", "description": "Optional lower bound for generated cut lengths."},
                 "maxClipFrames": {"type": "integer", "description": "Optional upper bound for generated cut lengths."},
-                "alignCuts": {"type": "boolean", "description": "Optional. true means move/split cuts to the detected beat grid."}
+                "alignCuts": {"type": "boolean", "description": "Optional. true means align proposed cuts to the detected beat grid."},
+                "write": {"type": "boolean", "description": "Optional, default false. true applies all selected clip placements and linked A/V partners in one atomic command."}
             }),
             &[],
         ),
@@ -396,6 +409,16 @@ pub fn input_schema(tool: ToolName) -> Value {
                 "thresholdDb": {"type": "number", "description": "Optional silence threshold in dB."},
                 "minSilenceFrames": {"type": "integer", "description": "Optional minimum silence span to cut."},
                 "paddingFrames": {"type": "integer", "description": "Optional context to preserve around each silence."}
+            }),
+            &[],
+        ),
+
+        ToolName::RemoveFillerWords => object(
+            json!({
+                "clipIds": {"type": "array", "items": {"type": "string"}, "description": "Optional spoken clip ids to transcribe and analyze."},
+                "trackIndex": {"type": "integer", "description": "Optional spoken track index to analyze. Mutually exclusive with clipIds."},
+                "fillerWords": {"type": "array", "items": {"type": "string"}, "description": "Optional exact filler lexicon. Multi-word phrases such as 'you know' are supported."},
+                "paddingFrames": {"type": "integer", "minimum": 0, "description": "Optional context frames to preserve before and after each matched filler phrase."}
             }),
             &[],
         ),
@@ -661,8 +684,8 @@ pub fn input_schema(tool: ToolName) -> Value {
                     "items": {
                         "type": "object",
                         "properties": {
-                            "name": {"type": "string", "description": "Effect identifier, e.g. 'gaussianBlur'."},
-                            "params": {"type": "object", "description": "Named numeric parameters for the effect, e.g. { \"radius\": 4 }.", "additionalProperties": {"type": "number"}},
+                            "name": {"type": "string", "enum": ["grayscale", "sepia", "invert"], "description": "Identifier from the closed rendered effect registry."},
+                            "params": {"type": "object", "description": "Optional effect strength; defaults to 1.", "properties": {"amount": {"type": "number", "minimum": 0, "maximum": 1}}, "additionalProperties": false},
                             "enabled": {"type": "boolean", "description": "Whether the effect is active (default true)."}
                         },
                         "required": ["name"]
@@ -677,16 +700,16 @@ pub fn input_schema(tool: ToolName) -> Value {
             json!({
                 "source": {
                     "type": "object",
-                    "description": "Exactly one of code or templateId must be set. code is Motion Canvas TS/TSX scene/project source; templateId instantiates a registered Motion Canvas template with params.",
+                    "description": "Exactly one of code or templateId must be set. code is self-contained HTML/CSS/JS using OpenTake.onSeek; templateId selects a registered local template.",
                     "properties": {
-                        "code": {"type": "string", "description": "Motion Canvas TypeScript/TSX scene or project source. Prefer deterministic frame-driven animation, not wall-clock timers."},
-                        "templateId": {"type": "string", "description": "Registered Motion Canvas template id (e.g. 'lower-third.glass'). Mutually exclusive with code."},
+                        "code": {"type": "string", "description": "Self-contained HTML/CSS/JS document. Animate deterministically with OpenTake.onSeek; raw TS/TSX is not supported by this Beta renderer."},
+                        "templateId": {"type": "string", "enum": ["title-card", "lower-third.glass"], "description": "Registered local motion template. Mutually exclusive with code."},
                         "params": {"type": "object", "description": "Template params: name -> value. Values are string, number, bool, or a hex color string '#RRGGBB'/'#RRGGBBAA'. Only valid with templateId.", "additionalProperties": {"oneOf": [{"type": "string"}, {"type": "number"}, {"type": "boolean"}]}}
                     }
                 },
                 "startFrame": {"type": "integer", "description": "Timeline frame position to place the graphic (project frames)."},
                 "durationFrames": {"type": "integer", "description": "Clip length on the timeline, in project frames (>= 1)."},
-                "transparent": {"type": "boolean", "description": "Forward-compatible alpha intent. v1 Motion Canvas mp4 materialization is opaque; transparent overlays are a later PNG-sequence/native-motion path."},
+                "transparent": {"type": "boolean", "description": "Forward-compatible alpha intent. The current MP4 path rejects true with a typed unsupported-capability error."},
                 "trackIndex": {"type": "integer", "description": "Optional. Existing non-audio track index (0-based) to place the graphic on. Omit to auto-create a new video track at the top."}
             }),
             &["source", "startFrame", "durationFrames"],
@@ -694,11 +717,98 @@ pub fn input_schema(tool: ToolName) -> Value {
 
         ToolName::EditMotionGraphic => object(
             json!({
-                "clipId": {"type": "string", "description": "The Motion Canvas-generated clip id to edit (from add_motion_graphic or get_timeline)."},
-                "code": {"type": "string", "description": "Replacement Motion Canvas TypeScript/TSX source for a code-authored graphic. Only valid when the clip was authored with code."},
-                "params": {"type": "object", "description": "Template param overrides (merged over current bindings) for a template-authored Motion Canvas graphic. Values are string, number, bool, or a hex color string. Only valid when the clip was authored from a template.", "additionalProperties": {"oneOf": [{"type": "string"}, {"type": "number"}, {"type": "boolean"}]}}
+                "clipId": {"type": "string", "description": "The OpenTake motion clip id to edit (from add_motion_graphic or get_timeline)."},
+                "code": {"type": "string", "description": "Replacement self-contained HTML/CSS/JS for a code-authored graphic."},
+                "params": {"type": "object", "description": "Template parameter overrides merged over current bindings. Only valid for a template-authored graphic.", "additionalProperties": {"oneOf": [{"type": "string"}, {"type": "number"}, {"type": "boolean"}]}}
             }),
             &["clipId"],
+        ),
+
+        ToolName::TrackMotion => object(
+            json!({
+                "clipId": {"type": "string"},
+                "region": {"type": "object", "properties": {"x": {"type": "number"}, "y": {"type": "number"}, "width": {"type": "number"}, "height": {"type": "number"}}, "required": ["x", "y", "width", "height"]},
+                "startFrame": {"type": "integer"}, "endFrame": {"type": "integer"},
+                "apply": {"type": "boolean", "default": false}
+            }),
+            &["clipId", "region"],
+        ),
+        ToolName::GenerateMatte => object(
+            json!({
+                "clipId": {"type": "string"}, "model": {"type": "string"},
+                "startFrame": {"type": "integer"}, "endFrame": {"type": "integer"},
+                "apply": {"type": "boolean", "default": false}
+            }),
+            &["clipId"],
+        ),
+        ToolName::RemoveObject => object(
+            json!({
+                "clipId": {"type": "string"}, "maskId": {"type": "string"},
+                "startFrame": {"type": "integer"}, "endFrame": {"type": "integer"},
+                "provider": {"type": "string"}, "model": {"type": "string"},
+                "costAuthorized": {"type": "boolean"}, "apply": {"type": "boolean", "default": false}
+            }),
+            &["clipId", "maskId"],
+        ),
+        ToolName::MatchColor => object(
+            json!({
+                "clipId": {"type": "string"}, "referenceMediaRef": {"type": "string"},
+                "referenceFrame": {"type": "integer"}, "targetFrame": {"type": "integer"},
+                "apply": {"type": "boolean", "default": false}
+            }),
+            &["clipId", "referenceMediaRef"],
+        ),
+        ToolName::SeparateStems => object(
+            json!({
+                "mediaRef": {"type": "string"}, "provider": {"type": "string"},
+                "model": {"type": "string"}, "importToTracks": {"type": "boolean", "default": false},
+                "startFrame": {"type": "integer"}
+            }),
+            &["mediaRef"],
+        ),
+        ToolName::TranslateCaptions => object(
+            json!({
+                "captionClipIds": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                "sourceLocale": {"type": "string"}, "targetLocale": {"type": "string"},
+                "provider": {"type": "string"}, "model": {"type": "string"},
+                "costAuthorized": {"type": "boolean"}, "apply": {"type": "boolean", "default": false}
+            }),
+            &["captionClipIds", "targetLocale"],
+        ),
+        ToolName::ScriptToVideo => object(
+            json!({
+                "segments": {"type": "array", "minItems": 1, "items": {"type": "object", "properties": {
+                    "script": {"type": "string"}, "mediaRef": {"type": "string"},
+                    "narrationMediaRef": {"type": "string"}, "durationFrames": {"type": "integer"},
+                    "transition": {"type": "string"}
+                }, "required": ["script", "mediaRef", "durationFrames"]}},
+                "apply": {"type": "boolean", "default": false}
+            }),
+            &["segments"],
+        ),
+        ToolName::GenerateAvatar => object(
+            json!({
+                "portraitMediaRef": {"type": "string"}, "audioMediaRef": {"type": "string"},
+                "consentId": {"type": "string"}, "provider": {"type": "string"},
+                "model": {"type": "string"}, "costAuthorized": {"type": "boolean"},
+                "startFrame": {"type": "integer"}
+            }),
+            &[
+                "portraitMediaRef",
+                "audioMediaRef",
+                "consentId",
+                "costAuthorized",
+            ],
+        ),
+        ToolName::CloneVoice => object(
+            json!({
+                "action": {"type": "string", "enum": ["enroll", "generate", "revoke"]},
+                "referenceAudioMediaRef": {"type": "string"}, "consentId": {"type": "string"},
+                "voiceId": {"type": "string"}, "voiceName": {"type": "string"},
+                "prompt": {"type": "string"}, "provider": {"type": "string"},
+                "model": {"type": "string"}, "costAuthorized": {"type": "boolean"}
+            }),
+            &["action", "consentId"],
         ),
     };
     close_declared_objects(&mut schema);

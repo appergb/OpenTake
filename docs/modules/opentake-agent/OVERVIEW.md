@@ -30,7 +30,7 @@ src-tauri         桌面壳：build_registry + server::serve 起 MCP（src-tauri
 
 **做什么**
 
-- 定义 **44 个工具**的名称 / 描述 / JSON Schema / 类型化参数（= 上游工具单一事实源）。
+- 定义 **45 个兼容工具**的名称 / 描述 / JSON Schema / 类型化参数（= 上游工具单一事实源）。
 - 一条统一派发管线包裹**每个**工具：解析名 → 快照 → 展开短 id → 解码（精确路径错误）→ 跑 body → 附 Context Signal → 缩短 id。
 - 把编辑类工具归一到 `opentake-ops::EditCommand`，经 `CoreHandle` 应用到权威 `AppCore`。
 - 起 rmcp MCP server（回环绑定 + Origin/Host 守卫 + OAuth well-known）。
@@ -50,7 +50,7 @@ src-tauri         桌面壳：build_registry + server::serve 起 MCP（src-tauri
 
 ### 1. MCP server（网络面）
 
-rmcp 的 `StreamableHttpService` 挂在 `/mcp`，默认绑 `127.0.0.1:19789`（`server::DEFAULT_ADDR`）。axum 路由外层套一个 **loopback 守卫**：`Host` / `Origin` 头若存在且非 `localhost`/`127.0.0.1`/`::1` 一律 403（DNS-rebinding 防御；头缺省放行，原生 MCP 客户端常不带 `Origin`）。另暴露 `/.well-known/oauth-protected-resource` 明确"无需鉴权"。`get_info` 广告系统提示 + tools 能力，`list_tools` 返回 44 个工具 schema，`call_tool` 经 `spawn_blocking` 派发。详见 [mcp-server.md](mcp-server.md)。
+rmcp 的 `StreamableHttpService` 挂在 `/mcp`，默认绑 `127.0.0.1:19789`（`server::DEFAULT_ADDR`）。axum 路由外层套一个 **loopback 守卫**：`Host` / `Origin` 头若存在且非 `localhost`/`127.0.0.1`/`::1` 一律 403（DNS-rebinding 防御；头缺省放行，原生 MCP 客户端常不带 `Origin`）。另暴露 `/.well-known/oauth-protected-resource` 明确"无需鉴权"。`get_info` 广告系统提示 + tools 能力，`list_tools` 按媒体桥、生成授权和后端能力返回当前可执行 schema，`call_tool` 经 `spawn_blocking` 派发。详见 [mcp-server.md](mcp-server.md)。
 
 ### 2. 工具派发层（归一到 EditCommand）
 
@@ -108,11 +108,11 @@ MCP 客户端 → /mcp (loopback 守卫) → McpServer::call_tool
 
 ### 已实现
 
-- **44 工具的名称 / 描述 / Schema / 类型化参数**（`tools/`，描述逐字移植）。
+- **45 个兼容工具的名称 / 描述 / Schema / 类型化参数**（`tools/`，未就绪能力按主机会话 fail-closed 隐藏）。
 - **统一派发管线**全链路（解析 → 快照 → 短 id 展开 → 解码 → body → 信号 → 短 id 缩短）。
 - 编辑类工具接线到 `EditCommand`：`add_clips` / `insert_clips` / `move_clips` / `remove_clips` / `remove_tracks` / `split_clip` / `set_keyframes` / `ripple_delete_ranges` / `add_texts` / `set_clip_properties` / `create_folder` / `move_to_folder` / `rename_media` / `rename_folder` / `delete_media` / `delete_folder` / `undo`，以及 A-tier 效果 `set_color_grade` / `chroma_key` / `set_mask` / `apply_effect`。
 - 读类工具：`get_timeline`（紧凑编码）/ `get_media` / `list_folders` / `list_models`（读 `opentake-gen` 静态目录，纯本地）。
-- 分析驱动工具：`detect_beats` / `auto_cut_to_beats` / `tighten_silences`（经 `CoreHandle::extract_analysis_pcm` + `opentake-media` 分析，**返回预览/建议，不直接落地**——`applied:false`，由模型再调编辑工具落地）。
+- 分析驱动工具：`detect_beats` / `auto_cut_to_beats` / `tighten_silences` / `remove_filler_words`（PCM 或词级转写分析，**返回预览/建议，不直接落地**——`applied:false`，由模型审阅后再调编辑工具落地）。
 - **MCP server**：rmcp Streamable-HTTP + loopback 守卫 + OAuth well-known + `serve()`，已被 `src-tauri/src/mcp.rs` 集成启动。
 - **Context Signal**：视频类型自动判定 / 轨道角色检测 + 逐轨建议 / 剪辑阶段推断 + 阶段指引 / 内置规则告警 + 插件规则。
 - **工作流插件**：JSON 模型 + 注册表（扫描/校验/激活）+ 内置 `audio-first` + 三个工作流工具（`list_workflows` / `activate_workflow` / `deactivate_workflow`）。
@@ -122,17 +122,17 @@ MCP 客户端 → /mcp (loopback 守卫) → McpServer::call_tool
 ### 计划中 / 隐藏能力（如实标注）
 
 - `inspect_media` / `get_transcript` / `inspect_timeline` / `search_media` / `import_media` / `add_captions` 已接真实桌面媒体桥；`inspect_media` 的 Lottie 分支仍返回明确不支持。
-- `generate_video` / `generate_image` / `generate_audio` / `upscale_media`（异步 GenClient + BYOK）及 `add_motion_graphic` / `edit_motion_graphic`（Motion Canvas）仅保留于 `ToolName::KNOWN`，不进入 MCP/Chat 发现面或系统提示。
+- `generate_video` / `generate_image` / `generate_audio` / `upscale_media` 在存在兼容托管或 BYOK 授权时动态进入 MCP/Chat 发现面；`add_motion_graphic` / `edit_motion_graphic` 在桌面 Chromium + FFmpeg 可用时动态进入发现面，并共享 Motion Panel 的确定性渲染、原子导入/落轨/替换与撤销路径。
 - `smart_reframe`：返回结构化不可用原因（需视觉/显著性分析后端）。
-- `get_timeline` 的 `canGenerate` 恒为 `false`（生成后端未接线，让模型不会提议生成）。
+- `get_timeline` 的 `canGenerate` 来自当前生成桥可用授权与 provider/model 能力，不再是常量。
 - `create_folder` / `move_to_folder` 的批量 `entries` 形式未接线（仅单条形式）。
 - **应用内聊天客户端**（`AgentService` 等价的 SSE 工具循环、BYOK Anthropic 直连）尚未落地。
 
-## 工具总数：**38 个发现面工具 / 44 个兼容线名**
+## 工具总数：**最多 39 个基础工具（主机能力过滤）+ 4 个动态生成工具 + 2 个动态 Motion 工具 / 45 个兼容线名**
 
-源：`crates/opentake-agent/src/tools/names.rs` 的 `ALL`（38）/ `KNOWN`（44）/ `UPSTREAM`（31）常量。
+源：`crates/opentake-agent/src/tools/names.rs` 的 `ALL`（39）/ `GENERATION`（4）/ `KNOWN`（45）/ `UPSTREAM`（31）常量。
 
-13 个扩展 = 分析驱动 4（`detect_beats` / `auto_cut_to_beats` / `smart_reframe` / `tighten_silences`）+ 工作流插件 3（`activate_workflow` / `list_workflows` / `deactivate_workflow`）+ A-tier 着色效果 4（`set_color_grade` / `chroma_key` / `set_mask` / `apply_effect`）+ Motion Canvas 2（`add_motion_graphic` / `edit_motion_graphic`）。
+14 个扩展 = 分析驱动 5（`detect_beats` / `auto_cut_to_beats` / `smart_reframe` / `tighten_silences` / `remove_filler_words`）+ 工作流插件 3（`activate_workflow` / `list_workflows` / `deactivate_workflow`）+ A-tier 着色效果 4（`set_color_grade` / `chroma_key` / `set_mask` / `apply_effect`）+ Motion Canvas 2（`add_motion_graphic` / `edit_motion_graphic`）。
 
 ---
 

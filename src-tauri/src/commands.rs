@@ -1,10 +1,11 @@
 //! The `#[tauri::command]` surface.
 //!
-//! Each command is a thin shim: it locks nothing of its own, delegates to an
-//! `opentake_core::dto::handle_*` function (which wraps [`AppCore`]). Most
-//! boundary `CmdError`s become strings; playback-aware project lifecycle
-//! commands preserve the structured playback error code so overlap is reported
-//! as `busy` before core mutation.
+//! Each command is a thin shim over an `opentake_core::dto::handle_*` function
+//! (which wraps [`AppCore`]). Project New/Open additionally share one boundary
+//! single-flight gate so asynchronous project preparation cannot race another
+//! lifecycle transition. Core editing/history/save commands preserve
+//! `CmdError` at the IPC boundary; playback-aware lifecycle commands preserve
+//! their structured error code so callers never need to parse display text.
 //!
 //! `EditCommand` itself is not `Deserialize` (it carries engine value types with
 //! no serde derives), so the editing entry point takes a local serde-friendly
@@ -13,6 +14,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
+use opentake_core::core::PreparedProjectOpen;
 use opentake_core::dto::{
     handle_edit_apply, handle_get_timeline, handle_project_new, handle_redo, handle_undo,
     EditResultDto, TimelineSnapshotDto,
@@ -25,9 +27,24 @@ use opentake_ops::{
 };
 
 use opentake_domain::{
-    AnimPair, ChromaKey, ClipType, ColorGrade, Crop, Effect, Interpolation, Keyframe,
-    KeyframeTrack, Mask, TextStyle, Transform,
+    AnimPair, AudioDenoise, ChromaKey, ClipType, ColorGrade, Crop, Effect, Interpolation, Keyframe,
+    KeyframeTrack, LoudnessNormalization, LutReference, Mask, StabilizationTrack, TextStyle,
+    Transform, TransitionKind,
 };
+
+#[derive(Clone, Default)]
+pub(crate) struct ProjectLifecycleCoordinator {
+    gate: std::sync::Arc<tokio::sync::Mutex<()>>,
+}
+
+impl ProjectLifecycleCoordinator {
+    fn try_acquire(&self) -> Result<tokio::sync::OwnedMutexGuard<()>, String> {
+        self.gate
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| "another project lifecycle transition is already in progress".to_string())
+    }
+}
 
 // MARK: - Read / lifecycle commands (direct DTO passthrough)
 
@@ -39,25 +56,47 @@ pub fn get_timeline(core: State<'_, AppCore>) -> TimelineSnapshotDto {
 
 /// `undo` / `redo`: global history navigation.
 #[tauri::command]
-pub fn undo(core: State<'_, AppCore>) -> Result<EditResultDto, String> {
-    handle_undo(&core).map_err(msg)
+pub fn undo(core: State<'_, AppCore>) -> Result<EditResultDto, CmdError> {
+    handle_undo(&core)
 }
 
 #[tauri::command]
-pub fn redo(core: State<'_, AppCore>) -> Result<EditResultDto, String> {
-    handle_redo(&core).map_err(msg)
+pub fn redo(core: State<'_, AppCore>) -> Result<EditResultDto, CmdError> {
+    handle_redo(&core)
 }
 
-/// `project_new`: replace the session with a fresh, unsaved project and return
-/// its first snapshot.
+/// `project_new`: replace the session with a fresh project and return its first
+/// snapshot. When `path` is supplied, build and persist the new bundle away
+/// from the live session, then install it atomically only after preparation
+/// succeeds.
 #[cfg(feature = "playback-engine")]
 #[tauri::command]
-pub fn project_new(
-    core: State<'_, AppCore>,
-    playback: State<'_, crate::playback::PlaybackState>,
-    prewarm: State<'_, crate::media::prewarm::PrewarmScheduler>,
+pub async fn project_new(
+    app: AppHandle,
+    path: Option<String>,
 ) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
-    project_new_with_playback_and_prewarm(&core, &playback, &prewarm)
+    let _lifecycle = app
+        .state::<ProjectLifecycleCoordinator>()
+        .try_acquire()
+        .map_err(crate::playback::session::PlaybackCommandError::busy)?;
+    if let Some(path) = path {
+        app.state::<crate::playback::PlaybackState>()
+            .ensure_project_transition_available()?;
+        let prepared = prepare_saved_project_off_thread(std::path::PathBuf::from(path))
+            .await
+            .map_err(crate::playback::session::PlaybackCommandError::engine)?;
+        return commit_prepared_project_open_with_playback_and_prewarm(
+            &app.state::<AppCore>(),
+            prepared,
+            &app.state::<crate::playback::PlaybackState>(),
+            &app.state::<crate::media::prewarm::PrewarmScheduler>(),
+        );
+    }
+    project_new_with_playback_and_prewarm(
+        &app.state::<AppCore>(),
+        &app.state::<crate::playback::PlaybackState>(),
+        &app.state::<crate::media::prewarm::PrewarmScheduler>(),
+    )
 }
 
 #[cfg(all(feature = "playback-engine", test))]
@@ -89,10 +128,22 @@ fn project_new_with_playback_and_prewarm(
 
 #[cfg(not(feature = "playback-engine"))]
 #[tauri::command]
-pub fn project_new(
-    core: State<'_, AppCore>,
-    prewarm: State<'_, crate::media::prewarm::PrewarmScheduler>,
+pub async fn project_new(
+    app: AppHandle,
+    path: Option<String>,
 ) -> Result<TimelineSnapshotDto, String> {
+    let _lifecycle = app.state::<ProjectLifecycleCoordinator>().try_acquire()?;
+    if let Some(path) = path {
+        let prepared = prepare_saved_project_off_thread(std::path::PathBuf::from(path)).await?;
+        let core = app.state::<AppCore>();
+        let prewarm = app.state::<crate::media::prewarm::PrewarmScheduler>();
+        prewarm.begin_project_transition()?;
+        let snapshot = TimelineSnapshotDto::from(core.commit_project_open(prepared));
+        prewarm.activate_project(snapshot.project_epoch);
+        return Ok(snapshot);
+    }
+    let core = app.state::<AppCore>();
+    let prewarm = app.state::<crate::media::prewarm::PrewarmScheduler>();
     prewarm.begin_project_transition()?;
     let snapshot = handle_project_new(&core);
     prewarm.activate_project(snapshot.project_epoch);
@@ -100,15 +151,75 @@ pub fn project_new(
 }
 
 /// `project_open`: open a `.opentake` bundle, returning the first snapshot.
+const PROJECT_LIFECYCLE_PREPARE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+async fn run_blocking_with_timeout<T, F>(
+    operation: &'static str,
+    timeout: std::time::Duration,
+    build: F,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    let task = tokio::task::spawn_blocking(build);
+    match tokio::time::timeout(timeout, task).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => Err(format!("{operation} task failed: {error}")),
+        Err(_) => Err(format!("{operation} timed out after {timeout:?}")),
+    }
+}
+
+async fn prepare_project_open_off_thread(
+    path: std::path::PathBuf,
+) -> Result<PreparedProjectOpen, String> {
+    run_blocking_with_timeout(
+        "project open",
+        PROJECT_LIFECYCLE_PREPARE_TIMEOUT,
+        move || AppCore::prepare_project_open(path).map_err(|error| error.to_string()),
+    )
+    .await
+}
+
+async fn prepare_saved_project_off_thread(
+    path: std::path::PathBuf,
+) -> Result<PreparedProjectOpen, String> {
+    run_blocking_with_timeout(
+        "project create",
+        PROJECT_LIFECYCLE_PREPARE_TIMEOUT,
+        move || {
+            AppCore::new()
+                .save_project(Some(path.clone()))
+                .map_err(|error| error.to_string())?;
+            AppCore::prepare_project_open(path).map_err(|error| error.to_string())
+        },
+    )
+    .await
+}
+
 #[cfg(feature = "playback-engine")]
 #[tauri::command]
-pub fn project_open(
-    core: State<'_, AppCore>,
+pub async fn project_open(
+    app: AppHandle,
     path: String,
-    playback: State<'_, crate::playback::PlaybackState>,
-    prewarm: State<'_, crate::media::prewarm::PrewarmScheduler>,
 ) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
-    project_open_with_playback_and_prewarm(&core, path, &playback, &prewarm)
+    let _lifecycle = app
+        .state::<ProjectLifecycleCoordinator>()
+        .try_acquire()
+        .map_err(crate::playback::session::PlaybackCommandError::busy)?;
+    // Fail fast if another project transition is already active, but never hold
+    // a managed-state guard across the blocking filesystem prepare.
+    app.state::<crate::playback::PlaybackState>()
+        .ensure_project_transition_available()?;
+    let prepared = prepare_project_open_off_thread(std::path::PathBuf::from(path))
+        .await
+        .map_err(crate::playback::session::PlaybackCommandError::engine)?;
+    commit_prepared_project_open_with_playback_and_prewarm(
+        &app.state::<AppCore>(),
+        prepared,
+        &app.state::<crate::playback::PlaybackState>(),
+        &app.state::<crate::media::prewarm::PrewarmScheduler>(),
+    )
 }
 
 #[cfg(all(feature = "playback-engine", test))]
@@ -122,7 +233,7 @@ pub(crate) fn project_open_with_playback(
     project_open_with_playback_and_prewarm(core, path, playback, &prewarm)
 }
 
-#[cfg(feature = "playback-engine")]
+#[cfg(all(feature = "playback-engine", test))]
 pub(crate) fn project_open_with_playback_and_prewarm(
     core: &AppCore,
     path: String,
@@ -134,6 +245,16 @@ pub(crate) fn project_open_with_playback_and_prewarm(
         AppCore::prepare_project_open(std::path::PathBuf::from(path)).map_err(|error| {
             crate::playback::session::PlaybackCommandError::engine(error.to_string())
         })?;
+    commit_prepared_project_open_with_playback_and_prewarm(core, prepared, playback, prewarm)
+}
+
+#[cfg(feature = "playback-engine")]
+fn commit_prepared_project_open_with_playback_and_prewarm(
+    core: &AppCore,
+    prepared: PreparedProjectOpen,
+    playback: &crate::playback::PlaybackState,
+    prewarm: &crate::media::prewarm::PrewarmScheduler,
+) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
     let transition = playback.begin_project_transition()?;
     if let Err(error) = prewarm.begin_project_transition() {
         playback.cancel_project_transition(transition);
@@ -147,13 +268,11 @@ pub(crate) fn project_open_with_playback_and_prewarm(
 
 #[cfg(not(feature = "playback-engine"))]
 #[tauri::command]
-pub fn project_open(
-    core: State<'_, AppCore>,
-    path: String,
-    prewarm: State<'_, crate::media::prewarm::PrewarmScheduler>,
-) -> Result<TimelineSnapshotDto, String> {
-    let prepared = AppCore::prepare_project_open(std::path::PathBuf::from(path))
-        .map_err(|error| error.to_string())?;
+pub async fn project_open(app: AppHandle, path: String) -> Result<TimelineSnapshotDto, String> {
+    let _lifecycle = app.state::<ProjectLifecycleCoordinator>().try_acquire()?;
+    let prepared = prepare_project_open_off_thread(std::path::PathBuf::from(path)).await?;
+    let core = app.state::<AppCore>();
+    let prewarm = app.state::<crate::media::prewarm::PrewarmScheduler>();
     prewarm.begin_project_transition()?;
     let snapshot = TimelineSnapshotDto::from(core.commit_project_open(prepared));
     prewarm.activate_project(snapshot.project_epoch);
@@ -173,7 +292,7 @@ pub fn project_open(
 /// risk lock reentrancy for no fidelity gain. Capture is best-effort: a failure
 /// yields `None`, leaving any existing cover untouched, and never fails the save.
 #[tauri::command]
-pub fn project_save(core: State<'_, AppCore>, path: Option<String>) -> Result<String, String> {
+pub fn project_save(core: State<'_, AppCore>, path: Option<String>) -> Result<String, CmdError> {
     let snapshot = core.runtime_snapshot();
     let thumbnail = opentake_media::capture_project_thumbnail(
         &snapshot.timeline,
@@ -184,7 +303,7 @@ pub fn project_save(core: State<'_, AppCore>, path: Option<String>) -> Result<St
     let target = path.map(std::path::PathBuf::from);
     core.save_project_with_thumbnail(target, thumbnail)
         .map(|p| p.to_string_lossy().into_owned())
-        .map_err(|e| e.to_string())
+        .map_err(CmdError::from)
 }
 
 /// `get_default_project_dir`: the default folder new projects save into
@@ -398,16 +517,21 @@ pub fn edit_apply(
     render: State<'_, crate::render::RenderState>,
     media: State<'_, crate::media::MediaState>,
     command: EditRequest,
-) -> Result<EditResultDto, String> {
+) -> Result<EditResultDto, CmdError> {
     let cmd = match command {
         EditRequest::FreezeFrame {
             clip_id,
             at_frame,
             duration_frames,
         } => {
-            validate_freeze_frame_request(&core, &clip_id, at_frame, duration_frames)?;
+            validate_freeze_frame_request(&core, &clip_id, at_frame, duration_frames)
+                .map_err(validation_error)?;
             let media_ref =
-                crate::render::capture_freeze_frame(&core, &render, &media, &clip_id, at_frame)?;
+                crate::render::capture_freeze_frame(&core, &render, &media, &clip_id, at_frame)
+                    .map_err(|error| {
+                        eprintln!("freeze-frame capture failed: {error}");
+                        internal_error("Freeze-frame capture failed")
+                    })?;
             EditCommand::FreezeFrame {
                 clip_id,
                 at_frame,
@@ -415,9 +539,9 @@ pub fn edit_apply(
                 media_ref,
             }
         }
-        other => other.into_command()?,
+        other => other.into_command().map_err(validation_error)?,
     };
-    handle_edit_apply(&core, cmd).map_err(msg)
+    handle_edit_apply(&core, cmd)
 }
 
 /// `check_path_exists`: checks if a path (e.g. project bundle folder) exists on disk.
@@ -426,8 +550,18 @@ pub fn check_path_exists(path: String) -> bool {
     std::path::Path::new(&path).exists()
 }
 
-fn msg(e: CmdError) -> String {
-    e.message
+fn validation_error(message: String) -> CmdError {
+    CmdError {
+        code: "validation".to_string(),
+        message,
+    }
+}
+
+fn internal_error(message: impl Into<String>) -> CmdError {
+    CmdError {
+        code: "internal".to_string(),
+        message: message.into(),
+    }
 }
 
 fn validate_freeze_frame_request(
@@ -471,8 +605,19 @@ fn validate_freeze_frame_request(
 /// union. Engine value types (`ClipMove`, `TrimEdit`, `FrameRange`, keyframe
 /// tracks) are mirrored as local serde DTOs and converted in [`into_command`].
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 pub enum EditRequest {
+    #[serde(rename_all = "camelCase")]
+    CreateNestedSequence { name: String, clip_ids: Vec<String> },
+    #[serde(rename_all = "camelCase")]
+    EditNestedSequence {
+        sequence_id: String,
+        command: Box<EditRequest>,
+    },
+    #[serde(rename_all = "camelCase")]
+    RenameNestedSequence { sequence_id: String, name: String },
+    #[serde(rename_all = "camelCase")]
+    DissolveNestedSequence { clip_id: String },
     #[serde(rename_all = "camelCase")]
     AddClips { entries: Vec<ClipEntryDto> },
     #[serde(rename_all = "camelCase")]
@@ -553,6 +698,11 @@ pub enum EditRequest {
         grade: Option<ColorGrade>,
     },
     #[serde(rename_all = "camelCase")]
+    SetLut {
+        clip_ids: Vec<String>,
+        lut: Option<LutReference>,
+    },
+    #[serde(rename_all = "camelCase")]
     SetChromaKey {
         clip_ids: Vec<String>,
         chroma_key: Option<ChromaKey>,
@@ -566,6 +716,36 @@ pub enum EditRequest {
     SetEffects {
         clip_ids: Vec<String>,
         effects: Vec<Effect>,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetLoudnessNormalization {
+        clip_id: String,
+        normalization: Option<LoudnessNormalization>,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetAudioDenoise {
+        clip_id: String,
+        denoise: Option<AudioDenoise>,
+    },
+    #[serde(rename_all = "camelCase")]
+    ApplyStabilization {
+        clip_id: String,
+        solution: StabilizationTrack,
+    },
+    #[serde(rename_all = "camelCase")]
+    AdjustStabilization {
+        clip_id: String,
+        strength: Option<f64>,
+        crop_margin: Option<f64>,
+    },
+    #[serde(rename_all = "camelCase")]
+    ResetStabilization { clip_id: String },
+    #[serde(rename_all = "camelCase")]
+    SetTransition {
+        from_clip_id: String,
+        to_clip_id: String,
+        kind: Option<TransitionKind>,
+        duration_frames: i32,
     },
     #[serde(rename_all = "camelCase")]
     RippleDeleteRanges {
@@ -628,6 +808,22 @@ pub enum EditRequest {
 impl EditRequest {
     fn into_command(self) -> Result<EditCommand, String> {
         Ok(match self {
+            EditRequest::CreateNestedSequence { name, clip_ids } => {
+                EditCommand::CreateNestedSequenceFromClips { name, clip_ids }
+            }
+            EditRequest::EditNestedSequence {
+                sequence_id,
+                command,
+            } => EditCommand::EditNestedSequence {
+                sequence_id,
+                command: Box::new(command.into_command()?),
+            },
+            EditRequest::RenameNestedSequence { sequence_id, name } => {
+                EditCommand::RenameNestedSequence { sequence_id, name }
+            }
+            EditRequest::DissolveNestedSequence { clip_id } => {
+                EditCommand::DissolveNestedSequence { clip_id }
+            }
             EditRequest::AddClips { entries } => EditCommand::AddClips {
                 entries: entries.into_iter().map(ClipEntryDto::into_entry).collect(),
             },
@@ -732,6 +928,7 @@ impl EditRequest {
             EditRequest::SetColorGrade { clip_ids, grade } => {
                 EditCommand::SetColorGrade { clip_ids, grade }
             }
+            EditRequest::SetLut { clip_ids, lut } => EditCommand::SetLut { clip_ids, lut },
             EditRequest::SetChromaKey {
                 clip_ids,
                 chroma_key,
@@ -743,6 +940,42 @@ impl EditRequest {
             EditRequest::SetEffects { clip_ids, effects } => {
                 EditCommand::SetEffects { clip_ids, effects }
             }
+            EditRequest::SetLoudnessNormalization {
+                clip_id,
+                normalization,
+            } => EditCommand::SetLoudnessNormalization {
+                clip_id,
+                normalization,
+            },
+            EditRequest::SetAudioDenoise { clip_id, denoise } => {
+                EditCommand::SetAudioDenoise { clip_id, denoise }
+            }
+            EditRequest::ApplyStabilization { clip_id, solution } => {
+                EditCommand::ApplyStabilization { clip_id, solution }
+            }
+            EditRequest::AdjustStabilization {
+                clip_id,
+                strength,
+                crop_margin,
+            } => EditCommand::AdjustStabilization {
+                clip_id,
+                strength,
+                crop_margin,
+            },
+            EditRequest::ResetStabilization { clip_id } => {
+                EditCommand::ResetStabilization { clip_id }
+            }
+            EditRequest::SetTransition {
+                from_clip_id,
+                to_clip_id,
+                kind,
+                duration_frames,
+            } => EditCommand::SetTransition {
+                from_clip_id,
+                to_clip_id,
+                kind,
+                duration_frames,
+            },
             EditRequest::RippleDeleteRanges {
                 track_index,
                 ranges,
@@ -1189,6 +1422,110 @@ impl KeyframeValueDto {
     }
 }
 
+#[cfg(test)]
+mod project_open_async_tests {
+    use super::{
+        prepare_saved_project_off_thread, run_blocking_with_timeout, ProjectLifecycleCoordinator,
+    };
+    use opentake_core::core::PreparedProjectOpen;
+    use opentake_core::AppCore;
+    use std::time::Duration;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_project_prepare_runs_off_the_async_caller_thread() {
+        let caller = std::thread::current().id();
+
+        let worker = run_blocking_with_timeout("test prepare", Duration::from_secs(1), || {
+            Ok(std::thread::current().id())
+        })
+        .await
+        .expect("blocking task completes");
+
+        assert_ne!(worker, caller);
+    }
+
+    #[test]
+    fn project_lifecycle_transitions_are_single_flight() {
+        let coordinator = ProjectLifecycleCoordinator::default();
+        let incumbent = coordinator.try_acquire().expect("first transition starts");
+
+        assert_eq!(
+            coordinator
+                .try_acquire()
+                .expect_err("overlapping transition must be busy"),
+            "another project lifecycle transition is already in progress"
+        );
+
+        drop(incumbent);
+        coordinator
+            .try_acquire()
+            .expect("transition may retry after incumbent settles");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn timed_out_prepare_cannot_commit_a_late_project() {
+        let fixture = tempfile::tempdir().expect("fixture tempdir");
+        let bundle = fixture.path().join("slow.opentake");
+        AppCore::new()
+            .save_project(Some(bundle.clone()))
+            .expect("save project fixture");
+        let core = AppCore::new();
+        let before = core.project_revision();
+
+        let result: Result<PreparedProjectOpen, String> =
+            run_blocking_with_timeout("project open", Duration::from_millis(10), move || {
+                std::thread::sleep(Duration::from_millis(75));
+                AppCore::prepare_project_open(bundle).map_err(|error| error.to_string())
+            })
+            .await;
+
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("slow prepare must time out"),
+        };
+        assert_eq!(error, "project open timed out after 10ms");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(core.project_revision(), before);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn saved_project_is_prepared_without_mutating_live_core_until_commit() {
+        let fixture = tempfile::tempdir().expect("fixture tempdir");
+        let bundle = fixture.path().join("Fresh.opentake");
+        let core = AppCore::new();
+        let before = core.project_revision();
+
+        let prepared = prepare_saved_project_off_thread(bundle.clone())
+            .await
+            .expect("new project bundle prepares");
+
+        assert_eq!(core.project_revision(), before);
+        assert!(bundle.join("project.json").is_file());
+        let snapshot = core.commit_project_open(prepared);
+        assert_eq!(snapshot.project_path.as_deref(), Some(bundle.as_path()));
+        assert_eq!(snapshot.version, 0);
+        assert_ne!(snapshot.project_epoch, before.project_epoch);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_saved_project_prepare_preserves_live_core() {
+        let fixture = tempfile::tempdir().expect("fixture tempdir");
+        let regular_file = fixture.path().join("not-a-directory");
+        std::fs::write(&regular_file, b"occupied").expect("write blocking fixture");
+        let bundle = regular_file.join("Fresh.opentake");
+        let core = AppCore::new();
+        let before = core.project_revision();
+
+        let error = match prepare_saved_project_off_thread(bundle).await {
+            Err(error) => error,
+            Ok(_) => panic!("invalid destination must fail"),
+        };
+
+        assert!(!error.is_empty());
+        assert_eq!(core.project_revision(), before);
+    }
+}
+
 #[cfg(all(test, feature = "playback-engine"))]
 mod project_prewarm_lifecycle_tests {
     use super::project_open_with_playback_and_prewarm;
@@ -1249,6 +1586,8 @@ mod project_prewarm_lifecycle_tests {
             source_height: Some(720),
             source_fps: Some(24.0),
             has_audio: Some(false),
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
@@ -1297,7 +1636,10 @@ mod project_prewarm_lifecycle_tests {
                 .path,
             media_path
         );
-        let metrics = crate::playback::ManifestMetrics { sizes };
+        let metrics = crate::playback::ManifestMetrics {
+            sizes,
+            straight_alpha: std::collections::HashSet::new(),
+        };
         let plan = build_render_plan(
             &snapshot.timeline,
             RenderSize::new(
@@ -1357,8 +1699,337 @@ mod project_prewarm_lifecycle_tests {
 mod edit_request_serde_tests {
     use super::{validate_freeze_frame_request, EditRequest};
     use opentake_core::{AppCore, EditCommand};
-    use opentake_domain::ClipType;
+    use opentake_domain::{ClipType, TransitionKind};
     use opentake_ops::ClipEntry;
+
+    fn request_route(request: &EditRequest) -> &'static str {
+        match request {
+            EditRequest::CreateNestedSequence { .. } => "CreateNestedSequence",
+            EditRequest::EditNestedSequence { .. } => "EditNestedSequence",
+            EditRequest::RenameNestedSequence { .. } => "RenameNestedSequence",
+            EditRequest::DissolveNestedSequence { .. } => "DissolveNestedSequence",
+            EditRequest::AddClips { .. } => "AddClips",
+            EditRequest::InsertClips { .. } => "InsertClips",
+            EditRequest::MoveClips { .. } => "MoveClips",
+            EditRequest::DuplicateClips { .. } => "DuplicateClips",
+            EditRequest::RemoveClips { .. } => "RemoveClips",
+            EditRequest::SplitClip { .. } => "SplitClip",
+            EditRequest::FreezeFrame { .. } => "FreezeFrame",
+            EditRequest::TrimClips { .. } => "TrimClips",
+            EditRequest::SetClipProperties { .. } => "SetClipProperties",
+            EditRequest::SetKeyframes { .. } => "SetKeyframes",
+            EditRequest::StampKeyframe { .. } => "StampKeyframe",
+            EditRequest::UpsertKeyframe { .. } => "UpsertKeyframe",
+            EditRequest::RemoveKeyframe { .. } => "RemoveKeyframe",
+            EditRequest::MoveKeyframe { .. } => "MoveKeyframe",
+            EditRequest::SetKeyframeInterpolation { .. } => "SetKeyframeInterpolation",
+            EditRequest::SetColorGrade { .. } => "SetColorGrade",
+            EditRequest::SetLut { .. } => "SetLut",
+            EditRequest::SetChromaKey { .. } => "SetChromaKey",
+            EditRequest::SetMasks { .. } => "SetMasks",
+            EditRequest::SetEffects { .. } => "SetEffects",
+            EditRequest::SetLoudnessNormalization { .. } => "SetLoudnessNormalization",
+            EditRequest::SetAudioDenoise { .. } => "SetAudioDenoise",
+            EditRequest::ApplyStabilization { .. } => "ApplyStabilization",
+            EditRequest::AdjustStabilization { .. } => "AdjustStabilization",
+            EditRequest::ResetStabilization { .. } => "ResetStabilization",
+            EditRequest::SetTransition { .. } => "SetTransition",
+            EditRequest::RippleDeleteRanges { .. } => "RippleDeleteRanges",
+            EditRequest::RippleDeleteClips { .. } => "RippleDeleteClips",
+            EditRequest::AddTexts { .. } => "AddTexts",
+            EditRequest::AddTextsAutoTrack { .. } => "AddTextsAutoTrack",
+            EditRequest::AddCaptions { .. } => "AddCaptions",
+            EditRequest::Link { .. } => "Link",
+            EditRequest::Unlink { .. } => "Unlink",
+            EditRequest::RemoveTracks { .. } => "RemoveTracks",
+            EditRequest::SwapTracks { .. } => "SwapTracks",
+            EditRequest::SwapClips { .. } => "SwapClips",
+            EditRequest::InsertTrack { .. } => "InsertTrack",
+            EditRequest::SetTrackProps { .. } => "SetTrackProps",
+            EditRequest::CreateFolder { .. } => "CreateFolder",
+            EditRequest::MoveToFolder { .. } => "MoveToFolder",
+            EditRequest::RenameMedia { .. } => "RenameMedia",
+            EditRequest::RenameFolder { .. } => "RenameFolder",
+            EditRequest::DeleteMedia { .. } => "DeleteMedia",
+            EditRequest::DeleteFolder { .. } => "DeleteFolder",
+            EditRequest::SwapMedia { .. } => "SwapMedia",
+            EditRequest::ResetTransform { .. } => "ResetTransform",
+            EditRequest::SetTimelineSettings { .. } => "SetTimelineSettings",
+        }
+    }
+
+    fn command_matches_route(command: &EditCommand, route: &str) -> bool {
+        matches!(
+            (route, command),
+            (
+                "CreateNestedSequence",
+                EditCommand::CreateNestedSequenceFromClips { .. }
+            ) | ("EditNestedSequence", EditCommand::EditNestedSequence { .. })
+                | (
+                    "RenameNestedSequence",
+                    EditCommand::RenameNestedSequence { .. }
+                )
+                | (
+                    "DissolveNestedSequence",
+                    EditCommand::DissolveNestedSequence { .. }
+                )
+                | ("AddClips", EditCommand::AddClips { .. })
+                | ("InsertClips", EditCommand::InsertClips { .. })
+                | ("MoveClips", EditCommand::MoveClips { .. })
+                | ("DuplicateClips", EditCommand::DuplicateClips { .. })
+                | ("RemoveClips", EditCommand::RemoveClips { .. })
+                | ("SplitClip", EditCommand::SplitClip { .. })
+                | ("TrimClips", EditCommand::TrimClips { .. })
+                | ("SetClipProperties", EditCommand::SetClipProperties { .. })
+                | ("SetKeyframes", EditCommand::SetKeyframes { .. })
+                | ("StampKeyframe", EditCommand::StampKeyframe { .. })
+                | ("UpsertKeyframe", EditCommand::UpsertKeyframe { .. })
+                | ("RemoveKeyframe", EditCommand::RemoveKeyframe { .. })
+                | ("MoveKeyframe", EditCommand::MoveKeyframe { .. })
+                | (
+                    "SetKeyframeInterpolation",
+                    EditCommand::SetKeyframeInterpolation { .. }
+                )
+                | ("SetColorGrade", EditCommand::SetColorGrade { .. })
+                | ("SetLut", EditCommand::SetLut { .. })
+                | ("SetChromaKey", EditCommand::SetChromaKey { .. })
+                | ("SetMasks", EditCommand::SetMasks { .. })
+                | ("SetEffects", EditCommand::SetEffects { .. })
+                | (
+                    "SetLoudnessNormalization",
+                    EditCommand::SetLoudnessNormalization { .. }
+                )
+                | ("SetAudioDenoise", EditCommand::SetAudioDenoise { .. })
+                | ("ApplyStabilization", EditCommand::ApplyStabilization { .. })
+                | (
+                    "AdjustStabilization",
+                    EditCommand::AdjustStabilization { .. }
+                )
+                | ("ResetStabilization", EditCommand::ResetStabilization { .. })
+                | ("SetTransition", EditCommand::SetTransition { .. })
+                | ("RippleDeleteRanges", EditCommand::RippleDeleteRanges { .. })
+                | ("RippleDeleteClips", EditCommand::RippleDeleteClips { .. })
+                | ("AddTexts", EditCommand::AddTexts { .. })
+                | ("AddTextsAutoTrack", EditCommand::AddTextsAutoTrack { .. })
+                | ("AddCaptions", EditCommand::AddCaptions { .. })
+                | ("Link", EditCommand::Link { .. })
+                | ("Unlink", EditCommand::Unlink { .. })
+                | ("RemoveTracks", EditCommand::RemoveTracks { .. })
+                | ("SwapTracks", EditCommand::SwapTracks { .. })
+                | ("SwapClips", EditCommand::SwapClips { .. })
+                | ("InsertTrack", EditCommand::InsertTrack { .. })
+                | ("SetTrackProps", EditCommand::SetTrackProps { .. })
+                | ("CreateFolder", EditCommand::CreateFolder { .. })
+                | ("MoveToFolder", EditCommand::MoveToFolder { .. })
+                | ("RenameMedia", EditCommand::RenameMedia { .. })
+                | ("RenameFolder", EditCommand::RenameFolder { .. })
+                | ("DeleteMedia", EditCommand::DeleteMedia { .. })
+                | ("DeleteFolder", EditCommand::DeleteFolder { .. })
+                | ("SwapMedia", EditCommand::SwapMedia { .. })
+                | ("ResetTransform", EditCommand::ResetTransform { .. })
+                | (
+                    "SetTimelineSettings",
+                    EditCommand::SetTimelineSettings { .. }
+                )
+        )
+    }
+
+    fn assert_every_edit_request_maps_to_exact_edit_command() {
+        let cases = [
+            (
+                r#"{"type":"createNestedSequence","name":"Scene","clipIds":["c"]}"#,
+                "CreateNestedSequence",
+            ),
+            (
+                r#"{"type":"editNestedSequence","sequenceId":"s","command":{"type":"removeClips","clipIds":["c"]}}"#,
+                "EditNestedSequence",
+            ),
+            (
+                r#"{"type":"renameNestedSequence","sequenceId":"s","name":"Scene"}"#,
+                "RenameNestedSequence",
+            ),
+            (
+                r#"{"type":"dissolveNestedSequence","clipId":"c"}"#,
+                "DissolveNestedSequence",
+            ),
+            (r#"{"type":"addClips","entries":[]}"#, "AddClips"),
+            (
+                r#"{"type":"insertClips","trackIndex":0,"atFrame":0,"entries":[]}"#,
+                "InsertClips",
+            ),
+            (r#"{"type":"moveClips","moves":[]}"#, "MoveClips"),
+            (
+                r#"{"type":"duplicateClips","clipIds":[],"offsetFrames":0,"targetTrackIndexes":[]}"#,
+                "DuplicateClips",
+            ),
+            (r#"{"type":"removeClips","clipIds":[]}"#, "RemoveClips"),
+            (
+                r#"{"type":"splitClip","clipId":"c","atFrame":1}"#,
+                "SplitClip",
+            ),
+            (
+                r#"{"type":"freezeFrame","clipId":"c","atFrame":1,"durationFrames":1}"#,
+                "FreezeFrame",
+            ),
+            (r#"{"type":"trimClips","edits":[]}"#, "TrimClips"),
+            (
+                r#"{"type":"setClipProperties","clipIds":[],"properties":{}}"#,
+                "SetClipProperties",
+            ),
+            (
+                r#"{"type":"setKeyframes","clipId":"c","property":"opacity","payload":{"kind":"scalar","keyframes":[]}}"#,
+                "SetKeyframes",
+            ),
+            (
+                r#"{"type":"stampKeyframe","clipId":"c","property":"opacity","frame":1}"#,
+                "StampKeyframe",
+            ),
+            (
+                r#"{"type":"upsertKeyframe","clipId":"c","property":"opacity","frame":1,"value":{"kind":"scalar","value":0.5}}"#,
+                "UpsertKeyframe",
+            ),
+            (
+                r#"{"type":"removeKeyframe","clipId":"c","property":"opacity","frame":1}"#,
+                "RemoveKeyframe",
+            ),
+            (
+                r#"{"type":"moveKeyframe","clipId":"c","property":"opacity","fromFrame":1,"toFrame":2}"#,
+                "MoveKeyframe",
+            ),
+            (
+                r#"{"type":"setKeyframeInterpolation","clipId":"c","property":"opacity","frame":1,"interpolation":"hold"}"#,
+                "SetKeyframeInterpolation",
+            ),
+            (
+                r#"{"type":"setColorGrade","clipIds":[],"grade":null}"#,
+                "SetColorGrade",
+            ),
+            (r#"{"type":"setLut","clipIds":[],"lut":null}"#, "SetLut"),
+            (
+                r#"{"type":"setChromaKey","clipIds":[],"chromaKey":null}"#,
+                "SetChromaKey",
+            ),
+            (r#"{"type":"setMasks","clipIds":[],"masks":[]}"#, "SetMasks"),
+            (
+                r#"{"type":"setEffects","clipIds":[],"effects":[]}"#,
+                "SetEffects",
+            ),
+            (
+                r#"{"type":"setLoudnessNormalization","clipId":"c","normalization":null}"#,
+                "SetLoudnessNormalization",
+            ),
+            (
+                r#"{"type":"setAudioDenoise","clipId":"c","denoise":null}"#,
+                "SetAudioDenoise",
+            ),
+            (
+                r#"{"type":"applyStabilization","clipId":"c","solution":{"model":"opentake.motion-smoothing","modelVersion":1,"sourceIdentity":"asset","strength":1.0,"cropMargin":0.0,"keyframes":[{"frame":0,"translationX":0.0,"translationY":0.0,"rotationDegrees":0.0},{"frame":1,"translationX":0.0,"translationY":0.0,"rotationDegrees":0.0}]}}"#,
+                "ApplyStabilization",
+            ),
+            (
+                r#"{"type":"adjustStabilization","clipId":"c","strength":0.75,"cropMargin":0.02}"#,
+                "AdjustStabilization",
+            ),
+            (
+                r#"{"type":"resetStabilization","clipId":"c"}"#,
+                "ResetStabilization",
+            ),
+            (
+                r#"{"type":"setTransition","fromClipId":"a","toClipId":"b","kind":null,"durationFrames":1}"#,
+                "SetTransition",
+            ),
+            (
+                r#"{"type":"rippleDeleteRanges","trackIndex":0,"ranges":[]}"#,
+                "RippleDeleteRanges",
+            ),
+            (
+                r#"{"type":"rippleDeleteClips","clipIds":[]}"#,
+                "RippleDeleteClips",
+            ),
+            (r#"{"type":"addTexts","entries":[]}"#, "AddTexts"),
+            (
+                r#"{"type":"addTextsAutoTrack","entries":[]}"#,
+                "AddTextsAutoTrack",
+            ),
+            (r#"{"type":"addCaptions","entries":[]}"#, "AddCaptions"),
+            (r#"{"type":"link","clipIds":[]}"#, "Link"),
+            (r#"{"type":"unlink","clipIds":[]}"#, "Unlink"),
+            (
+                r#"{"type":"removeTracks","trackIndexes":[]}"#,
+                "RemoveTracks",
+            ),
+            (r#"{"type":"swapTracks","a":0,"b":1}"#, "SwapTracks"),
+            (
+                r#"{"type":"swapClips","clipA":"a","clipB":"b"}"#,
+                "SwapClips",
+            ),
+            (
+                r#"{"type":"insertTrack","kind":"video","at":0}"#,
+                "InsertTrack",
+            ),
+            (
+                r#"{"type":"setTrackProps","trackIndex":0,"muted":true}"#,
+                "SetTrackProps",
+            ),
+            (r#"{"type":"createFolder","name":"f"}"#, "CreateFolder"),
+            (
+                r#"{"type":"moveToFolder","assetIds":[],"folderId":null}"#,
+                "MoveToFolder",
+            ),
+            (r#"{"type":"renameMedia","entries":[]}"#, "RenameMedia"),
+            (r#"{"type":"renameFolder","entries":[]}"#, "RenameFolder"),
+            (r#"{"type":"deleteMedia","assetIds":[]}"#, "DeleteMedia"),
+            (r#"{"type":"deleteFolder","folderIds":[]}"#, "DeleteFolder"),
+            (
+                r#"{"type":"swapMedia","clipId":"c","mediaRef":"m"}"#,
+                "SwapMedia",
+            ),
+            (
+                r#"{"type":"resetTransform","clipIds":[]}"#,
+                "ResetTransform",
+            ),
+            (
+                r#"{"type":"setTimelineSettings","fps":24,"width":1920,"height":1080}"#,
+                "SetTimelineSettings",
+            ),
+        ];
+
+        assert_eq!(cases.len(), 51);
+        for (json, expected_route) in cases {
+            let mut hostile = serde_json::from_str::<serde_json::Value>(json).unwrap();
+            hostile
+                .as_object_mut()
+                .unwrap()
+                .insert("unexpected".to_string(), serde_json::json!(true));
+            assert!(
+                serde_json::from_value::<EditRequest>(hostile).is_err(),
+                "{expected_route} must reject unknown fields"
+            );
+
+            let request = serde_json::from_str::<EditRequest>(json)
+                .unwrap_or_else(|error| panic!("{expected_route} DTO failed: {error}"));
+            assert_eq!(request_route(&request), expected_route);
+            if expected_route == "FreezeFrame" {
+                assert!(request.into_command().is_err());
+            } else {
+                let command = request.into_command().expect("request maps to EditCommand");
+                assert!(
+                    command_matches_route(&command, expected_route),
+                    "{expected_route} mapped to {command:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_frontend_edit_request_deserializes_to_intended_command() {
+        assert_every_edit_request_maps_to_exact_edit_command();
+    }
+
+    #[test]
+    fn every_edit_request_maps_to_exact_edit_command() {
+        assert_every_edit_request_maps_to_exact_edit_command();
+    }
 
     // Regression: the front end sends camelCase keys (clipIds/clipId/atFrame…).
     // serde's enum-level `rename_all` does NOT rename struct-variant fields, so
@@ -1415,6 +2086,29 @@ mod edit_request_serde_tests {
                 assert_eq!(properties.reversed, Some(true));
             }
             other => panic!("expected SetClipProperties, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserializes_set_transition_pair_and_kind() {
+        let request: EditRequest = serde_json::from_str(
+            r#"{"type":"setTransition","fromClipId":"a","toClipId":"b","kind":"crossDissolve","durationFrames":15}"#,
+        )
+        .expect("setTransition camelCase");
+
+        match request.into_command().expect("setTransition command") {
+            EditCommand::SetTransition {
+                from_clip_id,
+                to_clip_id,
+                kind,
+                duration_frames,
+            } => {
+                assert_eq!(from_clip_id, "a");
+                assert_eq!(to_clip_id, "b");
+                assert_eq!(kind, Some(TransitionKind::CrossDissolve));
+                assert_eq!(duration_frames, 15);
+            }
+            other => panic!("expected SetTransition, got {other:?}"),
         }
     }
 
@@ -1716,13 +2410,13 @@ mod edit_request_serde_tests {
         ));
 
         let effects = serde_json::from_str::<EditRequest>(
-            r#"{"type":"setEffects","clipIds":["clip-1"],"effects":[{"name":"gaussianBlur","params":{"radius":4.0}}]}"#,
+            r#"{"type":"setEffects","clipIds":["clip-1"],"effects":[{"name":"grayscale","params":{"amount":0.4}}]}"#,
         )
         .expect("setEffects camelCase");
         match effects.into_command().expect("setEffects command") {
             EditCommand::SetEffects { effects, .. } => {
-                assert_eq!(effects[0].name, "gaussianBlur");
-                assert_eq!(effects[0].param("radius", 0.0), 4.0);
+                assert_eq!(effects[0].name, "grayscale");
+                assert_eq!(effects[0].param("amount", 0.0), 0.4);
             }
             other => panic!("expected SetEffects, got {other:?}"),
         }

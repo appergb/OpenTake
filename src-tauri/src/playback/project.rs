@@ -10,7 +10,7 @@
 //! can hoist the single shared projection into one `pub(crate)` helper once all
 //! three paths are stable (tracked as a follow-up; see the export.rs header note).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use opentake_domain::{ClipType, MediaManifest, MediaSource, TextStyle, Timeline};
@@ -22,6 +22,7 @@ pub struct MediaInfo {
     /// Absolute, decode-ready path (project-relative entries already joined to
     /// the bundle dir).
     pub path: PathBuf,
+    pub straight_alpha: bool,
 }
 
 /// A text clip projected from the timeline, keyed by clip id. The box's width /
@@ -39,11 +40,16 @@ pub struct TextInfo {
 /// auto-rotates on decode in this cut), mirroring the preview/export adapters.
 pub struct ManifestMetrics {
     pub sizes: HashMap<String, (u32, u32)>,
+    pub straight_alpha: HashSet<String>,
 }
 
 impl SourceMetrics for ManifestMetrics {
     fn natural_size(&self, media_ref: &str) -> Option<(u32, u32)> {
         self.sizes.get(media_ref).copied()
+    }
+
+    fn needs_premultiply(&self, media_ref: &str) -> bool {
+        self.straight_alpha.contains(media_ref)
     }
 }
 
@@ -53,23 +59,30 @@ impl SourceMetrics for ManifestMetrics {
 /// `export::project_text`'s identical projection.
 pub fn project_text(timeline: &Timeline) -> HashMap<String, TextInfo> {
     let mut text: HashMap<String, TextInfo> = HashMap::new();
-    for track in &timeline.tracks {
-        for clip in &track.clips {
-            if clip.media_type != ClipType::Text {
-                continue;
+    for candidate in std::iter::once(timeline).chain(
+        timeline
+            .nested_sequences
+            .iter()
+            .map(|sequence| &sequence.timeline),
+    ) {
+        for track in &candidate.tracks {
+            for clip in &track.clips {
+                if clip.media_type != ClipType::Text {
+                    continue;
+                }
+                let (Some(content), Some(style)) = (&clip.text_content, &clip.text_style) else {
+                    continue;
+                };
+                let tl = clip.transform.top_left();
+                text.insert(
+                    clip.id.clone(),
+                    TextInfo {
+                        content: content.clone(),
+                        style: style.clone(),
+                        box_norm: (tl.x, tl.y, clip.transform.width, clip.transform.height),
+                    },
+                );
             }
-            let (Some(content), Some(style)) = (&clip.text_content, &clip.text_style) else {
-                continue;
-            };
-            let tl = clip.transform.top_left();
-            text.insert(
-                clip.id.clone(),
-                TextInfo {
-                    content: content.clone(),
-                    style: style.clone(),
-                    box_norm: (tl.x, tl.y, clip.transform.width, clip.transform.height),
-                },
-            );
         }
     }
     text
@@ -83,22 +96,60 @@ pub fn project_media(
     manifest: &MediaManifest,
     project_dir: &Option<PathBuf>,
 ) -> (HashMap<String, (u32, u32)>, HashMap<String, MediaInfo>) {
+    project_media_with_proxies(manifest, project_dir, false)
+}
+
+/// Proxy-aware playback projection. A proxy is selected only when the app
+/// preference is enabled, the project-local path is lexically confined to
+/// `media/proxies/`, the file exists, and the current source bytes still match
+/// the digest recorded when the proxy was created. Every failure falls back to
+/// the original source; export never calls this function.
+pub fn project_media_with_proxies(
+    manifest: &MediaManifest,
+    project_dir: &Option<PathBuf>,
+    prefer_proxy: bool,
+) -> (HashMap<String, (u32, u32)>, HashMap<String, MediaInfo>) {
     let mut sizes: HashMap<String, (u32, u32)> = HashMap::new();
     let mut media: HashMap<String, MediaInfo> = HashMap::new();
     for entry in &manifest.entries {
-        let path = match &entry.source {
+        let source_path = match &entry.source {
             MediaSource::External { absolute_path } => PathBuf::from(absolute_path),
             MediaSource::Project { relative_path } => match project_dir {
                 Some(base) => base.join(relative_path),
                 None => continue,
             },
         };
+        let path = if prefer_proxy {
+            entry
+                .proxy
+                .as_ref()
+                .and_then(|proxy| {
+                    let base = project_dir.as_ref()?;
+                    let candidate =
+                        crate::media::trusted_project_proxy_path(base, &proxy.relative_path)?;
+                    if opentake_media::file_sha256(&source_path).ok().as_deref()
+                        != Some(proxy.source_sha256.as_str())
+                    {
+                        return None;
+                    }
+                    Some(candidate)
+                })
+                .unwrap_or(source_path)
+        } else {
+            source_path
+        };
         if let (Some(w), Some(h)) = (entry.source_width, entry.source_height) {
             if w > 0 && h > 0 {
                 sizes.insert(entry.id.clone(), (w as u32, h as u32));
             }
         }
-        media.insert(entry.id.clone(), MediaInfo { path });
+        media.insert(
+            entry.id.clone(),
+            MediaInfo {
+                path,
+                straight_alpha: entry.carries_straight_alpha(),
+            },
+        );
     }
     (sizes, media)
 }
@@ -106,7 +157,7 @@ pub fn project_media(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opentake_domain::{Clip, MediaManifestEntry, Timeline, Track};
+    use opentake_domain::{Clip, MediaManifestEntry, MediaProxy, Timeline, Track};
 
     fn entry(id: &str, source: MediaSource, size: Option<(i32, i32)>) -> MediaManifestEntry {
         MediaManifestEntry {
@@ -120,6 +171,8 @@ mod tests {
             source_height: size.map(|(_, h)| h),
             source_fps: None,
             has_audio: None,
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
@@ -195,6 +248,42 @@ mod tests {
         // Paths still resolve; sizes are just absent for degenerate/unknown dims.
         assert_eq!(media.len(), 2);
         assert!(sizes.is_empty());
+    }
+
+    #[test]
+    fn proxy_projection_requires_enabled_present_and_matching_source_digest() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.mp4");
+        let proxy = temp.path().join("media/proxies/proxy.mp4");
+        std::fs::create_dir_all(proxy.parent().unwrap()).unwrap();
+        std::fs::write(&source, b"source-v1").unwrap();
+        std::fs::write(&proxy, b"proxy-v1").unwrap();
+
+        let mut manifest = MediaManifest::new();
+        let mut item = entry(
+            "asset",
+            MediaSource::External {
+                absolute_path: source.to_string_lossy().into_owned(),
+            },
+            Some((1920, 1080)),
+        );
+        item.proxy = Some(MediaProxy {
+            relative_path: "media/proxies/proxy.mp4".into(),
+            source_sha256: opentake_media::file_sha256(&source).unwrap(),
+            width: 640,
+            height: 360,
+        });
+        manifest.entries.push(item);
+        let project_dir = Some(temp.path().to_path_buf());
+
+        let (_, original) = project_media_with_proxies(&manifest, &project_dir, false);
+        assert_eq!(original["asset"].path, source);
+        let (_, proxied) = project_media_with_proxies(&manifest, &project_dir, true);
+        assert_eq!(proxied["asset"].path, proxy);
+
+        std::fs::write(&source, b"source-v2").unwrap();
+        let (_, stale) = project_media_with_proxies(&manifest, &project_dir, true);
+        assert_eq!(stale["asset"].path, source);
     }
 
     #[test]

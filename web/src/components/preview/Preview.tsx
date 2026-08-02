@@ -21,6 +21,7 @@ import { Icon } from "../ui/Icon";
 import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useMediaStore, refreshMedia } from "../../store/mediaStore";
+import { useSettingsStore } from "../../store/settingsStore";
 import { formatTimecode, totalFrames } from "../../lib/geometry";
 import { snapFrameToEdge } from "../../lib/snap";
 import { maybeSnapFeedback } from "../../lib/haptic";
@@ -28,6 +29,8 @@ import { assetUrl } from "../../lib/asset";
 import { TimelinePlayback } from "./TimelinePlaybackLayer";
 import { TransformOverlay } from "./TransformOverlay";
 import { CropOverlay } from "./CropOverlay";
+import { PolygonMaskOverlay } from "./PolygonMaskOverlay";
+import { MotionTrackingOverlay } from "./MotionTrackingOverlay";
 import {
   CANVAS_OUTLINE_COLOR,
   aspectFitBox,
@@ -72,7 +75,12 @@ import { createScrubGesture, transitionScrubGesture } from "./scrubGesture";
 
 export function Preview() {
   const t = useT();
-  const timeline = useProjectStore((s) => s.timeline);
+  const rootTimeline = useProjectStore((s) => s.timeline);
+  const activeNestedSequenceId = useEditorUiStore((s) => s.activeNestedSequenceId);
+  const timeline =
+    rootTimeline.nestedSequences?.find(
+      (sequence) => sequence.id === activeNestedSequenceId,
+    )?.timeline ?? rootTimeline;
   const projectEpoch = useProjectStore((s) => s.projectEpoch);
   const timelineVersion = useProjectStore((s) => s.timelineVersion);
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
@@ -91,6 +99,7 @@ export function Preview() {
   const togglePlayTimeline = useEditorUiStore((s) => s.togglePlay);
   const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
   const selectedClipIds = useEditorUiStore((s) => s.selectedClipIds);
+  const motionTrackingSelection = useEditorUiStore((s) => s.motionTrackingSelection);
   const pushToast = useEditorUiStore((s) => s.pushToast);
   const mediaPanelCurrentFolderId = useEditorUiStore((s) => s.mediaPanelCurrentFolderId);
   // Preview canvas zoom + pan (Item 1). Read here and applied to the timeline
@@ -215,7 +224,7 @@ export function Preview() {
   const activeShownFrame = previewing ? Math.round(mediaTime * fps) : activeFrame;
   const playing = previewing ? mediaPlaying : isPlaying;
   const playbackRoute = resolveTimelinePlaybackRoute(timeline, {
-    rustAvailable: isTauri,
+    rustAvailable: isTauri && !activeNestedSequenceId,
     rustEnabled: rustEngineEnabled() && !rustEngineFailed,
     forceRust:
       webkitPlaybackFailedRevision === `${projectEpoch}:${timelineVersion}`,
@@ -229,10 +238,10 @@ export function Preview() {
   const requestCompositeStill = useCallback(
     (request: Parameters<typeof compositeFrame>[0]) =>
       compositeFrame(
-        request,
+        { ...request, sequenceId: activeNestedSequenceId ?? undefined },
         previewQualityMaxSize(previewQualityShortEdge, timeline.width, timeline.height),
       ),
-    [previewQualityShortEdge, timeline.height, timeline.width],
+    [activeNestedSequenceId, previewQualityShortEdge, timeline.height, timeline.width],
   );
 
   const seekTo = (frame: number) => {
@@ -457,7 +466,9 @@ export function Preview() {
                     unconditional `if editor.cropEditingActive` swap). Overlays get
                     the SCALED canvas box (fittedCanvas × canvasZoom) so their
                     placement + pointer math track the zoomed canvas (invariant). */}
-                {cropEditingActive
+                {motionTrackingSelection?.clipId === transformClip?.id && scaledCanvas
+                  ? <MotionTrackingOverlay canvasPx={scaledCanvas} />
+                  : cropEditingActive
                   ? cropClip &&
                     scaledCanvas && (
                       <CropOverlay
@@ -466,14 +477,17 @@ export function Preview() {
                         sourcePixelAspect={cropSourcePixelAspect}
                       />
                     )
-                  : transformClip &&
-                    scaledCanvas && (
-                      <TransformOverlay
-                        clip={transformClip}
-                        canvasPx={scaledCanvas}
-                        mediaAspect={transformMediaAspect}
-                      />
-                    )}
+                  : transformClip && scaledCanvas
+                    ? transformClip.masks?.[0]?.shape.kind === "poly"
+                      ? <PolygonMaskOverlay clip={transformClip} canvasPx={scaledCanvas} />
+                      : (
+                          <TransformOverlay
+                            clip={transformClip}
+                            canvasPx={scaledCanvas}
+                            mediaAspect={transformMediaAspect}
+                          />
+                        )
+                    : null}
               </>
             ) : (
               // Empty timeline: a framed 16:9 canvas surface placeholder.
@@ -500,6 +514,7 @@ export function Preview() {
           both the timeline composite and (via mediaRef) single-media preview, so
           the <video>/<audio> renders without its native controls. */}
       <ScrubBar
+        ariaLabel={t("preview.scrubBar")}
         frame={activeShownFrame}
         total={total}
         onSeek={seekTo}
@@ -608,7 +623,9 @@ function MediaPreview({
   onPlayingChange: (playing: boolean) => void;
 }) {
   const t = useT();
-  const url = assetUrl(item.path);
+  const proxyPlaybackEnabled = useSettingsStore((state) => state.proxyPlaybackEnabled);
+  const playbackPath = proxyPlaybackEnabled ? (item.proxyPath ?? item.path) : item.path;
+  const url = assetUrl(playbackPath);
   // Hi-res first-frame poster, painted INSTANTLY behind the <video> so a cold
   // click shows a sharp frame with no blank/spinner. Decoded (and cached) by the
   // backend on select; the asset protocol then streams the real video
@@ -730,12 +747,14 @@ function PreviewTabs({ item }: { item: MediaItem | null }) {
   );
 }
 
-function ScrubBar({
+export function ScrubBar({
+  ariaLabel,
   frame,
   total,
   onSeek,
   onScrubbingChange,
 }: {
+  ariaLabel: string;
   frame: number;
   total: number;
   onSeek: (f: number) => void;
@@ -746,7 +765,9 @@ function ScrubBar({
   const ref = useRef<HTMLDivElement>(null);
   const gestureRef = useRef(createScrubGesture());
   const [hover, setHover] = useState(false);
-  const progress = total > 0 ? frame / total : 0;
+  const safeTotal = Math.max(0, total);
+  const safeFrame = Math.max(0, Math.min(safeTotal, Math.round(frame)));
+  const progress = safeTotal > 0 ? safeFrame / safeTotal : 0;
 
   const seekFromEvent = (clientX: number) => {
     const el = ref.current;
@@ -756,13 +777,40 @@ function ScrubBar({
     onSeek(Math.round(t * total));
   };
 
+  const cancelGesture = useCallback(() => {
+    const wasActive = gestureRef.current.active;
+    const transition = transitionScrubGesture(gestureRef.current, "cancel");
+    gestureRef.current = transition.state;
+    if (wasActive) onScrubbingChange?.(transition.scrubbing);
+  }, [onScrubbingChange]);
+
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    element.addEventListener("lostpointercapture", cancelGesture);
+    element.addEventListener("pointercancel", cancelGesture);
+    return () => {
+      element.removeEventListener("lostpointercapture", cancelGesture);
+      element.removeEventListener("pointercancel", cancelGesture);
+    };
+  }, [cancelGesture]);
+
   return (
     <div
       ref={ref}
+      data-preview-scrub
+      role="slider"
+      tabIndex={0}
+      aria-label={ariaLabel}
+      aria-orientation="horizontal"
+      aria-valuemin={0}
+      aria-valuemax={safeTotal}
+      aria-valuenow={safeFrame}
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
       onPointerDown={(e) => {
-        (e.target as HTMLElement).setPointerCapture(e.pointerId);
+        e.currentTarget.focus();
+        e.currentTarget.setPointerCapture(e.pointerId);
         const transition = transitionScrubGesture(gestureRef.current, "down");
         gestureRef.current = transition.state;
         onScrubbingChange?.(transition.scrubbing);
@@ -781,10 +829,22 @@ function ScrubBar({
         if (transition.effect === "exact-seek") seekFromEvent(e.clientX);
         onScrubbingChange?.(transition.scrubbing);
       }}
-      onLostPointerCapture={() => {
-        const transition = transitionScrubGesture(gestureRef.current, "cancel");
-        gestureRef.current = transition.state;
-        if (transition.effect !== "none") onScrubbingChange?.(transition.scrubbing);
+      onKeyDown={(e) => {
+        if (e.key === "Escape") {
+          if (gestureRef.current.active) {
+            e.preventDefault();
+            cancelGesture();
+          }
+          return;
+        }
+        let next: number | null = null;
+        if (e.key === "ArrowLeft" || e.key === "ArrowDown") next = safeFrame - 1;
+        if (e.key === "ArrowRight" || e.key === "ArrowUp") next = safeFrame + 1;
+        if (e.key === "Home") next = 0;
+        if (e.key === "End") next = safeTotal;
+        if (next === null || safeTotal <= 0) return;
+        e.preventDefault();
+        onSeek(Math.max(0, Math.min(safeTotal, next)));
       }}
       style={{
         height: 18,
@@ -797,6 +857,7 @@ function ScrubBar({
       }}
     >
       <div
+        data-preview-scrub-track
         style={{
           // position:relative confines the absolute progress fill + handle below.
           // Without it they escape to the nearest positioned ancestor (the preview

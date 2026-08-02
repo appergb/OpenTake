@@ -17,7 +17,7 @@
 
 ---
 
-### B2. 前端帧数学截断不一致（高）
+### B2. 前端帧数学截断不一致（已修复）
 
 | 属性 | 值 |
 |---|---|
@@ -25,6 +25,7 @@
 | **描述** | Rust 端 `seconds_to_frame()` 使用截断 `(seconds * fps) as i32`（对应上游 `Int(s*fps)`），前端使用 `Math.round`（四舍五入）。当 `seconds * fps` 小数部分 ≥0.5 时，双方结果差 1 帧，导致同一媒体的计算时长不一致 |
 | **影响** | 媒体导入时的帧数计算偏差可能导致 clip 时长 off-by-1 |
 | **修复方案** | 将前端的 `Math.round(seconds * fps)` 改为 `Math.floor(seconds * fps)` |
+| **验证** | 媒体时长、搜索片段 trim 起点/时长、ripple insert 与默认文本时长统一使用向零截断；`seconds_to_frame_truncates_fractional_boundaries` 覆盖 24/30 fps 的半帧、帧边界和无效输入。仅播放头吸附等明确的 nearest-frame UI 交互继续使用 `Math.round`。 |
 
 ---
 
@@ -59,12 +60,12 @@
 | **描述** | GPU 合成的 infrastructure 已就绪（`composite_frame` Tauri 命令、`useTimelineFrame` hook 均存在），但 `Preview.tsx` 仍然使用 DOM `<video>`/`<img>` 路径渲染，未接入 `useTimelineFrame`。后果：看不到关键帧动画、transform/crop/text/effects，preview ≠ export |
 | **当前状态** | 已有完整的 wgpu 合成管线，只需在 Preview.tsx 中接入 `useTimelineFrame` hook |
 
-### D2. Agent/MCP 隐藏能力仍待生产后端（高）
+### D2. Agent/MCP Lottie 检查（已关闭）
 
 | 属性 | 值 |
 |---|---|
-| **位置** | `crates/opentake-agent/src/tools/names.rs`、`crates/opentake-agent/src/mcp/dispatch.rs` |
-| **描述** | 发现面当前只发布 38 个有真实执行路径的工具。`inspect_media` 已连接桌面媒体桥，可检查图片、视频和音频（Lottie 仍明确不支持）；GenerateVideo/Image/Audio、UpscaleMedia、AddMotionGraphic、EditMotionGraphic 保留兼容线名但不进入 `ToolName::ALL`、MCP/Chat 目录或系统提示。它们的生产后端仍是 Beta 功能缺口，不能按已交付计算。 |
+| **位置** | `src-tauri/src/mcp.rs`、`src-tauri/src/render.rs` |
+| **描述** | 已关闭：`inspect_media` 使用共享 Velato/Vello 管线在中性灰底上均匀采样 Lottie，返回尺寸、帧率、时长和真实 JPEG 帧；`inspect_timeline` 也不再跳过 Lottie 层。无效文档、离线源和无 GPU 环境返回类型化失败。 |
 
 ### D3. Media 缩略图始终返回 `None`（中）
 
@@ -114,7 +115,7 @@
 | **B3** | rippleDeleteRanges 忽略 clipId | 🟠 高 | Agent 工具精度下降 | 中 |
 | **B4** | canGenerate 硬编码 false（已修复） | ✅ 已关闭 | 动态生成能力已恢复 | — |
 | **D1** | 预览未接入 GPU 合成 | 🟠 高 | 所有编辑效果不可见 | 中 |
-| **D2** | Agent 工具 30% stub | 🟠 高 | AI 协作核心缺失 | 高 |
+| **D2** | Agent/MCP Lottie 检查 | ✅ 已关闭 | 真实抽帧与合成已恢复 | — |
 | **D3** | 缩略图始终 None | 🟡 中 | 媒体库 UX 差 | 中 |
 | **D4** | Export 仅 H.264 | 🟡 中 | 输出格式受限 | 低 |
 | **D5** | TextTab/AIEdit scaffold | 🟡 中 | 功能不完整 | 中 |

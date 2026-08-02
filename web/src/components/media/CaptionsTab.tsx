@@ -23,14 +23,19 @@ import { useMediaStore } from "../../store/mediaStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import { generateCaptions } from "../../store/editActions";
 import {
+  applyCaptionTranslationReview,
+  cancelAdvancedWorkflow,
   downloadTranscribeModel,
   isTauri,
   onTranscribeProgress,
+  translateCaptions,
   transcribeModelStatus,
 } from "../../lib/api";
-import { SPACE, RADIUS } from "../../lib/theme";
+import { undo as undoEdit } from "../../store/editActions";
+import { LAYOUT, SPACE, RADIUS } from "../../lib/theme";
 import type {
   CaptionCase,
+  CaptionTranslationResult,
   CaptionRequest,
   CaptionSource,
   ModelStatus,
@@ -40,13 +45,13 @@ import type {
 } from "../../lib/types";
 
 /** Caption style/placement defaults, 1:1 with upstream `AppTheme.Caption`. */
-const DEFAULT_FONT_SIZE = 48;
-const MIN_FONT_SIZE = 12;
-const MAX_FONT_SIZE = 300;
+const DEFAULT_FONT_SIZE = LAYOUT.captionDefaultFontSize;
+const MIN_FONT_SIZE = LAYOUT.captionMinFontSize;
+const MAX_FONT_SIZE = LAYOUT.captionMaxFontSize;
 const DEFAULT_CENTER_X = 0.5;
-const DEFAULT_CENTER_Y = 0.9;
+const DEFAULT_CENTER_Y = LAYOUT.captionDefaultCenterY;
 const CENTER_SNAP = 0.5;
-const CENTER_SNAP_THRESHOLD = 0.02;
+const CENTER_SNAP_THRESHOLD = LAYOUT.captionCenterSnapThreshold;
 
 const CASE_OPTIONS: ReadonlyArray<CaptionCase> = ["auto", "upper", "lower"];
 
@@ -74,7 +79,7 @@ export function CaptionsTab() {
   }, [mediaItems]);
 
   // Style (caption font size default 48, not the generic text 96).
-  const [fontSize, setFontSize] = useState(DEFAULT_FONT_SIZE);
+  const [fontSize, setFontSize] = useState<number>(DEFAULT_FONT_SIZE);
   const [color, setColor] = useState<Rgba>({ r: 1, g: 1, b: 1, a: 1 });
   const [background, setBackground] = useState<{ enabled: boolean; color: Rgba }>({
     enabled: false,
@@ -85,7 +90,7 @@ export function CaptionsTab() {
 
   // Placement (normalized canvas center; default bottom-center).
   const [centerX, setCenterX] = useState(DEFAULT_CENTER_X);
-  const [centerY, setCenterY] = useState(DEFAULT_CENTER_Y);
+  const [centerY, setCenterY] = useState<number>(DEFAULT_CENTER_Y);
 
   // Source: null = auto (or selected clips), else a specific track id.
   const [trackId, setTrackId] = useState<string | null>(null);
@@ -94,6 +99,23 @@ export function CaptionsTab() {
 
   const [phase, setPhase] = useState<Phase>({ kind: "idle" });
   const [note, setNote] = useState<string | null>(null);
+  const [translationSourceLocale, setTranslationSourceLocale] = useState("auto");
+  const [translationTargetLocale, setTranslationTargetLocale] = useState("zh-CN");
+  const [translationProvider, setTranslationProvider] = useState<"openai" | "anthropic">("openai");
+  const [translationCostAuthorized, setTranslationCostAuthorized] = useState(false);
+  const [translationPhase, setTranslationPhase] = useState<"idle" | "translating" | "review" | "applying" | "applied">("idle");
+  const [translationResult, setTranslationResult] = useState<CaptionTranslationResult | null>(null);
+  const [acceptedTranslationIds, setAcceptedTranslationIds] = useState<Set<string>>(new Set());
+  const [translationError, setTranslationError] = useState<string | null>(null);
+
+  const captionClips = useMemo(
+    () => timeline.tracks.flatMap((track) => track.clips).filter((clip) => clip.mediaType === "text" && clip.captionGroupId && clip.textContent?.trim()),
+    [timeline],
+  );
+  const selectedCaptionIds = useMemo(() => {
+    const ids = captionClips.filter((clip) => selectedClipIds.has(clip.id)).map((clip) => clip.id);
+    return ids.length > 0 ? ids : captionClips.map((clip) => clip.id);
+  }, [captionClips, selectedClipIds]);
 
   // Caption-eligible tracks (any audio track, or a video track that carries
   // audio). Mirrors upstream's track menu built from `captionTargets`.
@@ -190,6 +212,53 @@ export function CaptionsTab() {
     }
   };
 
+  const runTranslation = async () => {
+    setTranslationPhase("translating");
+    setTranslationError(null);
+    setTranslationResult(null);
+    try {
+      const result = await translateCaptions(
+        selectedCaptionIds,
+        translationSourceLocale,
+        translationTargetLocale,
+        translationProvider,
+        translationCostAuthorized,
+      );
+      setTranslationResult(result);
+      setAcceptedTranslationIds(new Set(result.result.review.map((change) => change.id)));
+      setTranslationPhase("review");
+    } catch (error) {
+      setTranslationError(error instanceof Error ? error.message : String(error));
+      setTranslationPhase("idle");
+    }
+  };
+
+  const applyTranslation = async () => {
+    if (!translationResult) return;
+    const accepted = translationResult.result.review.filter((change) => acceptedTranslationIds.has(change.id));
+    if (accepted.length === 0) return;
+    setTranslationPhase("applying");
+    setTranslationError(null);
+    try {
+      await applyCaptionTranslationReview(translationResult.result, accepted);
+      setTranslationPhase("applied");
+    } catch (error) {
+      setTranslationError(error instanceof Error ? error.message : String(error));
+      setTranslationPhase("review");
+    }
+  };
+
+  const undoTranslation = async () => {
+    setTranslationPhase("applying");
+    try {
+      await undoEdit();
+      setTranslationPhase("review");
+    } catch (error) {
+      setTranslationError(error instanceof Error ? error.message : String(error));
+      setTranslationPhase("applied");
+    }
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", position: "relative" }}>
       <div style={{ flex: 1, overflowY: "auto", padding: `${SPACE.md}px ${SPACE.lgXl}px` }}>
@@ -280,6 +349,44 @@ export function CaptionsTab() {
             <PosField label="X" value={centerX} onChange={(v) => setCenterX(snapCenter(v))} />
             <PosField label="Y" value={centerY} onChange={(v) => setCenterY(snapCenter(v))} />
           </div>
+        </Section>
+
+        <Section title={t("captions.translation")}>
+          <div style={{ fontSize: "var(--fs-xs)", color: "var(--text-tertiary)" }}>
+            {t("captions.translation.scope", { count: selectedCaptionIds.length })}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: SPACE.sm }}>
+            <input aria-label={t("captions.translation.sourceLocale")} value={translationSourceLocale} disabled={translationPhase === "translating" || translationPhase === "applying"} onChange={(event) => setTranslationSourceLocale(event.currentTarget.value)} style={inputStyle} />
+            <input aria-label={t("captions.translation.targetLocale")} value={translationTargetLocale} disabled={translationPhase === "translating" || translationPhase === "applying"} onChange={(event) => setTranslationTargetLocale(event.currentTarget.value)} style={inputStyle} />
+          </div>
+          <select aria-label={t("captions.translation.provider")} value={translationProvider} disabled={translationPhase === "translating" || translationPhase === "applying"} onChange={(event) => setTranslationProvider(event.currentTarget.value as "openai" | "anthropic")} style={selectStyle}>
+            <option value="openai">OpenAI</option>
+            <option value="anthropic">Anthropic</option>
+          </select>
+          <label style={{ display: "flex", alignItems: "center", gap: SPACE.sm, fontSize: "var(--fs-xs)", color: "var(--text-secondary)" }}>
+            <input type="checkbox" checked={translationCostAuthorized} onChange={(event) => setTranslationCostAuthorized(event.currentTarget.checked)} />
+            {t("captions.translation.costConsent")}
+          </label>
+          {translationResult?.result.review.map((change) => (
+            <label key={change.id} style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: SPACE.sm, alignItems: "start", padding: SPACE.sm, border: "var(--bw-thin) solid var(--border-subtle)", borderRadius: RADIUS.sm }}>
+              <input type="checkbox" checked={acceptedTranslationIds.has(change.id)} disabled={translationPhase === "applying" || translationPhase === "applied"} onChange={(event) => { const accepted = event.currentTarget.checked; setAcceptedTranslationIds((current) => { const next = new Set(current); if (accepted) next.add(change.id); else next.delete(change.id); return next; }); }} aria-label={t("captions.translation.accept", { text: change.translatedText })} />
+              <span style={{ display: "flex", flexDirection: "column", gap: 2, fontSize: "var(--fs-xs)" }}><span style={{ color: "var(--text-tertiary)" }}>{change.sourceText}</span><span style={{ color: "var(--text-primary)" }}>{change.translatedText}</span></span>
+            </label>
+          ))}
+          {translationResult?.result.errors.map((failure) => <div key={failure.id} role="status" style={{ fontSize: "var(--fs-xs)", color: "var(--status-error)" }}>{failure.id}: {failure.message}</div>)}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: SPACE.sm }}>
+            {translationPhase === "applied" ? (
+              <button type="button" onClick={() => void undoTranslation()} style={primaryButtonStyle(false)}>{t("captions.translation.undo")}</button>
+            ) : (
+              <>
+                <button type="button" disabled={selectedCaptionIds.length === 0 || !translationTargetLocale.trim() || !translationCostAuthorized || translationPhase === "translating" || translationPhase === "applying"} onClick={() => void runTranslation()} style={primaryButtonStyle(translationPhase === "translating")}>{translationPhase === "translating" ? t("captions.translation.translating") : translationResult ? t("captions.translation.retry") : t("captions.translation.translate")}</button>
+                <button type="button" disabled={!translationResult || acceptedTranslationIds.size === 0 || translationPhase !== "review"} onClick={() => void applyTranslation()} style={primaryButtonStyle(translationPhase === "applying")}>{translationPhase === "applying" ? t("captions.translation.applying") : t("captions.translation.apply", { count: acceptedTranslationIds.size })}</button>
+              </>
+            )}
+            {translationPhase === "translating" && <button type="button" onClick={() => void cancelAdvancedWorkflow()}>{t("captions.translation.cancel")}</button>}
+          </div>
+          {translationPhase === "applied" && <div role="status" style={{ fontSize: "var(--fs-xs)", color: "var(--status-success)" }}>{t("captions.translation.applied")}</div>}
+          {translationError && <div role="alert" style={{ fontSize: "var(--fs-xs)", color: "var(--status-error)" }}>{translationError}</div>}
         </Section>
       </div>
 

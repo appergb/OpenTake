@@ -3,6 +3,7 @@ import {
   clampTrimDeltaFrames,
   dbFromLinear,
   findCropEditingClip,
+  findLogicalSingleClip,
   findSelectedVisualClip,
   fitTransformForMedia,
   liveVolumeKfLinearAt,
@@ -519,6 +520,26 @@ describe("findCropEditingClip (upstream CropOverlayView.selectedClip port)", () 
   });
 });
 
+describe("findLogicalSingleClip", () => {
+  const visual = clip({ id: "linked-video", linkGroupId: "group" });
+  const audio = clip({ id: "linked-audio", mediaType: "audio", linkGroupId: "group" });
+  const other = clip({ id: "other" });
+  const tl = timeline([
+    track({ id: "vt", type: "video", clips: [visual, other] }),
+    track({ id: "at", type: "audio", clips: [audio] }),
+  ]);
+
+  it("treats one linked video and audio companion as one logical clip", () => {
+    expect(findLogicalSingleClip(tl, new Set([visual.id, audio.id]))).toBe(visual);
+    expect(findSelectedVisualClip(tl, new Set([visual.id, audio.id]))).toBe(visual);
+    expect(findCropEditingClip(tl, new Set([visual.id, audio.id]))).toBe(visual);
+  });
+
+  it("keeps unrelated clips as a genuine marquee selection", () => {
+    expect(findLogicalSingleClip(tl, new Set([visual.id, other.id]))).toBeNull();
+  });
+});
+
 function fullClip(overrides: Partial<Clip> = {}): Clip {
   return {
     id: "c1",
@@ -576,6 +597,24 @@ describe("animated-value inspector seed (raw track sample, no fade/gain)", () =>
     // The composited output differs (× static volume 2 × the 0.25 fade ramp at
     // rel-frame 5), proving the seed is NOT taken from it.
     expect(volumeAt(clip, 15)).toBeCloseTo((raw as number) * 2 * 0.25);
+  });
+
+  it("volumeAt applies persisted loudness gain on top of authored controls", () => {
+    const clip = fullClip({
+      mediaType: "audio",
+      sourceClipType: "audio",
+      volume: 0.5,
+      loudnessNormalization: {
+        targetLufs: -16,
+        truePeakCeilingDbtp: -1,
+        inputIntegratedLufs: -22,
+        inputTruePeakDbtp: -8,
+        gainDb: 6,
+        outputIntegratedLufs: -16,
+        outputTruePeakDbtp: -2,
+      },
+    });
+    expect(volumeAt(clip, 15)).toBeCloseTo(0.5 * 10 ** (6 / 20));
   });
 
   it("rawOpacityAt returns the authored track value, excluding the fade envelope", () => {

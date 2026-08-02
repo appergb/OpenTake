@@ -24,6 +24,11 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2"
+# Dialog selections extend the runtime file/asset scopes. Persist only those
+# user-approved paths so Recents can render media after restart without the
+# previous global `**` asset exposure. The fs plugin must initialize first.
+tauri-plugin-fs = "2"
+tauri-plugin-persisted-scope = { version = "2", features = ["protocol-asset"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 opentake-core = { workspace = true }
@@ -32,19 +37,19 @@ opentake-ops = { workspace = true }
 opentake-domain = { workspace = true }
 # Transcription + visual semantic search are ON for the shipped app:
 # `whisper-backend` compiles the whisper.cpp CPU backend (via cmake —
-# preinstalled on GitHub runners, no CUDA); `ort-backend` links ONNX Runtime for
-# the SigLIP2 dual-encoder — its `download-binaries` feature fetches a
-# *statically* linked prebuilt onnxruntime at build time and bakes it into the
-# binary (no runtime .so/.dylib to ship; same build-time-network shape as
-# whisper.cpp / model-download); `model-download` pulls the model files over
-# HTTPS with checksum verification. All three stay optional at the
-# opentake-media level (its own default tests run offline, without them);
+# preinstalled on GitHub runners, no CUDA); `ort-backend` runs the SigLIP2
+# dual-encoder through a checksum-pinned native ONNX Runtime on macOS/Linux and
+# ort's official pure-Rust tract backend on Windows. The Windows package has no
+# native ONNX Runtime or DirectX provider dependency. `model-download` pulls the
+# model files over HTTPS with checksum verification. All three stay optional at
+# the opentake-media level (its own default tests run offline, without them);
 # ort-inference tests are feature-gated + runtime-skipped like the GPU/ffmpeg
 # integration tests.
 opentake-media = { workspace = true, features = ["whisper-backend", "ort-backend", "model-download"] }
 opentake-render = { workspace = true }
 opentake-gen = { workspace = true }
 opentake-agent = { workspace = true }
+opentake-motion = { workspace = true, features = ["chromium"] }
 # Preview composite frames are returned to the WebView as a base64 PNG data URL;
 # the agent's `inspect_timeline` bridge encodes composited frames as JPEG.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
@@ -54,16 +59,20 @@ cap-std = "4.0.2"
 cap-fs-ext = "4.0.2"
 sha2 = "0.10"
 uuid = { workspace = true }
+tempfile = "3"
 # Optional account scaffold: verify a token only against a user-configured
 # backend. Rustls keeps the desktop build independent of a system OpenSSL.
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
 futures-util = "0.3"
+crossbeam-channel = "0.5"
+velato = { workspace = true }
+sentry = { workspace = true }
 
 # Tokio is also required by the always-built MCP server (URL import cancellation,
 # timers and the loopback runtime), so it cannot be optional in the minimal
 # no-playback shell. The remaining transport dependencies stay feature-gated.
 axum = { version = "0.8", features = ["ws"], optional = true }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "sync", "time"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "sync", "time", "process", "io-util"] }
 bytes = { version = "1", optional = true }
 futures = { version = "0.3", optional = true }
 # Real-time audio output backing the playback master clock (#63). New crate:
@@ -76,6 +85,7 @@ cpal = { version = "0.15", optional = true }
 # Tauri, so this only enables the NSHapticFeedback module (incremental build).
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSHapticFeedback"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["NSError", "NSFileManager", "NSString", "NSURL"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -84,8 +94,8 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
-tempfile = "3"
 opentake-media = { workspace = true, features = ["test-faults"] }
+tauri = { version = "2", features = ["protocol-asset", "test"] }
 
 [features]
 # `default` now includes `playback-engine`: the continuous Rust streaming engine

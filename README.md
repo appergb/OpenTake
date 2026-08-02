@@ -61,7 +61,7 @@ OpenTake is not a replacement for CapCut / DaVinci Resolve / Final Cut Pro — i
 |:--|:--|:--|
 | Agent doesn't know how to edit | Agent reads skill docs on its own | Software pushes Context Signal — "this track is A-roll, cut with talking-head rhythm" |
 | Cross-platform needs 3 codebases | macOS: Swift/AVFoundation, Windows: C++/DirectShow | Single Rust codebase, FFmpeg + wgpu, identical experience on all 3 platforms |
-| I want to use my own AI keys | Locked into vendor cloud services | BYOK — direct to fal.ai / Replicate / OpenAI, zero backend, zero ops cost |
+| I want to use AI directly | Locked into vendor cloud services | Official Codex / ChatGPT sign-in for Agent, plus BYOK for fal.ai / Replicate / OpenAI |
 | Agent can chat but can't act | CLI agent reads text output | MCP Server with 31 tools — Agent directly runs add_clips / split_clip / set_keyframes |
 | Rewriting prompts for every video type | "You are editing a product review..." every time | Workflow Plugin System: review/tutorial/gaming/wedding, each pre-packaged with methodology |
 | Steep learning curve for new tools | Complex UI, long onboarding | Agent operates for you — just say "edit this interview into a 3-minute highlight" |
@@ -110,7 +110,9 @@ Full MCP server at `127.0.0.1:19789`. Agents control the timeline directly:
 | Library | 7 | `create_folder`, `move_to_folder`, `rename_media` |
 | Resources | 2 | `models/video`, `models/image` |
 
-Built-in Agent chat panel shares tool definitions and system prompt with MCP.
+Built-in Agent chat panel shares tool definitions and system prompt with MCP. It can use direct
+OpenAI/Anthropic BYOK or the user-installed official Codex CLI's ChatGPT sign-in; OpenTake never
+reads or stores the Codex credential.
 
 ### 🎬 Cross-Platform Media Engine
 
@@ -295,7 +297,10 @@ cd ..
 cargo tauri dev
 ```
 
-> ⚠️ **Current Status**: Early design phase. Architecture, roadmap, and module port maps are complete; code implementation in progress.
+> **Current Status**: `1.0.0-beta.1` candidate. The local editing, preview,
+> persistence, export, Agent, Motion Canvas, and reviewed AI workflow verticals
+> are implemented. See the [Beta release notes](docs/releases/1.0.0-beta.1.md)
+> for validation scope and platform/provider limits.
 
 The sibling directory `palmier-pro-upstream/` contains upstream Swift sources for reference during porting.
 
@@ -306,6 +311,7 @@ The sibling directory `palmier-pro-upstream/` contains upstream Swift sources fo
 | Version | Date | Milestone |
 |:--|:--|:--|
 | `0.1.0-dev` | 2026-06 | Phase 0+1: Cargo workspace + Domain models + Edit ops + Tauri scaffold |
+| `1.0.0-beta.1` | 2026-08-01 | First installable Beta: end-to-end local editor, Agent, Motion and reviewed AI workflows |
 | *(planned)* `0.2.0` | TBD | Phase 2: Persistence + Media import + Thumbnails + Waveform |
 | *(planned)* `0.3.0` | TBD | Phase 3: Timeline UI + Preview + MCP Server |
 | *(planned)* `0.4.0` | TBD | Phase 4: GPU Compositor (wgpu) + Text rasterization |

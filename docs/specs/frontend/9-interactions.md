@@ -99,6 +99,8 @@
 
 > **跨平台键位**:macOS ⌘ → Win/Linux Ctrl;⌥ → Alt。Tauri 下用 `accelerator` 字符串复刻。keyCode 是 macOS 物理键码,前端用 `event.code`(如 `Space`/`KeyC`/`BracketLeft`/`Backquote`/`ArrowLeft`)更可靠,**逐键对照上表语义**。
 
+**OpenTake 代码门禁（2026-08-01）**:`resolveDocumentedShortcut` 是本表唯一的 WebView 物理键解析边界，按表输出语义命令；`APPLICATION_MENU_SPEC` 继续作为原生菜单 accelerator 与同一动作的声明边界。矩阵已覆盖 macOS/Windows 修饰键、`⌘S`/`⌘⇧S` 冲突、Space 修饰/重复、媒体与时间线方向键、输入控件、弹窗、只读工程及 Home/no-editor no-op。`useKeyboardShortcuts` 只执行解析结果，并对一次性命令抑制 repeat。代码测试与生产构建已通过；本表最终勾选仍须完成打包桌面端逐键取证。
+
 ### 9.7 Hover / 焦点 / 游标态
 
 | 元素 | hover 效果 | 来源 |
@@ -112,6 +114,8 @@
 | 轨道高度边 | `resizeUpDown` | `TimelineHeaderView.swift:203-209` |
 | scrub 条 | `pointingHand` + 变粗 | `PreviewContainerView.swift:655,677` |
 | 数字字段 | `resizeLeftRight`（ew-resize）| `ScrubbableNumberField.swift:185-187` |
+
+**OpenTake 代码门禁（2026-08-01）**:`timelineInteractionCursor` 统一投影刻度/Shift-range、trim、clip body、razor、move/scrub/trim/marquee drag 与只读禁用态；Transform/Crop、SplitPane、ScrubbableNumberField 和 HoverButton 的 enabled/disabled/dragging/focus 状态由同一 owning matrix 校验。数字字段同时暴露 spinbutton 语义与键盘增减/进入编辑路径，禁用 hover 不再着色。代码测试与生产构建已通过；鼠标、触控板、键盘焦点、高对比度的打包桌面快照仍是最终勾选前置。
 
 ### 9.8 右键菜单（汇总，见 §5.10 详表）
 

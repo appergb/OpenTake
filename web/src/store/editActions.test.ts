@@ -26,10 +26,47 @@ const srv = vi.hoisted(() => {
     transform?: Transform;
   };
   type STrack = { id: string; type: string; clips: SClip[] };
-  const state: { tracks: STrack[]; version: number; seq: number } = {
+  type SCommand = {
+    type: string;
+    kind?: string;
+    at?: number;
+    fps?: number;
+    width?: number;
+    height?: number;
+    entries?: Array<{
+      mediaRef?: string;
+      mediaType?: ClipType;
+      sourceClipType?: ClipType;
+      trackIndex?: number;
+      startFrame: number;
+      durationFrames: number;
+      trimStartFrame?: number;
+      trimEndFrame?: number;
+      transform?: Transform;
+    }>;
+    trackIndex?: number;
+    atFrame?: number;
+    a?: number;
+    b?: number;
+  };
+  const state: {
+    tracks: STrack[];
+    version: number;
+    seq: number;
+    fps: number;
+    width: number;
+    height: number;
+    settingsConfigured: boolean;
+    commands: SCommand[];
+  } = {
     tracks: [],
     version: 0,
     seq: 0,
+    fps: 30,
+    width: 1920,
+    height: 1080,
+    settingsConfigured: true,
+    commands: [],
   };
   // Core overwrite-on-place: clear any clip overlapping [start, end) before placing.
   function clearRegion(track: STrack, start: number, end: number): void {
@@ -43,29 +80,27 @@ const srv = vi.hoisted(() => {
       state.tracks = [];
       state.version = 0;
       state.seq = 0;
+      state.fps = 30;
+      state.width = 1920;
+      state.height = 1080;
+      state.settingsConfigured = true;
+      state.commands = [];
     },
-    apply(cmd: {
-      type: string;
-      kind?: string;
-      at?: number;
-      // `addClips` entries carry `trackIndex`; `addTextsAutoTrack` entries
-      // don't (every entry lands on the one fresh track the command creates).
-      entries?: Array<{
-        mediaRef?: string;
-        mediaType?: ClipType;
-        sourceClipType?: ClipType;
-        trackIndex?: number;
-        startFrame: number;
-        durationFrames: number;
-        trimStartFrame?: number;
-        trimEndFrame?: number;
-        transform?: Transform;
-      }>;
-      trackIndex?: number;
-      atFrame?: number;
-      a?: number;
-      b?: number;
-    }): { changed: boolean; affectedClipIds: string[] } {
+    apply(cmd: SCommand): { changed: boolean; affectedClipIds: string[] } {
+      state.commands.push(cmd);
+      if (
+        cmd.type === "setTimelineSettings" &&
+        cmd.fps !== undefined &&
+        cmd.width !== undefined &&
+        cmd.height !== undefined
+      ) {
+        state.fps = cmd.fps;
+        state.width = cmd.width;
+        state.height = cmd.height;
+        state.settingsConfigured = true;
+        state.version += 1;
+        return { changed: true, affectedClipIds: [] };
+      }
       if (cmd.type === "insertTrack") {
         const at = Math.max(0, Math.min(state.tracks.length, cmd.at ?? state.tracks.length));
         state.tracks.splice(at, 0, {
@@ -189,10 +224,10 @@ vi.mock("../lib/api", () => ({
   },
   getTimeline: async () => ({
     timeline: {
-      fps: 30,
-      width: 1920,
-      height: 1080,
-      settingsConfigured: true,
+      fps: srv.state.fps,
+      width: srv.state.width,
+      height: srv.state.height,
+      settingsConfigured: srv.state.settingsConfigured,
       tracks: srv.state.tracks.map((t) => ({
         id: t.id,
         type: t.type,
@@ -244,6 +279,8 @@ import {
   addMediaToTimelineAt,
   addMomentToTimelineAt,
   addTextClip,
+  applyAutomationCommands,
+  buildMediaInsertPlan,
   insertClips,
   insertTrack,
   mediaDurationFrames,
@@ -263,6 +300,18 @@ const EMPTY: Timeline = {
   settingsConfigured: true,
   tracks: [],
 };
+
+function setMirror(timeline: Timeline, version: number, projectEpoch: number): void {
+  useProjectStore.getState().clearProjectSnapshot();
+  useProjectStore.getState().replaceProjectSnapshot({
+    timeline,
+    version,
+    projectEpoch,
+    projectPath: null,
+    compatibilityReadOnly: false,
+    compatibilityBlockers: [],
+  });
+}
 
 function video(name: string, width?: number, height?: number): MediaItem {
   // duration 2s * 30fps = 60 frames per clip.
@@ -306,7 +355,7 @@ function clipboardClip(transform: Transform): Clip {
 describe("addMediaToTimeline", () => {
   beforeEach(() => {
     srv.reset();
-    useProjectStore.getState().setMirror(EMPTY, 0, 1);
+    setMirror(EMPTY, 0, 1);
     useClipboardStore.getState().clear();
     useEditorUiStore.setState({ activeFrame: 0, currentFrame: 0, selectedClipIds: new Set() });
   });
@@ -324,6 +373,61 @@ describe("addMediaToTimeline", () => {
     const p2 = addMediaToTimeline(video("b"));
     await Promise.all([p1, p2]);
     expect(visualClipStarts()).toEqual([0, 60]);
+  });
+
+  it("applies first-video settings before placing the first clip", async () => {
+    srv.state.settingsConfigured = false;
+    setMirror({ ...EMPTY, settingsConfigured: false }, 0, 1);
+
+    await addMediaToTimeline({
+      ...video("first", 3840, 2160),
+      sourceFps: 23.976,
+    });
+
+    expect(srv.state.commands.map((command) => command.type)).toEqual([
+      "setTimelineSettings",
+      "insertTrack",
+      "addClips",
+    ]);
+    expect(srv.state.commands[0]).toMatchObject({
+      type: "setTimelineSettings",
+      fps: 24,
+      width: 3840,
+      height: 2160,
+    });
+    expect(srv.state.commands[2].entries?.[0]).toMatchObject({
+      mediaRef: "first",
+      durationFrames: 48,
+    });
+    expect(useProjectStore.getState().timeline).toMatchObject({
+      fps: 24,
+      width: 3840,
+      height: 2160,
+      settingsConfigured: true,
+    });
+  });
+
+  it("waits for configured-empty mismatch choice and preserves either decision", async () => {
+    const mismatched = { ...video("mismatch", 3840, 2160), sourceFps: 24 };
+    const keep = addMediaToTimeline(mismatched);
+    await vi.waitFor(() => expect(useEditorUiStore.getState().projectSettingsPrompt).not.toBeNull());
+    useEditorUiStore.getState().resolveProjectSettingsPrompt(false);
+    await keep;
+    expect(srv.state.commands.some((command) => command.type === "setTimelineSettings")).toBe(false);
+    expect(srv.state.commands.at(-1)?.entries?.[0]).toMatchObject({ durationFrames: 60 });
+
+    srv.reset();
+    setMirror(EMPTY, 0, 1);
+    const match = addMediaToTimeline(mismatched);
+    await vi.waitFor(() => expect(useEditorUiStore.getState().projectSettingsPrompt).not.toBeNull());
+    useEditorUiStore.getState().resolveProjectSettingsPrompt(true);
+    await match;
+    expect(srv.state.commands.map((command) => command.type)).toEqual([
+      "setTimelineSettings",
+      "insertTrack",
+      "addClips",
+    ]);
+    expect(srv.state.commands.at(-1)?.entries?.[0]).toMatchObject({ durationFrames: 48 });
   });
 
   it("drops overlapping media onto a new top overlay track instead of overwriting", async () => {
@@ -378,7 +482,10 @@ describe("addMediaToTimeline", () => {
   });
 
   it("adds vertical media with the upstream aspect-fit transform", async () => {
-    await addMediaToTimeline(video("vertical", 1080, 1920));
+    const add = addMediaToTimeline(video("vertical", 1080, 1920));
+    await vi.waitFor(() => expect(useEditorUiStore.getState().projectSettingsPrompt).not.toBeNull());
+    useEditorUiStore.getState().resolveProjectSettingsPrompt(false);
+    await add;
 
     const [transform] = visualClipTransforms();
     expect(transform.width).toBeCloseTo(0.31640625);
@@ -420,6 +527,27 @@ describe("addMediaToTimeline", () => {
     await swapTracks(0, 1);
 
     expect(srv.state.tracks.map((track) => track.id)).toEqual(["t2", "t1"]);
+  });
+});
+
+describe("applyAutomationCommands", () => {
+  beforeEach(() => {
+    srv.reset();
+    setMirror(EMPTY, 0, 1);
+  });
+
+  it("accepts one atomic request and refuses a multi-command pseudo-transaction", async () => {
+    const result = await applyAutomationCommands([{ type: "insertTrack", kind: "video" }]);
+    expect(result).toHaveLength(1);
+    expect(srv.state.commands.map((command) => command.type)).toEqual(["insertTrack"]);
+
+    await expect(
+      applyAutomationCommands([
+        { type: "insertTrack", kind: "video" },
+        { type: "insertTrack", kind: "audio" },
+      ]),
+    ).rejects.toThrow("one atomic EditRequest");
+    expect(srv.state.commands.map((command) => command.type)).toEqual(["insertTrack"]);
   });
 });
 
@@ -540,12 +668,68 @@ describe("momentDurationFrames", () => {
   it("never returns less than one frame for a tiny range", () => {
     expect(momentDurationFrames({ startSec: 3, endSec: 3.001 }, 30)).toBe(1);
   });
+
+  it("seconds_to_frame_truncates_fractional_boundaries", async () => {
+    for (const fps of [24, 30]) {
+      for (const [frames, expected] of [
+        [0.49, 1],
+        [0.5, 1],
+        [0.99, 1],
+        [1.01, 1],
+        [10.49, 10],
+        [10.5, 10],
+        [10.99, 10],
+        [11.01, 11],
+      ] as const) {
+        const duration = frames / fps;
+        const item: MediaItem = {
+          id: `v-${fps}-${frames}`,
+          name: "fractional.mp4",
+          type: "video",
+          duration,
+          hasAudio: false,
+        };
+        expect(mediaDurationFrames(item, fps)).toBe(expected);
+        expect(momentDurationFrames({ startSec: 5, endSec: 5 + duration }, fps)).toBe(expected);
+        const plan = buildMediaInsertPlan(
+          {
+            ...EMPTY,
+            fps,
+            tracks: [
+              {
+                id: "video-track",
+                type: "video",
+                muted: false,
+                hidden: false,
+                syncLocked: true,
+                clips: [],
+              },
+            ],
+          },
+          item,
+          0,
+          0,
+        );
+        expect(plan?.entries[0].durationFrames).toBe(expected);
+      }
+    }
+
+    expect(momentDurationFrames({ startSec: 2, endSec: 1 }, 30)).toBe(1);
+    expect(momentDurationFrames({ startSec: Number.NaN, endSec: 1 }, 30)).toBe(1);
+    expect(momentDurationFrames({ startSec: 0, endSec: Number.POSITIVE_INFINITY }, 30)).toBe(1);
+
+    srv.reset();
+    setMirror({ ...EMPTY, fps: 29.97 }, 0, 1);
+    useEditorUiStore.setState({ activeFrame: 0, currentFrame: 0, selectedClipIds: new Set() });
+    await addTextClip();
+    expect(useProjectStore.getState().timeline.tracks[0].clips[0].durationFrames).toBe(89);
+  });
 });
 
 describe("addMomentToTimelineAt (trimmed source-range drop from a search hit)", () => {
   beforeEach(() => {
     srv.reset();
-    useProjectStore.getState().setMirror(EMPTY, 0, 1);
+    setMirror(EMPTY, 0, 1);
     useEditorUiStore.setState({ activeFrame: 0, currentFrame: 0, selectedClipIds: new Set() });
   });
 
@@ -598,7 +782,7 @@ describe("addMomentToTimelineAt (trimmed source-range drop from a search hit)", 
 describe("addTextClip (Toolbar 'T' button)", () => {
   beforeEach(() => {
     srv.reset();
-    useProjectStore.getState().setMirror(EMPTY, 0, 1);
+    setMirror(EMPTY, 0, 1);
     useEditorUiStore.setState({ activeFrame: 0, currentFrame: 0, selectedClipIds: new Set() });
   });
 

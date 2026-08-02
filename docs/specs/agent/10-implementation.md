@@ -68,7 +68,7 @@ src/
 
 **OpenTake 增强（ARCHITECTURE §7 `:154`，可后置）**
 16. [ ] 系统提示词分层化 + 模型策略从 `opentake-gen` 配置注入（§6.5.1）。
-17. [ ] 高阶工具 `remove_filler_words` / `tighten_silences`（把易错帧算术在 Rust 内一次完成）。
+17. [x] 高阶工具 `remove_filler_words` / `tighten_silences`（返回可审阅项目帧区间与原子 `ripple_delete_ranges` 命令；完整实机保存/重开/导出验收仍由审计计划跟踪）。
 18. [ ] 写工具统一返回结构化 JSON（§4.4 增强）。
 19. [ ] `get_capabilities`（一次性返回 ASR/视觉索引/生成/编解码就绪状态）。
 

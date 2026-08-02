@@ -58,7 +58,8 @@ pub use manifest::{
     DurationMode, DurationSpec, FpsPolicy, MotionPlugin, MotionPluginAuthor, ParamSpec,
 };
 pub use renderer::{
-    deterministic_clock_script, HeadlessChromiumRenderer, MotionRenderer, StubRenderer,
+    deterministic_clock_script, HeadlessChromiumRenderer, MotionCancellationToken, MotionRenderer,
+    StubRenderer,
 };
 pub use sandbox::{AllowedOrigin, SandboxPolicy};
 pub use source::{limits, MotionRenderRequest, MotionSource, ParamValue, RenderedClip};

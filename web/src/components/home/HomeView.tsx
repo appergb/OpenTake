@@ -1,14 +1,46 @@
-import { useEffect, useState, type CSSProperties } from "react";
-import { Plus, FolderOpen, Settings as SettingsIcon, Film, Trash2, Library } from "lucide-react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
+import {
+  Plus,
+  FolderOpen,
+  Settings as SettingsIcon,
+  Film,
+  Trash2,
+  Library,
+  MoreHorizontal,
+  Sparkles,
+} from "lucide-react";
 import { Icon } from "../ui/Icon";
-import { useT } from "../../i18n";
+import { useT, type TFunction } from "../../i18n";
+import { assetUrl } from "../../lib/asset";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useRecentStore, type RecentProject } from "../../store/recentStore";
 import {
   newProjectAndEnter,
+  openSampleProject,
   openProjectViaDialog,
   openProjectPath,
 } from "../../store/projectActions";
+
+export function formatProjectRelativeTime(
+  t: TFunction,
+  timestamp: number,
+  now = Date.now(),
+): string {
+  const then = new Date(timestamp);
+  const current = new Date(now);
+  const thenDay = new Date(then.getFullYear(), then.getMonth(), then.getDate()).getTime();
+  const currentDay = new Date(
+    current.getFullYear(),
+    current.getMonth(),
+    current.getDate(),
+  ).getTime();
+  const days = Math.max(0, Math.round((currentDay - thenDay) / 86_400_000));
+  if (days === 0) return t("home.relative.today");
+  if (days === 1) return t("home.relative.yesterday");
+  if (days < 7) return t("home.relative.daysAgo", { count: days });
+  if (days < 35) return t("home.relative.weeksAgo", { count: Math.floor(days / 7) });
+  return t("home.relative.monthsAgo", { count: Math.max(1, Math.floor(days / 30)) });
+}
 
 const homeShellStyle: CSSProperties = {
   display: "flex",
@@ -48,8 +80,68 @@ const homeWorkspaceStyle: CSSProperties = {
 
 const subtleTransition = "background-color var(--anim-hover) var(--ease-out), border-color var(--anim-hover) var(--ease-out), color var(--anim-hover) var(--ease-out)";
 
+type ProjectAction = "new" | "open" | "sample" | null;
+
+export const HOME_NOTICE_STORAGE_KEY = "opentake.home.lastSeenVersion";
+export const HOME_NOTICE_VERSION = __APP_VERSION__;
+
+type HomeNotice = "welcome" | "whatsNew" | null;
+
+export function resolveHomeNotice(
+  lastSeenVersion: string | null,
+  hasRecentProjects: boolean,
+): Exclude<HomeNotice, null> | null {
+  if (lastSeenVersion === HOME_NOTICE_VERSION) return null;
+  return lastSeenVersion === null && !hasRecentProjects ? "welcome" : "whatsNew";
+}
+
+function loadHomeNotice(hasRecentProjects: boolean): HomeNotice {
+  try {
+    return resolveHomeNotice(localStorage.getItem(HOME_NOTICE_STORAGE_KEY), hasRecentProjects);
+  } catch {
+    return hasRecentProjects ? "whatsNew" : "welcome";
+  }
+}
+
+function persistHomeNoticeSeen() {
+  try {
+    localStorage.setItem(HOME_NOTICE_STORAGE_KEY, HOME_NOTICE_VERSION);
+  } catch {
+    // Storage can be unavailable in privacy-restricted browser previews. The
+    // notice still dismisses for this session; the editor remains usable.
+  }
+}
+
 export function HomeView() {
   const recents = useRecentStore((s) => s.recents);
+  const [projectAction, setProjectAction] = useState<ProjectAction>(null);
+  const [homeNotice, setHomeNotice] = useState<HomeNotice>(() =>
+    loadHomeNotice(recents.length > 0),
+  );
+  const projectActionRef = useRef<ProjectAction>(null);
+
+  const dismissHomeNotice = () => {
+    persistHomeNoticeSeen();
+    setHomeNotice(null);
+  };
+
+  const runProjectAction = async (
+    action: Exclude<ProjectAction, null>,
+    operation: () => Promise<void>,
+  ) => {
+    if (projectActionRef.current) return;
+    projectActionRef.current = action;
+    setProjectAction(action);
+    try {
+      await operation();
+    } catch {
+      // Project actions own their localized error toast;
+      // keep the UI gesture handled so a native rejection is not unhandled.
+    } finally {
+      projectActionRef.current = null;
+      setProjectAction(null);
+    }
+  };
 
   // Validate recent projects on mount to filter out folders deleted on disk
   useEffect(() => {
@@ -58,30 +150,188 @@ export function HomeView() {
 
   return (
     <div style={homeShellStyle}>
-      <Sidebar />
+      <Sidebar
+        projectAction={projectAction}
+        onNew={() => void runProjectAction("new", newProjectAndEnter)}
+        onOpen={() => void runProjectAction("open", openProjectViaDialog)}
+      />
       <main style={homeMainStyle}>
         <section style={homeWorkspaceStyle}>
-          {recents.length === 0 ? <EmptyLauncher /> : <ProjectLauncher recents={recents} />}
+          <SampleProjectsStrip
+            busy={projectAction !== null}
+            onOpen={(slug, tutorial) =>
+              void runProjectAction("sample", () => openSampleProject(slug, tutorial))
+            }
+          />
+          {recents.length === 0 ? (
+            <EmptyLauncher
+              projectAction={projectAction}
+              onNew={() => void runProjectAction("new", newProjectAndEnter)}
+              onOpen={() => void runProjectAction("open", openProjectViaDialog)}
+            />
+          ) : (
+            <ProjectLauncher
+              recents={recents}
+              projectAction={projectAction}
+              onNew={() => void runProjectAction("new", newProjectAndEnter)}
+              onOpen={() => void runProjectAction("open", openProjectViaDialog)}
+              onOpenPath={(path) =>
+                void runProjectAction("open", () => openProjectPath(path))
+              }
+            />
+          )}
         </section>
       </main>
+      {homeNotice && <HomeNoticeDialog kind={homeNotice} onDismiss={dismissHomeNotice} />}
     </div>
   );
 }
 
-function Sidebar() {
+function HomeNoticeDialog({
+  kind,
+  onDismiss,
+}: {
+  kind: Exclude<HomeNotice, null>;
+  onDismiss: () => void;
+}) {
+  const t = useT();
+  const buttonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    buttonRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      onDismiss();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onDismiss]);
+
+  const isWelcome = kind === "welcome";
+  return (
+    <div
+      data-testid="home-notice-backdrop"
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 40,
+        display: "grid",
+        placeItems: "center",
+        padding: "var(--space-xl)",
+        background: "rgba(0,0,0,0.62)",
+        backdropFilter: "blur(8px)",
+      }}
+    >
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="home-notice-title"
+        style={{
+          width: "min(520px, 100%)",
+          padding: "var(--space-xl-xxl)",
+          border: "1px solid var(--home-border)",
+          borderRadius: "var(--radius-xl)",
+          background: "var(--home-popover)",
+          boxShadow: "var(--home-panel-shadow)",
+          color: "var(--home-foreground)",
+        }}
+      >
+        <Icon icon={Sparkles} size={24} />
+        <h1 id="home-notice-title" style={{ margin: "var(--space-md) 0 var(--space-sm)", fontSize: "var(--fs-title2)" }}>
+          {isWelcome
+            ? t("home.welcomeOverlayTitle")
+            : t("home.newInVersion", { version: HOME_NOTICE_VERSION })}
+        </h1>
+        <p style={{ margin: 0, color: "var(--home-muted-foreground)", lineHeight: 1.6 }}>
+          {isWelcome ? t("home.welcomeOverlayBody") : t("home.updateOverlayBody")}
+        </p>
+        <button
+          ref={buttonRef}
+          type="button"
+          onClick={onDismiss}
+          style={{
+            marginTop: "var(--space-xl)",
+            minHeight: 34,
+            padding: "0 var(--space-lg-xl)",
+            borderRadius: "var(--radius-md)",
+            background: "var(--home-primary)",
+            color: "var(--home-primary-foreground)",
+            fontWeight: "var(--fw-semibold)",
+          }}
+        >
+          {isWelcome ? t("home.welcomeOverlayStart") : t("home.updateOverlayDismiss")}
+        </button>
+      </section>
+    </div>
+  );
+}
+
+const SAMPLE_PROJECTS = [
+  { slug: "product-demo", label: "home.sampleDemo", tutorial: false },
+  { slug: "quick-tutorial", label: "home.sampleTutorial", tutorial: true },
+  { slug: "template-project", label: "home.sampleTemplate", tutorial: false },
+] as const;
+
+function SampleProjectsStrip({
+  busy,
+  onOpen,
+}: {
+  busy: boolean;
+  onOpen: (slug: string, tutorial: boolean) => void;
+}) {
+  const t = useT();
+  return (
+    <section
+      aria-labelledby="home-samples-heading"
+      style={{ padding: "var(--titlebar-safe-top) var(--space-xl-xxl) 0" }}
+    >
+      <h2
+        id="home-samples-heading"
+        style={{ margin: "0 0 var(--space-sm)", fontSize: "var(--fs-xs)", fontWeight: 500 }}
+      >
+        {t("home.samples")}
+      </h2>
+      <div style={{ display: "flex", gap: "var(--space-sm)" }}>
+        {SAMPLE_PROJECTS.map((sample) => (
+          <button
+            key={sample.slug}
+            type="button"
+            disabled={busy}
+            aria-busy={busy || undefined}
+            onClick={() => onOpen(sample.slug, sample.tutorial)}
+            className="hover-area"
+            style={{
+              minHeight: 34,
+              padding: "0 var(--space-md)",
+              border: "1px solid var(--home-border)",
+              borderRadius: "var(--radius-md)",
+              background: "rgba(255,255,255,0.018)",
+              color: "var(--home-muted-foreground)",
+              opacity: busy ? 0.55 : 1,
+            }}
+          >
+            {t(sample.label)}
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function Sidebar({
+  projectAction,
+  onNew,
+  onOpen,
+}: {
+  projectAction: ProjectAction;
+  onNew: () => void;
+  onOpen: () => void;
+}) {
   const t = useT();
   const setView = useEditorUiStore((s) => s.setView);
   const setSettingsOpen = useEditorUiStore((s) => s.setSettingsOpen);
-  const [opening, setOpening] = useState(false);
-
-  const handleOpen = async () => {
-    setOpening(true);
-    try {
-      await openProjectViaDialog();
-    } finally {
-      setOpening(false);
-    }
-  };
+  const busy = projectAction !== null;
 
   return (
     <aside data-tauri-drag-region style={homeSidebarStyle}>
@@ -99,11 +349,18 @@ function Sidebar() {
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-xs)" }}>
-        <SidebarRow primary icon={Plus} label={t("home.newProject")} onClick={() => void newProjectAndEnter()} />
+        <SidebarRow
+          primary
+          icon={Plus}
+          label={projectAction === "new" ? t("home.creating") : t("home.newProject")}
+          onClick={onNew}
+          disabled={busy}
+        />
         <SidebarRow
           icon={FolderOpen}
-          label={opening ? t("home.opening") : t("home.openProject")}
-          onClick={() => void handleOpen()}
+          label={projectAction === "open" ? t("home.opening") : t("home.openProject")}
+          onClick={onOpen}
+          disabled={busy}
         />
       </div>
 
@@ -122,16 +379,20 @@ function SidebarRow({
   label,
   onClick,
   primary = false,
+  disabled = false,
 }: {
   icon: typeof Plus;
   label: string;
   onClick: () => void;
   primary?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
+      aria-busy={disabled || undefined}
       className="hover-area"
       style={{
         display: "flex",
@@ -147,6 +408,7 @@ function SidebarRow({
         fontWeight: "var(--fw-medium)",
         textAlign: "left",
         transition: subtleTransition,
+        opacity: disabled ? 0.55 : 1,
       }}
     >
       <Icon icon={icon} size={15} />
@@ -155,18 +417,17 @@ function SidebarRow({
   );
 }
 
-function EmptyLauncher() {
+function EmptyLauncher({
+  projectAction,
+  onNew,
+  onOpen,
+}: {
+  projectAction: ProjectAction;
+  onNew: () => void;
+  onOpen: () => void;
+}) {
   const t = useT();
-  const [opening, setOpening] = useState(false);
-
-  const handleOpen = async () => {
-    setOpening(true);
-    try {
-      await openProjectViaDialog();
-    } finally {
-      setOpening(false);
-    }
-  };
+  const busy = projectAction !== null;
 
   return (
     <section
@@ -231,8 +492,17 @@ function EmptyLauncher() {
           {t("app.tagline")}
         </p>
         <div style={{ display: "flex", gap: "var(--space-sm)", marginTop: "var(--space-xl)" }}>
-          <LauncherButton primary label={t("home.newProject")} onClick={() => void newProjectAndEnter()} />
-          <LauncherButton label={opening ? t("home.opening") : t("home.openProject")} onClick={() => void handleOpen()} />
+          <LauncherButton
+            primary
+            label={projectAction === "new" ? t("home.creating") : t("home.newProject")}
+            onClick={onNew}
+            disabled={busy}
+          />
+          <LauncherButton
+            label={projectAction === "open" ? t("home.opening") : t("home.openProject")}
+            onClick={onOpen}
+            disabled={busy}
+          />
         </div>
         <div
           style={{
@@ -253,15 +523,19 @@ function LauncherButton({
   label,
   onClick,
   primary = false,
+  disabled = false,
 }: {
   label: string;
   onClick: () => void;
   primary?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
+      aria-busy={disabled || undefined}
       style={{
         height: 34,
         padding: "0 var(--space-lg-xl)",
@@ -272,6 +546,7 @@ function LauncherButton({
         fontSize: "var(--fs-sm-md)",
         fontWeight: primary ? "var(--fw-semibold)" : "var(--fw-medium)",
         transition: subtleTransition,
+        opacity: disabled ? 0.55 : 1,
       }}
     >
       {label}
@@ -279,34 +554,44 @@ function LauncherButton({
   );
 }
 
-function ProjectLauncher({ recents }: { recents: RecentProject[] }) {
+function ProjectLauncher({
+  recents,
+  projectAction,
+  onNew,
+  onOpen,
+  onOpenPath,
+}: {
+  recents: RecentProject[];
+  projectAction: ProjectAction;
+  onNew: () => void;
+  onOpen: () => void;
+  onOpenPath: (path: string) => void;
+}) {
   const t = useT();
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
-  const [opening, setOpening] = useState(false);
-
-  const handleOpen = async () => {
-    setOpening(true);
-    try {
-      await openProjectViaDialog();
-    } finally {
-      setOpening(false);
-    }
-  };
+  const busy = projectAction !== null;
 
   // Listen to KeyDown to open project when selected + Enter is pressed
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Enter" && selectedPath) {
+      if (e.key === "Enter" && selectedPath && !busy) {
+        const target = e.target instanceof Element ? e.target : null;
+        const interactiveTarget = target?.closest(
+          "button, a, input, textarea, select, [role='button'], [contenteditable='true']",
+        );
+        if (interactiveTarget && !target?.closest(".home-project-card")) return;
+        e.preventDefault();
         if (selectedPath === "new") {
-          void newProjectAndEnter();
+          onNew();
         } else {
-          void openProjectPath(selectedPath);
+          const selected = recents.find((entry) => entry.path === selectedPath);
+          if (!selected?.missing) onOpenPath(selectedPath);
         }
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [selectedPath]);
+  }, [busy, onNew, onOpenPath, recents, selectedPath]);
 
   return (
     <div
@@ -320,7 +605,7 @@ function ProjectLauncher({ recents }: { recents: RecentProject[] }) {
         flexDirection: "column",
       }}
     >
-      <ProjectHero opening={opening} onOpen={() => void handleOpen()} />
+      <ProjectHero projectAction={projectAction} onNew={onNew} onOpen={onOpen} />
       <div
         style={{
           display: "flex",
@@ -352,11 +637,11 @@ function ProjectLauncher({ recents }: { recents: RecentProject[] }) {
             key={entry.path}
             entry={entry}
             selected={selectedPath === entry.path}
-            onClick={(e) => {
-              e.stopPropagation();
-              setSelectedPath(entry.path);
+            disabled={busy}
+            onSelect={() => setSelectedPath(entry.path)}
+            onDoubleClick={() => {
+              if (!entry.missing) onOpenPath(entry.path);
             }}
-            onDoubleClick={() => void openProjectPath(entry.path)}
           />
         ))}
       </div>
@@ -364,8 +649,17 @@ function ProjectLauncher({ recents }: { recents: RecentProject[] }) {
   );
 }
 
-function ProjectHero({ opening, onOpen }: { opening: boolean; onOpen: () => void }) {
+function ProjectHero({
+  projectAction,
+  onNew,
+  onOpen,
+}: {
+  projectAction: ProjectAction;
+  onNew: () => void;
+  onOpen: () => void;
+}) {
   const t = useT();
+  const busy = projectAction !== null;
 
   return (
     <section
@@ -418,8 +712,17 @@ function ProjectHero({ opening, onOpen }: { opening: boolean; onOpen: () => void
         {t("app.tagline")}
       </p>
       <div style={{ display: "flex", gap: "var(--space-sm)", marginTop: "var(--space-xl)" }}>
-        <LauncherButton primary label={t("home.newProject")} onClick={() => void newProjectAndEnter()} />
-        <LauncherButton label={opening ? t("home.opening") : t("home.openProject")} onClick={onOpen} />
+        <LauncherButton
+          primary
+          label={projectAction === "new" ? t("home.creating") : t("home.newProject")}
+          onClick={onNew}
+          disabled={busy}
+        />
+        <LauncherButton
+          label={projectAction === "open" ? t("home.opening") : t("home.openProject")}
+          onClick={onOpen}
+          disabled={busy}
+        />
       </div>
     </section>
   );
@@ -428,104 +731,216 @@ function ProjectHero({ opening, onOpen }: { opening: boolean; onOpen: () => void
 function ProjectGridCard({
   entry,
   selected,
-  onClick,
+  disabled,
+  onSelect,
   onDoubleClick,
 }: {
   entry: RecentProject;
   selected: boolean;
-  onClick: (e: React.MouseEvent) => void;
+  disabled: boolean;
+  onSelect: () => void;
   onDoubleClick: () => void;
 }) {
   const t = useT();
   const remove = useRecentStore((s) => s.remove);
+  const reveal = useRecentStore((s) => s.reveal);
+  const trash = useRecentStore((s) => s.trash);
   const [hovered, setHovered] = useState(false);
+  const [actionsOpen, setActionsOpen] = useState(false);
+  const [confirmTrash, setConfirmTrash] = useState(false);
+  const [pending, setPending] = useState<"reveal" | "remove" | "trash" | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [thumbnailFailed, setThumbnailFailed] = useState(false);
 
-  const cleanDisplayPath = entry.path.replace(/^\/Users\/[^\/]+/, "~");
+  const actionsVisible = hovered || actionsOpen || confirmTrash || actionError !== null;
+  const coverUrl = entry.missing || thumbnailFailed ? null : assetUrl(entry.thumbnailPath);
+  const modifiedLabel = formatProjectRelativeTime(t, entry.modifiedAt ?? entry.openedAt);
+
+  useEffect(
+    () => setThumbnailFailed(false),
+    [entry.missing, entry.modifiedAt, entry.thumbnailPath],
+  );
+
+  const runReveal = async () => {
+    setPending("reveal");
+    setActionError(null);
+    try {
+      await reveal(entry.path);
+      setActionsOpen(false);
+    } catch (error) {
+      setActionError(t("home.revealFailed", {
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    } finally {
+      setPending(null);
+    }
+  };
+
+  const runTrash = async () => {
+    setPending("trash");
+    setActionError(null);
+    try {
+      await trash(entry.path);
+      setConfirmTrash(false);
+      setActionsOpen(false);
+    } catch (error) {
+      setActionError(t("home.trashFailed", {
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    } finally {
+      setPending(null);
+    }
+  };
+
+  const runRemove = async () => {
+    setPending("remove");
+    setActionError(null);
+    try {
+      await remove(entry.path);
+      setActionsOpen(false);
+    } catch (error) {
+      setActionError(t("home.removeFailed", {
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    } finally {
+      setPending(null);
+    }
+  };
 
   return (
     <div
-      onClick={onClick}
-      onDoubleClick={onDoubleClick}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
-      className="home-project-card"
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setActionsOpen(true);
+      }}
       style={{
         position: "relative",
         minWidth: 0,
-        minHeight: 96,
-        padding: "var(--space-md)",
-        borderRadius: "var(--radius-md)",
-        background: selected ? "var(--home-selected)" : "rgba(255,255,255,0.018)",
-        border: selected ? "1px solid rgba(255,255,255,0.32)" : "1px solid var(--home-border)",
-        color: "var(--home-foreground)",
-        transition: subtleTransition,
-        cursor: "default",
       }}
     >
-      <div
+      <button
+        type="button"
+        disabled={disabled}
+        aria-label={entry.missing ? `${entry.name} · ${t("home.fileMissing")}` : entry.name}
+        aria-pressed={selected}
+        aria-describedby={entry.missing ? `missing-${entry.path}` : undefined}
+        onClick={(event) => {
+          event.stopPropagation();
+          onSelect();
+        }}
+        onFocus={onSelect}
+        onDoubleClick={onDoubleClick}
+        className="home-project-card"
         style={{
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "flex-start",
-          gap: "var(--space-md)",
-          minWidth: 0,
           width: "100%",
+          minHeight: 96,
+          padding: "var(--space-md)",
+          borderRadius: "var(--radius-md)",
+          background: selected ? "var(--home-selected)" : "rgba(255,255,255,0.018)",
+          border: selected ? "1px solid rgba(255,255,255,0.32)" : "1px solid var(--home-border)",
+          color: "var(--home-foreground)",
+          transition: subtleTransition,
+          cursor: "default",
+          textAlign: "left",
+          opacity: disabled ? 0.55 : 1,
         }}
       >
         <div
           style={{
-            width: 24,
-            height: 24,
-            flex: "0 0 auto",
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            borderRadius: "var(--radius-md)",
-            background: "var(--home-muted)",
-            color: "var(--home-muted-foreground)",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "flex-start",
+            gap: "var(--space-md)",
+            minWidth: 0,
+            width: "100%",
           }}
         >
-          <Icon icon={Film} size={13} />
-        </div>
-        <div style={{ minWidth: 0, width: "100%" }}>
           <div
             style={{
-              fontSize: "var(--fs-sm-md)",
-              color: "var(--home-foreground)",
-              fontWeight: selected ? "var(--fw-semibold)" : "var(--fw-medium)",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {entry.name}
-          </div>
-          <div
-            className="tabular"
-            title={entry.path}
-            style={{
-              marginTop: "var(--space-xs)",
-              fontSize: "var(--fs-xs)",
+              width: "100%",
+              height: 48,
+              flex: "0 0 auto",
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              borderRadius: "var(--radius-md)",
+              background: "var(--home-muted)",
               color: "var(--home-muted-foreground)",
               overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
             }}
           >
-            {cleanDisplayPath}
+            {coverUrl ? (
+              <img
+                src={coverUrl}
+                alt=""
+                onError={() => setThumbnailFailed(true)}
+                style={{ width: "100%", height: "100%", objectFit: "cover" }}
+              />
+            ) : <Icon icon={Film} size={16} />}
+          </div>
+          <div style={{ minWidth: 0, width: "100%" }}>
+            <div
+              style={{
+                fontSize: "var(--fs-sm-md)",
+                color: "var(--home-foreground)",
+                fontWeight: selected ? "var(--fw-semibold)" : "var(--fw-medium)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {entry.name}
+            </div>
+            <div
+              className="tabular"
+              title={entry.path}
+              style={{
+                marginTop: "var(--space-xs)",
+                fontSize: "var(--fs-xs)",
+                color: "var(--home-muted-foreground)",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {entry.missing ? (
+                <span id={`missing-${entry.path}`} style={{ color: "var(--status-error)" }}>
+                  {t("home.fileMissing")}
+                </span>
+              ) : modifiedLabel}
+            </div>
+            {entry.missing && (
+              <div
+                className="tabular"
+                style={{
+                  marginTop: 2,
+                  fontSize: "var(--fs-xs)",
+                  color: "var(--home-muted-foreground)",
+                }}
+              >
+                {modifiedLabel}
+              </div>
+            )}
           </div>
         </div>
-      </div>
+      </button>
 
-      {hovered && (
+      {!disabled && (
         <button
           type="button"
-          title={t("home.remove")}
-          aria-label={t("home.remove")}
+          title={t("home.projectActions")}
+          aria-label={t("home.projectActions")}
+          aria-expanded={actionsOpen || confirmTrash}
           onClick={(e) => {
             e.stopPropagation();
-            remove(entry.path);
+            setActionsOpen((open) => !open);
+            setConfirmTrash(false);
+            setActionError(null);
           }}
+          onFocus={() => setHovered(true)}
           className="hover-area"
           style={{
             position: "absolute",
@@ -538,13 +953,114 @@ function ProjectGridCard({
             justifyContent: "center",
             borderRadius: "var(--radius-md)",
             background: "var(--home-popover)",
-            color: "var(--status-error)",
+            color: "var(--home-muted-foreground)",
+            opacity: actionsVisible ? 1 : 0.62,
             zIndex: 4,
             border: "1px solid var(--home-border)",
           }}
         >
-          <Icon icon={Trash2} size={14} />
+          <Icon icon={MoreHorizontal} size={14} />
         </button>
+      )}
+
+      {hovered && !disabled && !actionsOpen && !confirmTrash && (
+        <button
+          type="button"
+          title={t("home.remove")}
+          aria-label={t("home.remove")}
+          onClick={(event) => {
+            event.stopPropagation();
+            void runRemove();
+          }}
+          style={{
+            position: "absolute",
+            top: "var(--space-sm)",
+            right: 38,
+            width: 26,
+            height: 26,
+            borderRadius: "var(--radius-md)",
+            border: "1px solid var(--home-border)",
+            background: "var(--home-popover)",
+            color: "var(--status-error)",
+            zIndex: 4,
+          }}
+        >
+          <Icon icon={Trash2} size={13} />
+        </button>
+      )}
+
+      {(actionsOpen || confirmTrash || actionError) && !disabled && (
+        <div
+          role="dialog"
+          aria-label={confirmTrash ? t("home.confirmTrashTitle") : t("home.projectActions")}
+          onClick={(event) => event.stopPropagation()}
+          style={{
+            position: "absolute",
+            top: 38,
+            right: "var(--space-sm)",
+            width: 220,
+            padding: "var(--space-sm)",
+            borderRadius: "var(--radius-md)",
+            border: "1px solid var(--home-border)",
+            background: "var(--home-popover)",
+            boxShadow: "var(--home-panel-shadow)",
+            zIndex: 8,
+          }}
+        >
+          {confirmTrash ? (
+            <>
+              <div style={{ fontSize: "var(--fs-xs)", lineHeight: 1.45 }}>
+                {t("home.confirmTrashBody", { name: entry.name })}
+              </div>
+              <div style={{ display: "flex", gap: "var(--space-xs)", marginTop: "var(--space-sm)" }}>
+                <button
+                  type="button"
+                  disabled={pending !== null}
+                  onClick={() => void runTrash()}
+                  style={{ color: "var(--status-error)" }}
+                >
+                  <Icon icon={Trash2} size={13} /> {pending === "trash" ? t("home.trashing") : t("home.moveToTrash")}
+                </button>
+                <button
+                  type="button"
+                  disabled={pending !== null}
+                  onClick={() => {
+                    setConfirmTrash(false);
+                    setActionError(null);
+                  }}
+                >
+                  {t("common.cancel")}
+                </button>
+              </div>
+            </>
+          ) : (
+            <div style={{ display: "grid", gap: "var(--space-xs)" }}>
+              <button type="button" disabled={pending !== null} onClick={() => void runReveal()}>
+                <Icon icon={FolderOpen} size={13} /> {pending === "reveal" ? t("home.revealing") : t("home.revealInFinder")}
+              </button>
+              <button
+                type="button"
+                disabled={pending !== null}
+                onClick={() => void runRemove()}
+              >
+                {pending === "remove" ? t("home.removing") : t("home.removeFromRecents")}
+              </button>
+              <button
+                type="button"
+                disabled={pending !== null}
+                onClick={() => setConfirmTrash(true)}
+                style={{ color: "var(--status-error)" }}
+              >
+                <Icon icon={Trash2} size={13} /> {t("home.moveToTrash")}
+              </button>
+            </div>
+          )}
+          {actionError && (
+            <div role="alert" style={{ marginTop: "var(--space-sm)", color: "var(--status-error)", fontSize: "var(--fs-xs)" }}>
+              {actionError}
+            </div>
+          )}
+        </div>
       )}
     </div>
   );

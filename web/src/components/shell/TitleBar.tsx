@@ -97,7 +97,9 @@ export function TitleBar() {
     const chosen = await save({
       title: t(`title.export${format.key}Dialog`),
       defaultPath,
-      filters: [{ name: t(`title.export${format.key}Filter`), extensions: [format.ext] }],
+      // rfd's deprecated macOS allowedFileTypes path disables Save for
+      // interchange extensions on macOS 26. withExt() enforces the type after
+      // confirmation while retaining the intended directory and filename.
     });
     if (typeof chosen !== "string") return; // cancelled
 

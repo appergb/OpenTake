@@ -219,7 +219,13 @@ export function ClipContextMenu({
   onClose: () => void;
 }) {
   const t = useT();
-  const timeline = useProjectStore((s) => s.timeline);
+  const rootTimeline = useProjectStore((s) => s.timeline);
+  const activeNestedSequenceId = useEditorUiStore((s) => s.activeNestedSequenceId);
+  const enterNestedSequence = useEditorUiStore((s) => s.enterNestedSequence);
+  const timeline =
+    rootTimeline.nestedSequences?.find(
+      (sequence) => sequence.id === activeNestedSequenceId,
+    )?.timeline ?? rootTimeline;
   const selectedClipIds = useEditorUiStore((s) => s.selectedClipIds);
   const selectClips = useEditorUiStore((s) => s.selectClips);
   const setPendingSwapClipId = useEditorUiStore((s) => s.setPendingSwapClipId);
@@ -342,6 +348,42 @@ export function ClipContextMenu({
         tooLong: currentClip.durationFrames > Math.round(timeline.fps * 60),
       },
     });
+    if (activeNestedSequenceId) {
+      const rootOnlyLabels = new Set([
+        t("contextMenu.freezeFrame"),
+        t("contextMenu.saveAsMedia"),
+      ]);
+      items = items.filter((item) => !rootOnlyLabels.has(item.label));
+    }
+    if (currentClip.nestedSequenceId) {
+      const mediaOnlyLabels = new Set([
+        t("contextMenu.swapMedia"),
+        t("contextMenu.freezeFrame"),
+        t("contextMenu.reverse"),
+        t("contextMenu.reverseOn"),
+        t("contextMenu.reverseTooLong"),
+        t("contextMenu.saveAsMedia"),
+      ]);
+      items = items.filter((item) => !mediaOnlyLabels.has(item.label));
+      items.unshift({
+        label: t("contextMenu.openCompound"),
+        action: () => enterNestedSequence(currentClip.nestedSequenceId!),
+      });
+      if (!activeNestedSequenceId) {
+        items.push({
+          label: t("contextMenu.dissolveCompound"),
+          action: () => void edit.dissolveNestedSequence(clipId),
+        });
+      }
+    } else if (!activeNestedSequenceId) {
+      items.push({
+        label: t("contextMenu.createCompound"),
+        action: () => {
+          ensureSelected();
+          void edit.createNestedSequence(t("compound.defaultName"));
+        },
+      });
+    }
   }
   if (range) {
     items.push(

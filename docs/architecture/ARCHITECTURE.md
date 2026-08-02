@@ -77,7 +77,7 @@ OpenTake/
 │   ├── opentake-motion/      # 原生 motion fallback:RGBA frame cache / sandbox / StubRenderer / 后续 alpha source
 │   └── opentake-core/        # 组装:EditorState(持有 timeline+manifest)、command 路由、事件总线
 ├── plugins/
-│   └── motion-canvas-studio/ # 待新增:Motion Canvas(MIT) fork/plugin,渲染 mp4 后导入落轨
+│   └── motion-canvas-studio/ # Motion Canvas 3.17.2 MIT wrapper,确定性渲染 mp4 后导入落轨
 ├── src-tauri/                # Tauri 2 app:#[tauri::command] 薄封装 + 窗口/菜单/生命周期
 ├── web/                      # React + TS 前端(Vite)
 ├── services/
@@ -87,7 +87,7 @@ OpenTake/
 
 依赖法则(经上游验证):`domain` 零依赖叶子;`ops` 只依赖 `domain`;`command` 是唯一编辑入口;UI/Agent/MCP 是命令层三个对等客户端。
 
-> Motion / AI Video 主线改为 `plugins/motion-canvas-studio/`:fork Motion Canvas(MIT),渲染 materialized mp4 后由 OpenTake 当普通媒体导入并落轨。`crates/opentake-motion/` 已有 scaffold 保留为后续透明 alpha / PNG sequence / HTML-CSS fallback,不作为 v1 主渲染器 blocker。
+> Motion / AI Video v1 已由 `plugins/motion-canvas-studio/` 落地：锁定 Motion Canvas 3.17.2(MIT)，渲染 materialized mp4 后由 OpenTake 当普通媒体原子导入并落轨。`crates/opentake-motion/` 同时提供离线 Chromium 宿主与 HTML/CSS fallback；透明 alpha / PNG sequence 留给后续版本。
 
 ## 4. 领域模型(可直接复刻,见 MODULE-PORT-MAP.md「Models」)
 

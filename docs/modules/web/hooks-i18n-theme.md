@@ -25,7 +25,7 @@
 ## i18n/（轻量自研，无外部依赖）
 
 - `dict.ts`：扁平 key→value 字典，支持两个 locale——**`zh-CN`（简体中文，默认）** 与 **`en`（英文）**；字符串内 `{placeholder}` 由 `vars` 插值。
-- `index.ts`：Zustand 持久化当前 locale 到 localStorage（键 `locale`，默认 `zh-CN`）；`useT()` 返回记忆化翻译函数（切语言触发重渲染），`t()` 为命令式翻译器（用于非组件上下文，如行为标签），`initI18n()` 启动时写 `<html lang>`。`App.tsx` 启动调 `initI18n()`。
+- `index.ts`：Zustand 持久化当前 locale 到 localStorage（键 `locale`，默认 `zh-CN`）；启动时仅接受 `zh-CN`/`en`，非法持久值会被清除并回退中文，存储不可用时仍保持内存状态与 `<html lang>` 正确。`useT()` 返回记忆化翻译函数（切语言触发重渲染），`t()` 为命令式翻译器（用于非组件上下文，如行为标签），`initI18n()` 启动时写 `<html lang>`。缺失 key 原样返回；数值/字符串变量均可插值，未提供的命名占位符原样保留。`App.tsx` 启动调 `initI18n()`。
 
 ## lib/theme.ts — 设计令牌（数值常量单一源）
 

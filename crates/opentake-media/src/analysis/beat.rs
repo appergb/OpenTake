@@ -28,6 +28,11 @@ pub struct BeatOnset {
     pub strength: f32,
 }
 
+// Normalized PCM below this onset-energy delta is treated as low-level speech,
+// room tone, or codec noise. Relative normalization alone would otherwise turn
+// an inaudible fluctuation into a full-strength "beat".
+const MIN_ABSOLUTE_ONSET_ENERGY_DELTA: f32 = 0.0001;
+
 pub fn detect_beats(samples: &[f32], config: BeatDetectionConfig) -> Vec<BeatOnset> {
     if samples.is_empty() || config.sample_rate == 0 || !config.fps.is_finite() || config.fps <= 0.0
     {
@@ -45,7 +50,7 @@ pub fn detect_beats(samples: &[f32], config: BeatDetectionConfig) -> Vec<BeatOns
         .windows(2)
         .map(|pair| (pair[1] - pair[0]).max(0.0))
         .fold(0.0f32, f32::max);
-    if peak_delta <= f32::EPSILON {
+    if peak_delta < MIN_ABSOLUTE_ONSET_ENERGY_DELTA {
         return Vec::new();
     }
 
@@ -119,5 +124,22 @@ mod tests {
             .find(|beat| beat.frame == 5)
             .expect("pulse should produce a beat on frame 5");
         assert!(beat.strength > 0.0);
+    }
+
+    #[test]
+    fn low_energy_speech_is_not_overdetected() {
+        let samples = (0..1_000)
+            .map(|index| if (index / 100) % 2 == 0 { 0.005 } else { 0.006 })
+            .collect::<Vec<_>>();
+        let config = BeatDetectionConfig {
+            sample_rate: 1_000,
+            fps: 10.0,
+            window_size_samples: 100,
+            hop_size_samples: 100,
+            min_onset_strength: 0.05,
+            min_gap_frames: 1,
+        };
+
+        assert!(detect_beats(&samples, config).is_empty());
     }
 }

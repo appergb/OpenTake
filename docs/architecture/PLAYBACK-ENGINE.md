@@ -1,6 +1,6 @@
 # Playback engine architecture
 
-> Current reviewed state: 2026-07-18. The original 2026-07-04 default-off
+> Current reviewed state: 2026-08-01. The original 2026-07-04 default-off
 > MJPEG design is historical; this document records the Wave 1A implementation.
 
 ## Capability route is the sole authority
@@ -115,6 +115,12 @@ the same project retain valid caches.
   54/570; playback integration 7/7; transport 6/6; workspace Rust passed.
   Workspace still reports seven deliberate ignored probes: one ffmpeg/ffprobe
   environment probe and six real-device probes (three export, three playback).
+- 2026-08-01 reconciliation: the four reviewed route/lifecycle owners passed
+  against the current code; Web passed 93 files/824 tests. The final packaged
+  macOS application exercised both a single-video WebKit project and a
+  text/color/multi-track Rust project, then switched back across the project
+  boundary without retaining the previous duration or playhead. Receipt:
+  [playback-route-lifecycle-real-device-2026-08-01.md](../audit/2026-07-14/runtime-artifacts/automated/playback-route-lifecycle-real-device-2026-08-01.md).
 
 Artifact hashes and the separation between older installed-app evidence and
 fresh detached bundles are recorded in

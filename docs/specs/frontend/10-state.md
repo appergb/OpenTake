@@ -1,99 +1,48 @@
 # Zustand 状态结构（只读镜像 + UI-only 态）
 
-> 拆分依据:上游 `EditorViewModel` 字段（`EditorViewModel.swift`）按「Rust 真相镜像」vs「纯前端 UI 态」分流。**镜像态只能由 `timeline_changed` event 更新,前端绝不直接改;UI 态前端自由改。**
+Rust 是工程、时间线和媒体的唯一真相源。前端将权威快照与纯 UI 交互状态分开：镜像只能整体替换，UI 态可以本地更新。
 
 ### 10.1 镜像态（来自 Rust，只读）—— `useProjectStore`
 
-```ts
-interface ProjectMirror {
-  // 由 timeline_changed{version} 驱动重取(get_timeline)
-  timelineVersion: number;          // ← 上游 timelineRenderRevision (EditorViewModel.swift:76)
-  timeline: Timeline;               // fps/width/height/tracks (见 §12)
-  // 媒体库(运行时富对象, 来自 Rust)
-  mediaAssets: MediaAsset[];        // EditorViewModel.swift:110
-  folders: MediaFolder[];
-  offlineMediaRefs: Set<string>;    // :111
-  unprocessableMediaRefs: Set<string>; // :112
-  // 工程信息
-  projectUrl: string | null;
-  projectId: string | null;
-  isDocumentEdited: boolean;        // :185
-  // 能力/账户(只读)
-  canGenerate: boolean;
-}
-```
+`useProjectStore` 保存 `projectEpoch`、`timelineVersion`、已深拷贝并冻结的 `timeline`、`projectPath`、兼容只读状态、保存版本与 undo/redo 可用性。工程媒体由独立 `mediaStore` 承载，同样只能由 Rust 命令返回/事件驱动刷新。
+
+权威边界规则：
+
+- 生产代码不得对镜像的 `tracks`、`clips`、帧位置或 version 做就地写入；所有编辑调用 Rust 命令。
+- `replaceProjectSnapshot` 拒绝更小的 project epoch，也拒绝同工程更小的 version。
+- 事件承诺版本 N 后，`sync` 只能发布达到 N 的快照；有界重试仍达不到时保留当前快照。
+- 并发刷新用 generation 和 mutation revision 仲裁，迟到的 N/N+1 不得覆盖已接受的 N+2。
+- 编辑、undo、redo 和工程切换后重取权威快照；失败命令不改镜像。
 
 ### 10.2 UI-only 态 —— `useEditorUiStore`（前端自管）
 
-```ts
-interface EditorUiState {
-  // —— 播放/播放头 (上游 EditorViewModel.swift:55-98) ——
-  currentFrame: number;             // 提交后的播放头帧
-  activeFrame: number;              // = playheadState.timelineFrame(scrub 时的实时帧, :58)
-  sourcePlayheadFrame: number;      // 源预览播放头(:96)
-  isPlaying: boolean;               // :59
-  isScrubbing: boolean;             // :77
+`useEditorUiStore` 只持有交互状态：
 
-  // —— 选择 (上游 :60-66) ——
-  selectedClipIds: Set<string>;     // :61
-  isMarqueeSelecting: boolean;      // :62
-  selectedGap: GapSelection | null; // :63
-  selectedTimelineRange: TimelineRange | null; // :64
-  selectedMediaAssetIds: Set<string>; // :65
-  selectedFolderIds: Set<string>;   // :66
+- 导航/对话框：`view`、settings/export/save-as/project-settings 状态。
+- 播放头：`currentFrame`、`activeFrame`、播放/scrub 与 decoder fallback 状态。
+- 选择：clip/media/folder 选择、range、gap、marquee。
+- 时间线视图：`zoomScale`、最小缩放、scroll、可见宽度、工具与临时 track display height。
+- 预览：canvas zoom/offset、预览质量、媒体预览、crop 交互。
+- 面板：focus/maximize/fullscreen、layout preset、面板可见性与子标签。
+- 项目内临时 UI：当前媒体文件夹、swap 目标、toast 等。
 
-  // —— 时间线视图 (上游 :68-77) ——
-  zoomScale: number;                // = pixelsPerFrame, 初值 4.0 (:68)
-  minZoomScale: number;             // 由可视宽+总帧算; 前端复刻或从镜像取
-  timelineVisibleWidth: number;     // :75
-  scrollLeft: number; scrollTop: number; // 滚动位置(上游隐含在 NSScrollView)
-  toolMode: 'pointer' | 'razor';    // :78 (ToolMode)
-  trackDisplayHeights: Record<string, number>; // 轨道高(不持久, 默认 50; 上游 Track.displayHeight)
-
-  // —— 画布(Preview) (上游 :69-74) ——
-  canvasZoom: number;               // :69 (≤1 时 offset 归零)
-  canvasOffset: { width: number; height: number }; // :74
-  cropEditingActive: boolean;       // :90
-  cropAspectLock: CropAspectLock;   // :91
-
-  // —— 面板 (上游 :46-47, 135-157) ——
-  focusedPanel: Panel | null;       // :46
-  maximizedPanel: Panel | null;     // :47
-  layoutPreset: 'default'|'media'|'vertical'; // :99 (持久化 localStorage)
-  agentPanelVisible: boolean;       // :135 (默认 false, 持久化)
-  mediaPanelVisible: boolean;       // :141 (默认 true, 持久化)
-  inspectorPanelVisible: boolean;   // :147 (默认 true, 持久化)
-  keyframesPanelVisible: boolean;   // :153 (默认 false, 持久化)
-
-  // —— Preview tabs (上游 :92-95) ——
-  previewTabs: PreviewTab[];        // 初值 [timeline]
-  activePreviewTabId: string;       // :93
-  previewTabHistory: string[]; previewTabHistoryIndex: number; // :94-95(前进/后退)
-
-  // —— Media 面板导航 (上游 :161-170) ——
-  mediaPanelCurrentFolderId: string | null;
-  mediaPanelRevealAssetId: string | null;
-  mediaPanelScrollTarget: string | null;
-  mediaPanelToast: string | null;
-
-  // —— 对话框/生成 (上游 :79-89) ——
-  showExportDialog: boolean;        // :79
-  showGenerationPanel: boolean;     // :80 (打开时切到 Media tab)
-  pendingReplacements: Set<string>; // :89 (生成中的 clip id)
-  pendingSwapClipId: string | null; // :66
-
-  // —— 剪贴板(可由 Rust 持有, 前端只读能否粘贴) ——
-  canPasteClips: boolean;
-}
-
-type Panel = 'agent'|'media'|'preview'|'inspector'|'timeline';
-```
+`resetProjectRuntimeState` 在工程 identity 变化时清除播放头、选择、滚动、track heights、预览媒体、crop/swap/对话框等项目内状态，同时保留全局 layout、面板可见性与 timeline zoom 偏好。
 
 ### 10.3 派生选择器（前端纯函数，不进 store）
 
-复刻上游计算属性：`totalFrames`(Timeline.swift:16-22)、clip rect / playhead x（§5.2 geometry）、`zones`(视频/音频区划分，TimelineHeaderView 用)、`validSelectedTimelineRange`、各 Inspector 的 `selectedVisualClip(s)`/`selectedAudioClip(s)`/`availableTabs`(InspectorView.swift:170-200)。**这些是纯函数,从镜像 + UI 态算,不存储**(避免冗余,符合上游"派生不存"原则)。
+`totalFrames`、clip rect、playhead x、track zones、有效 range、Inspector 选中对象与可用 tab 都由当前 Rust 镜像 + UI 态即时计算。不将这些可派生数据再次持久化或作为第二份工程真相。
 
 ### 10.4 持久化
 
-- `localStorage`：`layoutPreset` / `agentPanelVisible` / `mediaPanelVisible` / `inspectorPanelVisible` / `keyframesPanelVisible`（对应上游 `UserDefaults`，`EditorViewModel.swift:99-157`）。
-- 其余 UI 态会话内存即可。
+UI store 只写入带 schema 版本的 `opentake.ui.v1.*` 全局偏好：
+
+- `layoutPreset`
+- `agentPanelVisible`
+- `mediaPanelVisible`
+- `inspectorPanelVisible`
+- `keyframesPanelVisible`
+- `zoomScale`（`0.05...40`）
+
+旧的无前缀同名键仅作一次迁移来源；合法值迁移到 v1，损坏、越界或无法解析的值会删除并使用默认值。这些键不包含 project id/path，因为它们是跨工程用户偏好；所有项目内 UI 态在切换时清理而不持久化。
+
+主题、窗口大小、默认导入目录和 BYOK provider 选择由 `settingsStore` 持久化；API key 只进入系统密钥链，不进入 Zustand/localStorage。最近工程在桌面端以 Rust `ProjectRegistry` 为权威，localStorage 仅用于浏览器预览和旧版迁移缓存。timeline、clips、media catalog、凭据、拖拽/播放/对话框临时状态均不得写入 UI 持久化表面。

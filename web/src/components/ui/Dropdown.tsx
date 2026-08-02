@@ -9,7 +9,7 @@
  * keep their narrow union (`Locale`, `Theme`, …).
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Check, ChevronDown } from "lucide-react";
 import { Icon } from "./Icon";
 
@@ -39,15 +39,33 @@ export function Dropdown<T extends string>({
 }: DropdownProps<T>) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const listboxRef = useRef<HTMLDivElement>(null);
+  const listboxId = useId();
   const selected = options.find((o) => o.id === value);
+
+  const close = useCallback(() => {
+    setOpen(false);
+    triggerRef.current?.focus();
+  }, []);
 
   useEffect(() => {
     if (!open) return;
+    const selectedOption = listboxRef.current?.querySelector<HTMLButtonElement>(
+      "button[aria-selected='true']:not(:disabled)",
+    );
+    const firstEnabled = listboxRef.current?.querySelector<HTMLButtonElement>(
+      "button:not(:disabled)",
+    );
+    (selectedOption ?? firstEnabled)?.focus();
     const onPointerDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) close();
     };
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") {
+        e.preventDefault();
+        close();
+      }
     };
     document.addEventListener("mousedown", onPointerDown);
     document.addEventListener("keydown", onKey);
@@ -55,16 +73,33 @@ export function Dropdown<T extends string>({
       document.removeEventListener("mousedown", onPointerDown);
       document.removeEventListener("keydown", onKey);
     };
-  }, [open]);
+  }, [close, open]);
+
+  const moveOptionFocus = (direction: 1 | -1) => {
+    const enabled = Array.from(
+      listboxRef.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? [],
+    );
+    if (enabled.length === 0) return;
+    const current = enabled.indexOf(document.activeElement as HTMLButtonElement);
+    const next = current < 0
+      ? direction === 1 ? 0 : enabled.length - 1
+      : (current + direction + enabled.length) % enabled.length;
+    enabled[next].focus();
+  };
 
   return (
     <div ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button
+        ref={triggerRef}
         type="button"
         aria-label={ariaLabel}
         aria-haspopup="listbox"
         aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
+        aria-controls={listboxId}
+        onClick={() => {
+          if (open) close();
+          else setOpen(true);
+        }}
         className="hover-area"
         style={{
           display: "inline-flex",
@@ -97,7 +132,28 @@ export function Dropdown<T extends string>({
 
       {open && (
         <div
+          ref={listboxRef}
+          id={listboxId}
           role="listbox"
+          aria-label={ariaLabel}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowDown") {
+              e.preventDefault();
+              moveOptionFocus(1);
+            } else if (e.key === "ArrowUp") {
+              e.preventDefault();
+              moveOptionFocus(-1);
+            } else if (e.key === "Home") {
+              e.preventDefault();
+              listboxRef.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+            } else if (e.key === "End") {
+              e.preventDefault();
+              const enabled = listboxRef.current?.querySelectorAll<HTMLButtonElement>(
+                "button:not(:disabled)",
+              );
+              enabled?.[enabled.length - 1]?.focus();
+            }
+          }}
           style={{
             position: "absolute",
             top: "calc(100% + var(--space-xs))",
@@ -128,7 +184,7 @@ export function Dropdown<T extends string>({
                 onClick={() => {
                   if (disabled) return;
                   onChange(opt.id);
-                  setOpen(false);
+                  close();
                 }}
                 className={disabled ? undefined : "hover-area"}
                 style={{

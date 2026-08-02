@@ -20,8 +20,11 @@ export interface InsertPlan {
 /** Frame length a media item occupies (duplicated tiny rule from editActions to
  *  keep this module import-free of the store; stills get a default length). */
 function durationFramesFor(item: MediaItem, fps: number, defaultImageSeconds: number): number {
-  const seconds = item.duration > 0 ? item.duration : defaultImageSeconds;
-  return Math.max(1, Math.round(seconds * fps));
+  const seconds = Number.isFinite(item.duration) && item.duration > 0
+    ? item.duration
+    : defaultImageSeconds;
+  const frames = seconds * fps;
+  return Number.isFinite(frames) ? Math.max(1, Math.trunc(frames)) : 1;
 }
 
 function isVisual(type: ClipType): boolean {

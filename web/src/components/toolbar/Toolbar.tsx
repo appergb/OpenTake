@@ -13,6 +13,7 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
+import { useState } from "react";
 import { HoverButton } from "../ui/HoverButton";
 import { Icon } from "../ui/Icon";
 import { useEditorUiStore } from "../../store/uiStore";
@@ -42,15 +43,17 @@ function GlyphButton({
   serif = false,
   fontSize = 16,
   onClick,
+  disabled = false,
 }: {
   glyph: string;
   title: string;
   serif?: boolean;
   fontSize?: number;
   onClick?: () => void;
+  disabled?: boolean;
 }) {
   return (
-    <HoverButton title={title} onClick={onClick}>
+    <HoverButton title={title} onClick={onClick} disabled={disabled}>
       <span
         style={{
           fontFamily: serif ? "var(--font-serif)" : "var(--font-mono)",
@@ -72,8 +75,12 @@ export function Toolbar() {
   const zoomScale = useEditorUiStore((s) => s.zoomScale);
   const minZoomScale = useEditorUiStore((s) => s.minZoomScale);
   const setZoomScale = useEditorUiStore((s) => s.setZoomScale);
+  const pushToast = useEditorUiStore((s) => s.pushToast);
   const canUndo = useProjectStore((s) => s.canUndo);
   const canRedo = useProjectStore((s) => s.canRedo);
+  const [toolbarPending, setToolbarPending] = useState<
+    "undo" | "redo" | "split" | "trimStart" | "trimEnd" | "addText" | null
+  >(null);
 
   // Logarithmic slider mapping (ToolbarView.swift:50-53): travel uniform per
   // zoom factor; get=log(zoom), set=exp(value).
@@ -84,6 +91,84 @@ export function Toolbar() {
   const onSlider = (e: React.ChangeEvent<HTMLInputElement>) => {
     const t = Number(e.target.value);
     setZoomScale(Math.exp(logMin + t * (logMax - logMin)));
+  };
+
+  const onUndo = async () => {
+    if (!canUndo || toolbarPending) return;
+    setToolbarPending("undo");
+    try {
+      await edit.undo();
+    } catch (reason: unknown) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      pushToast(`${t("toolbar.undo")}: ${message}`);
+    } finally {
+      setToolbarPending(null);
+    }
+  };
+
+  const onRedo = async () => {
+    if (!canRedo || toolbarPending) return;
+    setToolbarPending("redo");
+    try {
+      await edit.redo();
+    } catch (reason: unknown) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      pushToast(`${t("toolbar.redo")}: ${message}`);
+    } finally {
+      setToolbarPending(null);
+    }
+  };
+
+  const onSplit = async () => {
+    if (toolbarPending) return;
+    setToolbarPending("split");
+    try {
+      await edit.splitAtPlayhead();
+    } catch (reason: unknown) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      pushToast(`${t("toolbar.split")}: ${message}`);
+    } finally {
+      setToolbarPending(null);
+    }
+  };
+
+  const onTrimStart = async () => {
+    if (toolbarPending) return;
+    setToolbarPending("trimStart");
+    try {
+      await edit.trimStartToPlayhead();
+    } catch (reason: unknown) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      pushToast(`${t("toolbar.trimStart")}: ${message}`);
+    } finally {
+      setToolbarPending(null);
+    }
+  };
+
+  const onTrimEnd = async () => {
+    if (toolbarPending) return;
+    setToolbarPending("trimEnd");
+    try {
+      await edit.trimEndToPlayhead();
+    } catch (reason: unknown) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      pushToast(`${t("toolbar.trimEnd")}: ${message}`);
+    } finally {
+      setToolbarPending(null);
+    }
+  };
+
+  const onAddText = async () => {
+    if (toolbarPending) return;
+    setToolbarPending("addText");
+    try {
+      await edit.addTextClip();
+    } catch (reason: unknown) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      pushToast(`${t("toolbar.addText")}: ${message}`);
+    } finally {
+      setToolbarPending(null);
+    }
   };
 
   return (
@@ -101,12 +186,24 @@ export function Toolbar() {
     >
       {/* Undo / Redo */}
       <div style={{ display: "flex", alignItems: "center" }}>
-        <HoverButton title={t("toolbar.undo")} disabled={!canUndo} onClick={() => edit.undo()}>
-          <Icon icon={RotateCcw} size={13} />
-        </HoverButton>
-        <HoverButton title={t("toolbar.redo")} disabled={!canRedo} onClick={() => edit.redo()}>
-          <Icon icon={RotateCw} size={13} />
-        </HoverButton>
+        <span aria-busy={toolbarPending === "undo" || undefined} style={{ display: "inline-flex" }}>
+          <HoverButton
+            title={t("toolbar.undo")}
+            disabled={!canUndo || toolbarPending !== null}
+            onClick={() => void onUndo()}
+          >
+            <Icon icon={RotateCcw} size={13} />
+          </HoverButton>
+        </span>
+        <span aria-busy={toolbarPending === "redo" || undefined} style={{ display: "inline-flex" }}>
+          <HoverButton
+            title={t("toolbar.redo")}
+            disabled={!canRedo || toolbarPending !== null}
+            onClick={() => void onRedo()}
+          >
+            <Icon icon={RotateCw} size={13} />
+          </HoverButton>
+        </span>
       </div>
 
       <Divider />
@@ -133,21 +230,55 @@ export function Toolbar() {
 
       {/* Split / Trim */}
       <div style={{ display: "flex", alignItems: "center" }}>
-        <HoverButton title={t("toolbar.split")} onClick={() => edit.splitAtPlayhead()}>
-          <Icon icon={SplitSquareHorizontal} size={13} />
-        </HoverButton>
-        <GlyphButton
-          glyph="["
-          title={t("toolbar.trimStart")}
-          onClick={() => edit.trimStartToPlayhead()}
-        />
-        <GlyphButton glyph="]" title={t("toolbar.trimEnd")} onClick={() => edit.trimEndToPlayhead()} />
+        <span aria-busy={toolbarPending === "split" || undefined} style={{ display: "inline-flex" }}>
+          <HoverButton
+            title={t("toolbar.split")}
+            disabled={toolbarPending !== null}
+            onClick={() => void onSplit()}
+          >
+            <Icon icon={SplitSquareHorizontal} size={13} />
+          </HoverButton>
+        </span>
+        <span
+          aria-busy={toolbarPending === "trimStart" || undefined}
+          style={{ display: "inline-flex" }}
+        >
+          <GlyphButton
+            glyph="["
+            title={t("toolbar.trimStart")}
+            disabled={toolbarPending !== null}
+            onClick={() => void onTrimStart()}
+          />
+        </span>
+        <span
+          aria-busy={toolbarPending === "trimEnd" || undefined}
+          style={{ display: "inline-flex" }}
+        >
+          <GlyphButton
+            glyph="]"
+            title={t("toolbar.trimEnd")}
+            disabled={toolbarPending !== null}
+            onClick={() => void onTrimEnd()}
+          />
+        </span>
       </div>
 
       <Divider />
 
       {/* Add text */}
-      <GlyphButton glyph="T" title={t("toolbar.addText")} serif fontSize={17} onClick={() => edit.addTextClip()} />
+      <span
+        aria-busy={toolbarPending === "addText" || undefined}
+        style={{ display: "inline-flex" }}
+      >
+        <GlyphButton
+          glyph="T"
+          title={t("toolbar.addText")}
+          serif
+          fontSize={17}
+          disabled={toolbarPending !== null}
+          onClick={() => void onAddText()}
+        />
+      </span>
 
       <div style={{ flex: 1 }} />
 

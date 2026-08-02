@@ -352,7 +352,15 @@ export function ExportDialog() {
     }
     // Bundling has no cooperative cancel; only the video path can stop mid-run.
     const operationId = activeOperationId.current;
-    if (mode === "video" && operationId) await api.cancelExport(operationId);
+    if (mode === "video" && operationId) {
+      try {
+        await api.cancelExport(operationId);
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        setError(message);
+        pushToast(t("export.failed"));
+      }
+    }
   }
 
   return (

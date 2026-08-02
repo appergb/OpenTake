@@ -436,6 +436,99 @@ impl ProjectRoot {
         Ok(())
     }
 
+    /// Read one project-managed LUT through retained no-follow directories.
+    pub fn read_lut(&self, name: &str, max_bytes: usize) -> Result<Option<Vec<u8>>> {
+        validate_leaf(name).map_err(|error| {
+            ProjectError::io(
+                self.path
+                    .join(crate::layout::MEDIA_DIR)
+                    .join(crate::layout::LUTS_DIR)
+                    .join(name),
+                error,
+            )
+        })?;
+        let Some(directory) = self.luts_directory(false)? else {
+            return Ok(None);
+        };
+        let path = self
+            .path
+            .join(crate::layout::MEDIA_DIR)
+            .join(crate::layout::LUTS_DIR)
+            .join(name);
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        options.custom_flags(libc::O_NONBLOCK);
+        let mut file = match directory.open_with(name, &options) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(ProjectError::io(path, error)),
+        };
+        let metadata = file
+            .metadata()
+            .map_err(|error| ProjectError::io(&path, error))?;
+        if !metadata.is_file() || metadata.len() > max_bytes as u64 {
+            return Err(ProjectError::io(
+                path,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "LUT is not a bounded nofollow regular file",
+                ),
+            ));
+        }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        Read::by_ref(&mut file)
+            .take(max_bytes as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| ProjectError::io(&path, error))?;
+        if bytes.len() > max_bytes {
+            return Err(ProjectError::io(
+                path,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "LUT grew beyond the configured byte limit",
+                ),
+            ));
+        }
+        Ok(Some(bytes))
+    }
+
+    /// Atomically publish one validated, content-addressed LUT under
+    /// `media/luts/`. Callers validate both the bytes and digest before entry.
+    pub fn write_lut_atomic(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        validate_leaf(name).map_err(|error| {
+            ProjectError::io(
+                self.path
+                    .join(crate::layout::MEDIA_DIR)
+                    .join(crate::layout::LUTS_DIR)
+                    .join(name),
+                error,
+            )
+        })?;
+        let directory = self
+            .luts_directory(true)?
+            .expect("create=true returns a directory");
+        let directory_path = self
+            .path
+            .join(crate::layout::MEDIA_DIR)
+            .join(crate::layout::LUTS_DIR);
+        let tmp_name = unique_temp_name(name);
+        let mut tmp = TransactionLeaf::create(&directory, &tmp_name)
+            .map_err(|error| ProjectError::io(directory_path.join(&tmp_name), error))?;
+        tmp.handle
+            .as_file_mut()
+            .write_all(bytes)
+            .map_err(|error| ProjectError::io(directory_path.join(&tmp_name), error))?;
+        tmp.handle
+            .as_file()
+            .sync_all()
+            .map_err(|error| ProjectError::io(directory_path.join(&tmp_name), error))?;
+        tmp.replace(&directory, Path::new(name))
+            .map_err(|error| ProjectError::io(directory_path.join(name), error))?;
+        tmp.cleanup_on_drop = false;
+        Ok(())
+    }
+
     /// List no-follow regular leaves in `chat-sessions/`. Callers own the
     /// filename policy (for example selecting only `<session>.json`).
     pub fn list_chat_session_files(&self, max_entries: usize) -> Result<Vec<OsString>> {
@@ -507,6 +600,71 @@ impl ProjectRoot {
             .open_dir_nofollow(name)
             .map(Some)
             .map_err(|error| ProjectError::io(path, error))
+    }
+
+    fn luts_directory(&self, create: bool) -> Result<Option<Dir>> {
+        let media_path = self.path.join(crate::layout::MEDIA_DIR);
+        match self.dir.symlink_metadata(crate::layout::MEDIA_DIR) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => {
+                return Err(ProjectError::io(
+                    media_path,
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "media must be a nofollow directory",
+                    ),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => {
+                self.dir
+                    .create_dir(crate::layout::MEDIA_DIR)
+                    .or_else(|error| {
+                        if error.kind() == std::io::ErrorKind::AlreadyExists {
+                            Ok(())
+                        } else {
+                            Err(error)
+                        }
+                    })
+                    .map_err(|error| ProjectError::io(&media_path, error))?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(ProjectError::io(&media_path, error)),
+        }
+        let media = self
+            .dir
+            .open_dir_nofollow(crate::layout::MEDIA_DIR)
+            .map_err(|error| ProjectError::io(&media_path, error))?;
+        let luts_path = media_path.join(crate::layout::LUTS_DIR);
+        match media.symlink_metadata(crate::layout::LUTS_DIR) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => {
+                return Err(ProjectError::io(
+                    luts_path,
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "luts must be a nofollow directory",
+                    ),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => {
+                media
+                    .create_dir(crate::layout::LUTS_DIR)
+                    .or_else(|error| {
+                        if error.kind() == std::io::ErrorKind::AlreadyExists {
+                            Ok(())
+                        } else {
+                            Err(error)
+                        }
+                    })
+                    .map_err(|error| ProjectError::io(&luts_path, error))?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(ProjectError::io(&luts_path, error)),
+        }
+        media
+            .open_dir_nofollow(crate::layout::LUTS_DIR)
+            .map(Some)
+            .map_err(|error| ProjectError::io(luts_path, error))
     }
 }
 
@@ -642,15 +800,33 @@ impl BundlePublisher {
     }
 
     pub(crate) fn publish(mut self) -> Result<ProjectRoot> {
-        #[cfg(test)]
-        if FAIL_PUBLISH_AFTER_BACKUP.with(|fail| fail.replace(false)) {
-            return self.publish_with_hook(|| {
-                Err(std::io::Error::other(
-                    "injected publication failure after backup",
-                ))
-            });
+        let result = {
+            #[cfg(test)]
+            if FAIL_PUBLISH_AFTER_BACKUP.with(|fail| fail.replace(false)) {
+                self.publish_with_hook(|| {
+                    Err(std::io::Error::other(
+                        "injected publication failure after backup",
+                    ))
+                })
+            } else {
+                self.publish_with_hook(|| Ok(()))
+            }
+
+            #[cfg(not(test))]
+            self.publish_with_hook(|| Ok(()))
+        };
+
+        // A caller may immediately start the next complete-bundle save while
+        // retaining the returned ProjectRoot. Make that successful handoff
+        // explicit instead of depending on the two cloned lock handles being
+        // dropped at the end of this function. Error paths retain the lock
+        // through Drop's staged-artifact cleanup. Closing the handles remains
+        // the fallback; an unlock error cannot safely turn an already
+        // committed publication into a reported failure.
+        if result.is_ok() {
+            let _ = self._lock.unlock();
         }
-        self.publish_with_hook(|| Ok(()))
+        result
     }
 
     fn publish_with_hook(
@@ -2174,6 +2350,38 @@ mod tests {
             .path()
             .join(".Existing.opentake.opentake-journal")
             .exists());
+    }
+
+    #[test]
+    fn publish_releases_the_transaction_lock_before_returning() {
+        let tmp = TmpDir::new("publish-lock-handoff");
+        let target = tmp.path().join("Existing.opentake");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("project.json"), b"initial timeline").unwrap();
+        let lock_path = tmp.path().join(".Existing.opentake.opentake-lock");
+
+        for generation in 0..32 {
+            let publisher = ProjectRoot::begin_replace(&target).unwrap();
+            let expected = format!("timeline generation {generation}");
+            publisher
+                .stage()
+                .write_atomic("project.json", expected.as_bytes())
+                .unwrap();
+            let root = publisher.publish().unwrap();
+
+            let lock = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .unwrap();
+            lock.try_lock()
+                .expect("publish must hand off its transaction lock before returning");
+            lock.unlock().unwrap();
+            assert_eq!(
+                root.read_optional("project.json").unwrap().unwrap(),
+                expected.as_bytes()
+            );
+        }
     }
 
     #[test]

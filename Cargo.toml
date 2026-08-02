@@ -14,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.0.0-beta.1"
 edition = "2021"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/appergb/OpenTake"
@@ -24,6 +24,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_ignored = "0.1"
 uuid = { version = "1", features = ["v4"] }
+velato = { version = "=0.5.0", features = ["wgpu"] }
+sentry = { version = "=0.49.0", default-features = false, features = ["backtrace", "panic", "ureq"] }
 opentake-domain = { path = "crates/opentake-domain" }
 opentake-ops = { path = "crates/opentake-ops" }
 opentake-project = { path = "crates/opentake-project" }

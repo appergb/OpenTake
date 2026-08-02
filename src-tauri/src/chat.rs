@@ -18,12 +18,14 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 use opentake_agent::chat::{
-    ChatLoop, ChatMessage, ChatSession, ChatSessionStore, ChatTurnGate, EmitLoop, LoopError,
-    LoopEvent,
+    ChatLoop, ChatMessage, ChatSession, ChatSessionStore, ChatTurnGate, EmitLoop, LlmError,
+    LoopError, LoopEvent, Role,
 };
+use opentake_agent::mcp::advanced::AdvancedWorkflowBridge;
 use opentake_agent::mcp::core_handle::{AppCoreHandle, CoreHandle};
 use opentake_agent::mcp::dispatch::Dispatcher;
 use opentake_agent::mcp::generation::GenerationBridge;
+use opentake_agent::mcp::motion::MotionBridge;
 use opentake_agent::tools::result::ToolResult;
 use opentake_gen::{KeyStore, KeyringStore};
 
@@ -97,17 +99,27 @@ impl ChatState {
         cache_root: PathBuf,
         models_dir: PathBuf,
     ) -> Self {
-        Self::new_inner(core, workflows_dir, cache_root, models_dir, None)
+        Self::new_inner(
+            core,
+            workflows_dir,
+            cache_root,
+            models_dir,
+            None,
+            None,
+            None,
+        )
     }
 
     /// Build the state in `setup`: a dispatcher over the live core + workflow
     /// registry + the same media bridge the desktop MCP server uses.
-    pub fn new_with_generation(
+    pub fn new_with_capabilities(
         core: AppCore,
         workflows_dir: PathBuf,
         cache_root: PathBuf,
         models_dir: PathBuf,
         generation_bridge: Arc<dyn GenerationBridge>,
+        motion_bridge: Arc<dyn MotionBridge>,
+        advanced_bridge: Arc<dyn AdvancedWorkflowBridge>,
     ) -> Self {
         Self::new_inner(
             core,
@@ -115,6 +127,8 @@ impl ChatState {
             cache_root,
             models_dir,
             Some(generation_bridge),
+            Some(motion_bridge),
+            Some(advanced_bridge),
         )
     }
 
@@ -124,15 +138,19 @@ impl ChatState {
         cache_root: PathBuf,
         models_dir: PathBuf,
         generation_bridge: Option<Arc<dyn GenerationBridge>>,
+        motion_bridge: Option<Arc<dyn MotionBridge>>,
+        advanced_bridge: Option<Arc<dyn AdvancedWorkflowBridge>>,
     ) -> Self {
         let handle: Arc<dyn CoreHandle> = Arc::new(AppCoreHandle::new(core.clone()));
         let registry = Arc::new(RwLock::new(crate::mcp::build_registry(&workflows_dir)));
         let bridge = crate::mcp::build_media_bridge(core.clone(), cache_root, models_dir);
-        let dispatcher = Arc::new(Dispatcher::with_bridges(
+        let dispatcher = Arc::new(Dispatcher::with_all_capability_bridges(
             handle,
             registry.clone(),
             Some(bridge),
             generation_bridge,
+            motion_bridge,
+            advanced_bridge,
         ));
         let store: Arc<dyn KeyStore> = Arc::new(KeyringStore::new());
         let sessions = Arc::new(Mutex::new(HashMap::new()));
@@ -476,6 +494,47 @@ impl ChatTurnGate for ProjectTurnGate {
     }
 }
 
+fn truncate_for_codex_prompt(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
+fn codex_turn_prompt(session: &ChatSession, user_text: &str) -> String {
+    let mut history = session
+        .messages
+        .iter()
+        .rev()
+        .skip(1)
+        .filter_map(|message| match message.role {
+            Role::User => Some(format!(
+                "User: {}",
+                truncate_for_codex_prompt(&message.content, 2_000)
+            )),
+            Role::Assistant if !message.content.trim().is_empty() => Some(format!(
+                "Assistant: {}",
+                truncate_for_codex_prompt(&message.content, 2_000)
+            )),
+            _ => None,
+        })
+        .take(6)
+        .collect::<Vec<_>>();
+    history.reverse();
+    let history = history.join("\n");
+    format!(
+        "You are the official Codex Agent embedded in OpenTake, a desktop video editor. \
+Use only the `opentake` MCP server for reading or changing the current project. \
+Do not use shell commands, direct file edits, web search, plugins, or other MCP servers. \
+Treat the current saved OpenTake project as the sole editing target. Explain the completed result concisely.\n\n\
+Recent conversation:\n{history}\n\nCurrent user request:\n{}",
+        truncate_for_codex_prompt(user_text, 20_000)
+    )
+}
+
 // MARK: - Commands
 
 /// `chat_send`: spawn a chat turn. Returns immediately; the turn streams via
@@ -518,15 +577,78 @@ pub async fn chat_send(
             state: state_clone.clone(),
             project: project.clone(),
         };
-        let gate: Arc<dyn ChatTurnGate> = Arc::new(ProjectTurnGate {
-            state: state_clone.clone(),
-            project: project.clone(),
-            cancel: turn_cancel,
-        });
-        let result = state_clone
-            .loop_
-            .run_turn_gated(&mut session, chat_provider, text, &emitter, cancel, gate)
-            .await;
+        let result = if chat_provider == "codex" {
+            session.provider = Some("codex".into());
+            session.model = Some("official-codex-default".into());
+            let prompt = codex_turn_prompt(&session, &text);
+            match crate::codex::run_agent_turn(&project.project_dir, &prompt, cancel, |tool_call| {
+                emitter.emit(LoopEvent::ToolCall {
+                    session_id: sid.clone(),
+                    tool_call,
+                });
+            })
+            .await
+            {
+                Ok(output) => {
+                    let message = ChatMessage::assistant(output.text.clone(), output.tool_calls);
+                    emitter.emit(LoopEvent::Delta {
+                        session_id: sid.clone(),
+                        delta: output.text,
+                    });
+                    emitter.emit(LoopEvent::Done {
+                        session_id: sid.clone(),
+                        message: message.clone(),
+                    });
+                    session.messages.push(message);
+                    Ok(())
+                }
+                Err(crate::codex::CodexTurnError::Cancelled) => Err(LoopError::Cancelled),
+                Err(crate::codex::CodexTurnError::Unavailable) => {
+                    let guide = "Official Codex CLI was not found. Install Codex, then return to Settings → AI and choose Official Codex / ChatGPT.".to_string();
+                    let message = ChatMessage::assistant(guide.clone(), Vec::new());
+                    emitter.emit(LoopEvent::Delta {
+                        session_id: sid.clone(),
+                        delta: guide,
+                    });
+                    emitter.emit(LoopEvent::Done {
+                        session_id: sid.clone(),
+                        message: message.clone(),
+                    });
+                    session.messages.push(message);
+                    Ok(())
+                }
+                Err(crate::codex::CodexTurnError::NotAuthenticated) => {
+                    let guide = "Codex is not signed in. Open Settings → AI, choose Official Codex / ChatGPT, and sign in with ChatGPT.".to_string();
+                    let message = ChatMessage::assistant(guide.clone(), Vec::new());
+                    emitter.emit(LoopEvent::Delta {
+                        session_id: sid.clone(),
+                        delta: guide,
+                    });
+                    emitter.emit(LoopEvent::Done {
+                        session_id: sid.clone(),
+                        message: message.clone(),
+                    });
+                    session.messages.push(message);
+                    Ok(())
+                }
+                Err(crate::codex::CodexTurnError::Failed) => {
+                    Err(LoopError::Llm(LlmError::Provider(
+                        "official Codex turn failed; check the Codex login status and try again"
+                            .into(),
+                    )))
+                }
+            }
+        } else {
+            let gate: Arc<dyn ChatTurnGate> = Arc::new(ProjectTurnGate {
+                state: state_clone.clone(),
+                project: project.clone(),
+                cancel: turn_cancel,
+            });
+            state_clone
+                .loop_
+                .run_turn_gated(&mut session, chat_provider, text, &emitter, cancel, gate)
+                .await
+        };
 
         match &result {
             Err(LoopError::Cancelled) => {
@@ -706,6 +828,23 @@ mod tests {
         let json = serde_json::to_value(done).unwrap();
         assert_eq!(json["sessionId"], "sess-1");
         assert_eq!(json["message"]["role"], "assistant");
+    }
+
+    #[test]
+    fn codex_prompt_keeps_recent_context_and_limits_unbounded_history() {
+        let mut session = ChatSession::new("codex-prompt");
+        session.messages.push(ChatMessage::user("earlier request"));
+        session
+            .messages
+            .push(ChatMessage::assistant("earlier result", Vec::new()));
+        session.messages.push(ChatMessage::user("x".repeat(30_000)));
+
+        let prompt = codex_turn_prompt(&session, &"当前请求".repeat(10_000));
+        assert!(prompt.contains("User: earlier request"));
+        assert!(prompt.contains("Assistant: earlier result"));
+        assert!(prompt.contains("Current user request:"));
+        assert!(prompt.chars().count() < 21_000);
+        assert!(prompt.ends_with('…'));
     }
 
     #[test]

@@ -3,6 +3,8 @@
 > 来源:`UI/AppTheme.swift` 全文。上游 `AGENTS.md` 强制「所有 UI 样式必须用 AppTheme 常量，不得硬编码」。OpenTake 前端同样:**全部令牌定义为 CSS 变量，组件只引用变量。**
 > 颜色:上游用 0–255 或 0–1 的 sRGB。下方给出等价 `rgb()/rgba()`。深色主题(上游唯一主题,不做浅色)。
 
+OpenTake 实现以 `web/src/lib/theme.ts` 作为 Canvas/TypeScript 数值表，以 `web/src/styles/tokens.css` 作为 DOM/CSS 投影。`theme.contract.test.ts#complete_upstream_token_table_and_css_projection` 对照本文全表验证两侧精确值；`tokenUsage.test.ts#representative_panel_spacing_type_radius_and_color_matrix` 验证六个主要界面表面的代表性消费，并拒绝所有生产组件中未定义的 CSS 变量引用。
+
 ### 1.1 背景 Background（`AppTheme.swift:8-23`）
 
 | Token | 上游值 | CSS 变量 | 值 |

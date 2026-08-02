@@ -70,13 +70,13 @@
 - **#51/#52 合成预览**(PR #59):时间线标签按播放头贴 GPU 合成帧(视频+图)。
 - **#61/#62**:多素材拖入、保存/自动保存/退出 flush、预览整数帧、音频探测、播放卡顿缓解。
 - **#36 MCP 工具派发层 + Skills**(PR #66/#67):单一能力派发(25 工具接线:18 EditCommand + rename/delete + workflow/Skills)+ 默认"音频先入"内置 Skill(`crates/opentake-agent/src/plugin/builtin/audio-first/`)。
-- **#65 文字光栅化**(PR #68):`CosmicTextRasterizer`(cosmic-text+swash)把文字 clip 框渲染为预乘 RGBA,经既有 affine 1:1 合成置顶(对应上游 CATextLayer);字体/字号/颜色/对齐/背景/投影/边框全覆盖;真机视觉自检中英混排正常。**剩 Lottie 烘焙**。
+- **#65 文字/Lottie 光栅化**:`CosmicTextRasterizer` 处理文字，Velato/Vello 处理 Lottie；preview/playback/export 共用预乘 RGBA 纹理合约，Agent `inspect_media` 及 `inspect_timeline` 也使用同一 Lottie 渲染路径。
 - **#36 MCP server 网络面**(PR #69,**issue 已关闭**):rmcp Streamable-HTTP `127.0.0.1:19789/mcp` + 回环 Origin/Host 守卫 + OAuth well-known;src-tauri `mcp.rs` 在 setup spawn(会话共享的 AppCore 克隆 + 内置/用户 workflow registry)。HTTP 集成测试完成 `initialize` 握手 + 远程 Origin 403。`claude mcp add --transport http opentake http://127.0.0.1:19789/mcp` 可连。
 
 ## 5. 🟦 可认领/未完成(供同事,注意文件区避免冲突)
-- **🔴 #53 [#47-C] 时间线播放引擎**(连续解码 + cpal 音频 + A/V 同步 + MJPEG 回环传输)。子项 #63(cpal)/#64(MJPEG 传输)/#65(Lottie 烘焙)。最大未完成项,需专门会话 + 真机视觉验证。
+- **#53 [#47-C] 时间线播放引擎**代码竖切已完成：有界解码、cpal 音频、A/V 时钟、seek/pause/resume/cancel 和 Lottie 均已接入；最终发布仍需按完成规划重放打包 GUI 验收。
 - **#48 片段编辑收尾**:Delete/切割/片段右键菜单/Inspector 三段式/Toolbar 接线。
-- **剩余隐藏能力**:`inspect_media/get_transcript/search_media/inspect_timeline/import_media/add_captions` 已接真实路径；生成/超分/Motion 六个线名在生产后端完成前不进入发现面。`inspect_media` 尚缺 Lottie；`generate_*`/upscale 仍需异步 GenClient + BYOK，Motion 仍需确定性渲染/导入事务。
+- **动态能力面**:媒体/转写/检索/时间线检查均为真实路径，`inspect_media` 支持图片/视频/音频/Lottie；生成/超分仅在可用授权时发布，Motion add/edit 仅在 Chromium/FFmpeg 生产桥就绪时发布。
 - **#49 项目内文件夹导入 + 嵌套文件夹浏览(剪映式)**:文件夹图标/双击进入/面包屑/拖出;DTO 加 folderId+folders;import_folder 镜像目录树。用户很想要。
 - **#37 全局可复用素材库 + 收藏**(跨项目/分类/音效库/全库可见):**后端已并入 main** —— 存储层 `crates/opentake-media/src/library.rs`(#37-A/#54,PR #104,copy-on-favorite + SHA-256 内容寻址去重 + JSON manifest 原子写)+ Tauri 命令层 `src-tauri/src/library.rs`(#37-B/#55,PR #106,7 命令 list/favorite/unfavorite/categorize/rename/delete/import_to_project)。**前端 #37-C/#56 已并入 main**(PR #115:独立 `LibraryView` 全屏视图 + `libraryStore`/`libraryApi`,分类树/网格/搜索/排序/跨视图聚合/音效库;Home/TitleBar 入口;前端↔后端 7 命令契约已核实)。**#37 epic 收口**(后端 #104/#106 + 前端 #115)。剩:库→时间线拖拽(现用「导入当前项目」按钮)、媒体面板「星标→library_favorite」接线、收藏从 localStorage 迁后端。follow-up:`library.rs:322` remove() 静默吞 remove_file 错误,建议补 `tracing::warn!`;`library_delete` 与 `library_unfavorite` 现为纯别名,建议语义区分。
 - **#39 提取音频星标 · #40 设置多分页+主页 1:1 · #34 motion dispatch · #27–30 进阶 B/C/D/E · #22–25 #12 follow-up · #35 bundle id 改名**。

@@ -20,43 +20,59 @@
 //! Zero IO, pure logic, fully unit-testable. The only runtime dependency is
 //! `serde`; persistence-side UUID repair belongs to `opentake-project`.
 
+pub mod audio;
 pub mod caption_sync;
 pub mod clip;
 pub mod clip_type;
 mod clip_wire;
 pub mod grade;
 pub mod keyframe;
+pub mod lut;
 pub mod media;
 pub mod signal;
 pub mod split;
+pub mod stabilization;
 pub mod subtitle_export;
 pub mod text;
 mod text_wire;
 pub mod timeline;
 pub mod transform;
+pub mod transition;
 
 // Flat re-export of the public domain API for ergonomic downstream use.
+pub use audio::{AudioDenoise, DenoiseMode, LoudnessNormalization};
 pub use caption_sync::{caption_group_ids, clips_in_group, sync_caption_group_style};
-pub use clip::{Clip, FadeEdge, KeyframeTrackWireField, KeyframeValueWireShape, VolumeScale};
+pub use clip::{
+    CaptionTranslationInput, Clip, FadeEdge, KeyframeTrackWireField, KeyframeValueWireShape,
+    VolumeScale,
+};
 pub use clip_type::ClipType;
 pub use grade::{
-    chroma_cb_cr, luma709, smoothstep01, ChromaKey, ColorGrade, Effect, LiftGammaGain, Mask,
-    MaskShape, Point2, Rgb,
+    chroma_cb_cr, effect_registry, luma709, smoothstep01, validate_effect_chain, ChromaKey,
+    ColorGrade, ColorGradeValidationError, ColorMatchInput, Effect, EffectDescriptor,
+    EffectParameterDescriptor, EffectValidationError, HslSecondary, LiftGammaGain, Mask, MaskShape,
+    MaskTransform, Point2, Rgb, MAX_EFFECTS_PER_CLIP, MAX_MASKS_PER_CLIP, MAX_POLYGON_MASK_POINTS,
 };
 pub use keyframe::{
     smoothstep, split_keyframe_track, AnimPair, AnimatableProperty, Interpolation, Keyframe,
     KeyframeInterpolatable, KeyframeTrack,
 };
+pub use lut::{CubeLut, CubeLutError, LutReference, LutReferenceValidationError};
 pub use media::{
-    GenerationInput, GenerationJobStatus, GenerationStatus, MediaAsset, MediaFolder, MediaManifest,
-    MediaManifestEntry, MediaResolver, MediaSource,
+    GenerationInput, GenerationJobStatus, GenerationStatus, MediaAsset, MediaColorMetadata,
+    MediaFolder, MediaManifest, MediaManifestEntry, MediaProxy, MediaResolver, MediaSource,
 };
 pub use signal::{
     ContextSignal, EditingSkeleton, EditingStage, StageGuidance, TrackHint, TrackRole,
     TrackRoleAssignment, VideoType,
 };
 pub use split::split_clip;
+pub use stabilization::{StabilizationKeyframe, StabilizationTrack, StabilizationTransform};
 pub use subtitle_export::{collect_caption_cues, export_srt, export_vtt, SubtitleCue};
 pub use text::{Fill, Rgba, Shadow, TextAlignment, TextLayout, TextStyle};
-pub use timeline::{ClipLocation, Timeline, Track};
+pub use timeline::{
+    ClipLocation, NestedSequence, ScriptAssemblyPlan, ScriptAssemblySegment, Timeline, Track,
+    VoiceModelRecord,
+};
 pub use transform::{Crop, CropAspectLock, Point, Transform};
+pub use transition::{Transition, TransitionKind};

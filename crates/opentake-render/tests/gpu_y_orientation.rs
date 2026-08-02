@@ -243,6 +243,7 @@ fn off_center_mask_clips_to_authored_screen_region_not_mirrored() {
         },
         feather: 0.0,
         invert: false,
+        ..Mask::default()
     }];
     let mut track = Track::new("t0", ClipType::Video);
     track.clips.push(clip);

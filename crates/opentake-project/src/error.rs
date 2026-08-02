@@ -50,6 +50,10 @@ pub enum ProjectError {
         blockers: Vec<String>,
     },
 
+    /// The decoded timeline graph is structurally unsafe to edit or render.
+    #[error("invalid timeline graph in {file}: {reason}")]
+    InvalidTimeline { file: &'static str, reason: String },
+
     /// Publication could not install the staged bundle or restore the prior
     /// target. The retained backup is deliberately left in place and the next
     /// save attempt will recover it before doing new work.

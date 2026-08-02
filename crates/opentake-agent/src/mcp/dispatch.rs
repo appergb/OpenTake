@@ -17,7 +17,7 @@
 //! names for compatibility but stay out of discovery until their backends are
 //! production-ready.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, RwLock};
 
 use opentake_domain::{AnimPair, Crop, Interpolation, Keyframe, KeyframeTrack};
@@ -35,6 +35,10 @@ use opentake_ops::{
 };
 use serde_json::Value;
 
+use crate::mcp::advanced::{
+    AdvancedWorkflowBridge, AdvancedWorkflowError, AdvancedWorkflowErrorKind,
+    AdvancedWorkflowRequest,
+};
 use crate::mcp::core_handle::CoreHandle;
 use crate::mcp::gen_catalog;
 use crate::mcp::generation::{GenerationBridge, GenerationRequest};
@@ -42,6 +46,10 @@ use crate::mcp::media_bridge::{
     frame_to_block, media_frame_to_block, BridgeErrorKind, ImportSource, InspectMediaRequest,
     InspectMediaResult, InspectResult, MediaBridge, SearchCandidate, TranscriptSource,
     IMPORT_BYTES_BASE64_MAX,
+};
+use crate::mcp::motion::{
+    AddMotionRequest, EditMotionRequest, MotionBridge, MotionBridgeError, MotionBridgeErrorKind,
+    MotionSourceRequest,
 };
 use crate::plugin::registry::PluginRegistry;
 use crate::signal::engine;
@@ -64,16 +72,6 @@ const INSPECT_MEDIA_MAX_FRAMES: usize = 12;
 const INSPECT_MEDIA_MAX_SEGMENTS: usize = 400;
 const INSPECT_MEDIA_MAX_WORDS: usize = 10_000;
 
-fn is_generation_tool(tool: ToolName) -> bool {
-    matches!(
-        tool,
-        ToolName::GenerateVideo
-            | ToolName::GenerateImage
-            | ToolName::GenerateAudio
-            | ToolName::UpscaleMedia
-    )
-}
-
 /// The in-process tool dispatcher. Holds the [`CoreHandle`] boundary, the plugin
 /// registry (read-locked for the active plugin), and a per-dispatcher agent-undo
 /// stack so `undo` only reverts edits this session made.
@@ -88,6 +86,12 @@ pub struct Dispatcher {
     /// Paid generation/upscale side-door. The desktop host injects this only
     /// when it can persist jobs and run configured providers.
     generation_bridge: Option<Arc<dyn GenerationBridge>>,
+    /// Deterministic render + atomic import/place host capability. Motion tools
+    /// are discoverable only while this bridge reports production readiness.
+    motion_bridge: Option<Arc<dyn MotionBridge>>,
+    /// Capability-gated advanced workflows. Each tool is discovered only when
+    /// this bridge explicitly reports a production implementation for it.
+    advanced_bridge: Option<Arc<dyn AdvancedWorkflowBridge>>,
     /// Action names of agent edits applied through this dispatcher, newest last.
     /// Guards `undo`: we only revert when this session has pushed an edit.
     agent_undo: Mutex<Vec<String>>,
@@ -119,11 +123,44 @@ impl Dispatcher {
         bridge: Option<Arc<dyn MediaBridge>>,
         generation_bridge: Option<Arc<dyn GenerationBridge>>,
     ) -> Self {
+        Self::with_capability_bridges(handle, registry, bridge, generation_bridge, None)
+    }
+
+    /// New dispatcher with every optional host capability injected
+    /// independently. The narrower constructors remain source-compatible for
+    /// non-desktop hosts and tests.
+    pub fn with_capability_bridges(
+        handle: Arc<dyn CoreHandle>,
+        registry: Arc<RwLock<PluginRegistry>>,
+        bridge: Option<Arc<dyn MediaBridge>>,
+        generation_bridge: Option<Arc<dyn GenerationBridge>>,
+        motion_bridge: Option<Arc<dyn MotionBridge>>,
+    ) -> Self {
+        Self::with_all_capability_bridges(
+            handle,
+            registry,
+            bridge,
+            generation_bridge,
+            motion_bridge,
+            None,
+        )
+    }
+
+    pub fn with_all_capability_bridges(
+        handle: Arc<dyn CoreHandle>,
+        registry: Arc<RwLock<PluginRegistry>>,
+        bridge: Option<Arc<dyn MediaBridge>>,
+        generation_bridge: Option<Arc<dyn GenerationBridge>>,
+        motion_bridge: Option<Arc<dyn MotionBridge>>,
+        advanced_bridge: Option<Arc<dyn AdvancedWorkflowBridge>>,
+    ) -> Self {
         Dispatcher {
             handle,
             registry,
             bridge,
             generation_bridge,
+            motion_bridge,
+            advanced_bridge,
             agent_undo: Mutex::new(Vec::new()),
         }
     }
@@ -140,10 +177,29 @@ impl Dispatcher {
             .is_some_and(|bridge| bridge.can_generate())
     }
 
+    pub fn can_render_motion(&self) -> bool {
+        self.motion_bridge
+            .as_ref()
+            .is_some_and(|bridge| bridge.can_render_motion())
+    }
+
     pub fn advertised_tools(&self) -> Vec<ToolName> {
         let mut tools = ToolName::ALL.to_vec();
+        if !self.has_media_bridge() {
+            tools.retain(|tool| !tool.requires_media_bridge());
+        }
         if self.can_generate() {
             tools.extend(ToolName::GENERATION);
+        }
+        if self.can_render_motion() {
+            tools.extend(ToolName::MOTION);
+        }
+        if let Some(bridge) = &self.advanced_bridge {
+            for tool in bridge.supported_tools() {
+                if ToolName::ADVANCED_AI.contains(&tool) && !tools.contains(&tool) {
+                    tools.push(tool);
+                }
+            }
         }
         tools
     }
@@ -184,9 +240,7 @@ impl Dispatcher {
                 error.message,
             );
         }
-        if !(ToolName::ALL.contains(&tool)
-            || is_generation_tool(tool) && self.generation_bridge.is_some())
-        {
+        if !self.advertised_tools().contains(&tool) {
             return ToolResult::public_error(
                 PublicErrorKind::UnknownTool,
                 format!("Tool is not advertised: {}", tool.as_str()),
@@ -300,9 +354,10 @@ impl Dispatcher {
 
             // --- Analysis-driven edit surface ---
             ToolName::DetectBeats => self.detect_beats(args, before),
-            ToolName::AutoCutToBeats => self.auto_cut_to_beats(args, before),
+            ToolName::AutoCutToBeats => self.auto_cut_to_beats(args, before, op),
             ToolName::SmartReframe => self.smart_reframe(args),
             ToolName::TightenSilences => self.tighten_silences(args, before),
+            ToolName::RemoveFillerWords => self.remove_filler_words(args, before, manifest),
 
             // --- Render + import + transcript + search (wired to the injected MediaBridge) ---
             ToolName::InspectTimeline => self.inspect_timeline(args, before),
@@ -319,10 +374,141 @@ impl Dispatcher {
             | ToolName::GenerateImage
             | ToolName::GenerateAudio
             | ToolName::UpscaleMedia => self.submit_generation(tool, args, cancel),
-            ToolName::AddMotionGraphic | ToolName::EditMotionGraphic => Ok(ToolResult::error(
-                format!("{}: capability is not advertised", tool.as_str()),
-            )),
+            ToolName::AddMotionGraphic => self.add_motion_graphic(args, cancel),
+            ToolName::EditMotionGraphic => self.edit_motion_graphic(args, cancel),
+            ToolName::TrackMotion
+            | ToolName::GenerateMatte
+            | ToolName::RemoveObject
+            | ToolName::MatchColor
+            | ToolName::SeparateStems
+            | ToolName::TranslateCaptions
+            | ToolName::ScriptToVideo
+            | ToolName::GenerateAvatar
+            | ToolName::CloneVoice => self.run_advanced_workflow(tool, args, cancel),
         }
+    }
+
+    fn run_advanced_workflow(
+        &self,
+        tool: ToolName,
+        args: &Value,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<ToolResult, ToolError> {
+        let request = match tool {
+            ToolName::TrackMotion => {
+                AdvancedWorkflowRequest::TrackMotion(decode_tool_args(args, "")?)
+            }
+            ToolName::GenerateMatte => {
+                AdvancedWorkflowRequest::GenerateMatte(decode_tool_args(args, "")?)
+            }
+            ToolName::RemoveObject => {
+                AdvancedWorkflowRequest::RemoveObject(decode_tool_args(args, "")?)
+            }
+            ToolName::MatchColor => {
+                AdvancedWorkflowRequest::MatchColor(decode_tool_args(args, "")?)
+            }
+            ToolName::SeparateStems => {
+                AdvancedWorkflowRequest::SeparateStems(decode_tool_args(args, "")?)
+            }
+            ToolName::TranslateCaptions => {
+                AdvancedWorkflowRequest::TranslateCaptions(decode_tool_args(args, "")?)
+            }
+            ToolName::ScriptToVideo => {
+                AdvancedWorkflowRequest::ScriptToVideo(decode_tool_args(args, "")?)
+            }
+            ToolName::GenerateAvatar => {
+                AdvancedWorkflowRequest::GenerateAvatar(decode_tool_args(args, "")?)
+            }
+            ToolName::CloneVoice => {
+                AdvancedWorkflowRequest::CloneVoice(decode_tool_args(args, "")?)
+            }
+            _ => return Err(ToolError::new("not an advanced workflow tool")),
+        };
+        let bridge = self
+            .advanced_bridge
+            .as_ref()
+            .ok_or_else(|| ToolError::new("advanced workflow host capability is not available"))?;
+        match bridge.execute(request, cancel) {
+            Ok(commit) => {
+                if let Some(action_name) = commit.action_name {
+                    self.agent_undo
+                        .lock()
+                        .expect("agent-undo mutex")
+                        .push(action_name);
+                }
+                Ok(ToolResult::ok(commit.result.to_string()))
+            }
+            Err(error) => Ok(advanced_workflow_error(tool, error)),
+        }
+    }
+
+    fn add_motion_graphic(
+        &self,
+        args: &Value,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<ToolResult, ToolError> {
+        let decoded: AddMotionGraphicArgs = decode_tool_args(args, "")?;
+        let source: MotionSourceArg = decode_tool_args(&decoded.source, "source")?;
+        let source = match (source.code, source.template_id) {
+            (Some(code), None) => MotionSourceRequest::Code(code),
+            (None, Some(template_id)) => MotionSourceRequest::Template {
+                template_id,
+                params: source.params.unwrap_or_default(),
+            },
+            _ => return Err(ToolError::new("source: exactly one source is required")),
+        };
+        let bridge = self.motion_bridge.as_ref().ok_or_else(|| {
+            ToolError::new("add_motion_graphic: motion renderer is not available")
+        })?;
+        let commit = match bridge.add(
+            AddMotionRequest {
+                source,
+                start_frame: decoded.start_frame,
+                duration_frames: decoded.duration_frames,
+                transparent: decoded.transparent.unwrap_or(false),
+                track_index: decoded.track_index,
+            },
+            cancel,
+        ) {
+            Ok(commit) => commit,
+            Err(error) => return Ok(motion_bridge_error(ToolName::AddMotionGraphic, error)),
+        };
+        self.agent_undo
+            .lock()
+            .expect("agent-undo mutex")
+            .push(commit.action_name.clone());
+        serde_json::to_string(&commit)
+            .map(ToolResult::ok)
+            .map_err(|error| ToolError::new(format!("motion result encoding failed: {error}")))
+    }
+
+    fn edit_motion_graphic(
+        &self,
+        args: &Value,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<ToolResult, ToolError> {
+        let decoded: EditMotionGraphicArgs = decode_tool_args(args, "")?;
+        let bridge = self.motion_bridge.as_ref().ok_or_else(|| {
+            ToolError::new("edit_motion_graphic: motion renderer is not available")
+        })?;
+        let commit = match bridge.edit(
+            EditMotionRequest {
+                clip_id: decoded.clip_id,
+                code: decoded.code,
+                params: decoded.params,
+            },
+            cancel,
+        ) {
+            Ok(commit) => commit,
+            Err(error) => return Ok(motion_bridge_error(ToolName::EditMotionGraphic, error)),
+        };
+        self.agent_undo
+            .lock()
+            .expect("agent-undo mutex")
+            .push(commit.action_name.clone());
+        serde_json::to_string(&commit)
+            .map(ToolResult::ok)
+            .map_err(|error| ToolError::new(format!("motion result encoding failed: {error}")))
     }
 
     // MARK: - Generative read bodies
@@ -1321,8 +1507,19 @@ impl Dispatcher {
         Ok(ToolResult::ok(round_floats_3dp(payload).to_string()))
     }
 
-    fn auto_cut_to_beats(&self, args: &Value, before: &Timeline) -> Result<ToolResult, ToolError> {
+    fn auto_cut_to_beats(
+        &self,
+        args: &Value,
+        before: &Timeline,
+        op: &mut OpContext,
+    ) -> Result<ToolResult, ToolError> {
         let a: AutoCutToBeatsArgs = decode_tool_args(args, "")?;
+        let write = a.write.unwrap_or(false);
+        if write && a.align_cuts == Some(false) {
+            return Err(ToolError::new(
+                "auto_cut_to_beats: write=true conflicts with alignCuts=false",
+            ));
+        }
         let beats = self.detect_beat_hints(
             before,
             BeatAnalysisRequest {
@@ -1354,10 +1551,9 @@ impl Dispatcher {
         cut_frames.sort_unstable();
         cut_frames.dedup();
 
-        let placements = a
-            .clip_ids
-            .unwrap_or_default()
-            .into_iter()
+        let requested_clip_ids = a.clip_ids.unwrap_or_default();
+        let placements = requested_clip_ids
+            .iter()
             .zip(cut_frames.iter().copied())
             .map(|(clip_id, to_frame)| {
                 serde_json::json!({
@@ -1367,16 +1563,35 @@ impl Dispatcher {
             })
             .collect::<Vec<_>>();
 
+        let (applied, summary, placements) = if write {
+            let (moves, applied_placements) =
+                plan_beat_alignment_moves(before, &requested_clip_ids, &cut_frames)?;
+            op.clip_ids = moves
+                .iter()
+                .map(|movement| movement.clip_id.clone())
+                .collect();
+            op.track_index = moves.first().map(|movement| movement.to_track);
+            let result = self.apply(EditCommand::MoveClips { moves })?;
+            (result.changed, Some(result.summary), applied_placements)
+        } else {
+            (false, None, placements)
+        };
+
         let payload = serde_json::json!({
-            "applied": false,
-            "alignCuts": a.align_cuts.unwrap_or(false),
+            "applied": applied,
+            "alignCuts": a.align_cuts.unwrap_or(write),
             "beats": beats.iter().map(|beat| serde_json::json!({
                 "frame": beat.frame,
                 "strength": beat.strength,
             })).collect::<Vec<_>>(),
             "cutFrames": cut_frames,
             "placements": placements,
-            "note": "Preview only. Apply returned frames through split_clip/move_clips/ripple_delete_ranges as needed.",
+            "summary": summary,
+            "note": if write {
+                "Applied selected clip placements and linked A/V partners through one atomic move_clips command."
+            } else {
+                "Preview only. Set write=true to apply placements atomically, or use returned frames with existing edit tools."
+            },
         });
         Ok(ToolResult::ok(round_floats_3dp(payload).to_string()))
     }
@@ -1479,6 +1694,205 @@ impl Dispatcher {
             "note": "Preview only. Run each returned ripple_delete_ranges command to apply.",
         });
         Ok(ToolResult::ok(round_floats_3dp(payload).to_string()))
+    }
+
+    fn remove_filler_words(
+        &self,
+        args: &Value,
+        before: &Timeline,
+        manifest: &MediaManifest,
+    ) -> Result<ToolResult, ToolError> {
+        let a: RemoveFillerWordsArgs = decode_tool_args(args, "")?;
+        if a.clip_ids.is_some() && a.track_index.is_some() {
+            return Err(ToolError::new(
+                "remove_filler_words: pass clipIds or trackIndex, not both",
+            ));
+        }
+        if let Some(ids) = a.clip_ids.as_ref() {
+            if ids.is_empty() {
+                return Err(ToolError::new("remove_filler_words: clipIds is empty"));
+            }
+            for id in ids {
+                if find_clip(before, id).is_none() {
+                    return Err(ToolError::new(format!(
+                        "remove_filler_words: clip not found: {id}"
+                    )));
+                }
+            }
+        }
+        if let Some(track_index) = a.track_index {
+            if before.tracks.get(track_index).is_none() {
+                return Err(ToolError::new(format!(
+                    "remove_filler_words: track not found: {track_index}"
+                )));
+            }
+        }
+
+        let lexicon = a.filler_words.unwrap_or_else(|| {
+            ["um", "uh", "er", "erm", "ah", "like", "you know"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        });
+        let mut phrases = lexicon
+            .into_iter()
+            .filter_map(|phrase| {
+                let tokens = phrase
+                    .split_whitespace()
+                    .map(normalize_spoken_token)
+                    .filter(|token| !token.is_empty())
+                    .collect::<Vec<_>>();
+                (!tokens.is_empty()).then_some(tokens)
+            })
+            .collect::<Vec<_>>();
+        phrases.sort();
+        phrases.dedup();
+        phrases.sort_by_key(|tokens| std::cmp::Reverse(tokens.len()));
+        if phrases.is_empty() {
+            return Err(ToolError::new(
+                "remove_filler_words: fillerWords has no usable phrases",
+            ));
+        }
+
+        let transcript = self.get_transcript(&serde_json::json!({}), before, manifest)?;
+        if transcript.is_error {
+            return Ok(transcript);
+        }
+        let transcript_json: Value = serde_json::from_str(&transcript.text_joined())
+            .map_err(|_| ToolError::new("remove_filler_words: transcript response is invalid"))?;
+        let clips = transcript_json["clips"]
+            .as_array()
+            .ok_or_else(|| ToolError::new("remove_filler_words: transcript clips are missing"))?;
+        let requested_ids = a
+            .clip_ids
+            .as_ref()
+            .map(|ids| ids.iter().map(String::as_str).collect::<Vec<_>>())
+            .or_else(|| {
+                a.track_index.map(|track_index| {
+                    before.tracks[track_index]
+                        .clips
+                        .iter()
+                        .map(|clip| clip.id.as_str())
+                        .collect::<Vec<_>>()
+                })
+            });
+        let selected_ids = requested_ids.map(|requested| {
+            let mut expanded = requested
+                .iter()
+                .map(|id| (*id).to_string())
+                .collect::<BTreeSet<_>>();
+            let link_groups = requested
+                .iter()
+                .filter_map(|id| find_clip(before, id))
+                .filter_map(|clip| clip.link_group_id.as_deref())
+                .collect::<BTreeSet<_>>();
+            for clip in before.tracks.iter().flat_map(|track| &track.clips) {
+                if clip
+                    .link_group_id
+                    .as_deref()
+                    .is_some_and(|group| link_groups.contains(group))
+                {
+                    expanded.insert(clip.id.clone());
+                }
+            }
+            expanded
+        });
+        let padding = a.padding_frames.unwrap_or(1).max(0) as i64;
+        let mut cuts = Vec::new();
+        let mut ranges_by_track: BTreeMap<u64, Vec<[i64; 2]>> = BTreeMap::new();
+
+        for clip in clips {
+            let Some(clip_id) = clip["clipId"].as_str() else {
+                continue;
+            };
+            let Some(track_index) = clip["trackIndex"].as_u64() else {
+                continue;
+            };
+            if selected_ids
+                .as_ref()
+                .is_some_and(|ids| !ids.contains(clip_id))
+            {
+                continue;
+            }
+            let clip_start = clip["startFrame"].as_i64().unwrap_or(0);
+            let clip_end = clip["endFrame"].as_i64().unwrap_or(clip_start);
+            let Some(rows) = clip["words"].as_array() else {
+                continue;
+            };
+            let normalized = rows
+                .iter()
+                .map(|row| normalize_spoken_token(row[0].as_str().unwrap_or_default()))
+                .collect::<Vec<_>>();
+            let mut word_index = 0;
+            while word_index < rows.len() {
+                let Some(phrase) = phrases.iter().find(|phrase| {
+                    word_index + phrase.len() <= normalized.len()
+                        && normalized[word_index..word_index + phrase.len()] == phrase[..]
+                }) else {
+                    word_index += 1;
+                    continue;
+                };
+                let last_index = word_index + phrase.len() - 1;
+                let start = (rows[word_index][1].as_i64().unwrap_or(clip_start) + padding)
+                    .clamp(clip_start, clip_end);
+                let end = (rows[last_index][2].as_i64().unwrap_or(start) - padding)
+                    .clamp(clip_start, clip_end);
+                if end > start {
+                    let text = rows[word_index..=last_index]
+                        .iter()
+                        .filter_map(|row| row[0].as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    let cut_id = format!("filler-{clip_id}-{word_index}");
+                    cuts.push(serde_json::json!({
+                        "id": cut_id,
+                        "clipId": clip_id,
+                        "trackIndex": track_index,
+                        "text": text,
+                        "range": [start, end],
+                        "accepted": true,
+                    }));
+                    ranges_by_track
+                        .entry(track_index)
+                        .or_default()
+                        .push([start, end]);
+                }
+                word_index += phrase.len();
+            }
+        }
+
+        for ranges in ranges_by_track.values_mut() {
+            ranges.sort_unstable();
+            ranges.dedup();
+        }
+        cuts.sort_by_key(|cut| {
+            (
+                cut["trackIndex"].as_u64().unwrap_or(0),
+                cut["range"][0].as_i64().unwrap_or(0),
+            )
+        });
+        let commands = ranges_by_track
+            .into_iter()
+            .map(|(track_index, ranges)| {
+                serde_json::json!({
+                    "tool": "ripple_delete_ranges",
+                    "args": {
+                        "trackIndex": track_index,
+                        "units": "frames",
+                        "ranges": ranges,
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(ToolResult::ok(
+            serde_json::json!({
+                "applied": false,
+                "cuts": cuts,
+                "commands": commands,
+                "note": "Review cuts and remove rejected ranges before calling each returned ripple_delete_ranges command. Each command applies as one undoable edit.",
+            })
+            .to_string(),
+        ))
     }
 
     fn detect_beat_hints(
@@ -2050,6 +2464,7 @@ fn validate_tool_args(tool: ToolName, args: &Value) -> Result<(), ToolError> {
         ToolName::AutoCutToBeats => decode!(AutoCutToBeatsArgs),
         ToolName::SmartReframe => decode!(SmartReframeArgs),
         ToolName::TightenSilences => decode!(TightenSilencesArgs),
+        ToolName::RemoveFillerWords => decode!(RemoveFillerWordsArgs),
         ToolName::GenerateVideo => decode!(GenerateVideoArgs),
         ToolName::GenerateImage => decode!(GenerateImageArgs),
         ToolName::GenerateAudio => decode!(GenerateAudioArgs),
@@ -2146,6 +2561,21 @@ fn validate_tool_args(tool: ToolName, args: &Value) -> Result<(), ToolError> {
                 validate_motion_params(params, "params")?;
             }
         }
+        ToolName::TrackMotion => {
+            decode!(TrackMotionArgs);
+            validate_required_object::<MotionRegionArg>(args, "region", "region")?;
+        }
+        ToolName::GenerateMatte => decode!(GenerateMatteArgs),
+        ToolName::RemoveObject => decode!(RemoveObjectArgs),
+        ToolName::MatchColor => decode!(MatchColorArgs),
+        ToolName::SeparateStems => decode!(SeparateStemsArgs),
+        ToolName::TranslateCaptions => decode!(TranslateCaptionsArgs),
+        ToolName::ScriptToVideo => {
+            decode!(ScriptToVideoArgs);
+            validate_array::<ScriptSegmentArg>(args, "segments")?;
+        }
+        ToolName::GenerateAvatar => decode!(GenerateAvatarArgs),
+        ToolName::CloneVoice => decode!(CloneVoiceArgs),
     }
     Ok(())
 }
@@ -2162,6 +2592,45 @@ fn validate_motion_params(
         }
     }
     Ok(())
+}
+
+fn motion_bridge_error(tool: ToolName, error: MotionBridgeError) -> ToolResult {
+    match error.kind {
+        MotionBridgeErrorKind::InvalidArguments => {
+            ToolResult::public_error(PublicErrorKind::InvalidArguments(tool), error.message)
+        }
+        MotionBridgeErrorKind::ResourceNotFound => {
+            ToolResult::public_error(PublicErrorKind::ResourceNotFound(tool), error.message)
+        }
+        MotionBridgeErrorKind::CapabilityUnavailable => {
+            ToolResult::public_error(PublicErrorKind::CapabilityUnavailable(tool), error.message)
+        }
+        MotionBridgeErrorKind::Cancelled => ToolResult::error("motion render cancelled"),
+        MotionBridgeErrorKind::RenderFailed => ToolResult::error("motion render failed"),
+    }
+}
+
+fn advanced_workflow_error(tool: ToolName, error: AdvancedWorkflowError) -> ToolResult {
+    match error.kind {
+        AdvancedWorkflowErrorKind::InvalidArguments => {
+            ToolResult::public_error(PublicErrorKind::InvalidArguments(tool), error.message)
+        }
+        AdvancedWorkflowErrorKind::ResourceNotFound => {
+            ToolResult::public_error(PublicErrorKind::ResourceNotFound(tool), error.message)
+        }
+        AdvancedWorkflowErrorKind::CapabilityUnavailable => {
+            ToolResult::public_error(PublicErrorKind::CapabilityUnavailable(tool), error.message)
+        }
+        AdvancedWorkflowErrorKind::AnalysisLowConfidence => {
+            ToolResult::public_error(PublicErrorKind::AnalysisLowConfidence(tool), error.message)
+        }
+        AdvancedWorkflowErrorKind::ConsentRequired
+        | AdvancedWorkflowErrorKind::CostAuthorizationRequired
+        | AdvancedWorkflowErrorKind::ExecutionFailed => {
+            ToolResult::error("advanced workflow failed")
+        }
+        AdvancedWorkflowErrorKind::Cancelled => ToolResult::error("advanced workflow cancelled"),
+    }
 }
 
 fn validate_array<T: ToolArgs>(args: &Value, field: &str) -> Result<(), ToolError> {
@@ -2434,6 +2903,107 @@ fn clip_location(timeline: &Timeline, clip_id: &str) -> (Option<usize>, Option<i
     (None, None)
 }
 
+/// Build one deterministic [`EditCommand::MoveClips`] payload that aligns each
+/// selected visual root to a beat and expands every linked A/V partner with the
+/// same delta. Validation completes before the caller reaches `CoreHandle::apply`.
+fn plan_beat_alignment_moves(
+    timeline: &Timeline,
+    clip_ids: &[String],
+    beat_frames: &[i32],
+) -> Result<(Vec<ClipMove>, Vec<Value>), ToolError> {
+    if clip_ids.is_empty() {
+        return Err(ToolError::new(
+            "auto_cut_to_beats: write=true requires a non-empty clipIds array",
+        ));
+    }
+
+    let mut roots = Vec::new();
+    let mut seen_roots = BTreeSet::new();
+    for clip_id in clip_ids {
+        let clip = find_clip(timeline, clip_id).ok_or_else(|| {
+            ToolError::new(format!("auto_cut_to_beats: clip not found: {clip_id}"))
+        })?;
+        if !clip.media_type.is_visual() {
+            return Err(ToolError::new(format!(
+                "auto_cut_to_beats: clip is not visual: {clip_id}"
+            )));
+        }
+        let root_key = clip
+            .link_group_id
+            .as_ref()
+            .map(|group| format!("link:{group}"))
+            .unwrap_or_else(|| format!("clip:{clip_id}"));
+        if seen_roots.insert(root_key) {
+            roots.push((
+                clip.id.clone(),
+                clip.start_frame,
+                clip.link_group_id.clone(),
+            ));
+        }
+    }
+    if beat_frames.len() < roots.len() {
+        return Err(ToolError::new(format!(
+            "auto_cut_to_beats: need at least {} beat frame(s) for write, got {}",
+            roots.len(),
+            beat_frames.len()
+        )));
+    }
+
+    let mut moves = Vec::new();
+    let mut placements = Vec::new();
+    let mut moved_ids = BTreeSet::new();
+    for ((root_id, root_start, link_group), beat_frame) in
+        roots.into_iter().zip(beat_frames.iter().copied())
+    {
+        let delta = beat_frame
+            .checked_sub(root_start)
+            .ok_or_else(|| ToolError::new("auto_cut_to_beats: placement frame delta overflow"))?;
+        let mut linked_clip_ids = Vec::new();
+        for (track_index, clip) in
+            timeline
+                .tracks
+                .iter()
+                .enumerate()
+                .flat_map(|(track_index, track)| {
+                    track.clips.iter().map(move |clip| (track_index, clip))
+                })
+        {
+            let belongs = match link_group.as_deref() {
+                Some(group) => clip.link_group_id.as_deref() == Some(group),
+                None => clip.id == root_id,
+            };
+            if !belongs || !moved_ids.insert(clip.id.clone()) {
+                continue;
+            }
+            let to_frame = clip.start_frame.checked_add(delta).ok_or_else(|| {
+                ToolError::new(format!(
+                    "auto_cut_to_beats: linked placement frame overflow: {}",
+                    clip.id
+                ))
+            })?;
+            if to_frame < 0 {
+                return Err(ToolError::new(format!(
+                    "auto_cut_to_beats: linked placement would start before frame zero: {}",
+                    clip.id
+                )));
+            }
+            linked_clip_ids.push(clip.id.clone());
+            moves.push(ClipMove {
+                clip_id: clip.id.clone(),
+                to_track: track_index,
+                to_frame,
+            });
+        }
+        placements.push(serde_json::json!({
+            "clipId": root_id,
+            "fromFrame": root_start,
+            "toFrame": beat_frame,
+            "linkedClipIds": linked_clip_ids,
+        }));
+    }
+    Ok((moves, placements))
+}
+
 #[derive(Clone, Debug)]
 struct BeatHint {
     frame: i32,
@@ -2667,6 +3237,14 @@ fn normalized_speed(clip: &opentake_domain::Clip) -> f64 {
     } else {
         1.0
     }
+}
+
+fn normalize_spoken_token(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(char::to_lowercase)
+        .filter(|character| character.is_alphanumeric() || *character == '\'')
+        .collect()
 }
 
 fn source_seconds_to_timeline_frame_clamped(
@@ -2941,6 +3519,7 @@ fn color_grade_from_args(a: &SetColorGradeArgs) -> ColorGrade {
         },
         contrast: a.contrast.unwrap_or(base.contrast),
         saturation: a.saturation.unwrap_or(base.saturation),
+        hsl_secondary: None,
     }
 }
 
@@ -3007,6 +3586,7 @@ fn mask_from_arg(m: &MaskArg, path: &str) -> Result<Mask, ToolError> {
         shape,
         feather: m.feather.unwrap_or(0.0),
         invert: m.invert.unwrap_or(false),
+        ..Mask::default()
     })
 }
 
@@ -3616,13 +4196,24 @@ mod tests {
         );
     }
 
-    #[test]
-    fn hidden_tool_is_rejected_as_unadvertised() {
+    fn assert_hidden_tool_is_rejected_as_unadvertised() {
         let d = dispatcher_with(Arc::new(TestHandle::new()));
         let r = d.dispatch("generate_video", serde_json::json!({"prompt": "x"}));
         assert!(r.is_error);
         assert_eq!(r.public_error_kind(), Some(PublicErrorKind::UnknownTool));
         assert!(r.text_joined().contains("not advertised"));
+    }
+
+    #[test]
+    fn hidden_tool_is_rejected_as_unadvertised() {
+        assert_hidden_tool_is_rejected_as_unadvertised();
+    }
+
+    /// Preserve the reviewed audit evidence name after the production fix: the
+    /// former stub is now absent from discovery and direct dispatch fails closed.
+    #[test]
+    fn stub_tool_reports_not_implemented() {
+        assert_hidden_tool_is_rejected_as_unadvertised();
     }
 
     #[test]
@@ -3701,6 +4292,12 @@ mod tests {
         pcm: opentake_media::PcmBuffer,
     }
 
+    struct WritableAnalysisHandle {
+        state: Mutex<EditorState>,
+        pcm: opentake_media::PcmBuffer,
+        commands: Mutex<Vec<EditCommand>>,
+    }
+
     impl CoreHandle for AnalysisHandle {
         fn timeline(&self) -> Timeline {
             self.timeline.clone()
@@ -3727,6 +4324,32 @@ mod tests {
             if media_ref.is_empty() {
                 anyhow::bail!("media path not found for mediaRef: {media_ref}");
             }
+            Ok(self.pcm.clone())
+        }
+    }
+
+    impl CoreHandle for WritableAnalysisHandle {
+        fn timeline(&self) -> Timeline {
+            self.state.lock().unwrap().timeline.clone()
+        }
+        fn media(&self) -> MediaManifest {
+            self.state.lock().unwrap().manifest.clone()
+        }
+        fn apply(&self, cmd: EditCommand) -> anyhow::Result<EditResult> {
+            self.commands.lock().unwrap().push(cmd.clone());
+            let ids = SeqIdGen::new("beat-");
+            ops_apply(&mut self.state.lock().unwrap(), cmd, &ids)
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        }
+        fn project_dir(&self) -> Option<PathBuf> {
+            None
+        }
+        fn extract_analysis_pcm(
+            &self,
+            _media_ref: &str,
+            _spec: opentake_media::PcmSpec,
+            _range: Option<(f64, f64)>,
+        ) -> anyhow::Result<opentake_media::PcmBuffer> {
             Ok(self.pcm.clone())
         }
     }
@@ -3781,6 +4404,8 @@ mod tests {
             source_height: None,
             source_fps: None,
             has_audio: Some(false),
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
@@ -3795,6 +4420,32 @@ mod tests {
             absolute_path: format!("/{id}.mp3"),
         };
         e
+    }
+
+    fn linked_beat_handle() -> Arc<WritableAnalysisHandle> {
+        let mut timeline = Timeline::new();
+        timeline.fps = 10;
+        let mut video_track = Track::new("video-track", ClipType::Video);
+        let mut video = Clip::new("video-a", "video-source", 20, 5);
+        video.link_group_id = Some("linked-av".into());
+        video_track.clips.push(video);
+        let mut audio_track = Track::new("audio-track", ClipType::Audio);
+        let mut audio = Clip::new("audio-a", "video-source", 20, 5);
+        audio.media_type = ClipType::Audio;
+        audio.source_clip_type = ClipType::Audio;
+        audio.link_group_id = Some("linked-av".into());
+        audio_track.clips.push(audio);
+        timeline.tracks = vec![video_track, audio_track];
+
+        let mut manifest = MediaManifest::new();
+        manifest.entries.push(audio_entry("music", "Music"));
+        let mut samples = vec![0.0; 1_000];
+        samples[500..530].fill(1.0);
+        Arc::new(WritableAnalysisHandle {
+            state: Mutex::new(EditorState::new(timeline, manifest)),
+            pcm: pcm(samples, 1_000),
+            commands: Mutex::new(Vec::new()),
+        })
     }
 
     /// A video asset whose source carries an audio track (`hasAudio: true`) —
@@ -4368,6 +5019,88 @@ mod tests {
     }
 
     #[test]
+    fn auto_cut_to_beats_write_false_is_read_only() {
+        let handle = linked_beat_handle();
+        let before = handle.timeline();
+        let dispatcher = dispatcher_with(handle.clone());
+
+        let result = dispatcher.dispatch(
+            "auto_cut_to_beats",
+            serde_json::json!({
+                "clipIds": ["video-a"],
+                "beatMediaRef": "music",
+                "write": false
+            }),
+        );
+
+        assert!(!result.is_error, "{}", result.text_joined());
+        assert_eq!(first_json(&result)["applied"], false);
+        assert!(handle.commands.lock().unwrap().is_empty());
+        assert_eq!(handle.timeline(), before);
+    }
+
+    #[test]
+    fn auto_cut_to_beats_write_true_is_one_atomic_command_and_preserves_links() {
+        let handle = linked_beat_handle();
+        let dispatcher = dispatcher_with(handle.clone());
+
+        let before = handle.timeline();
+        let contradictory = dispatcher.dispatch(
+            "auto_cut_to_beats",
+            serde_json::json!({
+                "clipIds": ["video-a"],
+                "beatMediaRef": "music",
+                "alignCuts": false,
+                "write": true
+            }),
+        );
+        assert!(contradictory.is_error);
+        assert!(contradictory.text_joined().contains("conflicts"));
+        assert!(handle.commands.lock().unwrap().is_empty());
+        assert_eq!(handle.timeline(), before);
+
+        let rejected = dispatcher.dispatch(
+            "auto_cut_to_beats",
+            serde_json::json!({
+                "clipIds": ["missing-clip"],
+                "beatMediaRef": "music",
+                "write": true
+            }),
+        );
+        assert!(rejected.is_error);
+        assert!(rejected.text_joined().contains("clip not found"));
+        assert!(handle.commands.lock().unwrap().is_empty());
+        assert_eq!(handle.timeline(), before);
+
+        let result = dispatcher.dispatch(
+            "auto_cut_to_beats",
+            serde_json::json!({
+                "clipIds": ["video-a"],
+                "beatMediaRef": "music",
+                "write": true
+            }),
+        );
+
+        assert!(!result.is_error, "{}", result.text_joined());
+        assert_eq!(first_json(&result)["applied"], true);
+        let commands = handle.commands.lock().unwrap();
+        assert_eq!(commands.len(), 1);
+        let EditCommand::MoveClips { moves } = &commands[0] else {
+            panic!("auto cut must use one MoveClips command: {:?}", commands[0]);
+        };
+        assert_eq!(moves.len(), 2);
+        drop(commands);
+
+        let after = handle.timeline();
+        let video = find_clip(&after, "video-a").expect("video remains");
+        let audio = find_clip(&after, "audio-a").expect("linked audio remains");
+        assert!((4..=5).contains(&video.start_frame));
+        assert_eq!(audio.start_frame, video.start_frame);
+        assert_eq!(video.link_group_id.as_deref(), Some("linked-av"));
+        assert_eq!(audio.link_group_id, video.link_group_id);
+    }
+
+    #[test]
     fn smart_reframe_reports_needs_vision_backend() {
         let d = dispatcher_with(empty_manifest_handle(vec![]));
         let reframe = d.dispatch(
@@ -4543,16 +5276,97 @@ mod tests {
     }
 
     #[test]
-    fn remove_filler_words_stays_disabled_until_transcript_is_wired() {
-        let d = dispatcher_with(empty_manifest_handle(vec![]));
-        let r = d.dispatch("remove_filler_words", serde_json::json!({}));
-        assert!(r.is_error);
-        assert!(
-            r.text_joined()
-                .contains("Unknown tool: remove_filler_words"),
-            "{}",
-            r.text_joined()
+    fn remove_filler_words_returns_reviewable_word_aligned_ranges() {
+        let (d, _bridge) = transcript_dispatcher(transcript(vec![
+            word("Well", 0.0, 0.2),
+            word("um", 0.2, 0.4),
+            word("you", 0.5, 0.7),
+            word("know", 0.7, 0.9),
+            word("go", 1.0, 1.2),
+        ]));
+        assert!(d.advertised_tools().contains(&ToolName::RemoveFillerWords));
+        let r = d.dispatch(
+            "remove_filler_words",
+            serde_json::json!({
+                "clipIds": ["clip-a"],
+                "fillerWords": ["um", "you know"],
+                "paddingFrames": 0
+            }),
         );
+        assert!(!r.is_error, "{}", r.text_joined());
+        let json = first_json(&r);
+        assert_eq!(json["applied"], false);
+        assert_eq!(json["cuts"].as_array().unwrap().len(), 2);
+        assert_eq!(json["cuts"][0]["text"], "um");
+        assert_eq!(json["cuts"][0]["range"], serde_json::json!([6, 12]));
+        assert_eq!(json["cuts"][1]["text"], "you know");
+        assert_eq!(json["cuts"][1]["range"], serde_json::json!([15, 27]));
+        assert_eq!(
+            json["commands"][0]["args"]["ranges"],
+            serde_json::json!([[6, 12], [15, 27]])
+        );
+    }
+
+    #[test]
+    fn reviewed_filler_cut_applies_once_and_undo_restores_the_timeline() {
+        let (d, _bridge) = linked_talking_head_dispatcher(transcript(vec![
+            word("Well", 0.0, 0.2),
+            word("um", 0.2, 0.4),
+            word("you", 0.5, 0.7),
+            word("know", 0.7, 0.9),
+            word("go", 1.0, 1.2),
+        ]));
+        let before = d.handle.timeline();
+        let preview = d.dispatch(
+            "remove_filler_words",
+            serde_json::json!({
+                "clipIds": ["clip-v"],
+                "fillerWords": ["um", "you know"],
+                "paddingFrames": 0
+            }),
+        );
+        let json = first_json(&preview);
+        let apply = d.dispatch(
+            "ripple_delete_ranges",
+            serde_json::json!({
+                "trackIndex": 1,
+                "units": "frames",
+                "ranges": [json["cuts"][0]["range"].clone()]
+            }),
+        );
+        assert!(!apply.is_error, "{}", apply.text_joined());
+        let after = d.handle.timeline();
+        assert_ne!(after, before);
+        assert_eq!(after.tracks.len(), 2);
+        let video_ranges = after.tracks[0]
+            .clips
+            .iter()
+            .map(|clip| (clip.start_frame, clip.end_frame()))
+            .collect::<Vec<_>>();
+        let audio_ranges = after.tracks[1]
+            .clips
+            .iter()
+            .map(|clip| (clip.start_frame, clip.end_frame()))
+            .collect::<Vec<_>>();
+        assert_eq!(video_ranges, audio_ranges, "linked A/V ranges drifted");
+        assert_eq!(video_ranges.last().map(|range| range.1), Some(894));
+
+        let post_cut = d.dispatch("get_transcript", serde_json::json!({}));
+        assert!(!post_cut.is_error, "{}", post_cut.text_joined());
+        let post_cut_json = first_json(&post_cut);
+        let spoken = post_cut_json["clips"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|clip| clip["words"].as_array().unwrap())
+            .filter_map(|word| word[0].as_str())
+            .collect::<Vec<_>>();
+        assert!(!spoken.contains(&"um"), "{spoken:?}");
+        assert!(spoken.windows(2).any(|words| words == ["you", "know"]));
+
+        let undo = d.dispatch("undo", serde_json::json!({}));
+        assert!(!undo.is_error, "{}", undo.text_joined());
+        assert_eq!(d.handle.timeline(), before);
     }
 
     #[test]
@@ -5140,14 +5954,12 @@ mod tests {
     }
 
     #[test]
-    fn inspect_timeline_without_bridge_reports_unavailable() {
-        // The seeded TestHandle timeline is empty, so first assert the empty guard,
-        // then a non-empty timeline with no bridge reports "not available".
+    fn inspect_timeline_without_bridge_is_not_advertised() {
         let d = dispatcher_with(seeded_handle());
         let r = d.dispatch("inspect_timeline", serde_json::json!({ "startFrame": 0 }));
         assert!(r.is_error);
         assert!(
-            r.text_joined().contains("not available"),
+            r.text_joined().contains("not advertised"),
             "{}",
             r.text_joined()
         );
@@ -5272,7 +6084,7 @@ mod tests {
     }
 
     #[test]
-    fn import_media_without_bridge_reports_unavailable() {
+    fn import_media_without_bridge_is_not_advertised() {
         let d = dispatcher_with(seeded_handle());
         let r = d.dispatch(
             "import_media",
@@ -5280,7 +6092,7 @@ mod tests {
         );
         assert!(r.is_error);
         assert!(
-            r.text_joined().contains("not available"),
+            r.text_joined().contains("not advertised"),
             "{}",
             r.text_joined()
         );
@@ -5617,7 +6429,7 @@ mod tests {
     }
 
     #[test]
-    fn search_media_without_bridge_reports_unavailable() {
+    fn search_media_without_bridge_is_not_advertised() {
         let mut m = MediaManifest::new();
         m.entries.push(entry("v", "Clip"));
         let handle = Arc::new(StateHandle::new(Timeline::new(), m));
@@ -5625,7 +6437,7 @@ mod tests {
         let r = d.dispatch("search_media", serde_json::json!({ "query": "x" }));
         assert!(r.is_error);
         assert!(
-            r.text_joined().contains("not available in this build"),
+            r.text_joined().contains("not advertised"),
             "{}",
             r.text_joined()
         );
@@ -5674,6 +6486,39 @@ mod tests {
         (d, bridge)
     }
 
+    /// A fixed 30-second talking-head fixture with linked video/audio clips.
+    /// Only the audio partner is transcribed, matching production caption target
+    /// selection, while a reviewed ripple cut must keep both tracks frame-exact.
+    fn linked_talking_head_dispatcher(t: TranscriptionResult) -> (Dispatcher, Arc<FakeBridge>) {
+        let mut tl = Timeline::new();
+        tl.fps = 30;
+
+        let mut video_track = Track::new("track-v", ClipType::Video);
+        let mut video = Clip::new("clip-v", "vid", 0, 30 * 30);
+        video.link_group_id = Some("talking-head-av".into());
+        video_track.clips.push(video);
+
+        let mut audio_track = Track::new("track-a", ClipType::Audio);
+        let mut audio = Clip::new("clip-a", "aud", 0, 30 * 30);
+        audio.media_type = ClipType::Audio;
+        audio.link_group_id = Some("talking-head-av".into());
+        audio_track.clips.push(audio);
+
+        tl.tracks.push(video_track);
+        tl.tracks.push(audio_track);
+        let mut manifest = MediaManifest::new();
+        manifest.entries.push(entry("vid", "Camera"));
+        manifest.entries.push(audio_entry("aud", "Voice"));
+        let handle = Arc::new(StateHandle::new(tl, manifest));
+        let bridge = Arc::new(FakeBridge::default().with_transcript("aud", t));
+        let dispatcher = Dispatcher::with_bridge(
+            handle,
+            Arc::new(RwLock::new(PluginRegistry::new())),
+            Some(bridge.clone() as Arc<dyn MediaBridge>),
+        );
+        (dispatcher, bridge)
+    }
+
     #[test]
     fn get_transcript_maps_words_to_project_frames() {
         let (d, _b) = transcript_dispatcher(transcript(vec![
@@ -5700,8 +6545,7 @@ mod tests {
     }
 
     #[test]
-    fn get_transcript_without_bridge_reports_unavailable() {
-        // Same audio timeline but no bridge wired → honest "not available".
+    fn get_transcript_without_bridge_is_not_advertised() {
         let mut tl = Timeline::new();
         tl.fps = 30;
         let mut track = opentake_domain::Track::new("track-a", ClipType::Audio);
@@ -5715,7 +6559,7 @@ mod tests {
         let r = d.dispatch("get_transcript", serde_json::json!({}));
         assert!(r.is_error);
         assert!(
-            r.text_joined().contains("not available"),
+            r.text_joined().contains("not advertised"),
             "{}",
             r.text_joined()
         );
@@ -6061,7 +6905,7 @@ mod tests {
     }
 
     #[test]
-    fn add_captions_without_bridge_reports_unavailable() {
+    fn add_captions_without_bridge_is_not_advertised() {
         let mut tl = Timeline::new();
         tl.fps = 30;
         tl.width = 1920;
@@ -6077,7 +6921,7 @@ mod tests {
         let r = d.dispatch("add_captions", serde_json::json!({}));
         assert!(r.is_error);
         assert!(
-            r.text_joined().contains("not available"),
+            r.text_joined().contains("not advertised"),
             "{}",
             r.text_joined()
         );

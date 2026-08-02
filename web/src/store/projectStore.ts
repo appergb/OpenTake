@@ -7,13 +7,25 @@
 import { create } from "zustand";
 import type { RuntimeTimelineSnapshot, Timeline } from "../lib/types";
 
-const EMPTY_TIMELINE: Timeline = {
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+    for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function immutableTimeline(timeline: Timeline): Timeline {
+  return deepFreeze(structuredClone(timeline));
+}
+
+const EMPTY_TIMELINE: Timeline = deepFreeze({
   fps: 30,
   width: 1920,
   height: 1080,
   settingsConfigured: false,
   tracks: [],
-};
+});
 
 interface ProjectState {
   /** Monotonic authority boundary for snapshot/path writes; never reset. */
@@ -29,8 +41,8 @@ interface ProjectState {
   lastSavedVersion: number;
   canUndo: boolean;
   canRedo: boolean;
-  /** Replace the mirror (called by the sync layer after get_timeline). */
-  setMirror: (timeline: Timeline, version: number, projectEpoch?: number) => void;
+  /** Replace the whole authoritative snapshot. Same-project versions and
+   * project epochs may only advance; accepted timelines are cloned + frozen. */
   replaceProjectSnapshot: (snapshot: RuntimeTimelineSnapshot) => void;
   clearProjectSnapshot: () => void;
   setProjectPath: (path: string | null) => void;
@@ -51,21 +63,20 @@ export const useProjectStore = create<ProjectState>((set) => ({
   lastSavedVersion: 0,
   canUndo: false,
   canRedo: false,
-  setMirror: (timeline, timelineVersion, projectEpoch) =>
-    set((state) => ({
-      snapshotMutationRevision: state.snapshotMutationRevision + 1,
-      timeline,
-      timelineVersion,
-      projectEpoch: projectEpoch ?? state.projectEpoch,
-    })),
   replaceProjectSnapshot: (snapshot) =>
     set((state) => {
+      if (
+        snapshot.projectEpoch < state.projectEpoch ||
+        (snapshot.projectEpoch === state.projectEpoch && snapshot.version < state.timelineVersion)
+      ) {
+        return state;
+      }
       const projectChanged = state.projectEpoch !== snapshot.projectEpoch;
       return {
         snapshotMutationRevision: state.snapshotMutationRevision + 1,
         projectEpoch: snapshot.projectEpoch,
         timelineVersion: snapshot.version,
-        timeline: snapshot.timeline,
+        timeline: immutableTimeline(snapshot.timeline),
         projectPath: snapshot.projectPath,
         compatibilityReadOnly: snapshot.compatibilityReadOnly,
         compatibilityBlockers: snapshot.compatibilityBlockers,

@@ -85,36 +85,43 @@
   - Create, open, trim, move, duplicate, and dissolve a two-level nested compound through undoable shared commands and the timeline UI.
   - Prove save/reopen equality plus preview/export frame parity at the compound in/out boundaries and fail clearly on recursive nesting cycles.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-project/tests/compound_roundtrip.rs#compound_clip_roundtrips_nested_timeline` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
   - `crates/opentake-render/tests/compound_render.rs#compound_clip_preview_export_frames_match` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-project --test compound_roundtrip compound_clip_roundtrips_nested_timeline -- --exact`
   - Run: `cargo test -p opentake-render --test compound_render compound_clip_preview_export_frames_match -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-domain/src/clip.rs#CompoundClip`, `crates/opentake-render/src/plan/types.rs#RenderClip::Compound`, `docs/architecture/CAPCUT-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-project --test compound_roundtrip compound_clip_roundtrips_nested_timeline -- --exact`
   - Run: `cargo test -p opentake-render --test compound_render compound_clip_preview_export_frames_match -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Completion evidence (2026-07-31):
+`runtime-artifacts/automated/nested-timeline-compound-real-device-2026-07-31.md`.
+The exact owning tests, full Rust/Web gates, packaged create/open/trim/move/copy
+and paste flow, save/reopen persistence, paused/continuous preview, and retained
+export artifacts all pass; deterministic graph validation covers recursive
+cycle rejection.
 
 ### Task 3: multicam (implementation-slice-5902337034fd8e89)
 

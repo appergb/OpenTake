@@ -56,7 +56,41 @@ function normalizeColorGrade(
     },
     contrast: grade.contrast ?? 0,
     saturation: grade.saturation ?? 1,
+    hslSecondary: grade.hslSecondary
+      ? {
+          hueCenter: grade.hslSecondary.hueCenter ?? 0,
+          hueWidth: grade.hslSecondary.hueWidth ?? 0.24,
+          feather: grade.hslSecondary.feather ?? 0.08,
+          hueShift: grade.hslSecondary.hueShift ?? 0,
+          saturation: grade.hslSecondary.saturation ?? 0,
+          lightness: grade.hslSecondary.lightness ?? 0,
+        }
+      : undefined,
   };
+}
+
+function isValidColorGrade(grade: NonNullable<Clip["colorGrade"]>): boolean {
+  const finiteRange = (value: number, min: number, max: number) =>
+    Number.isFinite(value) && value >= min && value <= max;
+  const { lift, gamma, gain } = grade.liftGammaGain;
+  const secondary = grade.hslSecondary;
+  return (
+    finiteRange(grade.exposure, -5, 5) &&
+    finiteRange(grade.temperature, -1, 1) &&
+    finiteRange(grade.tint, -1, 1) &&
+    [lift.r, lift.g, lift.b].every((value) => finiteRange(value, -1, 1)) &&
+    [gamma.r, gamma.g, gamma.b].every((value) => Number.isFinite(value) && value > 0 && value <= 4) &&
+    [gain.r, gain.g, gain.b].every((value) => finiteRange(value, 0, 4)) &&
+    finiteRange(grade.contrast, -1, 2) &&
+    finiteRange(grade.saturation, 0, 3) &&
+    (secondary == null ||
+      (finiteRange(secondary.hueCenter, 0, 1) &&
+        Number.isFinite(secondary.hueWidth) && secondary.hueWidth > 0 && secondary.hueWidth <= 1 &&
+        finiteRange(secondary.feather, 0, 0.5) &&
+        finiteRange(secondary.hueShift, -0.5, 0.5) &&
+        finiteRange(secondary.saturation, -1, 1) &&
+        finiteRange(secondary.lightness, -1, 1)))
+  );
 }
 
 function normalizeChromaKey(
@@ -80,6 +114,11 @@ function normalizeMask(mask: Extract<EditRequest, { type: "setMasks" }>["masks"]
     },
     feather: mask.feather ?? 0,
     invert: mask.invert ?? false,
+    transform: mask.transform ?? {
+      offset: { x: 0, y: 0 },
+      scale: { x: 1, y: 1 },
+      rotationDegrees: 0,
+    },
   };
 }
 
@@ -491,6 +530,7 @@ export function createFallbackStore() {
             return result(false, "Split Clip", []);
           const rightDur = clip.startFrame + clip.durationFrames - cmd.atFrame;
           clip.durationFrames = cmd.atFrame - clip.startFrame;
+          delete clip.loudnessNormalization;
           const right = newClip(nextId(), clip.mediaRef, clip.mediaType, cmd.atFrame, rightDur);
           timeline.tracks[ti].clips.splice(ci + 1, 0, right);
           return result(true, "Split Clip", [right.id]);
@@ -502,6 +542,15 @@ export function createFallbackStore() {
             if (!loc) continue;
             const c = timeline.tracks[loc[0]].clips[loc[1]];
             const p = cmd.properties;
+            if (
+              p.durationFrames !== undefined ||
+              p.trimStartFrame !== undefined ||
+              p.trimEndFrame !== undefined ||
+              p.speed !== undefined ||
+              p.reversed !== undefined
+            ) {
+              delete c.loudnessNormalization;
+            }
             if (p.opacity !== undefined) (c.opacity = p.opacity), (changed = true);
             if (p.volume !== undefined) (c.volume = p.volume), (changed = true);
             if (p.speed !== undefined) (c.speed = p.speed), (changed = true);
@@ -522,6 +571,9 @@ export function createFallbackStore() {
           const locations = findAllClips(cmd.clipIds);
           if (!locations) return result(false, "Set Color Grade", []);
           const next = normalizeColorGrade(cmd.grade);
+          if (next && !isValidColorGrade(next)) {
+            return result(false, "Set Color Grade", []);
+          }
           let changed = false;
           for (const loc of locations) {
             const clip = timeline.tracks[loc[0]].clips[loc[1]];
@@ -531,6 +583,33 @@ export function createFallbackStore() {
             }
           }
           return result(changed, "Set Color Grade", cmd.clipIds);
+        }
+        case "setLut": {
+          const locations = findAllClips(cmd.clipIds);
+          if (!locations) return result(false, "Set LUT", []);
+          const next = cmd.lut ?? undefined;
+          const nameBytes = next ? new TextEncoder().encode(next.name).length : 0;
+          if (
+            next &&
+            (!/^[0-9a-f]{64}$/.test(next.id) ||
+              nameBytes < 1 ||
+              nameBytes > 128 ||
+              /\p{Cc}/u.test(next.name) ||
+              !Number.isFinite(next.intensity) ||
+              next.intensity < 0 ||
+              next.intensity > 1)
+          ) {
+            return result(false, "Set LUT", []);
+          }
+          let changed = false;
+          for (const loc of locations) {
+            const clip = timeline.tracks[loc[0]].clips[loc[1]];
+            if (JSON.stringify(clip.lut) !== JSON.stringify(next)) {
+              clip.lut = next ? { ...next } : undefined;
+              changed = true;
+            }
+          }
+          return result(changed, "Set LUT", cmd.clipIds);
         }
         case "setChromaKey": {
           const locations = findAllClips(cmd.clipIds);
@@ -573,6 +652,112 @@ export function createFallbackStore() {
             }
           }
           return result(changed, "Set Effects", cmd.clipIds);
+        }
+        case "setLoudnessNormalization": {
+          const loc = findClip(cmd.clipId);
+          if (!loc) return result(false, "Normalize Loudness", []);
+          const clip = timeline.tracks[loc[0]].clips[loc[1]];
+          const next = cmd.normalization ?? undefined;
+          if (JSON.stringify(clip.loudnessNormalization) === JSON.stringify(next)) {
+            return result(false, next ? "Normalize Loudness" : "Reset Loudness", []);
+          }
+          clip.loudnessNormalization = next;
+          return result(true, next ? "Normalize Loudness" : "Reset Loudness", [cmd.clipId]);
+        }
+        case "setAudioDenoise": {
+          const loc = findClip(cmd.clipId);
+          if (!loc) return result(false, "Apply Audio Denoise", []);
+          const clip = timeline.tracks[loc[0]].clips[loc[1]];
+          const next = cmd.denoise ?? undefined;
+          if (JSON.stringify(clip.audioDenoise) === JSON.stringify(next)) {
+            return result(false, next ? "Apply Audio Denoise" : "Reset Audio Denoise", []);
+          }
+          clip.audioDenoise = next ? structuredClone(next) : undefined;
+          return result(
+            true,
+            next ? "Apply Audio Denoise" : "Reset Audio Denoise",
+            [cmd.clipId],
+          );
+        }
+        case "applyStabilization": {
+          const loc = findClip(cmd.clipId);
+          if (!loc) return result(false, "Apply Stabilization", []);
+          const clip = timeline.tracks[loc[0]].clips[loc[1]];
+          if (clip.mediaType !== "video" || cmd.solution.sourceIdentity !== clip.mediaRef) {
+            return result(false, "Apply Stabilization", []);
+          }
+          clip.stabilization = structuredClone(cmd.solution);
+          return result(true, "Apply Stabilization", [cmd.clipId]);
+        }
+        case "adjustStabilization": {
+          const loc = findClip(cmd.clipId);
+          if (!loc) return result(false, "Adjust Stabilization", []);
+          const clip = timeline.tracks[loc[0]].clips[loc[1]];
+          if (!clip.stabilization) return result(false, "Adjust Stabilization", []);
+          if (cmd.strength !== undefined) clip.stabilization.strength = cmd.strength;
+          if (cmd.cropMargin !== undefined) clip.stabilization.cropMargin = cmd.cropMargin;
+          return result(true, "Adjust Stabilization", [cmd.clipId]);
+        }
+        case "resetStabilization": {
+          const loc = findClip(cmd.clipId);
+          if (!loc) return result(false, "Reset Stabilization", []);
+          const clip = timeline.tracks[loc[0]].clips[loc[1]];
+          if (!clip.stabilization) return result(false, "Reset Stabilization", []);
+          delete clip.stabilization;
+          return result(true, "Reset Stabilization", [cmd.clipId]);
+        }
+        case "setTransition": {
+          const fromLocation = findClip(cmd.fromClipId);
+          if (!fromLocation) return result(false, "Set Transition", []);
+          const from = timeline.tracks[fromLocation[0]].clips[fromLocation[1]];
+          if (cmd.kind == null) {
+            if (
+              from.transitionOut?.toClipId !== cmd.toClipId ||
+              (from.transitionOut.fromClipId !== undefined &&
+                from.transitionOut.fromClipId !== cmd.fromClipId)
+            ) {
+              return result(false, "Remove Transition", []);
+            }
+            delete from.transitionOut;
+            return result(true, "Remove Transition", [cmd.fromClipId, cmd.toClipId]);
+          }
+          const toLocation = findClip(cmd.toClipId);
+          if (!toLocation || toLocation[0] !== fromLocation[0]) {
+            return result(false, "Set Transition", []);
+          }
+          const track = timeline.tracks[fromLocation[0]];
+          const to = timeline.tracks[toLocation[0]].clips[toLocation[1]];
+          const ordered = track.clips
+            .slice()
+            .sort((left, right) => left.startFrame - right.startFrame || left.id.localeCompare(right.id));
+          const fromIndex = ordered.findIndex((clip) => clip.id === from.id);
+          if (
+            cmd.durationFrames < 1 ||
+            track.type === "audio" ||
+            from.mediaType === "audio" ||
+            from.mediaType === "text" ||
+            to.mediaType === "audio" ||
+            to.mediaType === "text" ||
+            from.startFrame + from.durationFrames !== to.startFrame ||
+            ordered[fromIndex + 1]?.id !== to.id
+          ) {
+            return result(false, "Set Transition", []);
+          }
+          const maximum = Math.max(1, Math.floor(Math.min(from.durationFrames, to.durationFrames) / 2));
+          if (cmd.durationFrames > maximum) {
+            return result(false, "Set Transition", []);
+          }
+          const next = {
+            fromClipId: from.id,
+            toClipId: to.id,
+            kind: cmd.kind,
+            durationFrames: cmd.durationFrames,
+          };
+          if (JSON.stringify(from.transitionOut) === JSON.stringify(next)) {
+            return result(false, "Set Transition", []);
+          }
+          from.transitionOut = next;
+          return result(true, "Set Transition", [cmd.fromClipId, cmd.toClipId]);
         }
         case "swapMedia": {
           return result(false, "Swap Media", []);

@@ -80,6 +80,8 @@ fn probe_timeline() -> (Timeline, MediaManifest) {
         source_height: Some(360),
         source_fps: Some(30.0),
         has_audio: Some(false),
+        color: None,
+        proxy: None,
         folder_id: None,
         cached_remote_url: None,
         cached_remote_url_expires_at: None,

@@ -1,6 +1,6 @@
 /**
  * MediaPanel (SPEC §7 + 剪映式顶栏改造)。顶部横排主标签（素材/音频/文本/贴纸/
- * 特效/转场/字幕/智能包裹，仅素材/音频可用，其余置灰占位）取代了原左侧竖排
+ * 特效/转场/字幕/智能包裹；素材/音频/音乐/字幕已接真实内容）取代了原左侧竖排
  * Media/Captions/Music 标签条。素材/音频下再分「导入 / 我的」二级标签：导入=当前
  * 项目素材（音频标签仅 type==='audio'），我的=跨项目全局收藏库。
  * 内容区仍是 actions/search/context 工具栏 + 资产网格；网格项 HTML5-draggable 到
@@ -63,7 +63,10 @@ import { saveDialog } from "../../lib/dialog";
 import type { MediaFolder, MediaItem } from "../../lib/types";
 import { MediaTabBar, MediaSubTabBar, MATERIAL_SUB_TABS, AUDIO_SUB_TABS } from "./MediaTabBar";
 import { SoundLibraryTab } from "./SoundLibraryTab";
+import { MusicTab } from "./MusicTab";
+import { TransitionTab } from "./TransitionTab";
 import { CaptionsTab } from "./CaptionsTab";
+import { SmartPackTab } from "./SmartPackTab";
 import { MediaSearchResults } from "./MediaSearch";
 import { applyFavoriteMigrationOutcome, migrateLocalFavorites } from "./favorites";
 import { LibraryEntryGrid } from "./LibraryView";
@@ -201,8 +204,14 @@ export function MediaPanel() {
       <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column" }}>
         {isLibraryTab ? (
           <MediaTab kind={mediaTab as MediaTabKind} />
+        ) : mediaTab === "music" ? (
+          <MusicTab />
+        ) : mediaTab === "transition" ? (
+          <TransitionTab />
         ) : mediaTab === "subtitle" ? (
           <CaptionsTab />
+        ) : mediaTab === "smartPack" ? (
+          <SmartPackTab />
         ) : (
           <Placeholder label={t(`media.tab.${mediaTab}`)} />
         )}

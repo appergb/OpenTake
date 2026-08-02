@@ -38,7 +38,7 @@
   - Add deterministic fixtures for every named current, legacy, missing, malformed, and fail-closed branch; the focused round-trip and compatibility suites must pass.
   - Exercise open, edit, save, and reopen on representative bundles and attach the exact implementation symbols plus test or runtime evidence before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-project/tests/upstream_compat.rs#applies_clip_defaults_for_omitted_fields` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-project/tests/upstream_compat.rs#migrates_legacy_transform_xy_to_center` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -47,7 +47,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-project --test upstream_compat applies_clip_defaults_for_omitted_fields -- --exact`
   - Run: `cargo test -p opentake-project --test upstream_compat migrates_legacy_transform_xy_to_center -- --exact`
@@ -56,11 +56,11 @@
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-project/src/bundle.rs#Project`, `crates/opentake-domain/src/clip.rs#Clip`, `crates/opentake-domain/src/media.rs#MediaManifest`, `crates/opentake-project/src/gen_log.rs#GenerationLogEntry`, `docs/architecture/MODULE-PORT-MAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-project --test upstream_compat applies_clip_defaults_for_omitted_fields -- --exact`
   - Run: `cargo test -p opentake-project --test upstream_compat migrates_legacy_transform_xy_to_center -- --exact`
@@ -69,11 +69,13 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Completion evidence: [`data-safety-legacy-default-matrix-real-device-2026-07-31.md`](../runtime-artifacts/automated/data-safety-legacy-default-matrix-real-device-2026-07-31.md). The four exact owning tests already passed at the initial baseline, so Task 1 required evidence closure and a packaged-app round trip rather than a new production patch; no artificial RED failure was introduced.
 
 ### Task 2: DS-mcp-transport (implementation-slice-078ed22bfa23f28a)
 
@@ -101,7 +103,7 @@
   - Origin and Host DNS-rebinding guards, request-size limit, and MCP protocol-version validation are all active and independently tested.
   - HTTP integration tests prove external Host/Origin and unsupported protocol versions never invoke a tool.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-agent/tests/mcp_http.rs#non_local_origin_is_rejected` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-agent/tests/mcp_http.rs#oversized_request_body_is_rejected` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -110,7 +112,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-agent --test mcp_http non_local_origin_is_rejected -- --exact`
   - Run: `cargo test -p opentake-agent --test mcp_http oversized_request_body_is_rejected -- --exact`
@@ -119,11 +121,11 @@
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-agent/src/mcp/server.rs#McpServer`, `crates/opentake-agent/src/mcp/server.rs#serve_with_bridge`, `docs/modules/opentake-agent/SPEC.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-agent --test mcp_http non_local_origin_is_rejected -- --exact`
   - Run: `cargo test -p opentake-agent --test mcp_http oversized_request_body_is_rejected -- --exact`
@@ -132,11 +134,13 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Completion evidence: [`data-safety-mcp-transport-real-device-2026-07-31.md`](../runtime-artifacts/automated/data-safety-mcp-transport-real-device-2026-07-31.md). The four exact owning tests already passed at the initial baseline, so Task 2 required packaged-server verification and evidence closure rather than a new production patch; no artificial RED failure was introduced.
 
 ### Task 3: DS-mcp-tool-import (implementation-slice-a5dcb81bd0966174)
 
@@ -166,7 +170,7 @@
   - Reject non-HTTPS/userinfo/redirect-to-non-HTTPS URLs before I/O; infer or validate the extension/MIME allowlist; stream to a staging file while enforcing the 1 GB decoded-byte cap across redirects.
   - Publish only after download, type/probe, and retained-project validation; cancellation/error cleans staging and leaves manifest unchanged.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-agent/src/mcp/dispatch.rs#import_media_requires_exactly_one_source` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-agent/src/mcp/dispatch.rs#import_media_rejects_unknown_nested_source_key` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -176,7 +180,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-agent import_media_requires_exactly_one_source`
   - Run: `cargo test -p opentake-agent import_media_rejects_unknown_nested_source_key`
@@ -186,11 +190,11 @@
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-agent/src/tools/errors.rs#decode_tool_args`, `crates/opentake-agent/src/mcp/dispatch.rs#Dispatcher`, `src-tauri/src/mcp.rs#TauriMediaBridge`, `docs/modules/opentake-agent/SPEC.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-agent import_media_requires_exactly_one_source`
   - Run: `cargo test -p opentake-agent import_media_rejects_unknown_nested_source_key`
@@ -200,11 +204,13 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Completion evidence: [`data-safety-mcp-tool-import-real-device-2026-07-31.md`](../runtime-artifacts/automated/data-safety-mcp-tool-import-real-device-2026-07-31.md). The initial exact argument-matrix command executed zero tests because its owning test had an extra suffix; the test was renamed to the plan-declared contract and then passed 1/1. Production import guards were already complete, and the packaged server passed path, bytes, HTTPS, rejection, persistence, and UI checks.
 
 ### Task 4: DS-mcp-redaction (implementation-slice-673f9e3f6002f97b)
 
@@ -228,33 +234,35 @@
   - Introduce a boundary sanitizer with typed safe error codes/details and private structured logging.
   - Adversarial tests inject a home path, API key, bearer token, signed URL query, provider body, and nested source error and assert none appear in MCP content while remediation remains actionable.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-agent/tests/mcp_error_redaction.rs#llm_errors_redact_paths_credentials_headers_provider_bodies` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-agent --test mcp_error_redaction llm_errors_redact_paths_credentials_headers_provider_bodies -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `src-tauri/src/mcp.rs#TauriMediaBridge`, `crates/opentake-agent/src/mcp/convert.rs#to_call_tool_result`, `docs/modules/opentake-agent/SPEC.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-agent --test mcp_error_redaction llm_errors_redact_paths_credentials_headers_provider_bodies -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Completion evidence: [`data-safety-mcp-redaction-real-device-2026-07-31.md`](../runtime-artifacts/automated/data-safety-mcp-redaction-real-device-2026-07-31.md). The exact owning matrix already passed at the initial baseline; the packaged MCP server independently proved adversarial path, credential, authorization, signed-query, and provider-style strings never reached response content.
 
 ### Task 5: DS-generation-seed (implementation-slice-4f2d8bcaff47a37f)
 
@@ -292,36 +300,38 @@
   - Add deterministic fixtures for every named current, legacy, missing, malformed, and fail-closed branch; the focused round-trip and compatibility suites must pass.
   - Exercise open, edit, save, and reopen on representative bundles and attach the exact implementation symbols plus test or runtime evidence before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-project/tests/roundtrip.rs#malformed_generation_log_is_ignored` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-core/tests/project_open.rs#missing_generation_log_seeds_manifest_provenance_once` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-project --test roundtrip malformed_generation_log_is_ignored -- --exact`
   - Run: `cargo test -p opentake-core --test project_open missing_generation_log_seeds_manifest_provenance_once -- --exact`
 
   Expected: FAIL because one or more of the 2 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-project/src/bundle.rs#Project`, `crates/opentake-core/src/session.rs#EditorSession`, `docs/modules/opentake-core/SPEC.md`, `docs/specs/core/5-assembly.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-project --test roundtrip malformed_generation_log_is_ignored -- --exact`
   - Run: `cargo test -p opentake-core --test project_open missing_generation_log_seeds_manifest_provenance_once -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Completion evidence: [`data-safety-generation-seed-real-device-2026-07-31.md`](../runtime-artifacts/automated/data-safety-generation-seed-real-device-2026-07-31.md). Both exact owning tests already passed at the initial baseline; the packaged application additionally proved missing-log seed, duplicate-provenance collapse, edit/save/reopen, and byte-stable idempotence.
 
 ### Task 6: DS-cache-identity-complete (implementation-slice-5af4f1ababc7b495)
 
@@ -352,7 +362,7 @@
   - Visible/returned assertion: assert the exact success payload for the valid case and a stable typed error for the invalid case, including zero partial side effects and no leaked internal path or credential.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-project/tests/completion_1cb2f0539425a14e.rs#completion_1cb2f0539425a14e_derive_a_stable_lowercase_32_hex_file_identity_f.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-media/src/cache_key.rs#identity_hex_is_stable_and_lowercase` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-media/src/cache_key.rs#identity_hex_matches_swift_for_whole_second_mtime` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -360,7 +370,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-media identity_hex_is_stable_and_lowercase`
   - Run: `cargo test -p opentake-media identity_hex_matches_swift_for_whole_second_mtime`
@@ -368,11 +378,11 @@
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-media/src/cache_key.rs#file_identity_key`, `crates/opentake-media/src/cache_key.rs#identity_hex`, `docs/modules/opentake-media/SPEC.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-media identity_hex_is_stable_and_lowercase`
   - Run: `cargo test -p opentake-media identity_hex_matches_swift_for_whole_second_mtime`
@@ -380,11 +390,13 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Completion evidence: [`data-safety-cache-identity-real-device-2026-07-31.md`](../runtime-artifacts/automated/data-safety-cache-identity-real-device-2026-07-31.md). The three exact owning tests already passed at baseline; a packaged-app waveform cache filename also matched an independent Foundation/CryptoKit calculation for the same real file byte-for-byte.
 
 ### Task 7: DS-shared-core-command-complete (implementation-slice-63ec0e639957e775)
 
@@ -554,7 +566,7 @@
   - Visible/returned assertion: assert the returned project/error variant, exact post-operation files and decoded state, and save-then-reopen equality or the specified fail-closed no-write result.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:tools/completion-tests/doc-c95515ae8f048e8a.test.mjs#completion_c95515ae8f048e8a_editor_state_and_edits_are_owned_by_the_shared_r.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-ops/src/editor_state.rs#commit_undo_redo_cycle_restores_and_versions` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-core/src/core.rs#apply_bumps_version_and_emits_once` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -563,7 +575,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-ops commit_undo_redo_cycle_restores_and_versions`
   - Run: `cargo test -p opentake-core apply_bumps_version_and_emits_once`
@@ -572,11 +584,11 @@
 
   Expected: FAIL because one or more of the 10 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-ops/src/editor_state.rs#EditorState`, `crates/opentake-ops/src/command.rs#EditCommand`, `crates/opentake-core/src/core.rs#AppCore`, `crates/opentake-core/src/events.rs#EventBus`, `docs/specs/core/1-editor-state.md`, `docs/specs/core/2-command-routing.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-ops commit_undo_redo_cycle_restores_and_versions`
   - Run: `cargo test -p opentake-core apply_bumps_version_and_emits_once`
@@ -585,7 +597,7 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
@@ -667,7 +679,7 @@
   - On every pre-commit failure, drop prepared capabilities, restore acquired transitions, publish no usable session, and preserve all project files unchanged.
   - Fault-inject the owned failure boundaries and assert cleanup/event order, then open/save/reopen valid and migrated fixtures with identical IDs, frames, media, and generation history.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-project/tests/upstream_compat.rs#exhaustive_legacy_default_matrix` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
   - `crates/opentake-core/tests/project_open.rs#missing_generation_log_seeds_manifest_provenance_once` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
@@ -681,7 +693,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-project --test upstream_compat exhaustive_legacy_default_matrix -- --exact`
   - Run: `cargo test -p opentake-core --test project_open missing_generation_log_seeds_manifest_provenance_once -- --exact`
@@ -695,11 +707,11 @@
 
   Expected: FAIL because one or more of the 4 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only the files listed for Task 8 as required to satisfy every listed acceptance criterion, including atomic combined reads, visible success, and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-project --test upstream_compat exhaustive_legacy_default_matrix -- --exact`
   - Run: `cargo test -p opentake-core --test project_open missing_generation_log_seeds_manifest_provenance_once -- --exact`
@@ -713,7 +725,7 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
@@ -748,14 +760,14 @@
   - Add deterministic fixtures for every named current, legacy, missing, malformed, and fail-closed branch; the focused round-trip and compatibility suites must pass.
   - Exercise open, edit, save, and reopen on a complete current version-2 bundle. Prove every rejected open/save leaves the full nofollow bundle tree unchanged, and prove rejected Save As creates no destination, journal, staging, symlink, or other sibling artifact.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-project/tests/roundtrip.rs#malformed_manifest_is_an_error` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-project/tests/schema_compat.rs#malformed_manifest_contract_matches_authoritative_source` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-project --test roundtrip malformed_manifest_is_an_error -- --exact`
   - Run: `cargo test -p opentake-project --test schema_compat malformed_manifest_contract_matches_authoritative_source -- --exact`
@@ -763,20 +775,20 @@
   Expected: the existing round-trip smoke passes, while the reviewed-planned
   schema contract is absent (`running 0 tests`), so the gate is not satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Add the missing owning test and reconcile the comments/spec/plan in the files
   listed for Task 9. Do not change the already-correct `Project` or
   `MediaManifest` runtime behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-project --test roundtrip malformed_manifest_is_an_error -- --exact`
   - Run: `cargo test -p opentake-project --test schema_compat malformed_manifest_contract_matches_authoritative_source -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
@@ -1040,12 +1052,17 @@ before namespace mutation; downstream algorithm tests use test-only trusted fixt
   - Acquisition, DACL checks, I/O, quarantine, no-replace publish, cleanup, reparse-point, source-swap, and cancellation regressions pass on native Windows.
   - The x86_64-pc-windows-msvc build, warnings-denied clippy, repository Windows jobs, and independent review all pass for the exact tree.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-project/src/safe_fs/tests.rs#windows_contract` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
   - `crates/opentake-project/src/safe_fs/tests.rs#synchronous_nt_pending_is_invariant_error` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
+
+  Result: Both exact names now execute in the common owning runner on native
+  Windows. Adapter-local tests cover DACL bounds and malformed descriptors,
+  retained I/O, rollback, quarantine, no-replace publish, recursive reparse
+  cleanup, and source-name rebinding resistance.
 
 - [ ] **Step 2: Run all focused tests and verify RED**
 
@@ -1054,16 +1071,28 @@ before namespace mutation; downstream algorithm tests use test-only trusted fixt
 
   Expected: FAIL because one or more of the 3 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-project/src/safe_fs/capability.rs#DirectoryAuthority`, `crates/opentake-project/src/safe_fs/ops.rs#capture_absolute_directory`, `docs/superpowers/plans/c1b/2026-07-12-c1b-windows-ci-normative.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+  Result: `windows.rs` is a compile-complete retained-HANDLE backend with
+  capability-relative no-follow acquisition, synchronous NT status handling,
+  owner-only security descriptors, I/O, quarantine, no-replace publish, and
+  non-traversing cleanup. It contains no unsupported-backend include or bypass
+  implementation.
+
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-project windows_contract`
   - Run: `cargo test -p opentake-project synchronous_nt_pending_is_invariant_error`
 
   Expected: PASS with every candidate-bound assertion executed.
+
+  Result: Native Windows run 30617000877, job 91112395644, executed 26 safe-fs
+  tests: 26 passed, 0 failed. Formatting, warnings-denied native clippy, and the
+  archive-security integration suite also exited zero. The immutable receipt is
+  recorded in
+  `runtime-artifacts/automated/data-safety-windows-safe-fs-native-2026-07-31.md`.
 
 - [ ] **Step 5: Run the subsystem regression gate**
 
@@ -1152,7 +1181,7 @@ before namespace mutation; downstream algorithm tests use test-only trusted fixt
   - Visible/returned assertion: assert the returned project/error variant, exact post-operation files and decoded state, and save-then-reopen equality or the specified fail-closed no-write result.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:tools/completion-tests/doc-bf6666ce4bc65294.test.mjs#completion_bf6666ce4bc65294_resolve_media_ref_to_an_expected_path_while_dist.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-domain/src/media.rs#resolver_expected_path_external` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `src-tauri/src/media.rs#dto_reports_file_size_for_present_source` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -1160,7 +1189,12 @@ before namespace mutation; downstream algorithm tests use test-only trusted fixt
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+  Result: The three reviewed Rust owners remain at their declared symbols, and
+  `tools/completion-tests/doc-bf6666ce4bc65294.test.mjs` now binds them under
+  the exact generated completion-test name. The runner rejects a zero-test
+  filter by requiring each Cargo invocation to report exactly one passing test.
+
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-domain resolver_expected_path_external`
   - Run: `cargo test -p opentake-tauri dto_reports_file_size_for_present_source`
@@ -1168,11 +1202,22 @@ before namespace mutation; downstream algorithm tests use test-only trusted fixt
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Result: The product behavior predated this generated completion slice, so the
+  honest missing-evidence RED was the absent declared completion-test path; the
+  required `node --test tools/completion-tests/doc-bf6666ce4bc65294.test.mjs`
+  entry point could not run. No product regression was manufactured.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-domain/src/media.rs#MediaResolver`, `src-tauri/src/media.rs#relink_media`, `docs/upstream-analysis/01-架构与数据流.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+  Result: The reviewed implementation already resolved external and
+  project-relative sources, derived present/offline state from the filesystem,
+  and relinked an offline asset in place while preserving its ID. The missing
+  work was the deterministic evidence bridge; no production-code change was
+  needed.
+
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-domain resolver_expected_path_external`
   - Run: `cargo test -p opentake-tauri dto_reports_file_size_for_present_source`
@@ -1180,8 +1225,17 @@ before namespace mutation; downstream algorithm tests use test-only trusted fixt
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+  Result: `node --test
+  tools/completion-tests/doc-bf6666ce4bc65294.test.mjs` passed 1/1. Its three
+  exact Cargo filters each executed one owner and passed, covering expected-path
+  resolution, present-source size/state, and offline-to-present relink with a
+  stable media ID.
+
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: `cargo fmt --all -- --check && cargo test --workspace
+  --no-fail-fast` passed on the exact local tree.

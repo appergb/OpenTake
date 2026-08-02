@@ -15,11 +15,14 @@ import type { TrackDropTarget } from "../lib/geometry";
 import { validRange, type TimelineRange } from "../lib/timelineRange";
 import { planNudge } from "../lib/timelineNudge";
 import { buildInsertPlan, type InsertPlan } from "../lib/timelineInsert";
+import { checkProjectSettings, type ProjectSettingsTarget } from "../lib/projectSettings";
 import { expandLinkGroup } from "../components/timeline/hitTest";
 import { useClipboardStore } from "./clipboardStore";
+import { t } from "../i18n";
 import type {
   CaptionEntryReq,
   CaptionRequest,
+  AudioDenoise,
   Clip,
   ClipEntryReq,
   ClipMoveReq,
@@ -36,26 +39,175 @@ import type {
   KeyframeProperty,
   KeyframeValueReq,
   MaskInput,
+  LutReference,
+  LoudnessNormalization,
+  DenoiseMode,
   MediaItem,
+  StabilizationTrack,
   RenameEntryReq,
+  TextEntryReq,
   TextAutoTrackEntryReq,
   TextStyle,
   Timeline,
   Transform,
+  TransitionKind,
   TrimEditReq,
 } from "../lib/types";
 
-async function applyAndRefresh(cmd: Parameters<typeof api.editApply>[0]) {
-  const res = await api.editApply(cmd);
+/**
+ * Maintained UI-gesture → wire DTO → Rust command inventory. The exhaustiveness
+ * sentinel below makes a newly-added `EditRequest` variant a compile failure
+ * until its production gesture route is recorded here.
+ */
+export const EDIT_GESTURE_COMMAND_MATRIX = [
+  { gesture: "group selected clips", action: "createNestedSequence", requestType: "createNestedSequence", backend: "CreateNestedSequenceFromClips" },
+  { gesture: "edit inside compound", action: "editNestedSequence", requestType: "editNestedSequence", backend: "EditNestedSequence" },
+  { gesture: "rename compound", action: "renameNestedSequence", requestType: "renameNestedSequence", backend: "RenameNestedSequence" },
+  { gesture: "dissolve compound", action: "dissolveNestedSequence", requestType: "dissolveNestedSequence", backend: "DissolveNestedSequence" },
+  { gesture: "media overwrite drop", action: "addClips", requestType: "addClips", backend: "AddClips" },
+  { gesture: "media ripple insert", action: "insertClips", requestType: "insertClips", backend: "InsertClips" },
+  { gesture: "clip drag commit", action: "moveClips", requestType: "moveClips", backend: "MoveClips" },
+  { gesture: "option drag copy", action: "duplicateClips", requestType: "duplicateClips", backend: "DuplicateClips" },
+  { gesture: "delete selection", action: "removeClips", requestType: "removeClips", backend: "RemoveClips" },
+  { gesture: "razor or command-k", action: "splitClip", requestType: "splitClip", backend: "SplitClip" },
+  { gesture: "freeze frame", action: "freezeFrame", requestType: "freezeFrame", backend: "FreezeFrame" },
+  { gesture: "trim handle commit", action: "trimClips", requestType: "trimClips", backend: "TrimClips" },
+  { gesture: "inspector property commit", action: "setClipProperties", requestType: "setClipProperties", backend: "SetClipProperties" },
+  { gesture: "replace keyframe lane", action: "setKeyframes", requestType: "setKeyframes", backend: "SetKeyframes" },
+  { gesture: "stamp keyframe", action: "stampKeyframe", requestType: "stampKeyframe", backend: "StampKeyframe" },
+  { gesture: "write animated value", action: "upsertKeyframe", requestType: "upsertKeyframe", backend: "UpsertKeyframe" },
+  { gesture: "delete keyframe", action: "removeKeyframe", requestType: "removeKeyframe", backend: "RemoveKeyframe" },
+  { gesture: "drag keyframe", action: "moveKeyframe", requestType: "moveKeyframe", backend: "MoveKeyframe" },
+  { gesture: "keyframe interpolation menu", action: "setKeyframeInterpolation", requestType: "setKeyframeInterpolation", backend: "SetKeyframeInterpolation" },
+  { gesture: "color grade commit", action: "setColorGrade", requestType: "setColorGrade", backend: "SetColorGrade" },
+  { gesture: "LUT select, intensity, or remove", action: "setLut", requestType: "setLut", backend: "SetLut" },
+  { gesture: "chroma key commit", action: "setChromaKey", requestType: "setChromaKey", backend: "SetChromaKey" },
+  { gesture: "mask commit", action: "setMasks", requestType: "setMasks", backend: "SetMasks" },
+  { gesture: "effect chain commit", action: "setEffects", requestType: "setEffects", backend: "SetEffects" },
+  { gesture: "loudness analysis apply or reset", action: "setLoudnessNormalization", requestType: "setLoudnessNormalization", backend: "SetLoudnessNormalization" },
+  { gesture: "denoise apply, preview toggle, or reset", action: "setAudioDenoise", requestType: "setAudioDenoise", backend: "SetAudioDenoise" },
+  { gesture: "stabilization analysis apply", action: "analyzeAndApplyStabilization", requestType: "applyStabilization", backend: "ApplyStabilization" },
+  { gesture: "stabilization strength or crop", action: "adjustStabilization", requestType: "adjustStabilization", backend: "AdjustStabilization" },
+  { gesture: "stabilization reset", action: "resetStabilization", requestType: "resetStabilization", backend: "ResetStabilization" },
+  { gesture: "transition commit", action: "setTransition", requestType: "setTransition", backend: "SetTransition" },
+  { gesture: "ripple delete range", action: "rippleDeleteRanges", requestType: "rippleDeleteRanges", backend: "RippleDeleteRanges" },
+  { gesture: "shift-delete clips", action: "rippleDeleteClips", requestType: "rippleDeleteClips", backend: "RippleDeleteClips" },
+  { gesture: "place text batch", action: "addTexts", requestType: "addTexts", backend: "AddTexts" },
+  { gesture: "toolbar text", action: "addTextsAutoTrack", requestType: "addTextsAutoTrack", backend: "AddTextsAutoTrack" },
+  { gesture: "generate captions", action: "addCaptions", requestType: "addCaptions", backend: "AddCaptions" },
+  { gesture: "link selection", action: "linkClips", requestType: "link", backend: "Link" },
+  { gesture: "unlink selection", action: "unlinkClips", requestType: "unlink", backend: "Unlink" },
+  { gesture: "delete tracks", action: "removeTracks", requestType: "removeTracks", backend: "RemoveTracks" },
+  { gesture: "move track row", action: "swapTracks", requestType: "swapTracks", backend: "SwapTracks" },
+  { gesture: "exchange clip positions", action: "swapClips", requestType: "swapClips", backend: "SwapClips" },
+  { gesture: "insert track drop zone", action: "insertTrack", requestType: "insertTrack", backend: "InsertTrack" },
+  { gesture: "track header toggle", action: "setTrackProps", requestType: "setTrackProps", backend: "SetTrackProps" },
+  { gesture: "create media folder", action: "createFolder", requestType: "createFolder", backend: "CreateFolder" },
+  { gesture: "move media to folder", action: "moveToFolder", requestType: "moveToFolder", backend: "MoveToFolder" },
+  { gesture: "rename media", action: "renameMedia", requestType: "renameMedia", backend: "RenameMedia" },
+  { gesture: "rename folder", action: "renameFolder", requestType: "renameFolder", backend: "RenameFolder" },
+  { gesture: "delete media", action: "deleteMedia", requestType: "deleteMedia", backend: "DeleteMedia" },
+  { gesture: "delete media folder", action: "deleteFolder", requestType: "deleteFolder", backend: "DeleteFolder" },
+  { gesture: "swap source media", action: "swapMedia", requestType: "swapMedia", backend: "SwapMedia" },
+  { gesture: "reset transform", action: "resetTransform", requestType: "resetTransform", backend: "ResetTransform" },
+  { gesture: "project settings commit", action: "setTimelineSettings", requestType: "setTimelineSettings", backend: "SetTimelineSettings" },
+] as const satisfies ReadonlyArray<{
+  gesture: string;
+  action: string;
+  requestType: EditRequest["type"];
+  backend: string;
+}>;
+
+type RoutedEditRequestType = (typeof EDIT_GESTURE_COMMAND_MATRIX)[number]["requestType"];
+type MissingEditRequestType = Exclude<EditRequest["type"], RoutedEditRequestType>;
+export const EDIT_GESTURE_COMMAND_MATRIX_IS_EXHAUSTIVE: [MissingEditRequestType] extends [never]
+  ? true
+  : never = true;
+
+export function currentTimeline(): Timeline {
+  const root = useProjectStore.getState().timeline;
+  const sequenceId = useEditorUiStore.getState().activeNestedSequenceId;
+  return root.nestedSequences?.find((sequence) => sequence.id === sequenceId)?.timeline ?? root;
+}
+
+/** End frame of the timeline currently shown in the editor. Nested timeline
+ *  transport and paste placement must not inherit the root sequence duration. */
+export function currentTimelineEndFrame(): number {
+  let end = 0;
+  for (const track of currentTimeline().tracks) {
+    for (const clip of track.clips) end = Math.max(end, clip.startFrame + clip.durationFrames);
+  }
+  return end;
+}
+
+const ROOT_SCOPED_EDIT_REQUEST_TYPES = new Set<EditRequest["type"]>([
+  "createNestedSequence",
+  "editNestedSequence",
+  "renameNestedSequence",
+  "dissolveNestedSequence",
+  "createFolder",
+  "moveToFolder",
+  "renameMedia",
+  "renameFolder",
+  "deleteMedia",
+  "deleteFolder",
+  "setTimelineSettings",
+]);
+
+async function applyAndRefresh(
+  cmd: Parameters<typeof api.editApply>[0],
+  options: { root?: boolean } = {},
+) {
+  const sequenceId = useEditorUiStore.getState().activeNestedSequenceId;
+  const targetsRoot = options.root || ROOT_SCOPED_EDIT_REQUEST_TYPES.has(cmd.type);
+  const request =
+    sequenceId && !targetsRoot
+      ? ({ type: "editNestedSequence", sequenceId, command: cmd } as const)
+      : cmd;
+  const res = await api.editApply(request);
   // Tauri pushes timeline_changed -> sync re-fetches. The browser fallback has
   // no event channel, so refresh explicitly there.
   if (!isTauri && res.changed) await forceRefresh();
   return res;
 }
 
+export async function createNestedSequence(name = "Compound clip") {
+  const clipIds = Array.from(useEditorUiStore.getState().selectedClipIds);
+  if (clipIds.length === 0) return;
+  const result = await applyAndRefresh({ type: "createNestedSequence", name, clipIds }, { root: true });
+  if (result.affectedClipIds[0]) {
+    useEditorUiStore.getState().selectClips(new Set([result.affectedClipIds[0]]));
+  }
+  return result;
+}
+
+export async function renameNestedSequence(sequenceId: string, name: string) {
+  return applyAndRefresh({ type: "renameNestedSequence", sequenceId, name }, { root: true });
+}
+
+export async function editNestedSequence(sequenceId: string, command: EditRequest) {
+  return applyAndRefresh({ type: "editNestedSequence", sequenceId, command }, { root: true });
+}
+
+export async function dissolveNestedSequence(clipId: string) {
+  return applyAndRefresh({ type: "dissolveNestedSequence", clipId }, { root: true });
+}
+
 export async function addClips(entries: ClipEntryReq[]) {
   if (entries.length === 0) return;
   return applyAndRefresh({ type: "addClips", entries });
+}
+
+/** Place prepared text clips on explicit tracks as one edit transaction. */
+export async function addTexts(entries: TextEntryReq[]) {
+  if (entries.length === 0) return;
+  return applyAndRefresh({ type: "addTexts", entries });
+}
+
+/** Place prepared text clips on one fresh top track as one edit transaction. */
+export async function addTextsAutoTrack(entries: TextAutoTrackEntryReq[]) {
+  if (entries.length === 0) return;
+  return applyAndRefresh({ type: "addTextsAutoTrack", entries });
 }
 
 /** Ripple-insert clips at `atFrame` on `trackIndex`: place the entries and push
@@ -172,6 +324,11 @@ export async function setColorGrade(clipIds: string[], grade: ColorGradeInput | 
   await applyAndRefresh({ type: "setColorGrade", clipIds, grade });
 }
 
+export async function setLut(clipIds: string[], lut: LutReference | null) {
+  if (clipIds.length === 0) return;
+  await applyAndRefresh({ type: "setLut", clipIds, lut });
+}
+
 export async function setChromaKey(clipIds: string[], chromaKey: ChromaKeyInput | null) {
   if (clipIds.length === 0) return;
   await applyAndRefresh({ type: "setChromaKey", clipIds, chromaKey });
@@ -187,6 +344,86 @@ export async function setEffects(clipIds: string[], effects: EffectInput[]) {
   await applyAndRefresh({ type: "setEffects", clipIds, effects });
 }
 
+export async function setLoudnessNormalization(
+  clipId: string,
+  normalization: LoudnessNormalization | null,
+) {
+  await applyAndRefresh({ type: "setLoudnessNormalization", clipId, normalization });
+}
+
+export async function analyzeAndApplyLoudness(
+  clipId: string,
+  targetLufs: number,
+  truePeakCeilingDbtp: number,
+) {
+  const normalization = await api.analyzeLoudness(clipId, targetLufs, truePeakCeilingDbtp);
+  await setLoudnessNormalization(clipId, normalization);
+  return normalization;
+}
+
+export async function cancelLoudnessAnalysis() {
+  return api.cancelLoudnessAnalysis();
+}
+
+export async function setAudioDenoise(clipId: string, denoise: AudioDenoise | null) {
+  await applyAndRefresh({ type: "setAudioDenoise", clipId, denoise });
+}
+
+export async function prepareAndApplyAudioDenoise(
+  clipId: string,
+  mode: DenoiseMode,
+  strength: number,
+  previewEnabled: boolean,
+) {
+  const denoise = await api.prepareDenoise(clipId, mode, strength, previewEnabled);
+  await setAudioDenoise(clipId, denoise);
+  return denoise;
+}
+
+export async function cancelDenoiseAnalysis() {
+  return api.cancelDenoiseAnalysis();
+}
+
+export async function applyStabilization(clipId: string, solution: StabilizationTrack) {
+  await applyAndRefresh({ type: "applyStabilization", clipId, solution });
+}
+
+export async function analyzeAndApplyStabilization(clipId: string) {
+  const solution = await api.analyzeStabilization(clipId);
+  await applyStabilization(clipId, solution);
+  return solution;
+}
+
+export async function cancelStabilizationAnalysis() {
+  return api.cancelStabilizationAnalysis();
+}
+
+export async function adjustStabilization(
+  clipId: string,
+  adjustment: { strength?: number; cropMargin?: number },
+) {
+  await applyAndRefresh({ type: "adjustStabilization", clipId, ...adjustment });
+}
+
+export async function resetStabilization(clipId: string) {
+  await applyAndRefresh({ type: "resetStabilization", clipId });
+}
+
+export async function setTransition(
+  fromClipId: string,
+  toClipId: string,
+  kind: TransitionKind | null,
+  durationFrames: number,
+) {
+  await applyAndRefresh({
+    type: "setTransition",
+    fromClipId,
+    toClipId,
+    kind,
+    durationFrames,
+  });
+}
+
 /** Inspector Transform section "Reset" button (upstream `transformHeader`
  *  onReset). Resets transform to identity, opacity to full, clears the
  *  opacity/position/scale/rotation keyframe tracks, and zeroes both fades.
@@ -200,7 +437,7 @@ export async function resetTransform(clipIds: string[]) {
  *  Quality badge menus (upstream `applyTimelineSettings`). When FPS changes the
  *  Rust engine rescales all clip frames; width/height set the canvas. */
 export async function setTimelineSettings(fps: number, width: number, height: number) {
-  await applyAndRefresh({ type: "setTimelineSettings", fps, width, height });
+  return applyAndRefresh({ type: "setTimelineSettings", fps, width, height });
 }
 
 export async function linkClips(clipIds: string[]) {
@@ -216,6 +453,12 @@ export async function insertTrack(kind: ClipType, at?: number) {
 
 export async function unlinkClips(clipIds: string[]) {
   await applyAndRefresh({ type: "unlink", clipIds });
+}
+
+/** Remove one or more tracks in a single undoable edit. */
+export async function removeTracks(trackIndexes: number[]) {
+  if (trackIndexes.length === 0) return;
+  await applyAndRefresh({ type: "removeTracks", trackIndexes });
 }
 
 /** Toggle a track head's mute / hide / sync-lock. Omitted fields are unchanged. */
@@ -297,6 +540,12 @@ export async function rippleDeleteRanges(trackIndex: number, ranges: FrameRangeR
   await applyAndRefresh({ type: "rippleDeleteRanges", trackIndex, ranges });
 }
 
+/** Ripple-delete selected clips as one atomic/undoable request. */
+export async function rippleDeleteClips(clipIds: string[]) {
+  if (clipIds.length === 0) return;
+  await applyAndRefresh({ type: "rippleDeleteClips", clipIds });
+}
+
 /** Create a media-library folder (optionally nested under `parentFolderId`). */
 export async function createFolder(name: string, parentFolderId?: string) {
   await applyAndRefresh({ type: "createFolder", name, parentFolderId });
@@ -337,11 +586,12 @@ export async function swapMedia(clipId: string, mediaRef: string) {
 
 export async function applyAutomationCommands(commands: EditRequest[]) {
   if (commands.length === 0) return [];
-  const results = [];
-  for (const command of commands) {
-    results.push(await applyAndRefresh(command));
+  if (commands.length !== 1) {
+    throw new Error(
+      "Automation writes must arrive as one atomic EditRequest; multi-command batches are refused",
+    );
   }
-  return results;
+  return [await applyAndRefresh(commands[0])];
 }
 
 export async function applySmartReframe(clipIds: string[], crop: Crop, transform?: Transform) {
@@ -383,7 +633,7 @@ export async function splitAtPlayhead() {
   let ids = selected;
   if (ids.length === 0) {
     // No selection: target every clip the playhead currently intersects.
-    const timeline = useProjectStore.getState().timeline;
+    const timeline = currentTimeline();
     ids = [];
     for (const track of timeline.tracks) {
       for (const c of track.clips) {
@@ -405,7 +655,7 @@ function clipsUnderPlayhead(): Clip[] {
   const selected = new Set(ui.selectedClipIds);
   const restrict = selected.size > 0;
   const out: Clip[] = [];
-  for (const track of useProjectStore.getState().timeline.tracks) {
+  for (const track of currentTimeline().tracks) {
     for (const c of track.clips) {
       if (frame <= c.startFrame || frame >= c.startFrame + c.durationFrames) continue;
       if (restrict && !selected.has(c.id)) continue;
@@ -436,7 +686,7 @@ export async function trimEndToPlayhead() {
  *  to live ids first is what makes ⌫ reliably delete. */
 function liveSelectedClipIds(): string[] {
   const live = new Set<string>();
-  for (const track of useProjectStore.getState().timeline.tracks) {
+  for (const track of currentTimeline().tracks) {
     for (const clip of track.clips) live.add(clip.id);
   }
   return [...useEditorUiStore.getState().selectedClipIds].filter((id) => live.has(id));
@@ -565,7 +815,7 @@ export async function rippleDeleteSelectedClips() {
   const ids = liveSelectedClipIds();
   if (ids.length > 0) {
     try {
-      await applyAndRefresh({ type: "rippleDeleteClips", clipIds: ids });
+      await rippleDeleteClips(ids);
       if (isTauri) await forceRefresh();
     } catch (err) {
       ui.pushToast(`删除失败 / Delete failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -588,7 +838,7 @@ export async function rippleDeleteMarkedRange(): Promise<boolean> {
   // Anchor = the selected clip's track (upstream `rippleDeleteRanges(anchorClipId:)`).
   const anchorId = liveSelectedClipIds()[0];
   if (!anchorId) return false;
-  const timeline = useProjectStore.getState().timeline;
+  const timeline = currentTimeline();
   let trackIndex = -1;
   for (let ti = 0; ti < timeline.tracks.length && trackIndex < 0; ti++) {
     if (timeline.tracks[ti].clips.some((c) => c.id === anchorId)) trackIndex = ti;
@@ -615,7 +865,7 @@ export async function rippleDeleteSelectedGap(): Promise<boolean> {
   const gap = ui.selectedGap;
   if (!gap || gap.endFrame <= gap.startFrame) return false;
   // Guard: an out-of-band edit may have filled the gap (upstream re-checks).
-  const timeline = useProjectStore.getState().timeline;
+  const timeline = currentTimeline();
   const track = timeline.tracks[gap.trackIndex];
   if (
     !track ||
@@ -642,7 +892,7 @@ export async function rippleDeleteSelectedGap(): Promise<boolean> {
 export async function nudgeSelectedClips(deltaFrames: number) {
   const ui = useEditorUiStore.getState();
   if (ui.selectedClipIds.size === 0) return;
-  const timeline = useProjectStore.getState().timeline;
+  const timeline = currentTimeline();
   // Linked partners travel together (the backend moveClips does NOT auto-expand
   // link groups — the drag path expands them too).
   const expanded = expandLinkGroup(timeline, ui.selectedClipIds);
@@ -657,13 +907,29 @@ export async function nudgeSelectedClips(deltaFrames: number) {
  *  ≈ 5s) since they have no intrinsic length. */
 const DEFAULT_IMAGE_SECONDS = 5;
 
+/** Match Rust's positive `f64 as i32` frame conversion: truncate toward zero,
+ *  return a finite integer, and keep duration-bearing UI objects visible for at
+ *  least one frame. Callers choose any source-duration fallback first. */
+function durationSecondsToFrames(seconds: number, fps: number): number {
+  const frames = seconds * fps;
+  return Number.isFinite(frames) ? Math.max(1, Math.trunc(frames)) : 1;
+}
+
+/** Same conversion for offsets, where frame zero is valid. */
+function offsetSecondsToFrames(seconds: number, fps: number): number {
+  const frames = seconds * fps;
+  return Number.isFinite(frames) ? Math.trunc(frames) : 0;
+}
+
 /** Frame length a media item occupies when placed on the timeline: its source
  *  duration (seconds → frames), or the still-image default when it has none.
  *  Shared by the clip-entry builders and the drop-ghost preview so the ghost
  *  width matches the clip that actually lands. */
 export function mediaDurationFrames(item: MediaItem, fps: number): number {
-  const seconds = item.duration > 0 ? item.duration : DEFAULT_IMAGE_SECONDS;
-  return Math.max(1, Math.round(seconds * fps));
+  const seconds = Number.isFinite(item.duration) && item.duration > 0
+    ? item.duration
+    : DEFAULT_IMAGE_SECONDS;
+  return durationSecondsToFrames(seconds, fps);
 }
 
 function isVisual(type: MediaItem["type"]): boolean {
@@ -814,6 +1080,26 @@ function enqueueMediaAdd(run: () => Promise<void>): Promise<void> {
   return result;
 }
 
+async function applyProjectSettings(settings: ProjectSettingsTarget): Promise<void> {
+  const result = await setTimelineSettings(settings.fps, settings.width, settings.height);
+  if (isTauri && result.changed) await forceRefresh();
+}
+
+async function reconcileProjectSettings(item: MediaItem): Promise<void> {
+  const timeline = currentTimeline();
+  const decision = checkProjectSettings(timeline, [item]);
+  if (decision.kind === "proceed") return;
+  if (decision.kind === "apply") {
+    await applyProjectSettings(decision.settings);
+    return;
+  }
+  const applySuggested = await useEditorUiStore.getState().requestProjectSettingsPrompt({
+    current: { fps: timeline.fps, width: timeline.width, height: timeline.height },
+    suggested: decision.settings,
+  });
+  if (applySuggested) await applyProjectSettings(decision.settings);
+}
+
 /** Add a media-library item to the timeline (drag-drop / double-click from the
  *  media panel). Resolves the target track and append position from the current
  *  mirror; if the timeline has no compatible track (e.g. a brand-new empty
@@ -848,7 +1134,7 @@ export interface SourceRange {
 /** Frames a moment clip occupies on the timeline for a source `[startSec,endSec)`
  *  range: the range length in frames, clamped to at least one frame. */
 export function momentDurationFrames(range: SourceRange, fps: number): number {
-  return Math.max(1, Math.round((range.endSec - range.startSec) * fps));
+  return durationSecondsToFrames(range.endSec - range.startSec, fps);
 }
 
 /** Place only `range` of `item` on the timeline at `startFrame` — a trimmed clip
@@ -869,13 +1155,14 @@ export function addMomentToTimelineAt(
 }
 
 async function addMediaToTimelineInner(item: MediaItem): Promise<void> {
-  let timeline = useProjectStore.getState().timeline;
+  await reconcileProjectSettings(item);
+  let timeline = currentTimeline();
   if (firstCompatibleTrackIndex(timeline, item.type) === null) {
     await insertTrack(item.type === "audio" ? "audio" : "video");
     // Ensure the mirror reflects the new track before computing the entry
     // (Tauri's timeline_changed refresh is async; force it synchronously here).
     await forceRefresh();
-    timeline = useProjectStore.getState().timeline;
+    timeline = currentTimeline();
   }
   const entry = entryForMedia(timeline, item);
   if (!entry) return;
@@ -899,11 +1186,12 @@ async function addMediaToTimelineAtInner(
   preferredTrackIndex: number | null,
   insertTrackAt?: number,
 ): Promise<void> {
-  let timeline = useProjectStore.getState().timeline;
+  await reconcileProjectSettings(item);
+  let timeline = currentTimeline();
   if (insertTrackAt !== undefined) {
     const res = await insertTrack(item.type === "audio" ? "audio" : "video", insertTrackAt);
     await forceRefresh();
-    timeline = useProjectStore.getState().timeline;
+    timeline = currentTimeline();
     const insertedTrackId = res?.affectedClipIds[0];
     const insertedIndex = insertedTrackId
       ? timeline.tracks.findIndex((track) => track.id === insertedTrackId)
@@ -915,7 +1203,7 @@ async function addMediaToTimelineAtInner(
     const fallbackInsertAt = preferredTrackIndex ?? undefined;
     const res = await insertTrack(item.type === "audio" ? "audio" : "video", fallbackInsertAt);
     await forceRefresh();
-    timeline = useProjectStore.getState().timeline;
+    timeline = currentTimeline();
     const insertedTrackId = res?.affectedClipIds[0];
     const insertedIndex = insertedTrackId
       ? timeline.tracks.findIndex((track) => track.id === insertedTrackId)
@@ -950,7 +1238,10 @@ function entryForMomentAt(
 ): ClipEntryReq | null {
   const fps = timeline.fps;
   const totalSource = mediaDurationFrames(item, fps);
-  const trimStartFrame = Math.max(0, Math.min(totalSource, Math.round(range.startSec * fps)));
+  const trimStartFrame = Math.max(
+    0,
+    Math.min(totalSource, offsetSecondsToFrames(range.startSec, fps)),
+  );
   const rangeFrames = momentDurationFrames(range, fps);
   // Clamp the visible span so trimStart + duration never exceed the source.
   const durationFrames = Math.max(1, Math.min(rangeFrames, totalSource - trimStartFrame));
@@ -991,11 +1282,12 @@ async function addMomentToTimelineAtInner(
     return addMediaToTimelineAtInner(item, startFrame, preferredTrackIndex, insertTrackAt);
   }
 
-  let timeline = useProjectStore.getState().timeline;
+  await reconcileProjectSettings(item);
+  let timeline = currentTimeline();
   if (insertTrackAt !== undefined) {
     const res = await insertTrack(item.type === "audio" ? "audio" : "video", insertTrackAt);
     await forceRefresh();
-    timeline = useProjectStore.getState().timeline;
+    timeline = currentTimeline();
     const insertedTrackId = res?.affectedClipIds[0];
     const insertedIndex = insertedTrackId
       ? timeline.tracks.findIndex((track) => track.id === insertedTrackId)
@@ -1007,7 +1299,7 @@ async function addMomentToTimelineAtInner(
     const fallbackInsertAt = preferredTrackIndex ?? undefined;
     const res = await insertTrack(item.type === "audio" ? "audio" : "video", fallbackInsertAt);
     await forceRefresh();
-    timeline = useProjectStore.getState().timeline;
+    timeline = currentTimeline();
     const insertedTrackId = res?.affectedClipIds[0];
     const insertedIndex = insertedTrackId
       ? timeline.tracks.findIndex((track) => track.id === insertedTrackId)
@@ -1082,9 +1374,9 @@ const DEFAULT_TEXT_STYLE: TextStyle = {
 export async function addTextClip() {
   const ui = useEditorUiStore.getState();
   const startFrame = ui.activeFrame;
-  const timeline = useProjectStore.getState().timeline;
+  const timeline = currentTimeline();
 
-  const durationFrames = Math.max(1, Math.round(DEFAULT_TEXT_SECONDS * timeline.fps));
+  const durationFrames = durationSecondsToFrames(DEFAULT_TEXT_SECONDS, timeline.fps);
   const entry: TextAutoTrackEntryReq = {
     startFrame,
     durationFrames,
@@ -1093,7 +1385,7 @@ export async function addTextClip() {
     transform: DEFAULT_TEXT_TRANSFORM,
   };
 
-  const res = await applyAndRefresh({ type: "addTextsAutoTrack", entries: [entry] });
+  const res = await addTextsAutoTrack([entry]);
   // Tauri's timeline_changed event refreshes the mirror asynchronously; force
   // it synchronously so the mirror (and any caller reading it right after,
   // e.g. selection logic elsewhere) reflects the new track immediately —
@@ -1141,7 +1433,7 @@ export async function generateCaptions(request: CaptionRequest) {
  *  linked companions, so a paste reproduces the video+audio pair). */
 export function copyClips() {
   const ui = useEditorUiStore.getState();
-  const tl = useProjectStore.getState().timeline;
+  const tl = currentTimeline();
   const ids = ui.selectedClipIds;
   if (ids.size === 0) return;
   // Expand selection to include linked companions.
@@ -1187,7 +1479,7 @@ export async function pasteClipsAtPlayhead() {
   const cb = useClipboardStore.getState();
   if (!cb.hasContent || cb.entries.length === 0) return;
   const ui = useEditorUiStore.getState();
-  const tl = useProjectStore.getState().timeline;
+  const tl = currentTimeline();
   const offset = ui.activeFrame - cb.sourceFirstFrame;
   const entries: ClipEntryReq[] = [];
   const sourceLinkGroups: (string | undefined)[] = [];
@@ -1213,25 +1505,29 @@ export async function pasteClipsAtPlayhead() {
     sourceLinkGroups.push(e.clip.linkGroupId);
   }
   if (entries.length === 0) return;
-  const res = await addClips(entries);
-  if (!res || res.affectedClipIds.length === 0) return;
+  try {
+    const res = await addClips(entries);
+    if (!res || res.affectedClipIds.length === 0) return;
 
-  // Re-establish link groups: map each old linkGroupId to the set of newly
-  // created clip ids, then call linkClips for each group.
-  const newGroupMap = new Map<string, string[]>();
-  for (let i = 0; i < res.affectedClipIds.length && i < sourceLinkGroups.length; i++) {
-    const oldGroup = sourceLinkGroups[i];
-    if (!oldGroup) continue;
-    const newId = res.affectedClipIds[i];
-    const arr = newGroupMap.get(oldGroup);
-    if (arr) arr.push(newId);
-    else newGroupMap.set(oldGroup, [newId]);
-  }
-  for (const ids of newGroupMap.values()) {
-    if (ids.length >= 2) await linkClips(ids);
-  }
+    // Re-establish link groups: map each old linkGroupId to the set of newly
+    // created clip ids, then call linkClips for each group.
+    const newGroupMap = new Map<string, string[]>();
+    for (let i = 0; i < res.affectedClipIds.length && i < sourceLinkGroups.length; i++) {
+      const oldGroup = sourceLinkGroups[i];
+      if (!oldGroup) continue;
+      const newId = res.affectedClipIds[i];
+      const arr = newGroupMap.get(oldGroup);
+      if (arr) arr.push(newId);
+      else newGroupMap.set(oldGroup, [newId]);
+    }
+    for (const ids of newGroupMap.values()) {
+      if (ids.length >= 2) await linkClips(ids);
+    }
 
-  // Select the freshly pasted clips so the user can immediately move/trim them.
-  ui.selectClips(new Set(res.affectedClipIds));
-  if (isTauri) await forceRefresh();
+    // Select the freshly pasted clips so the user can immediately move/trim them.
+    ui.selectClips(new Set(res.affectedClipIds));
+    if (isTauri) await forceRefresh();
+  } catch (error) {
+    ui.pushToast(t("edit.pasteFailed", { error: String(error) }));
+  }
 }

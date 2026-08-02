@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 
@@ -17,6 +18,34 @@ class WindowsProductCiContractTests(unittest.TestCase):
     def test_repository_workflow_satisfies_contract(self) -> None:
         self.assertEqual([], contract.validate_workflow(WORKFLOW))
 
+    def test_accepts_beta_app_version_with_numeric_msi_mapping(self) -> None:
+        config = json.dumps(
+            {
+                "version": "1.0.0-beta.1",
+                "bundle": {"windows": {"wix": {"version": "1.0.0.1"}}},
+            }
+        )
+        self.assertEqual([], contract.validate_tauri_config(config))
+
+    def test_rejects_missing_numeric_msi_mapping(self) -> None:
+        config = json.dumps({"version": "1.0.0-beta.1", "bundle": {}})
+        self.assertIn(
+            "MSI-compatible numeric Beta version",
+            contract.validate_tauri_config(config),
+        )
+
+    def test_rejects_msi_mapping_for_a_different_release(self) -> None:
+        config = json.dumps(
+            {
+                "version": "1.1.0-beta.1",
+                "bundle": {"windows": {"wix": {"version": "1.0.0.1"}}},
+            }
+        )
+        self.assertIn(
+            "MSI version tracks public app version",
+            contract.validate_tauri_config(config),
+        )
+
     def test_comment_cannot_replace_workspace_test_command(self) -> None:
         mutated = WORKFLOW.replace(
             "run: cargo test --workspace -- --test-threads=1",
@@ -25,6 +54,22 @@ class WindowsProductCiContractTests(unittest.TestCase):
         )
         self.assert_rejected(mutated, "Rust workspace tests command")
 
+    def test_chromium_gate_must_include_the_live_security_integration(self) -> None:
+        mutated = WORKFLOW.replace(
+            "            virtual_time_network_csp_timeout_cleanup_and_frame_identity \\\n",
+            "",
+            1,
+        )
+        self.assert_rejected(mutated, "complete Windows Chromium motion regression")
+
+    def test_cancellation_gate_must_use_the_pinned_packaged_ffmpeg(self) -> None:
+        mutated = WORKFLOW.replace(
+            "          OPENTAKE_FFMPEG: ${{ github.workspace }}\\src-tauri\\binaries\\ffmpeg-x86_64-pc-windows-msvc.exe\n",
+            "",
+            1,
+        )
+        self.assert_rejected(mutated, "pinned FFmpeg cancellation lifecycle")
+
     def test_product_cache_cannot_restore_target_outputs(self) -> None:
         mutated = WORKFLOW.replace(
             "            ~/.cargo/git\n          key: windows-product-",
@@ -32,6 +77,14 @@ class WindowsProductCiContractTests(unittest.TestCase):
             1,
         )
         self.assert_rejected(mutated, "product cache excludes target")
+
+    def test_installed_product_must_launch(self) -> None:
+        without_launch = WORKFLOW.replace(
+            "          $app = Start-Process -FilePath $application -PassThru\n",
+            "          $app = $null\n",
+            1,
+        )
+        self.assert_rejected(without_launch, "installed product launch smoke test")
 
     def test_receipt_must_hash_installers_and_bind_source_sha(self) -> None:
         without_hash = WORKFLOW.replace(

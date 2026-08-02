@@ -49,7 +49,9 @@ describe("project snapshot schema compatibility", () => {
     expect(updates).toEqual([13]);
     expect(state.projectEpoch).toBe(8);
     expect(state.timelineVersion).toBe(13);
-    expect(state.timeline).toBe(UNKNOWN_TIMELINE);
+    expect(state.timeline).toEqual(UNKNOWN_TIMELINE);
+    expect(state.timeline).not.toBe(UNKNOWN_TIMELINE);
+    expect(Object.isFrozen(state.timeline)).toBe(true);
     expect(state.projectPath).toBe("/Volumes/QA/unknown.opentake");
     expect(state.compatibilityReadOnly).toBe(true);
     expect(state.compatibilityBlockers).toEqual(["timeline.tracks[0].futureField"]);
@@ -102,7 +104,9 @@ describe("project snapshot schema compatibility", () => {
 
   it("keeps snapshot mutation revisions monotonic across mirror, path, and clear boundaries", () => {
     const revisions = [useProjectStore.getState().snapshotMutationRevision];
-    useProjectStore.getState().setMirror(UNKNOWN_TIMELINE, 2, 3);
+    useProjectStore.getState().replaceProjectSnapshot(
+      snapshot({ timeline: UNKNOWN_TIMELINE, version: 2, projectEpoch: 3 }),
+    );
     revisions.push(useProjectStore.getState().snapshotMutationRevision);
     useProjectStore.getState().setProjectPath("/tmp/saved.opentake");
     revisions.push(useProjectStore.getState().snapshotMutationRevision);

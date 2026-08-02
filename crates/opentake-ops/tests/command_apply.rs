@@ -3,8 +3,11 @@
 //! resulting `Timeline` / `MediaManifest`, undo/redo behavior, versioning, and
 //! the refusal path — the behaviors the port must match upstream.
 
-use opentake_domain::{AnimPair, Interpolation, Keyframe, KeyframeTrack};
-use opentake_domain::{ChromaKey, ColorGrade, Effect, Mask, MaskShape, Point2};
+use opentake_domain::{AnimPair, Interpolation, Keyframe, KeyframeTrack, TransitionKind};
+use opentake_domain::{
+    ChromaKey, ColorGrade, Effect, HslSecondary, LiftGammaGain, LutReference, Mask, MaskShape,
+    Point2, Rgb,
+};
 use opentake_domain::{
     Clip, ClipType, MediaManifest, MediaManifestEntry, MediaSource, Timeline, Track, Transform,
 };
@@ -53,6 +56,463 @@ fn entry(track_index: usize, media_type: ClipType, start: i32, dur: i32) -> Clip
         add_linked_audio: false,
         transform: None,
     }
+}
+
+#[test]
+fn compound_create_edit_move_trim_duplicate_dissolve_and_undo_share_one_command_path() {
+    let mut child = Timeline::new();
+    child.tracks = vec![video_track(
+        "child-track",
+        true,
+        vec![Clip::new("child", "asset-child", 5, 20)],
+    )];
+    let mut st = state(vec![video_track("root", true, vec![])]);
+    let ids = SeqIdGen::new("nested-");
+
+    let created = apply(
+        &mut st,
+        EditCommand::CreateNestedSequence {
+            name: "Scene A".into(),
+            timeline: child,
+            track_index: 0,
+            start_frame: 100,
+            duration_frames: 30,
+        },
+        &ids,
+    )
+    .unwrap();
+    let compound_id = created.affected_clip_ids[0].clone();
+    assert_eq!(st.timeline.nested_sequences.len(), 1);
+    assert_eq!(st.undo_depth(), 1);
+
+    let sequence_id = st.timeline.nested_sequences[0].id.clone();
+    let mut edited = st.timeline.nested_sequences[0].timeline.clone();
+    edited.tracks[0].clips[0].media_ref = "asset-edited".into();
+    apply(
+        &mut st,
+        EditCommand::SetNestedSequenceTimeline {
+            sequence_id: sequence_id.clone(),
+            timeline: edited,
+        },
+        &ids,
+    )
+    .unwrap();
+    apply(
+        &mut st,
+        EditCommand::RenameNestedSequence {
+            sequence_id,
+            name: "Edited scene".into(),
+        },
+        &ids,
+    )
+    .unwrap();
+    apply(
+        &mut st,
+        EditCommand::MoveClips {
+            moves: vec![ClipMove {
+                clip_id: compound_id.clone(),
+                to_track: 0,
+                to_frame: 110,
+            }],
+        },
+        &ids,
+    )
+    .unwrap();
+    apply(
+        &mut st,
+        EditCommand::TrimClips {
+            edits: vec![(compound_id.clone(), 5, 0)],
+        },
+        &ids,
+    )
+    .unwrap();
+    let duplicate = apply(
+        &mut st,
+        EditCommand::DuplicateClips {
+            clip_ids: vec![compound_id.clone()],
+            offset_frames: 40,
+            target_track_indexes: vec![0],
+        },
+        &ids,
+    )
+    .unwrap();
+    assert_eq!(duplicate.affected_clip_ids.len(), 1);
+
+    let before_dissolve = st.timeline.clone();
+    let dissolved = apply(
+        &mut st,
+        EditCommand::DissolveNestedSequence {
+            clip_id: compound_id.clone(),
+        },
+        &ids,
+    )
+    .unwrap();
+    assert_eq!(dissolved.affected_clip_ids.len(), 1);
+    let leaf = st
+        .timeline
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .find(|clip| dissolved.affected_clip_ids.contains(&clip.id))
+        .unwrap();
+    assert_eq!(leaf.media_ref, "asset-edited");
+    assert_eq!(leaf.start_frame, 115);
+    assert_eq!(leaf.duration_frames, 20);
+    assert_eq!(leaf.trim_start_frame, 0);
+
+    apply(&mut st, EditCommand::Undo, &ids).unwrap();
+    assert_eq!(st.timeline, before_dissolve);
+}
+
+#[test]
+fn dissolve_refuses_parent_edits_without_changing_history() {
+    let mut child = Timeline::new();
+    child.tracks = vec![video_track(
+        "child-track",
+        true,
+        vec![Clip::new("child", "asset-child", 0, 20)],
+    )];
+    let mut st = state(vec![video_track("root", true, vec![])]);
+    let ids = SeqIdGen::new("nested-");
+    let created = apply(
+        &mut st,
+        EditCommand::CreateNestedSequence {
+            name: "Scene".into(),
+            timeline: child,
+            track_index: 0,
+            start_frame: 0,
+            duration_frames: 20,
+        },
+        &ids,
+    )
+    .unwrap();
+    let compound_id = created.affected_clip_ids[0].clone();
+    apply(
+        &mut st,
+        EditCommand::SetClipProperties {
+            clip_ids: vec![compound_id.clone()],
+            properties: Box::new(ClipProperties {
+                opacity: Some(0.5),
+                ..ClipProperties::default()
+            }),
+        },
+        &ids,
+    )
+    .unwrap();
+    let before = st.timeline.clone();
+    let undo_depth = st.undo_depth();
+    let version = st.version();
+
+    let error = apply(
+        &mut st,
+        EditCommand::DissolveNestedSequence {
+            clip_id: compound_id,
+        },
+        &ids,
+    )
+    .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("parent-level edits must be normalized"));
+    assert_eq!(st.timeline, before);
+    assert_eq!(st.undo_depth(), undo_depth);
+    assert_eq!(st.version(), version);
+}
+
+#[test]
+fn compound_edit_refuses_properties_that_cannot_render() {
+    let mut child = Timeline::new();
+    child.tracks = vec![video_track(
+        "child-track",
+        true,
+        vec![Clip::new("child", "asset-child", 0, 20)],
+    )];
+    let mut st = state(vec![video_track("root", true, vec![])]);
+    let ids = SeqIdGen::new("nested-");
+    let created = apply(
+        &mut st,
+        EditCommand::CreateNestedSequence {
+            name: "Scene".into(),
+            timeline: child,
+            track_index: 0,
+            start_frame: 0,
+            duration_frames: 20,
+        },
+        &ids,
+    )
+    .unwrap();
+    let compound_id = created.affected_clip_ids[0].clone();
+    let before = st.timeline.clone();
+    let undo_depth = st.undo_depth();
+
+    let error = apply(
+        &mut st,
+        EditCommand::SetClipProperties {
+            clip_ids: vec![compound_id.clone()],
+            properties: Box::new(ClipProperties {
+                speed: Some(2.0),
+                ..ClipProperties::default()
+            }),
+        },
+        &ids,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("does not support retime"));
+    assert_eq!(st.timeline, before);
+    assert_eq!(st.undo_depth(), undo_depth);
+
+    let error = apply(
+        &mut st,
+        EditCommand::SetColorGrade {
+            clip_ids: vec![compound_id],
+            grade: Some(ColorGrade::default()),
+        },
+        &ids,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("direct pixel effects"));
+    assert_eq!(st.timeline, before);
+    assert_eq!(st.undo_depth(), undo_depth);
+}
+
+#[test]
+fn compound_creation_expands_linked_partners_and_refuses_unselected_overlap() {
+    let mut video = Clip::new("video", "video-asset", 0, 10);
+    video.link_group_id = Some("av".into());
+    let blocker = Clip::new("blocker", "blocker-asset", 15, 5);
+    let later = Clip::new("later", "later-asset", 20, 10);
+    let mut audio = Clip::new("audio", "audio-asset", 0, 10);
+    audio.media_type = ClipType::Audio;
+    audio.source_clip_type = ClipType::Audio;
+    audio.link_group_id = Some("av".into());
+    let mut st = state(vec![
+        video_track("v1", true, vec![video, blocker]),
+        video_track("v2", true, vec![later]),
+        audio_track("a1", true, vec![audio]),
+    ]);
+    let ids = SeqIdGen::new("nested-");
+    let before = st.timeline.clone();
+
+    let error = apply(
+        &mut st,
+        EditCommand::CreateNestedSequenceFromClips {
+            name: "Blocked".into(),
+            clip_ids: vec!["video".into(), "later".into()],
+        },
+        &ids,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("overlaps an unselected clip"));
+    assert_eq!(st.timeline, before);
+
+    apply(
+        &mut st,
+        EditCommand::CreateNestedSequenceFromClips {
+            name: "Linked".into(),
+            clip_ids: vec!["video".into()],
+        },
+        &ids,
+    )
+    .unwrap();
+    let child_clips = st.timeline.nested_sequences[0]
+        .timeline
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .collect::<Vec<_>>();
+    assert_eq!(child_clips.len(), 2);
+    assert!(child_clips.iter().any(|clip| clip.id == "video"));
+    assert!(child_clips.iter().any(|clip| clip.id == "audio"));
+}
+
+#[test]
+fn dissolve_remaps_link_groups_and_transition_targets() {
+    let mut first = Clip::new("first", "first-asset", 0, 10);
+    first.link_group_id = Some("av".into());
+    first.transition_out = Some(opentake_domain::Transition {
+        from_clip_id: "first".into(),
+        to_clip_id: "second".into(),
+        kind: TransitionKind::CrossDissolve,
+        duration_frames: 3,
+    });
+    let second = Clip::new("second", "second-asset", 10, 10);
+    let mut audio = Clip::new("audio", "audio-asset", 0, 10);
+    audio.media_type = ClipType::Audio;
+    audio.source_clip_type = ClipType::Audio;
+    audio.link_group_id = Some("av".into());
+    let mut child = Timeline::new();
+    child.tracks = vec![
+        video_track("child-video", true, vec![first, second]),
+        audio_track("child-audio", true, vec![audio]),
+    ];
+    let mut st = state(vec![video_track("root", true, vec![])]);
+    let ids = SeqIdGen::new("nested-");
+    let created = apply(
+        &mut st,
+        EditCommand::CreateNestedSequence {
+            name: "Scene".into(),
+            timeline: child,
+            track_index: 0,
+            start_frame: 0,
+            duration_frames: 20,
+        },
+        &ids,
+    )
+    .unwrap();
+    apply(
+        &mut st,
+        EditCommand::DissolveNestedSequence {
+            clip_id: created.affected_clip_ids[0].clone(),
+        },
+        &ids,
+    )
+    .unwrap();
+
+    let clips = st
+        .timeline
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .collect::<Vec<_>>();
+    let first = clips
+        .iter()
+        .find(|clip| clip.media_ref == "first-asset")
+        .unwrap();
+    let second = clips
+        .iter()
+        .find(|clip| clip.media_ref == "second-asset")
+        .unwrap();
+    let audio = clips
+        .iter()
+        .find(|clip| clip.media_ref == "audio-asset")
+        .unwrap();
+    assert_eq!(first.transition_out.as_ref().unwrap().to_clip_id, second.id);
+    assert!(first.link_group_id.is_some());
+    assert_eq!(first.link_group_id, audio.link_group_id);
+    assert_ne!(first.link_group_id.as_deref(), Some("av"));
+}
+
+#[test]
+fn invalid_nested_edit_restores_document_and_history() {
+    let mut st = state(vec![video_track("root", true, vec![])]);
+    let ids = SeqIdGen::new("nested-");
+    let mut child = Timeline::new();
+    child.tracks.push(video_track(
+        "child-track",
+        true,
+        vec![Clip::new_nested("bad-ref", "missing", 0, 10)],
+    ));
+    let before = st.timeline.clone();
+    let error = apply(
+        &mut st,
+        EditCommand::CreateNestedSequence {
+            name: "Invalid".into(),
+            timeline: child,
+            track_index: 0,
+            start_frame: 0,
+            duration_frames: 10,
+        },
+        &ids,
+    )
+    .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("missing nested sequence reference"));
+    assert_eq!(st.timeline, before);
+    assert_eq!(st.undo_depth(), 0);
+}
+
+#[test]
+fn nested_child_command_edits_in_place_and_root_undo_restores_it() {
+    let mut child = Timeline::new();
+    child.tracks = vec![video_track(
+        "child-track",
+        true,
+        vec![Clip::new("child-a", "asset", 0, 20)],
+    )];
+    let mut st = state(vec![video_track("root", true, vec![])]);
+    let ids = SeqIdGen::new("nested-");
+    apply(
+        &mut st,
+        EditCommand::CreateNestedSequence {
+            name: "Scene".into(),
+            timeline: child,
+            track_index: 0,
+            start_frame: 0,
+            duration_frames: 20,
+        },
+        &ids,
+    )
+    .unwrap();
+    let sequence_id = st.timeline.nested_sequences[0].id.clone();
+    let before = st.timeline.clone();
+
+    let result = apply(
+        &mut st,
+        EditCommand::EditNestedSequence {
+            sequence_id,
+            command: Box::new(EditCommand::MoveClips {
+                moves: vec![ClipMove {
+                    clip_id: "child-a".into(),
+                    to_track: 0,
+                    to_frame: 7,
+                }],
+            }),
+        },
+        &ids,
+    )
+    .unwrap();
+    assert!(result.changed);
+    assert_eq!(
+        st.timeline.nested_sequences[0].timeline.tracks[0].clips[0].start_frame,
+        7
+    );
+
+    apply(&mut st, EditCommand::Undo, &ids).unwrap();
+    assert_eq!(st.timeline, before);
+}
+
+#[test]
+fn nested_child_refuses_root_scoped_commands() {
+    let mut child = Timeline::new();
+    child.tracks = vec![video_track("child-track", true, vec![])];
+    let mut st = state(vec![video_track("root", true, vec![])]);
+    let ids = SeqIdGen::new("nested-");
+    apply(
+        &mut st,
+        EditCommand::CreateNestedSequence {
+            name: "Scene".into(),
+            timeline: child,
+            track_index: 0,
+            start_frame: 0,
+            duration_frames: 20,
+        },
+        &ids,
+    )
+    .unwrap();
+    let sequence_id = st.timeline.nested_sequences[0].id.clone();
+    let before_timeline = st.timeline.clone();
+    let before_manifest = st.manifest.clone();
+    let undo_depth = st.undo_depth();
+
+    let error = apply(
+        &mut st,
+        EditCommand::EditNestedSequence {
+            sequence_id,
+            command: Box::new(EditCommand::DeleteMedia {
+                asset_ids: vec!["asset".into()],
+            }),
+        },
+        &ids,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("must target the root timeline"));
+    assert_eq!(st.timeline, before_timeline);
+    assert_eq!(st.manifest, before_manifest);
+    assert_eq!(st.undo_depth(), undo_depth);
 }
 
 // ---- add_clips + overwrite ------------------------------------------------
@@ -107,6 +567,23 @@ fn add_clips_applies_supplied_transform() {
     let placed = &st.timeline.tracks[0].clips[0];
     assert_eq!(placed.transform.width, 0.31640625);
     assert_eq!(placed.transform.height, 1.0);
+}
+
+#[test]
+fn add_clips_accepts_audio_lane_derived_from_video_asset() {
+    let mut st = state(vec![audio_track("a", true, vec![])]);
+    let g = SeqIdGen::new("n-");
+    let mut e = entry(0, ClipType::Audio, 15, 110);
+    e.source_clip_type = ClipType::Video;
+    e.trim_start_frame = Some(10);
+
+    apply(&mut st, EditCommand::AddClips { entries: vec![e] }, &g).unwrap();
+
+    let placed = &st.timeline.tracks[0].clips[0];
+    assert_eq!(placed.media_type, ClipType::Audio);
+    assert_eq!(placed.source_clip_type, ClipType::Video);
+    assert_eq!(placed.start_frame, 15);
+    assert_eq!(placed.trim_start_frame, 10);
 }
 
 #[test]
@@ -753,6 +1230,116 @@ fn set_clip_properties_multiple_fields_at_once() {
     assert!(c.opacity_track.is_none()); // opacity scalar cleared its track
 }
 
+#[test]
+fn set_transition_validates_pair_rejects_oversize_and_undoes() {
+    let mut st = state(vec![video_track(
+        "v",
+        true,
+        vec![clip("a", 0, 100), clip("b", 100, 40)],
+    )]);
+    let g = SeqIdGen::default();
+
+    let result = apply(
+        &mut st,
+        EditCommand::SetTransition {
+            from_clip_id: "a".into(),
+            to_clip_id: "b".into(),
+            kind: Some(TransitionKind::CrossDissolve),
+            duration_frames: 20,
+        },
+        &g,
+    )
+    .unwrap();
+
+    assert!(result.changed);
+    assert_eq!(result.action_name, "Set Transition");
+    let transition = st.timeline.tracks[0].clips[0]
+        .transition_out
+        .as_ref()
+        .expect("transition stored on outgoing clip");
+    assert_eq!(transition.to_clip_id, "b");
+    assert_eq!(transition.from_clip_id, "a");
+    assert_eq!(transition.kind, TransitionKind::CrossDissolve);
+    assert_eq!(transition.duration_frames, 20);
+
+    apply(&mut st, EditCommand::Undo, &g).unwrap();
+    assert!(st.timeline.tracks[0].clips[0].transition_out.is_none());
+
+    let error = apply(
+        &mut st,
+        EditCommand::SetTransition {
+            from_clip_id: "b".into(),
+            to_clip_id: "a".into(),
+            kind: Some(TransitionKind::CrossDissolve),
+            duration_frames: 10,
+        },
+        &g,
+    )
+    .unwrap_err();
+    assert!(matches!(error, EditError::Invalid(_)));
+
+    let oversized = apply(
+        &mut st,
+        EditCommand::SetTransition {
+            from_clip_id: "a".into(),
+            to_clip_id: "b".into(),
+            kind: Some(TransitionKind::CrossDissolve),
+            duration_frames: 21,
+        },
+        &g,
+    )
+    .unwrap_err();
+    assert!(matches!(oversized, EditError::Invalid(_)));
+}
+
+#[test]
+fn moving_either_side_of_a_transition_prunes_it_and_undo_restores_it() {
+    let mut st = state(vec![video_track(
+        "v",
+        true,
+        vec![clip("a", 0, 100), clip("b", 100, 40)],
+    )]);
+    let g = SeqIdGen::default();
+    apply(
+        &mut st,
+        EditCommand::SetTransition {
+            from_clip_id: "a".into(),
+            to_clip_id: "b".into(),
+            kind: Some(TransitionKind::CrossDissolve),
+            duration_frames: 12,
+        },
+        &g,
+    )
+    .unwrap();
+
+    apply(
+        &mut st,
+        EditCommand::MoveClips {
+            moves: vec![ClipMove {
+                clip_id: "b".into(),
+                to_track: 0,
+                to_frame: 110,
+            }],
+        },
+        &g,
+    )
+    .unwrap();
+    let outgoing = st.timeline.tracks[0]
+        .clips
+        .iter()
+        .find(|clip| clip.id == "a")
+        .unwrap();
+    assert!(outgoing.transition_out.is_none());
+
+    apply(&mut st, EditCommand::Undo, &g).unwrap();
+    let outgoing = st.timeline.tracks[0]
+        .clips
+        .iter()
+        .find(|clip| clip.id == "a")
+        .unwrap();
+    assert_eq!(outgoing.transition_out.as_ref().unwrap().to_clip_id, "b");
+}
+
 // ---- set_keyframes --------------------------------------------------------
 
 #[test]
@@ -847,6 +1434,8 @@ fn create_folder_and_move_asset_into_it() {
         source_height: None,
         source_fps: None,
         has_audio: None,
+        color: None,
+        proxy: None,
         folder_id: None,
         cached_remote_url: None,
         cached_remote_url_expires_at: None,
@@ -1089,6 +1678,11 @@ fn set_color_grade_applies_and_undoes() {
     let grade = ColorGrade {
         exposure: 0.5,
         saturation: 1.2,
+        hsl_secondary: Some(HslSecondary {
+            hue_center: 0.65,
+            hue_shift: 0.15,
+            ..Default::default()
+        }),
         ..Default::default()
     };
     let res = apply(
@@ -1108,6 +1702,84 @@ fn set_color_grade_applies_and_undoes() {
     // Undo restores the cleared grade.
     apply(&mut st, EditCommand::Undo, &g).unwrap();
     assert_eq!(find_clip(&st, "c").color_grade, None);
+    apply(&mut st, EditCommand::Redo, &g).unwrap();
+    assert_eq!(find_clip(&st, "c").color_grade, Some(grade));
+}
+
+#[test]
+fn set_lut_applies_adjusts_removes_and_round_trips_history() {
+    let mut state = one_clip_state();
+    let ids = SeqIdGen::default();
+    let reference =
+        LutReference::new("0123456789abcdef".repeat(4), "Known Transform", 1.0).unwrap();
+    apply(
+        &mut state,
+        EditCommand::SetLut {
+            clip_ids: vec!["c".into()],
+            lut: Some(reference.clone()),
+        },
+        &ids,
+    )
+    .unwrap();
+    assert_eq!(find_clip(&state, "c").lut.as_ref(), Some(&reference));
+
+    let adjusted = LutReference {
+        intensity: 0.35,
+        ..reference.clone()
+    };
+    apply(
+        &mut state,
+        EditCommand::SetLut {
+            clip_ids: vec!["c".into()],
+            lut: Some(adjusted.clone()),
+        },
+        &ids,
+    )
+    .unwrap();
+    assert_eq!(find_clip(&state, "c").lut.as_ref(), Some(&adjusted));
+    apply(&mut state, EditCommand::Undo, &ids).unwrap();
+    assert_eq!(find_clip(&state, "c").lut.as_ref(), Some(&reference));
+    apply(&mut state, EditCommand::Redo, &ids).unwrap();
+    assert_eq!(find_clip(&state, "c").lut.as_ref(), Some(&adjusted));
+
+    apply(
+        &mut state,
+        EditCommand::SetLut {
+            clip_ids: vec!["c".into()],
+            lut: None,
+        },
+        &ids,
+    )
+    .unwrap();
+    assert!(find_clip(&state, "c").lut.is_none());
+}
+
+#[test]
+fn set_color_grade_rejects_invalid_without_mutation() {
+    let mut st = one_clip_state();
+    let g = SeqIdGen::default();
+    let error = apply(
+        &mut st,
+        EditCommand::SetColorGrade {
+            clip_ids: vec!["c".into()],
+            grade: Some(ColorGrade {
+                lift_gamma_gain: LiftGammaGain {
+                    gamma: Rgb::new(0.0, 1.0, 1.0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        },
+        &g,
+    )
+    .expect_err("zero gamma must be rejected before mutation");
+    assert_eq!(
+        error.to_string(),
+        "invalid color grade: liftGammaGain.gamma.r must be finite and within (0, 4]"
+    );
+    assert_eq!(find_clip(&st, "c").color_grade, None);
+    assert_eq!(st.version(), 0);
+    assert!(!st.can_undo());
 }
 
 #[test]
@@ -1227,6 +1899,7 @@ fn set_masks_replaces_list() {
         },
         feather: 0.05,
         invert: false,
+        ..Mask::default()
     }];
     let res = apply(
         &mut st,
@@ -1253,6 +1926,29 @@ fn set_masks_replaces_list() {
     .unwrap();
     assert!(res2.changed);
     assert!(find_clip(&st, "c").masks.is_empty());
+
+    apply(&mut st, EditCommand::Undo, &g).unwrap();
+    assert_eq!(find_clip(&st, "c").masks, masks);
+    apply(&mut st, EditCommand::Redo, &g).unwrap();
+    assert!(find_clip(&st, "c").masks.is_empty());
+
+    let oversized_polygon = Mask {
+        shape: MaskShape::Poly {
+            points: vec![Point2::new(0.5, 0.5); 17],
+        },
+        ..Mask::default()
+    };
+    let err = apply(
+        &mut st,
+        EditCommand::SetMasks {
+            clip_ids: vec!["c".into()],
+            masks: vec![oversized_polygon],
+        },
+        &g,
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("3..=16 points"));
+    assert!(find_clip(&st, "c").masks.is_empty());
 }
 
 #[test]
@@ -1260,8 +1956,8 @@ fn set_effects_replaces_chain() {
     let mut st = one_clip_state();
     let g = SeqIdGen::default();
     let effects = vec![
-        Effect::new("gaussianBlur").with_param("radius", 4.0),
-        Effect::new("glow").with_param("intensity", 0.6),
+        Effect::new("grayscale").with_param("amount", 0.4),
+        Effect::new("sepia").with_param("amount", 0.6),
     ];
     let res = apply(
         &mut st,
@@ -1275,6 +1971,30 @@ fn set_effects_replaces_chain() {
     assert!(res.changed);
     assert_eq!(res.action_name, "Set Effects");
     assert_eq!(find_clip(&st, "c").effects, effects);
+}
+
+#[test]
+fn set_effects_rejects_unknown_names_and_invalid_parameters_without_history() {
+    let g = SeqIdGen::default();
+    for effect in [
+        Effect::new("blur"),
+        Effect::new("sepia").with_param("radius", 2.0),
+        Effect::new("invert").with_param("amount", 1.1),
+    ] {
+        let mut st = one_clip_state();
+        let error = apply(
+            &mut st,
+            EditCommand::SetEffects {
+                clip_ids: vec!["c".into()],
+                effects: vec![effect],
+            },
+            &g,
+        )
+        .unwrap_err();
+        assert!(matches!(error, EditError::Invalid(_)));
+        assert!(find_clip(&st, "c").effects.is_empty());
+        assert_eq!(st.version(), 0);
+    }
 }
 
 #[test]
@@ -1299,7 +2019,7 @@ fn advanced_effect_commands_reject_empty_and_missing() {
             &mut st,
             EditCommand::SetEffects {
                 clip_ids: vec!["nope".into()],
-                effects: vec![Effect::new("blur")]
+                effects: vec![Effect::new("grayscale")]
             },
             &g
         ),
@@ -1368,6 +2088,8 @@ fn media_entry(id: &str, kind: ClipType, duration_secs: f64) -> MediaManifestEnt
         source_height: None,
         source_fps: None,
         has_audio: None,
+        color: None,
+        proxy: None,
         folder_id: None,
         cached_remote_url: None,
         cached_remote_url_expires_at: None,

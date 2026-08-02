@@ -37,6 +37,7 @@ const srv = vi.hoisted(() => {
     timeline,
     media,
     order,
+    createdPath: null as string | null,
     stopBoundary: vi.fn(async () => order.push("stop")),
     projectOpen: vi.fn(async () => {
       order.push("open");
@@ -49,19 +50,22 @@ const srv = vi.hoisted(() => {
         compatibilityBlockers: [],
       };
     }),
-    projectNew: vi.fn(async () => {
+    projectNew: vi.fn(async (path: string | null = null) => {
       order.push("new");
+      srv.createdPath = path;
       return {
         timeline,
         projectEpoch: 5,
         version: 0,
-        projectPath: null,
+        projectPath: path,
         compatibilityReadOnly: false,
         compatibilityBlockers: [],
       };
     }),
     projectSave: vi.fn(async (path: string | null) => path ?? ""),
+    sampleProjectMaterialize: vi.fn(async () => "/tmp/cache/quick-tutorial/Tutorial.opentake"),
     getMedia: vi.fn(async () => media),
+    openDialog: vi.fn(async () => undefined),
   };
 });
 
@@ -69,12 +73,13 @@ vi.mock("../lib/api", () => ({
   projectOpen: srv.projectOpen,
   projectNew: srv.projectNew,
   projectSave: srv.projectSave,
+  sampleProjectMaterialize: srv.sampleProjectMaterialize,
   getDefaultProjectDir: async () => "",
   getTimeline: async () => ({
     timeline: srv.timeline,
     projectEpoch: 5,
     version: 0,
-    projectPath: null,
+    projectPath: srv.createdPath,
     compatibilityReadOnly: false,
     compatibilityBlockers: [],
   }),
@@ -89,10 +94,17 @@ vi.mock("../components/preview/nativePlaybackSession", () => ({
 
 vi.mock("../lib/dialog", () => ({
   saveDialog: async () => async () => "/tmp/fresh.opentake",
-  openDialog: async () => undefined,
+  openDialog: srv.openDialog,
 }));
 
-import { newProjectAndEnter, openProjectPath, saveCurrentProject } from "./projectActions";
+import {
+  newProjectAndEnter,
+  openProjectPath,
+  openProjectViaDialog,
+  openSampleProject,
+  saveCurrentProject,
+  saveCurrentProjectAs,
+} from "./projectActions";
 import { useEditorUiStore } from "./uiStore";
 import { useMediaStore } from "./mediaStore";
 import { useProjectStore } from "./projectStore";
@@ -102,17 +114,33 @@ import { useI18nStore } from "../i18n";
 describe("openProjectPath", () => {
   beforeEach(() => {
     srv.order.length = 0;
+    srv.createdPath = null;
     srv.stopBoundary.mockClear();
     srv.projectOpen.mockClear();
-    srv.projectNew.mockClear();
+    srv.projectNew.mockReset();
+    srv.projectNew.mockImplementation(async (path: string | null = null) => {
+      srv.order.push("new");
+      srv.createdPath = path;
+      return {
+        timeline: srv.timeline,
+        projectEpoch: 5,
+        version: 0,
+        projectPath: path,
+        compatibilityReadOnly: false,
+        compatibilityBlockers: [],
+      };
+    });
     srv.getMedia.mockReset();
     srv.getMedia.mockImplementation(async () => srv.media);
     srv.projectSave.mockReset();
     srv.projectSave.mockImplementation(async (path: string | null) => path ?? "");
+    srv.openDialog.mockReset();
+    srv.openDialog.mockResolvedValue(undefined);
     useMediaStore.setState({ items: [], folders: [], importing: false, error: null });
     useRecentStore.setState({ recents: [] });
     useProjectStore.setState({ projectPath: null, timelineVersion: 0 });
     useEditorUiStore.setState({ view: "home", toast: null });
+    useI18nStore.setState({ locale: "zh-CN" });
   });
 
   it("refreshes the media mirror after opening a project", async () => {
@@ -132,6 +160,15 @@ describe("openProjectPath", () => {
     expect(useMediaStore.getState().error).toBeNull();
   });
 
+  it("reports a native picker failure before project-open delegation", async () => {
+    srv.openDialog.mockRejectedValueOnce(new Error("picker unavailable"));
+
+    await expect(openProjectViaDialog()).rejects.toThrow("picker unavailable");
+
+    expect(useEditorUiStore.getState().toast?.message).toBe("打开失败：picker unavailable");
+    expect(srv.projectOpen).not.toHaveBeenCalled();
+  });
+
   it("preserves media transient state when project open fails", async () => {
     const oldFolder = { id: "old-folder", name: "Old", parentFolderId: null };
     useMediaStore.setState({
@@ -140,14 +177,18 @@ describe("openProjectPath", () => {
       importing: true,
       error: "old project error",
     });
-    srv.projectOpen.mockRejectedValueOnce(new Error("open failed"));
+    const failure = { code: "engine", message: "project open timed out after 15s" };
+    srv.projectOpen.mockRejectedValueOnce(failure);
 
-    await expect(openProjectPath("/tmp/broken.opentake")).rejects.toThrow("open failed");
+    await expect(openProjectPath("/tmp/broken.opentake")).rejects.toBe(failure);
 
     expect(useMediaStore.getState().importing).toBe(true);
     expect(useMediaStore.getState().error).toBe("old project error");
     expect(useMediaStore.getState().items).toEqual(srv.media.items);
     expect(useMediaStore.getState().folders).toEqual([oldFolder]);
+    expect(useEditorUiStore.getState().toast?.message).toBe(
+      "打开失败：project open timed out after 15s",
+    );
   });
 
   it("clears the old catalog immediately, then installs the opened project catalog", async () => {
@@ -220,8 +261,96 @@ describe("openProjectPath", () => {
     await newProjectAndEnter();
 
     expect(srv.order.slice(0, 2)).toEqual(["stop", "new"]);
+    expect(srv.projectNew).toHaveBeenCalledWith("/tmp/fresh.opentake");
+    expect(srv.projectSave).not.toHaveBeenCalled();
     expect(useProjectStore.getState().projectEpoch).toBe(5);
     expect(useProjectStore.getState().projectPath).toBe("/tmp/fresh.opentake");
+  });
+
+  it("preserves the current project when initial creation fails", async () => {
+    const oldTimeline: Timeline = {
+      ...srv.timeline,
+      tracks: [
+        {
+          id: "old-track",
+          type: "video",
+          muted: false,
+          hidden: false,
+          syncLocked: true,
+          clips: [],
+        },
+      ],
+    };
+    useProjectStore.setState({
+      projectEpoch: 3,
+      timelineVersion: 12,
+      timeline: oldTimeline,
+      projectPath: "/tmp/current.opentake",
+      lastSavedVersion: 11,
+    });
+    useMediaStore.setState({ items: srv.media.items, folders: [], error: "old media state" });
+    const failure = { code: "engine", message: "project create timed out after 15s" };
+    srv.projectNew.mockRejectedValueOnce(failure);
+
+    await expect(newProjectAndEnter()).rejects.toBe(failure);
+
+    const project = useProjectStore.getState();
+    expect(project.projectEpoch).toBe(3);
+    expect(project.timelineVersion).toBe(12);
+    expect(project.timeline).toBe(oldTimeline);
+    expect(project.projectPath).toBe("/tmp/current.opentake");
+    expect(useMediaStore.getState().items).toEqual(srv.media.items);
+    expect(useMediaStore.getState().error).toBe("old media state");
+    expect(useEditorUiStore.getState().view).toBe("home");
+    expect(useEditorUiStore.getState().toast?.message).toBe(
+      "创建失败：project create timed out after 15s",
+    );
+    expect(srv.projectSave).not.toHaveBeenCalled();
+  });
+});
+
+describe("openSampleProject", () => {
+  beforeEach(() => {
+    srv.order.length = 0;
+    srv.sampleProjectMaterialize.mockClear();
+    srv.projectOpen.mockClear();
+    srv.projectOpen.mockImplementation(async () => ({
+      timeline: srv.timeline,
+      projectEpoch: 8,
+      version: 2,
+      projectPath: "/tmp/cache/quick-tutorial/Tutorial.opentake",
+      compatibilityReadOnly: false,
+      compatibilityBlockers: [],
+    }));
+    srv.getMedia.mockResolvedValue(srv.media);
+    useRecentStore.setState({
+      recents: [{ path: "/tmp/User.opentake", name: "User", openedAt: 1 }],
+    });
+    useEditorUiStore.setState({ view: "home", toast: null });
+    useI18nStore.setState({ locale: "en" });
+  });
+
+  it("opens a completed tutorial sample without registering its cache path", async () => {
+    await openSampleProject("quick-tutorial", true);
+
+    expect(srv.sampleProjectMaterialize).toHaveBeenCalledWith("quick-tutorial");
+    expect(srv.projectOpen).toHaveBeenCalledWith(
+      "/tmp/cache/quick-tutorial/Tutorial.opentake",
+    );
+    expect(useRecentStore.getState().recents.map(({ name }) => name)).toEqual(["User"]);
+    expect(useEditorUiStore.getState().view).toBe("editor");
+    expect(useEditorUiStore.getState().toast?.message).toContain("Tutorial project opened");
+  });
+
+  it("does not open or mutate recents when materialization fails", async () => {
+    srv.sampleProjectMaterialize.mockRejectedValueOnce(new Error("download failed"));
+
+    await expect(openSampleProject("quick-tutorial", true)).rejects.toThrow("download failed");
+
+    expect(srv.projectOpen).not.toHaveBeenCalled();
+    expect(useRecentStore.getState().recents.map(({ name }) => name)).toEqual(["User"]);
+    expect(useEditorUiStore.getState().view).toBe("home");
+    expect(useEditorUiStore.getState().toast?.message).toContain("download failed");
   });
 });
 
@@ -261,7 +390,14 @@ describe("saveCurrentProject", () => {
       .mockImplementationOnce(() => second.promise);
 
     const saving = saveCurrentProject();
-    useProjectStore.getState().setMirror(srv.timeline, 10, 1);
+    useProjectStore.getState().replaceProjectSnapshot({
+      timeline: srv.timeline,
+      version: 10,
+      projectEpoch: 1,
+      projectPath: "/tmp/unknown.opentake",
+      compatibilityReadOnly: false,
+      compatibilityBlockers: [],
+    });
     first.resolve("/tmp/unknown.opentake");
 
     await vi.waitFor(() => expect(srv.projectSave).toHaveBeenCalledTimes(2));
@@ -338,7 +474,14 @@ describe("saveCurrentProject", () => {
     useProjectStore.setState({ lastSavedVersion: 9 });
 
     const saving = saveCurrentProject();
-    useProjectStore.getState().setMirror(srv.timeline, 9, 1);
+    useProjectStore.getState().replaceProjectSnapshot({
+      timeline: srv.timeline,
+      version: 9,
+      projectEpoch: 1,
+      projectPath: "/tmp/unknown.opentake",
+      compatibilityReadOnly: false,
+      compatibilityBlockers: [],
+    });
     first.reject("stale save failure");
     await saving;
 
@@ -368,12 +511,70 @@ describe("saveCurrentProject", () => {
       compatibilityReadOnly: false,
       compatibilityBlockers: [],
     });
-    useProjectStore.getState().setMirror(srv.timeline, 5, 3);
+    useProjectStore.getState().replaceProjectSnapshot({
+      timeline: srv.timeline,
+      version: 5,
+      projectEpoch: 3,
+      projectPath: "/tmp/unknown.opentake",
+      compatibilityReadOnly: false,
+      compatibilityBlockers: [],
+    });
     first.resolve("/tmp/unknown.opentake");
     await Promise.all([projectASave, staleProjectBSave]);
 
     expect(srv.projectSave).toHaveBeenCalledTimes(1);
     expect(useProjectStore.getState().lastSavedVersion).toBe(4);
     expect(useProjectStore.getState().timelineVersion).toBe(5);
+  });
+});
+
+describe("saveCurrentProjectAs", () => {
+  beforeEach(() => {
+    srv.projectSave.mockReset();
+    srv.projectSave.mockImplementation(async (path: string | null) => path ?? "");
+    useRecentStore.setState({ recents: [] });
+    useProjectStore.setState({
+      snapshotMutationRevision: 0,
+      projectEpoch: 1,
+      projectPath: "/tmp/current.opentake",
+      compatibilityReadOnly: false,
+      timelineVersion: 9,
+      lastSavedVersion: 8,
+    });
+    useEditorUiStore.setState({ toast: null });
+    useI18nStore.setState({ locale: "zh-CN" });
+  });
+
+  it("adopts the core-returned Save As path only after publication succeeds", async () => {
+    srv.projectSave.mockResolvedValueOnce("/tmp/canonical-fresh.opentake");
+
+    await saveCurrentProjectAs();
+
+    expect(srv.projectSave).toHaveBeenCalledWith("/tmp/fresh.opentake");
+    expect(useProjectStore.getState().projectPath).toBe("/tmp/canonical-fresh.opentake");
+    expect(useProjectStore.getState().lastSavedVersion).toBe(9);
+    expect(useRecentStore.getState().recents[0]?.path).toBe(
+      "/tmp/canonical-fresh.opentake",
+    );
+  });
+
+  it("preserves the active path and dirty state when Save As fails", async () => {
+    srv.projectSave.mockRejectedValueOnce(new Error("destination denied"));
+
+    await expect(saveCurrentProjectAs()).rejects.toThrow("destination denied");
+
+    expect(useProjectStore.getState().projectPath).toBe("/tmp/current.opentake");
+    expect(useProjectStore.getState().lastSavedVersion).toBe(8);
+    expect(useRecentStore.getState().recents).toEqual([]);
+    expect(useEditorUiStore.getState().toast?.message).toBe("保存失败：destination denied");
+  });
+
+  it("does not open a Save As flow for compatibility read-only projects", async () => {
+    useProjectStore.setState({ compatibilityReadOnly: true });
+
+    await saveCurrentProjectAs();
+
+    expect(srv.projectSave).not.toHaveBeenCalled();
+    expect(useProjectStore.getState().projectPath).toBe("/tmp/current.opentake");
   });
 });

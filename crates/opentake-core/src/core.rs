@@ -31,8 +31,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
 
-use opentake_domain::{MediaManifest, MediaManifestEntry, Timeline};
-use opentake_ops::command::{EditCommand, EditResult};
+use opentake_domain::{
+    ClipType, GenerationInput, MediaAsset, MediaManifest, MediaManifestEntry, MediaProxy, Timeline,
+};
+use opentake_ops::command::{ClipEntry, EditCommand, EditResult};
 use opentake_ops::IdGen;
 use opentake_project::{GenerationLog, ProjectCompatibility};
 use same_file::Handle;
@@ -41,8 +43,8 @@ use crate::deps::CoreDeps;
 use crate::error::{CoreError, Result};
 use crate::events::{CoreEvent, EventBus, SubscriptionId};
 use crate::session::{
-    EditorSession, GenerationJobCommit, GenerationStateUpdate, PreparedGenerationJob,
-    PreparedGenerationOutput, ProbedMedia,
+    DerivedStemProvenance, EditorSession, GenerationJobCommit, GenerationStateUpdate,
+    PreparedGenerationJob, PreparedGenerationOutput, ProbedMedia,
 };
 
 type ProjectIdentityTransitionListener = Arc<dyn Fn(bool) + Send + Sync + 'static>;
@@ -126,6 +128,31 @@ pub struct ProjectRuntimeSnapshot {
     pub version: u64,
 }
 
+/// Placement half of a project-managed motion render commit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MotionPlacement {
+    Add {
+        start_frame: i32,
+        duration_frames: i32,
+        track_index: Option<usize>,
+    },
+    Replace {
+        clip_id: String,
+    },
+    /// Replace a clip with a derivative that already contains the result of
+    /// its masks, then clear those editable masks in the same undo snapshot.
+    ReplaceAndClearMasks {
+        clip_id: String,
+    },
+}
+
+/// Result of atomically registering a rendered video and placing/replacing it.
+#[derive(Clone, Debug)]
+pub struct MotionMediaCommit {
+    pub media: MediaManifestEntry,
+    pub edit: EditResult,
+}
+
 /// A folder target in a prepared media-import plan. Planned folders are keyed
 /// by the scanner without consuming application ids; existing folders retain
 /// their authoritative project id.
@@ -149,6 +176,12 @@ pub enum PreparedMediaImportOp {
         name: String,
         probe: ProbedMedia,
         folder: Option<PreparedMediaFolderRef>,
+    },
+    ImportDerivedStem {
+        path: PathBuf,
+        name: String,
+        probe: ProbedMedia,
+        provenance: DerivedStemProvenance,
     },
 }
 
@@ -507,6 +540,61 @@ impl AppCore {
         command: EditCommand,
     ) -> Result<EditResult> {
         self.apply_with_revision(command, Some(expected))
+    }
+
+    /// Apply one revision-bound edit and durably save the project under the
+    /// same session lock. Persistence failure restores document, history, and
+    /// version exactly before returning.
+    pub fn apply_at_revision_persisted(
+        &self,
+        expected: ProjectRevision,
+        command: EditCommand,
+    ) -> Result<EditResult> {
+        let (result, project_epoch, media_count, written) = {
+            let mut session = self.lock();
+            if session.project_epoch != expected.project_epoch
+                || session.editor.version() != expected.version
+            {
+                return Err(CoreError::Media(
+                    "project changed while preparing a deferred edit".to_string(),
+                ));
+            }
+            let before = session.editor.checkpoint_editor_state();
+            let outcome = (|| {
+                let result = session.editor.apply(command, self.ids.as_ref())?;
+                let media_count = result
+                    .manifest_changed
+                    .then(|| session.editor.media().entries.len());
+                let written = session.editor.save_project(None)?;
+                Ok((result, media_count, written))
+            })();
+            match outcome {
+                Ok((result, media_count, written)) => {
+                    (result, session.project_epoch, media_count, written)
+                }
+                Err(error) => {
+                    session.editor.restore_editor_state(before);
+                    return Err(error);
+                }
+            }
+        };
+        if result.changed {
+            self.events.emit(&CoreEvent::TimelineChanged {
+                project_epoch,
+                version: result.timeline_version,
+            });
+        }
+        if let Some(count) = media_count {
+            self.events.emit(&CoreEvent::MediaChanged {
+                project_epoch,
+                count,
+            });
+        }
+        self.events.emit(&CoreEvent::ProjectSaved {
+            path: written.to_string_lossy().into_owned(),
+            project_epoch,
+        });
+        Ok(result)
     }
 
     fn apply_with_revision(
@@ -922,6 +1010,178 @@ impl AppCore {
         Ok(entry)
     }
 
+    /// Atomically register a completed project-managed motion render and place
+    /// or replace its timeline clip.
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_motion_media_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_version: u64,
+        expected_project_dir: &Path,
+        path: impl AsRef<Path>,
+        name: impl Into<String>,
+        probe: &ProbedMedia,
+        provenance: GenerationInput,
+        placement: MotionPlacement,
+    ) -> Result<MotionMediaCommit> {
+        self.commit_generated_media_for_project(
+            expected_project_epoch,
+            expected_version,
+            expected_project_dir,
+            path,
+            name,
+            ClipType::Video,
+            probe,
+            provenance,
+            placement,
+            "Add Motion Graphic",
+        )
+    }
+
+    /// Atomically register a completed generated audio/video file and place or
+    /// replace its timeline clip. The generated file must already be a
+    /// regular, non-symlink child of the active bundle's `media/` directory.
+    /// The document command and project save share the session lock; any command
+    /// or persistence failure restores timeline, manifest, undo/redo, and
+    /// version exactly. A stale document version is rejected under that same
+    /// lock. Events are emitted only after the durable save succeeds.
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_generated_media_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_version: u64,
+        expected_project_dir: &Path,
+        path: impl AsRef<Path>,
+        name: impl Into<String>,
+        kind: ClipType,
+        probe: &ProbedMedia,
+        provenance: GenerationInput,
+        placement: MotionPlacement,
+        action_name: &str,
+    ) -> Result<MotionMediaCommit> {
+        let path = path.as_ref();
+        let media_dir = expected_project_dir.join(opentake_project::layout::MEDIA_DIR);
+        if path.parent() != Some(media_dir.as_path())
+            || path.file_name().is_none()
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    std::path::Component::ParentDir | std::path::Component::CurDir
+                )
+            })
+        {
+            return Err(CoreError::Media(
+                "generated output must be one direct child of the active project media directory"
+                    .into(),
+            ));
+        }
+        let metadata = std::fs::symlink_metadata(path)
+            .map_err(|error| CoreError::Media(format!("motion output metadata failed: {error}")))?;
+        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+            return Err(CoreError::Media(
+                "generated output must be a regular non-symlink file".into(),
+            ));
+        }
+
+        let (commit, count, written) = {
+            let mut session = self.lock();
+            ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+            if session.editor.version() != expected_version {
+                return Err(CoreError::Media(
+                    "project changed while preparing a generated-media edit".into(),
+                ));
+            }
+            session.editor.ensure_mutable()?;
+            let before = session.editor.checkpoint_editor_state();
+            let id = loop {
+                let candidate = self.ids.next_id();
+                if session.editor.media_entry(&candidate).is_none() {
+                    break candidate;
+                }
+            };
+
+            let result = (|| {
+                if !matches!(kind, ClipType::Audio | ClipType::Video) {
+                    return Err(CoreError::Media(
+                        "generated placement supports audio or video".into(),
+                    ));
+                }
+                let mut asset = MediaAsset::new(id, path, kind, name, probe.duration_secs);
+                asset.source_width = probe.width;
+                asset.source_height = probe.height;
+                asset.source_fps = probe.fps;
+                asset.color = probe.color.clone();
+                asset.has_audio = probe.has_audio;
+                asset.generation_input = Some(provenance);
+                let media = asset.to_manifest_entry(Some(expected_project_dir), 0.0);
+
+                let command = match placement {
+                    MotionPlacement::Add {
+                        start_frame,
+                        duration_frames,
+                        track_index,
+                    } => EditCommand::RegisterMediaAndAddClip {
+                        entry: ClipEntry {
+                            media_ref: media.id.clone(),
+                            media_type: kind,
+                            source_clip_type: kind,
+                            track_index: track_index.unwrap_or(0),
+                            start_frame,
+                            duration_frames,
+                            trim_start_frame: None,
+                            trim_end_frame: None,
+                            has_audio: probe.has_audio,
+                            add_linked_audio: false,
+                            transform: None,
+                        },
+                        media: media.clone(),
+                        auto_track: track_index.is_none(),
+                    },
+                    MotionPlacement::Replace { clip_id } => EditCommand::RegisterMediaAndSwapClip {
+                        media: media.clone(),
+                        clip_id,
+                    },
+                    MotionPlacement::ReplaceAndClearMasks { clip_id } => {
+                        EditCommand::RegisterMediaAndSwapClipClearingMasks {
+                            media: media.clone(),
+                            clip_id,
+                        }
+                    }
+                };
+                let mut edit = session.editor.apply(command, self.ids.as_ref())?;
+                edit.action_name = action_name.to_string();
+                edit.summary = format!("{} generated media clip(s)", edit.affected_clip_ids.len());
+                let written = session.editor.save_project(None)?;
+                Ok((MotionMediaCommit { media, edit }, written))
+            })();
+
+            match result {
+                Ok((commit, written)) => {
+                    let count = session.editor.media().entries.len();
+                    (commit, count, written)
+                }
+                Err(error) => {
+                    session.editor.restore_editor_state(before);
+                    return Err(error);
+                }
+            }
+        };
+
+        self.events.emit(&CoreEvent::TimelineChanged {
+            project_epoch: expected_project_epoch,
+            version: commit.edit.timeline_version,
+        });
+        self.events.emit(&CoreEvent::MediaChanged {
+            project_epoch: expected_project_epoch,
+            count,
+        });
+        self.events.emit(&CoreEvent::ProjectSaved {
+            path: written.to_string_lossy().into_owned(),
+            project_epoch: expected_project_epoch,
+        });
+        Ok(commit)
+    }
+
     /// Commit a fully probed media-import plan as one project-bound durable
     /// transaction. The session lock covers identity validation, all manifest
     /// edits, and the atomic `media.json` write. Any failure restores the exact
@@ -1006,6 +1266,18 @@ impl AppCore {
                                 )?;
                                 entry.folder_id = Some(folder_id);
                             }
+                            imports.push(CommittedMediaImport { path, entry });
+                        }
+                        PreparedMediaImportOp::ImportDerivedStem {
+                            path,
+                            name,
+                            probe,
+                            provenance,
+                        } => {
+                            let id = self.ids.next_id();
+                            let entry = session
+                                .editor
+                                .import_derived_stem_file(&path, id, name, &probe, provenance)?;
                             imports.push(CommittedMediaImport { path, entry });
                         }
                     }
@@ -1330,6 +1602,41 @@ impl AppCore {
         Ok(changed)
     }
 
+    /// Persist one asset's playback proxy as an atomic manifest mutation.
+    /// Failure to write restores the in-memory manifest before the lock is
+    /// released, so UI and disk never disagree about proxy availability.
+    pub fn set_media_proxy_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        asset_id: &str,
+        proxy: Option<MediaProxy>,
+    ) -> Result<MediaManifestEntry> {
+        let (entry, count, written) = {
+            let mut session = self.lock();
+            ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
+            let before = session.editor.media();
+            let entry = session.editor.set_media_proxy(asset_id, proxy)?;
+            let count = session.editor.media().entries.len();
+            match session.editor.save_media_manifest() {
+                Ok(written) => (entry, count, written),
+                Err(error) => {
+                    session.editor.restore_media(before);
+                    return Err(error);
+                }
+            }
+        };
+        self.events.emit(&CoreEvent::MediaChanged {
+            project_epoch: expected_project_epoch,
+            count,
+        });
+        self.events.emit(&CoreEvent::ProjectSaved {
+            path: written.to_string_lossy().into_owned(),
+            project_epoch: expected_project_epoch,
+        });
+        Ok(entry)
+    }
+
     /// Set or clear one project's global-favorite mapping, emitting the same
     /// media-change signal used by other manifest mutations.
     pub fn set_media_global_favorite(
@@ -1547,16 +1854,34 @@ impl AppCore {
         path: impl AsRef<std::path::Path>,
         probe: &ProbedMedia,
     ) -> Result<MediaManifestEntry> {
-        let (entry, count, project_epoch) = {
+        let (entry, count, project_epoch, saved) = {
             let mut session = self.lock();
+            let before = session.editor.media();
             let entry = session.editor.relink_media_file(asset_id, path, probe)?;
             let count = session.editor.media().entries.len();
-            (entry, count, session.project_epoch)
+            let saved = if session.editor.project_dir().is_some() {
+                match session.editor.save_media_manifest() {
+                    Ok(path) => Some(path),
+                    Err(error) => {
+                        session.editor.restore_media(before);
+                        return Err(error);
+                    }
+                }
+            } else {
+                None
+            };
+            (entry, count, session.project_epoch, saved)
         };
         self.events.emit(&CoreEvent::MediaChanged {
             project_epoch,
             count,
         });
+        if let Some(path) = saved {
+            self.events.emit(&CoreEvent::ProjectSaved {
+                path: path.to_string_lossy().into_owned(),
+                project_epoch,
+            });
+        }
         Ok(entry)
     }
 
@@ -1576,7 +1901,7 @@ impl AppCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opentake_domain::{ClipType, Timeline, Track};
+    use opentake_domain::{ClipType, MediaColorMetadata, MediaProxy, Timeline, Track};
     use opentake_ops::command::ClipEntry;
     use std::sync::Mutex;
 
@@ -1590,6 +1915,189 @@ mod tests {
             session.editor.seed_from_timeline(tl);
         }
         core
+    }
+
+    #[test]
+    fn motion_media_commit_is_durable_atomic_and_one_step_undoable() {
+        let bundle = project_bundle("motion-commit");
+        let core = AppCore::new();
+        core.open_project(&bundle).unwrap();
+        let media_dir = opentake_project::layout::media_dir(&bundle);
+        std::fs::create_dir_all(&media_dir).unwrap();
+        let rendered = media_dir.join("motion-a.mp4");
+        std::fs::write(&rendered, b"validated-render-fixture").unwrap();
+        let snapshot = core.runtime_snapshot();
+        let probe = ProbedMedia {
+            duration_secs: 1.0,
+            width: Some(64),
+            height: Some(36),
+            fps: Some(30.0),
+            has_audio: false,
+            color: None,
+        };
+
+        let committed = core
+            .commit_motion_media_for_project(
+                snapshot.project_epoch,
+                snapshot.version,
+                &bundle,
+                &rendered,
+                "Motion A",
+                &probe,
+                GenerationInput {
+                    prompt: "{\"templateId\":\"title-card\"}".into(),
+                    model: "opentake.motion-canvas".into(),
+                    duration: 30,
+                    aspect_ratio: "64:36".into(),
+                    provider: Some("opentake-motion".into()),
+                    status: Some(opentake_domain::GenerationJobStatus::Ready),
+                    ..GenerationInput::default()
+                },
+                MotionPlacement::Add {
+                    start_frame: 0,
+                    duration_frames: 30,
+                    track_index: Some(0),
+                },
+            )
+            .unwrap();
+        assert_eq!(committed.edit.action_name, "Add Motion Graphic");
+        assert_eq!(core.media().entries.len(), 2);
+        assert_eq!(core.get_timeline().timeline.tracks[0].clips.len(), 1);
+
+        let reopened = AppCore::new();
+        reopened.open_project(&bundle).unwrap();
+        assert_eq!(reopened.media().entries.len(), 2);
+        assert_eq!(reopened.get_timeline().timeline.tracks[0].clips.len(), 1);
+
+        core.undo().unwrap();
+        assert_eq!(core.media().entries.len(), 1);
+        assert!(core.get_timeline().timeline.tracks[0].clips.is_empty());
+        let _ = std::fs::remove_dir_all(bundle);
+    }
+
+    #[test]
+    fn generated_media_commit_refuses_version_drift_without_mutation() {
+        let bundle = project_bundle("generated-version-drift");
+        let core = AppCore::new();
+        core.open_project(&bundle).unwrap();
+        let media_dir = opentake_project::layout::media_dir(&bundle);
+        std::fs::create_dir_all(&media_dir).unwrap();
+        let rendered = media_dir.join("stale-render.mp4");
+        std::fs::write(&rendered, b"validated-render-fixture").unwrap();
+        let stale = core.runtime_snapshot();
+        core.apply(EditCommand::SetTimelineSettings {
+            fps: 24,
+            width: 1280,
+            height: 720,
+        })
+        .unwrap();
+        let before_commit = core.runtime_snapshot();
+
+        let error = core
+            .commit_motion_media_for_project(
+                stale.project_epoch,
+                stale.version,
+                &bundle,
+                &rendered,
+                "Stale Render",
+                &ProbedMedia::default(),
+                GenerationInput::default(),
+                MotionPlacement::Add {
+                    start_frame: 0,
+                    duration_frames: 1,
+                    track_index: Some(0),
+                },
+            )
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("project changed while preparing a generated-media edit"));
+        let after_commit = core.runtime_snapshot();
+        assert_eq!(after_commit.timeline, before_commit.timeline);
+        assert_eq!(after_commit.media, before_commit.media);
+        assert_eq!(after_commit.version, before_commit.version);
+
+        let _ = std::fs::remove_dir_all(bundle);
+    }
+
+    #[test]
+    fn motion_media_commit_rejects_output_outside_active_bundle_without_mutation() {
+        let bundle = project_bundle("motion-outside");
+        let core = AppCore::new();
+        core.open_project(&bundle).unwrap();
+        let outside = std::env::temp_dir().join(format!(
+            "opentake-motion-outside-{}-{}.mp4",
+            std::process::id(),
+            core.runtime_snapshot().project_epoch
+        ));
+        std::fs::write(&outside, b"outside").unwrap();
+        let before = core.runtime_snapshot();
+
+        let error = core
+            .commit_motion_media_for_project(
+                before.project_epoch,
+                before.version,
+                &bundle,
+                &outside,
+                "Outside",
+                &ProbedMedia::default(),
+                GenerationInput::default(),
+                MotionPlacement::Add {
+                    start_frame: 0,
+                    duration_frames: 1,
+                    track_index: Some(0),
+                },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("active project media"));
+        let after = core.runtime_snapshot();
+        assert_eq!(after.timeline, before.timeline);
+        assert_eq!(after.media, before.media);
+        assert_eq!(after.version, before.version);
+
+        let _ = std::fs::remove_file(outside);
+        let _ = std::fs::remove_dir_all(bundle);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn motion_media_commit_rejects_symlink_without_mutation() {
+        use std::os::unix::fs::symlink;
+
+        let bundle = project_bundle("motion-symlink");
+        let core = AppCore::new();
+        core.open_project(&bundle).unwrap();
+        let media_dir = opentake_project::layout::media_dir(&bundle);
+        std::fs::create_dir_all(&media_dir).unwrap();
+        let target = media_dir.join("motion-target.mp4");
+        let linked = media_dir.join("motion-linked.mp4");
+        std::fs::write(&target, b"validated-render-fixture").unwrap();
+        symlink(&target, &linked).unwrap();
+        let before = core.runtime_snapshot();
+
+        let error = core
+            .commit_motion_media_for_project(
+                before.project_epoch,
+                before.version,
+                &bundle,
+                &linked,
+                "Linked",
+                &ProbedMedia::default(),
+                GenerationInput::default(),
+                MotionPlacement::Add {
+                    start_frame: 0,
+                    duration_frames: 1,
+                    track_index: Some(0),
+                },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("regular non-symlink"));
+        let after = core.runtime_snapshot();
+        assert_eq!(after.timeline, before.timeline);
+        assert_eq!(after.media, before.media);
+        assert_eq!(after.version, before.version);
+
+        let _ = std::fs::remove_dir_all(bundle);
     }
 
     #[test]
@@ -2021,6 +2529,7 @@ mod tests {
             height: Some(480),
             fps: Some(24.0),
             has_audio: false,
+            color: None,
         };
         let entry = core.import_media_file("/abs/a.mp4", "a", &probe).unwrap();
 
@@ -2036,6 +2545,58 @@ mod tests {
                 count: 1
             }]
         );
+    }
+
+    #[test]
+    fn hdr_and_proxy_metadata_persist_across_project_reopen() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = temp.path().join("ColorProxy.opentake");
+        let source = temp.path().join("source.mp4");
+        std::fs::write(&source, b"source").unwrap();
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone())).unwrap();
+        let entry = core
+            .import_media_file(
+                &source,
+                "source",
+                &ProbedMedia {
+                    duration_secs: 1.0,
+                    width: Some(1920),
+                    height: Some(1080),
+                    fps: Some(24.0),
+                    has_audio: false,
+                    color: Some(MediaColorMetadata {
+                        primaries: Some("bt2020".into()),
+                        transfer: Some("smpte2084".into()),
+                        matrix: Some("bt2020nc".into()),
+                        range: Some("tv".into()),
+                    }),
+                },
+            )
+            .unwrap();
+        core.save_project(None).unwrap();
+        let proxy_relative = "media/proxies/source.mp4";
+        std::fs::create_dir_all(bundle.join("media/proxies")).unwrap();
+        std::fs::write(bundle.join(proxy_relative), b"proxy").unwrap();
+        let revision = core.runtime_snapshot();
+        core.set_media_proxy_for_project(
+            revision.project_epoch,
+            &bundle,
+            &entry.id,
+            Some(MediaProxy {
+                relative_path: proxy_relative.into(),
+                source_sha256: "a".repeat(64),
+                width: 640,
+                height: 360,
+            }),
+        )
+        .unwrap();
+
+        let reopened = AppCore::new();
+        reopened.open_project(&bundle).unwrap();
+        let restored = reopened.media().entries.into_iter().next().unwrap();
+        assert!(restored.color.as_ref().is_some_and(|color| color.is_hdr()));
+        assert_eq!(restored.proxy.unwrap().relative_path, proxy_relative);
     }
 
     #[test]

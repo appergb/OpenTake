@@ -14,7 +14,8 @@ use std::path::Path;
 use std::process::Command;
 
 use opentake_domain::{
-    Clip, ClipType, MediaManifest, MediaManifestEntry, MediaSource, Timeline, Track,
+    Clip, ClipType, MediaColorMetadata, MediaManifest, MediaManifestEntry, MediaSource, Timeline,
+    Track,
 };
 
 /// True when both ffmpeg and ffprobe are on PATH.
@@ -52,6 +53,62 @@ fn make_video(path: &Path, w: u32, h: u32, fps: u32, frames: u32) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// Generate a tagged Main10/PQ fixture. The x265 bitstream parameters are
+/// intentional: container-only tags are not sufficient to exercise the HDR
+/// decoder path used by the packaged application.
+fn make_hdr_video(path: &Path, w: u32, h: u32, fps: u32, frames: u32) -> bool {
+    Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc2=size={w}x{h}:rate={fps}"),
+            "-frames:v",
+            &frames.to_string(),
+            "-vf",
+            "format=yuv420p10le",
+            "-c:v",
+            "libx265",
+            "-preset",
+            "ultrafast",
+            "-x265-params",
+            "log-level=error:hdr-opt=1:repeat-headers=1:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc",
+            "-color_primaries",
+            "bt2020",
+            "-color_trc",
+            "smpte2084",
+            "-colorspace",
+            "bt2020nc",
+            "-y",
+        ])
+        .arg(path)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn decoded_rgb_range(path: &Path) -> Option<(u8, u8)> {
+    let output = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args(["-frames:v", "1", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"])
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return None;
+    }
+    Some(
+        output
+            .stdout
+            .into_iter()
+            .fold((u8::MAX, u8::MIN), |(minimum, maximum), value| {
+                (minimum.min(value), maximum.max(value))
+            }),
+    )
 }
 
 /// Generate an N-frame test video *with* a sine audio track. Returns false on
@@ -234,6 +291,8 @@ fn build_manifest_with_audio(
         source_height: Some(src_h),
         source_fps: Some(src_fps),
         has_audio: Some(has_audio),
+        color: None,
+        proxy: None,
         folder_id: None,
         cached_remote_url: None,
         cached_remote_url_expires_at: None,
@@ -319,6 +378,69 @@ fn export_full_timeline_produces_playable_mp4() {
     assert!(
         !has_audio_stream(&out),
         "video-only timeline must not gain an audio stream"
+    );
+}
+
+/// Regression for the packaged HDR export producing a valid-looking but fully
+/// black H.264 file. The packaged FFmpeg and the developer FFmpeg can expose
+/// different HDR filter backends, so this test is also run with
+/// `OPENTAKE_FFMPEG`/`OPENTAKE_FFPROBE` pointed at the bundled sidecars.
+#[test]
+fn export_hdr_timeline_preserves_picture_contrast_and_delivers_bt709() {
+    if !ffmpeg_ready() {
+        eprintln!("skip: ffmpeg/ffprobe not available");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("hdr-pq.mp4");
+    let out = dir.path().join("hdr-delivery.mp4");
+    let (sw, sh, sfps, frames) = (160, 90, 12, 12);
+    if !make_hdr_video(&src, sw, sh, sfps, frames) {
+        eprintln!("skip: could not generate HDR fixture media");
+        return;
+    }
+
+    let timeline = build_timeline(frames as i32, sw as i32, sh as i32, sfps as f64);
+    let mut manifest = build_manifest(&src, sw as i32, sh as i32, sfps as f64);
+    manifest.entries[0].color = Some(MediaColorMetadata {
+        primaries: Some("bt2020".into()),
+        transfer: Some("smpte2084".into()),
+        matrix: Some("bt2020nc".into()),
+        range: Some("tv".into()),
+    });
+
+    let request = ExportRequest {
+        out_path: out.to_string_lossy().into_owned(),
+        codec: Default::default(),
+        quality: ExportQuality::P720,
+    };
+    let summary = match run_export(&timeline, &manifest, &None, &request) {
+        Ok(summary) => summary,
+        Err(error) if error.contains("no GPU device") => {
+            eprintln!("skip: no GPU adapter available ({error})");
+            return;
+        }
+        Err(error) => panic!("HDR export failed: {error}"),
+    };
+
+    assert_summary_matches_real_probe(&summary, &out);
+    assert_eq!(
+        probe_field(&out, "stream=color_primaries").as_deref(),
+        Some("bt709")
+    );
+    assert_eq!(
+        probe_field(&out, "stream=color_transfer").as_deref(),
+        Some("bt709")
+    );
+    assert_eq!(
+        probe_field(&out, "stream=color_space").as_deref(),
+        Some("bt709")
+    );
+    let (minimum, maximum) = decoded_rgb_range(&out).expect("decode exported first frame");
+    assert!(
+        maximum.saturating_sub(minimum) > 32,
+        "tone-mapped export must retain picture contrast, got RGB range {minimum}..={maximum}"
     );
 }
 

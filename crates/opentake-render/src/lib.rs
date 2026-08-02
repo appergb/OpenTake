@@ -14,13 +14,14 @@ pub mod source;
 pub use wgpu;
 
 pub use plan::{
-    affine_transform, build_render_plan, compose, crop_to_uv, source_frame_index, ClipPlan,
-    FramePlan, LayerDraw, RenderPlan, RenderSize, TextureSource,
+    affine_transform, build_render_plan, compose, crop_to_uv, source_frame_index,
+    try_build_render_plan, AudioClipPlan, ClipPlan, CompoundAncestor, FramePlan, LayerDraw,
+    RenderPlan, RenderSize, TextureSource,
 };
 pub use size::{even, export_render_size, ExportResolution};
 pub use source::{DecodedFrame, FrameProvider, SourceMetrics};
 
 pub use gpu::{
-    Compositor, CosmicTextRasterizer, GpuTexture, NullTextRasterizer, RenderDevice, RenderError,
-    TextRasterRequest, TextRasterizer, TextureCache, TextureResolver,
+    Compositor, CosmicTextRasterizer, GpuLutTexture, GpuTexture, NullTextRasterizer, RenderDevice,
+    RenderError, TextRasterRequest, TextRasterizer, TextureCache, TextureResolver,
 };

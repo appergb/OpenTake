@@ -7,13 +7,60 @@
 
 export type ClipType = "video" | "audio" | "image" | "text" | "lottie";
 export type Interpolation = "linear" | "hold" | "smooth";
+export type TransitionKind = "crossDissolve";
+
+export interface Transition {
+  fromClipId: string;
+  toClipId: string;
+  kind: TransitionKind;
+  durationFrames: number;
+}
 
 export interface Timeline {
   fps: number; // default 30
   width: number; // default 1920
   height: number; // default 1080
   settingsConfigured: boolean;
+  nestedSequences?: NestedSequence[];
+  scriptAssemblyPlans?: ScriptAssemblyPlan[];
+  voiceModels?: VoiceModelRecord[];
   tracks: Track[];
+}
+
+export interface VoiceModelRecord {
+  id: string;
+  provider: string;
+  providerVoiceId: string;
+  model: string;
+  consentId: string;
+  sourceAudioAssetId: string;
+  sourceAudioSha256: string;
+  requestHash: string;
+  voiceName: string;
+  revoked: boolean;
+}
+
+export interface ScriptAssemblySegment {
+  script: string;
+  mediaRef: string;
+  narrationMediaRef?: string;
+  durationFrames: number;
+  transition?: TransitionKind;
+}
+
+export interface ScriptAssemblyPlan {
+  id: string;
+  planHash: string;
+  planner: string;
+  plannerVersion: number;
+  startFrame: number;
+  segments: ScriptAssemblySegment[];
+}
+
+export interface NestedSequence {
+  id: string;
+  name: string;
+  timeline: Timeline;
 }
 
 export interface Track {
@@ -102,6 +149,15 @@ export interface LiftGammaGain {
   gain: Rgb;
 }
 
+export interface HslSecondary {
+  hueCenter: number;
+  hueWidth: number;
+  feather: number;
+  hueShift: number;
+  saturation: number;
+  lightness: number;
+}
+
 export interface ColorGrade {
   exposure: number;
   temperature: number;
@@ -109,6 +165,13 @@ export interface ColorGrade {
   liftGammaGain: LiftGammaGain;
   contrast: number;
   saturation: number;
+  hslSecondary?: HslSecondary;
+}
+
+export interface LutReference {
+  id: string;
+  name: string;
+  intensity: number;
 }
 
 export interface ChromaKey {
@@ -128,10 +191,17 @@ export type MaskShape =
   | { kind: "circle"; center: Point2; radius: Point2 }
   | { kind: "poly"; points: Point2[] };
 
+export interface MaskTransform {
+  offset: Point2;
+  scale: Point2;
+  rotationDegrees: number;
+}
+
 export interface Mask {
   shape: MaskShape;
   feather: number;
   invert: boolean;
+  transform?: MaskTransform;
 }
 
 export interface Effect {
@@ -153,6 +223,29 @@ export interface ColorGradeInput {
   liftGammaGain?: LiftGammaGainInput;
   contrast?: number;
   saturation?: number;
+  hslSecondary?: Partial<HslSecondary>;
+}
+
+export interface ColorMatchInput {
+  referenceMediaRef: string;
+  referenceFrame: number;
+  targetFrame: number;
+  algorithm: string;
+  algorithmVersion: number;
+  targetMeanLinear: Rgb;
+  referenceMeanLinear: Rgb;
+  deltaEBefore: number;
+  deltaEAfter: number;
+  targetLumaBefore: number;
+  targetLumaAfter: number;
+}
+
+export interface CaptionTranslationInput {
+  sourceText: string;
+  sourceLocale: string;
+  targetLocale: string;
+  provider: string;
+  model: string;
 }
 
 export interface ChromaKeyInput {
@@ -166,12 +259,47 @@ export interface MaskInput {
   shape?: MaskShape;
   feather?: number;
   invert?: boolean;
+  transform?: MaskTransform;
 }
 
 export interface EffectInput {
   name: string;
   params?: Record<string, number>;
   enabled?: boolean;
+}
+
+export interface StabilizationKeyframe {
+  frame: number;
+  translationX: number;
+  translationY: number;
+  rotationDegrees: number;
+}
+
+export interface StabilizationTrack {
+  model: string;
+  modelVersion: number;
+  sourceIdentity: string;
+  strength: number;
+  cropMargin: number;
+  keyframes: StabilizationKeyframe[];
+}
+
+export interface LoudnessNormalization {
+  targetLufs: number;
+  truePeakCeilingDbtp: number;
+  inputIntegratedLufs: number;
+  inputTruePeakDbtp: number;
+  gainDb: number;
+  outputIntegratedLufs: number;
+  outputTruePeakDbtp: number;
+}
+
+export type DenoiseMode = "adaptive" | "voice";
+
+export interface AudioDenoise {
+  mode: DenoiseMode;
+  strength: number;
+  previewEnabled: boolean;
 }
 
 export interface Clip {
@@ -195,18 +323,26 @@ export interface Clip {
   crop: Crop;
   linkGroupId?: string;
   captionGroupId?: string;
+  nestedSequenceId?: string;
   textContent?: string;
   textStyle?: TextStyle;
+  captionTranslationInput?: CaptionTranslationInput;
   opacityTrack?: KeyframeTrack<number>;
   positionTrack?: KeyframeTrack<AnimPair>;
   scaleTrack?: KeyframeTrack<AnimPair>;
   rotationTrack?: KeyframeTrack<number>;
   cropTrack?: KeyframeTrack<Crop>;
   volumeTrack?: KeyframeTrack<number>;
+  loudnessNormalization?: LoudnessNormalization;
+  audioDenoise?: AudioDenoise;
   colorGrade?: ColorGrade;
+  colorMatchInput?: ColorMatchInput;
+  lut?: LutReference;
   chromaKey?: ChromaKey;
   masks?: Mask[];
   effects?: Effect[];
+  stabilization?: StabilizationTrack;
+  transitionOut?: Transition;
 }
 
 // MARK: - Command DTOs (mirror src-tauri EditRequest)
@@ -301,6 +437,10 @@ export interface FrameRangeReq {
 
 /** The discriminated union mapped to Rust `EditRequest` (tag = "type"). */
 export type EditRequest =
+  | { type: "createNestedSequence"; name: string; clipIds: string[] }
+  | { type: "editNestedSequence"; sequenceId: string; command: EditRequest }
+  | { type: "renameNestedSequence"; sequenceId: string; name: string }
+  | { type: "dissolveNestedSequence"; clipId: string }
   | { type: "addClips"; entries: ClipEntryReq[] }
   | { type: "insertClips"; trackIndex: number; atFrame: number; entries: ClipEntryReq[] }
   | { type: "moveClips"; moves: ClipMoveReq[] }
@@ -328,9 +468,35 @@ export type EditRequest =
   | { type: "moveKeyframe"; clipId: string; property: KeyframeProperty; fromFrame: number; toFrame: number }
   | { type: "setKeyframeInterpolation"; clipId: string; property: KeyframeProperty; frame: number; interpolation: Interpolation }
   | { type: "setColorGrade"; clipIds: string[]; grade?: ColorGradeInput | null }
+  | { type: "setLut"; clipIds: string[]; lut?: LutReference | null }
   | { type: "setChromaKey"; clipIds: string[]; chromaKey?: ChromaKeyInput | null }
   | { type: "setMasks"; clipIds: string[]; masks: MaskInput[] }
   | { type: "setEffects"; clipIds: string[]; effects: EffectInput[] }
+  | {
+      type: "setLoudnessNormalization";
+      clipId: string;
+      normalization?: LoudnessNormalization | null;
+    }
+  | {
+      type: "setAudioDenoise";
+      clipId: string;
+      denoise?: AudioDenoise | null;
+    }
+  | { type: "applyStabilization"; clipId: string; solution: StabilizationTrack }
+  | {
+      type: "adjustStabilization";
+      clipId: string;
+      strength?: number;
+      cropMargin?: number;
+    }
+  | { type: "resetStabilization"; clipId: string }
+  | {
+      type: "setTransition";
+      fromClipId: string;
+      toClipId: string;
+      kind?: TransitionKind | null;
+      durationFrames: number;
+    }
   | { type: "rippleDeleteRanges"; trackIndex: number; ranges: FrameRangeReq[] }
   | { type: "rippleDeleteClips"; clipIds: string[] }
   | { type: "addTexts"; entries: TextEntryReq[] }
@@ -448,6 +614,190 @@ export interface ModelStatus {
   model: string;
   /** Approximate download size in bytes. */
   bytes: number;
+}
+
+export interface MattingModelStatus {
+  installed: boolean;
+  model: string;
+  bytes: number;
+  sha256: string;
+}
+
+export interface MotionTrackingRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface MotionTrackingResult {
+  result: {
+    clipId: string;
+    applied: boolean;
+    algorithm: string;
+    algorithmVersion: number;
+    minimumConfidence: number;
+    region: MotionTrackingRegion;
+    keyframes: Array<{
+      frame: number;
+      position: { x: number; y: number };
+      interpolation: "linear";
+    }>;
+  };
+  actionName?: string | null;
+}
+
+export interface GenerateMatteResult {
+  result: {
+    clipId: string;
+    sourceMediaRef: string;
+    assetId?: string | null;
+    applied: boolean;
+    cacheKey: string;
+    previewPath: string;
+    frameCount: number;
+    width?: number | null;
+    height?: number | null;
+    fps?: number | null;
+    model: string;
+    modelSha256: string;
+    sourceSha256: string;
+    startFrame: number;
+    endFrame: number;
+  };
+  actionName?: string | null;
+}
+
+export interface RemoveObjectResult {
+  result: {
+    clipId: string;
+    sourceMediaRef: string;
+    assetId?: string | null;
+    applied: boolean;
+    cacheKey: string;
+    previewPath: string;
+    frameCount: number;
+    width?: number | null;
+    height?: number | null;
+    fps?: number | null;
+    provider: string;
+    model: string;
+    sourceSha256: string;
+    maskIndex: number;
+    startFrame: number;
+    endFrame: number;
+  };
+  actionName?: string | null;
+}
+
+export interface MatchColorResult {
+  result: {
+    clipId: string;
+    referenceMediaRef: string;
+    referenceFrame: number;
+    targetFrame: number;
+    algorithm: string;
+    algorithmVersion: number;
+    grade: ColorGrade;
+    targetMeanLinear: Rgb;
+    referenceMeanLinear: Rgb;
+    matchedMeanLinear: Rgb;
+    deltaEBefore: number;
+    deltaEAfter: number;
+    targetLumaBefore: number;
+    targetLumaAfter: number;
+    applied: boolean;
+  };
+  actionName?: string | null;
+}
+
+export interface CaptionTranslationReviewChange {
+  id: string;
+  sourceText: string;
+  translatedText: string;
+}
+
+export interface CaptionTranslationResult {
+  result: {
+    projectEpoch: number;
+    version: number;
+    sourceLocale: string;
+    targetLocale: string;
+    provider: string;
+    model: string;
+    review: CaptionTranslationReviewChange[];
+    errors: Array<{ id: string; message: string }>;
+    captionCount: number;
+    translatedCount: number;
+    applied: boolean;
+  };
+  actionName?: string | null;
+}
+
+export interface ScriptToVideoSegmentInput {
+  script: string;
+  mediaRef: string;
+  narrationMediaRef?: string;
+  durationFrames: number;
+  transition?: "crossDissolve";
+}
+
+export interface ScriptToVideoResult {
+  result: {
+    projectEpoch: number;
+    version: number;
+    planId: string;
+    planHash: string;
+    planner: string;
+    plannerVersion: number;
+    startFrame: number;
+    endFrame: number;
+    segments: Array<ScriptToVideoSegmentInput & { startFrame: number }>;
+    applied: boolean;
+  };
+  actionName?: string | null;
+}
+
+export interface AvatarGenerationResult {
+  result: {
+    assetId: string;
+    clipIds: string[];
+    previewPath: string;
+    provider: string;
+    model: string;
+    providerRequestId: string;
+    requestHash: string;
+    consentId: string;
+    portraitMediaRef: string;
+    audioMediaRef: string;
+    durationFrames: number;
+    mediaType: string;
+    imported: boolean;
+  };
+  actionName?: string | null;
+}
+
+export interface VoiceCloneResult {
+  result: {
+    action: "enroll" | "generate" | "revoke";
+    voiceId: string;
+    voiceName?: string;
+    assetId?: string;
+    clipIds?: string[];
+    previewPath?: string;
+    provider: string;
+    model?: string;
+    providerRequestId?: string;
+    requestHash?: string;
+    consentId: string;
+    sourceAudioMediaRef?: string;
+    sourceAudioSha256?: string;
+    durationFrames?: number;
+    mediaType?: string;
+    imported?: boolean;
+    revoked?: boolean;
+  };
+  actionName?: string | null;
 }
 
 /** One transcript word/token with optional source-seconds timing. */
@@ -574,8 +924,23 @@ export interface MediaItem {
   duration: number;
   width?: number | null;
   height?: number | null;
+  /** Probed source frame rate for first-video project configuration. */
+  sourceFps?: number | null;
   hasAudio: boolean;
+  /** Original video stream color signalling. PQ/HLG is delivered as SDR BT.709
+   *  by the current 8-bit preview/export compositor. */
+  color?: {
+    primaries?: string | null;
+    transfer?: string | null;
+    matrix?: string | null;
+    range?: string | null;
+  } | null;
+  isHdr?: boolean;
   path?: string | null;
+  /** Project-local low-resolution playback media; never used for export. */
+  proxyPath?: string | null;
+  proxyWidth?: number | null;
+  proxyHeight?: number | null;
   thumbnail?: string | null;
   /** Library folder this asset lives in (`null`/absent = root). */
   folderId?: string | null;
@@ -625,6 +990,8 @@ export interface GenerationInput {
   sourceStartFrame?: number | null;
   sourceEndFrame?: number | null;
   estimatedCostCredits?: number | null;
+  consentId?: string | null;
+  requestHash?: string | null;
 }
 
 /** A media-library folder (flat list; nest via `parentFolderId`). */

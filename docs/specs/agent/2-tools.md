@@ -8,7 +8,7 @@
 
 枚举顺序严格按 `ToolName`（`ToolDefinitions.swift:4-36`）：`get_timeline, get_media, add_clips, insert_clips, remove_clips, remove_tracks, move_clips, set_clip_properties, set_keyframes, split_clip, ripple_delete_ranges, undo, add_texts, add_captions, generate_video, generate_image, generate_audio, upscale_media, import_media, list_models, inspect_media, get_transcript, inspect_timeline, search_media, list_folders, create_folder, move_to_folder, rename_media, rename_folder, delete_media, delete_folder`。
 
-> 这是上游 31 工具契约清单，不等于当前发现面。OpenTake 在 `ToolName::KNOWN` 保留 44 个兼容线名：基础 38 个真实路径工具始终发布；存在托管或 fal/Replicate/OpenAI/ElevenLabs 兼容 BYOK 凭据时动态增加 `generate_video`、`generate_image`、`generate_audio`、`upscale_media`。Motion 两个兼容线名仍不发布。
+> 这是上游 31 工具契约清单，不等于当前发现面。OpenTake 在 `ToolName::KNOWN` 保留 45 个兼容线名：基础集合最多 39 个，其中媒体桥相关工具仅在主机桥存在时发布；存在托管或 fal/Replicate/OpenAI/ElevenLabs 兼容 BYOK 凭据时动态增加 `generate_video`、`generate_image`、`generate_audio`、`upscale_media`。Motion 两个兼容线名仅在桌面 Chromium/FFmpeg 桥报告可用时动态发布。
 
 ### A. 读 / 内省（只读，7 个）
 
@@ -16,7 +16,7 @@
 |---|---|---|---|---|---|
 | 1 | `get_timeline` | `startFrame?:int`, `endFrame?:int`（窗口分页） | — | `core.timeline_snapshot(window)` → 压缩编码 | `video_classification`+`track_roles`+`editing_stage`+`stage_guidance` |
 | 2 | `get_media` | （无） | — | `core.media_manifest()` | — |
-| 3 | `inspect_media` | `mediaRef*:string`, `clipId?:string`, `maxFrames?:int(≤12)`, `startSeconds?:number`, `endSeconds?:number`, `wordTimestamps?:bool`, `overview?:bool` | `mediaRef` | `opentake-media`：FFmpeg 抽帧 + whisper 转写 | `clip_analysis_hint`（镜头类型/景别） |
+| 3 | `inspect_media` | `mediaRef*:string`, `clipId?:string`, `maxFrames?:int(≤12)`, `startSeconds?:number`, `endSeconds?:number`, `wordTimestamps?:bool`, `overview?:bool` | `mediaRef` | 图片/FFmpeg 抽帧 + whisper 转写 + Velato/Vello Lottie 灰底抽帧 | `clip_analysis_hint`（镜头类型/景别） |
 | 4 | `get_transcript` | `startFrame?:int`, `endFrame?:int`, `clipId?:string` | — | `opentake-media`：遍历时间线音/视轨，映射 trim/speed/position | `break_analysis`（气口/句界/重复/啰嗦） |
 | 5 | `inspect_timeline` | `startFrame?:int`, `endFrame?:int`, `maxFrames?:int(≤12)` | — | `opentake-render`：合成帧（transform/opacity/crop/keyframe + 文字烧入） | — |
 | 6 | `search_media` | `query*:string`, `scope?:enum{visual,spoken,both}`, `mediaRef?:string`, `limit?:int(≤50)` | `query` | `opentake-media`：CLIP 视觉 + 转写口语检索 | `material_match_hint`（B-roll 匹配优先级） |

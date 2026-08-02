@@ -1,0 +1,8 @@
+{
+  "name": "@opentake/motion-canvas-runner",
+  "version": "0.1.0-beta.1",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "main": "main.js"
+}

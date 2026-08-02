@@ -17,6 +17,7 @@ thiserror = "2"
 wgpu = { version = "23", default-features = false, features = ["wgsl", "metal"] }
 # POD uniforms uploaded to the GPU (mat3x2 / crop_uv / opacity / flags).
 bytemuck = { version = "1", features = ["derive"] }
+half = "2"
 # Block on wgpu's async device/queue/map calls from synchronous render code.
 pollster = "0.4"
 # Text shaping + layout + glyph rasterization for timeline text clips (upstream
@@ -28,3 +29,6 @@ cosmic-text = { version = "0.12", default-features = false, features = ["std", "
 [dev-dependencies]
 # PNG read-back round-trip checks in the GPU smoke test (offline, no assets).
 image = { version = "0.25", default-features = false, features = ["png"] }
+serde_json = { workspace = true }
+opentake-media = { workspace = true }
+opentake-ops = { workspace = true }

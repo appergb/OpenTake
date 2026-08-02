@@ -17,7 +17,8 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use opentake_domain::media::MediaAsset;
 use opentake_domain::ClipType;
@@ -29,8 +30,21 @@ use crate::transcribe::cache::has_cached_on_disk;
 /// Cross-window reference-counted export-active flag. Background work yields
 /// while the count is non-zero. Port of `ExportPauseCounter`
 /// (`SearchIndexCoordinator.swift:37-47`).
+#[derive(Default)]
+struct ExportPauseInner {
+    active: AtomicUsize,
+    changed: Condvar,
+    gate: Mutex<()>,
+}
+
 #[derive(Clone, Default)]
-pub struct ExportPause(Arc<AtomicUsize>);
+pub struct ExportPause(Arc<ExportPauseInner>);
+
+/// Balanced playback/export pressure holder. Dropping the final guard wakes
+/// every blocked background worker, including early-return and unwind paths.
+pub struct ExportPauseGuard {
+    pause: ExportPause,
+}
 
 impl ExportPause {
     pub fn new() -> Self {
@@ -38,19 +52,56 @@ impl ExportPause {
     }
     /// Mark an export as begun (increment).
     pub fn begin(&self) {
-        self.0.fetch_add(1, Ordering::SeqCst);
+        self.0.active.fetch_add(1, Ordering::SeqCst);
     }
     /// Mark an export as ended (decrement; saturating at 0).
     pub fn end(&self) {
-        let _ = self
+        let previous = self
             .0
+            .active
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
                 Some(v.saturating_sub(1))
             });
+        if matches!(previous, Ok(1)) {
+            self.0.changed.notify_all();
+        }
     }
     /// True while any export is active.
     pub fn is_active(&self) -> bool {
-        self.0.load(Ordering::SeqCst) > 0
+        self.0.active.load(Ordering::SeqCst) > 0
+    }
+
+    /// Begin pressure and return an unwind-safe, automatically balanced guard.
+    pub fn guard(&self) -> ExportPauseGuard {
+        self.begin();
+        ExportPauseGuard {
+            pause: self.clone(),
+        }
+    }
+
+    /// Block until playback/export pressure clears. The cancellation predicate
+    /// is checked at short intervals so shutdown and job cancellation cannot be
+    /// stranded behind a missing `end`. Returns `false` when cancelled.
+    pub fn wait_while_active(&self, cancelled: impl Fn() -> bool) -> bool {
+        let mut gate = self.0.gate.lock().unwrap_or_else(|e| e.into_inner());
+        while self.is_active() {
+            if cancelled() {
+                return false;
+            }
+            let (next, _) = self
+                .0
+                .changed
+                .wait_timeout(gate, Duration::from_millis(20))
+                .unwrap_or_else(|e| e.into_inner());
+            gate = next;
+        }
+        !cancelled()
+    }
+}
+
+impl Drop for ExportPauseGuard {
+    fn drop(&mut self) {
+        self.pause.end();
     }
 }
 
@@ -135,6 +186,30 @@ mod tests {
         // saturating: extra end stays at 0.
         p.end();
         assert!(!p.is_active());
+
+        // A guard makes every early-return path balanced, and a blocked worker
+        // wakes promptly once the final nested holder leaves.
+        let outer = p.guard();
+        let inner = p.guard();
+        let waiter_pause = p.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            tx.send(waiter_pause.wait_while_active(|| false)).unwrap();
+        });
+        assert!(rx
+            .recv_timeout(std::time::Duration::from_millis(25))
+            .is_err());
+        drop(inner);
+        assert!(rx
+            .recv_timeout(std::time::Duration::from_millis(25))
+            .is_err());
+        drop(outer);
+        assert!(rx.recv_timeout(std::time::Duration::from_secs(1)).unwrap());
+        waiter.join().unwrap();
+
+        p.begin();
+        assert!(!p.wait_while_active(|| true));
+        p.end();
     }
 
     #[test]

@@ -97,32 +97,48 @@ impl EditorState {
         self.version += 1;
     }
 
+    /// Commit an irreversible audit mutation without adding an undo entry.
+    /// Earlier undo snapshots are retained, but restore paths keep provider
+    /// voice records outside ordinary document undo/redo.
+    pub(crate) fn commit_irreversible(&mut self) {
+        self.redo_stack.clear();
+        self.version += 1;
+    }
+
     /// Undo the most recent committed change. Returns `true` if anything was
     /// undone. Pushes the pre-undo document onto the redo stack and bumps the
     /// version.
     pub(crate) fn undo(&mut self) -> bool {
-        let Some(prev) = self.undo_stack.pop() else {
-            return false;
-        };
         let current = self.snapshot();
-        self.restore(prev);
-        self.redo_stack.push(current);
-        self.version += 1;
-        true
+        while let Some(mut prev) = self.undo_stack.pop() {
+            preserve_voice_models(&mut prev, &current);
+            if prev == current {
+                continue;
+            }
+            self.restore(prev);
+            self.redo_stack.push(current);
+            self.version += 1;
+            return true;
+        }
+        false
     }
 
     /// Redo the most recently undone change. Returns `true` if anything was
     /// redone. Pushes the pre-redo document onto the undo stack and bumps the
     /// version.
     pub(crate) fn redo(&mut self) -> bool {
-        let Some(next) = self.redo_stack.pop() else {
-            return false;
-        };
         let current = self.snapshot();
-        self.restore(next);
-        self.undo_stack.push(current);
-        self.version += 1;
-        true
+        while let Some(mut next) = self.redo_stack.pop() {
+            preserve_voice_models(&mut next, &current);
+            if next == current {
+                continue;
+            }
+            self.restore(next);
+            self.undo_stack.push(current);
+            self.version += 1;
+            return true;
+        }
+        false
     }
 
     // MARK: - Lookups (1:1 port of EditorViewModel.findClip)
@@ -143,10 +159,14 @@ impl EditorState {
     }
 }
 
+fn preserve_voice_models(target: &mut DocSnapshot, current: &DocSnapshot) {
+    target.timeline.voice_models = current.timeline.voice_models.clone();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opentake_domain::{Clip, ClipType, Track};
+    use opentake_domain::{Clip, ClipType, Track, VoiceModelRecord};
 
     fn state_with_clip() -> EditorState {
         let mut tl = Timeline::new();
@@ -192,6 +212,61 @@ mod tests {
         assert!(s.redo());
         assert_eq!(s.timeline.tracks[0].clips[0].start_frame, 99);
         assert_eq!(s.version(), 3);
+    }
+
+    #[test]
+    fn permanent_voice_revocation_survives_all_undo_snapshots() {
+        let mut state = EditorState::default();
+        let before_enroll = state.snapshot();
+        state.timeline.voice_models.push(VoiceModelRecord {
+            id: "voice-1".into(),
+            provider: "elevenlabs".into(),
+            provider_voice_id: "provider-1".into(),
+            model: "model".into(),
+            consent_id: "consent-1".into(),
+            source_audio_asset_id: "audio-1".into(),
+            source_audio_sha256: "a".repeat(64),
+            request_hash: "b".repeat(64),
+            voice_name: "Narrator".into(),
+            revoked: false,
+        });
+        state.commit(before_enroll);
+        state.timeline.voice_models[0].revoked = true;
+        state.commit_irreversible();
+
+        let version = state.version();
+        assert!(!state.undo());
+        assert_eq!(state.timeline.voice_models.len(), 1);
+        assert!(state.timeline.voice_models[0].revoked);
+        assert!(!state.can_undo());
+        assert!(!state.redo());
+        assert_eq!(state.version(), version);
+    }
+
+    #[test]
+    fn active_provider_voice_survives_undo_of_an_earlier_edit() {
+        let mut state = state_with_clip();
+        let before_edit = state.snapshot();
+        state.timeline.tracks[0].clips[0].start_frame = 12;
+        state.commit(before_edit);
+        state.timeline.voice_models.push(VoiceModelRecord {
+            id: "voice-1".into(),
+            provider: "elevenlabs".into(),
+            provider_voice_id: "provider-1".into(),
+            model: "model".into(),
+            consent_id: "consent-1".into(),
+            source_audio_asset_id: "audio-1".into(),
+            source_audio_sha256: "a".repeat(64),
+            request_hash: "b".repeat(64),
+            voice_name: "Narrator".into(),
+            revoked: false,
+        });
+        state.commit_irreversible();
+
+        assert!(state.undo());
+        assert_eq!(state.timeline.tracks[0].clips[0].start_frame, 0);
+        assert_eq!(state.timeline.voice_models.len(), 1);
+        assert!(!state.timeline.voice_models[0].revoked);
     }
 
     #[test]

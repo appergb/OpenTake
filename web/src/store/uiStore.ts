@@ -11,6 +11,10 @@ import { totalFrames } from "../lib/geometry";
 import type { CropAspectLock } from "../lib/cropOverlay";
 import { withRangeStart, withRangeEnd, type TimelineRange } from "../lib/timelineRange";
 import type { GapSelection } from "../lib/timelineGap";
+import { isTauri } from "../lib/api";
+import { t } from "../i18n";
+import type { ProjectSettingsTarget } from "../lib/projectSettings";
+import type { MotionTrackingRegion } from "../lib/types";
 
 export type Panel = "agent" | "media" | "preview" | "inspector" | "timeline";
 /** Top-level app view (SPEC: 启动先进主页). The editor is one of three views;
@@ -18,11 +22,20 @@ export type Panel = "agent" | "media" | "preview" | "inspector" | "timeline";
 export type AppView = "home" | "editor" | "settings" | "library";
 export type ToolMode = "pointer" | "razor";
 export type LayoutPreset = "default" | "media" | "vertical";
-/** 剪映式顶部素材面板主标签（英文标识符，中文文案在 dict）。
- *  目前仅 material/audio 可用，其余为置灰占位（功能未做）。 */
+export type SettingsPaneId =
+  | "general"
+  | "appearance"
+  | "import"
+  | "ai"
+  | "mcp"
+  | "shortcuts"
+  | "account"
+  | "about";
+/** 剪映式顶部素材面板主标签（英文标识符，中文文案在 dict）。 */
 export type MediaTabId =
   | "material"
   | "audio"
+  | "music"
   | "text"
   | "sticker"
   | "effect"
@@ -43,26 +56,95 @@ export interface SaveAsProgressState {
   cancelling: boolean;
 }
 
+export interface ProjectSettingsPromptState {
+  current: ProjectSettingsTarget;
+  suggested: ProjectSettingsTarget;
+}
+
+export interface MotionTrackingSelection {
+  clipId: string;
+  region: MotionTrackingRegion;
+}
+
+const STORAGE_PREFIX = "opentake.ui.v1.";
 const LS = {
-  layoutPreset: "layoutPreset",
-  agentPanelVisible: "agentPanelVisible",
-  mediaPanelVisible: "mediaPanelVisible",
-  inspectorPanelVisible: "inspectorPanelVisible",
-  keyframesPanelVisible: "keyframesPanelVisible",
+  layoutPreset: `${STORAGE_PREFIX}layoutPreset`,
+  agentPanelVisible: `${STORAGE_PREFIX}agentPanelVisible`,
+  mediaPanelVisible: `${STORAGE_PREFIX}mediaPanelVisible`,
+  inspectorPanelVisible: `${STORAGE_PREFIX}inspectorPanelVisible`,
+  keyframesPanelVisible: `${STORAGE_PREFIX}keyframesPanelVisible`,
+  zoomScale: `${STORAGE_PREFIX}zoomScale`,
 } as const;
 
-function loadBool(key: string, fallback: boolean): boolean {
-  if (typeof localStorage === "undefined") return fallback;
-  const v = localStorage.getItem(key);
-  return v === null ? fallback : v === "true";
+type UiStorageKey = (typeof LS)[keyof typeof LS];
+
+const LEGACY_LS: Record<UiStorageKey, string> = {
+  [LS.layoutPreset]: "layoutPreset",
+  [LS.agentPanelVisible]: "agentPanelVisible",
+  [LS.mediaPanelVisible]: "mediaPanelVisible",
+  [LS.inspectorPanelVisible]: "inspectorPanelVisible",
+  [LS.keyframesPanelVisible]: "keyframesPanelVisible",
+  [LS.zoomScale]: "zoomScale",
+};
+
+function readPersisted(key: UiStorageKey): { value: string | null; legacy: boolean } {
+  if (typeof localStorage === "undefined") return { value: null, legacy: false };
+  try {
+    const value = localStorage.getItem(key);
+    if (value !== null) return { value, legacy: false };
+    return { value: localStorage.getItem(LEGACY_LS[key]), legacy: true };
+  } catch {
+    return { value: null, legacy: false };
+  }
+}
+
+function discardPersisted(key: UiStorageKey): void {
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.removeItem(key);
+    localStorage.removeItem(LEGACY_LS[key]);
+  } catch {
+    // Storage may be unavailable; defaults still fail closed for this session.
+  }
+}
+
+function loadBool(key: UiStorageKey, fallback: boolean): boolean {
+  const stored = readPersisted(key);
+  if (stored.value !== "true" && stored.value !== "false") {
+    if (stored.value !== null) discardPersisted(key);
+    return fallback;
+  }
+  if (stored.legacy) persist(key, stored.value);
+  return stored.value === "true";
 }
 function loadPreset(): LayoutPreset {
-  if (typeof localStorage === "undefined") return "default";
-  const v = localStorage.getItem(LS.layoutPreset);
-  return v === "media" || v === "vertical" ? v : "default";
+  const stored = readPersisted(LS.layoutPreset);
+  if (stored.value !== "default" && stored.value !== "media" && stored.value !== "vertical") {
+    if (stored.value !== null) discardPersisted(LS.layoutPreset);
+    return "default";
+  }
+  if (stored.legacy) persist(LS.layoutPreset, stored.value);
+  return stored.value;
 }
-function persist(key: string, value: string) {
-  if (typeof localStorage !== "undefined") localStorage.setItem(key, value);
+function loadZoomScale(): number {
+  const stored = readPersisted(LS.zoomScale);
+  if (stored.value === null) return ZOOM.default;
+  const value = Number(stored.value);
+  if (!Number.isFinite(value) || value < 0.05 || value > ZOOM.max) {
+    discardPersisted(LS.zoomScale);
+    return ZOOM.default;
+  }
+  if (stored.legacy) persist(LS.zoomScale, String(value));
+  return value;
+}
+function persist(key: UiStorageKey, value: string): void {
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Sandboxed/private browsing can deny storage. UI state must still update
+    // for the current session and simply fall back to defaults next launch.
+  }
 }
 
 function settledFrame(frame: number): number {
@@ -75,12 +157,19 @@ interface UiState {
   setView: (view: AppView) => void;
   settingsOpen: boolean;
   setSettingsOpen: (open: boolean) => void;
+  settingsPane: SettingsPaneId;
+  openSettingsPane: (pane: SettingsPaneId) => void;
+  setSettingsPane: (pane: SettingsPaneId) => void;
   /** Whether the video-export dialog (§2.4 / #112) is shown. */
   exportDialogOpen: boolean;
   setExportDialogOpen: (open: boolean) => void;
   /** Visible progress owner for clip/range save-as operations. */
   saveAsProgress: SaveAsProgressState | null;
   setSaveAsProgress: (progress: SaveAsProgressState | null) => void;
+  projectSettingsPrompt: ProjectSettingsPromptState | null;
+  projectSettingsPromptResolver: ((applySuggested: boolean) => void) | null;
+  requestProjectSettingsPrompt: (prompt: ProjectSettingsPromptState) => Promise<boolean>;
+  resolveProjectSettingsPrompt: (applySuggested: boolean) => void;
 
   // Playback / playhead
   currentFrame: number;
@@ -110,6 +199,10 @@ interface UiState {
   selectedGap: GapSelection | null;
 
   // Timeline view
+  /** Root-registry sequence currently opened for direct timeline editing. */
+  activeNestedSequenceId: string | null;
+  enterNestedSequence: (sequenceId: string) => void;
+  exitNestedSequence: () => void;
   zoomScale: number;
   minZoomScale: number;
   scrollLeft: number;
@@ -133,10 +226,17 @@ interface UiState {
    *  shows the timeline composite. Mirrors upstream `openPreviewTab(mediaAsset)`. */
   previewMediaId: string | null;
   setPreviewMedia: (id: string | null) => void;
+  /** Active on-canvas subject rectangle for the Inspector motion tracker. */
+  motionTrackingSelection: MotionTrackingSelection | null;
+  setMotionTrackingSelection: (selection: MotionTrackingSelection | null) => void;
+  setMotionTrackingRegion: (region: MotionTrackingRegion) => void;
 
   // Panels
   focusedPanel: Panel | null;
   maximizedPanel: Panel | null;
+  /** Mirrors the desktop/browser window's fullscreen state for the checked View
+   *  menu item. The action always queries the real window before toggling. */
+  fullscreen: boolean;
   layoutPreset: LayoutPreset;
   agentPanelVisible: boolean;
   mediaPanelVisible: boolean;
@@ -218,6 +318,9 @@ interface UiState {
 
   focusPanel: (panel: Panel) => void;
   setMaximizedPanel: (panel: Panel | null) => void;
+  toggleMaximizedFocusedPanel: () => void;
+  syncFullscreen: () => Promise<void>;
+  toggleFullscreen: () => Promise<void>;
   setLayoutPreset: (preset: LayoutPreset) => void;
   toggleAgentPanel: () => void;
   toggleMediaPanel: () => void;
@@ -237,15 +340,30 @@ interface UiState {
   clearToast: () => void;
 }
 
-export const useEditorUiStore = create<UiState>((set, get) => ({
+export const createEditorUiStore = () => create<UiState>((set, get) => ({
   view: "home",
   setView: (view) => set({ view }),
   settingsOpen: false,
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+  settingsPane: "general",
+  openSettingsPane: (settingsPane) => set({ settingsPane, settingsOpen: true }),
+  setSettingsPane: (settingsPane) => set({ settingsPane }),
   exportDialogOpen: false,
   setExportDialogOpen: (exportDialogOpen) => set({ exportDialogOpen }),
   saveAsProgress: null,
   setSaveAsProgress: (saveAsProgress) => set({ saveAsProgress }),
+  projectSettingsPrompt: null,
+  projectSettingsPromptResolver: null,
+  requestProjectSettingsPrompt: (projectSettingsPrompt) =>
+    new Promise<boolean>((resolve) => {
+      get().projectSettingsPromptResolver?.(false);
+      set({ projectSettingsPrompt, projectSettingsPromptResolver: resolve });
+    }),
+  resolveProjectSettingsPrompt: (applySuggested) => {
+    const resolve = get().projectSettingsPromptResolver;
+    set({ projectSettingsPrompt: null, projectSettingsPromptResolver: null });
+    resolve?.(applySuggested);
+  },
 
   currentFrame: 0,
   activeFrame: 0,
@@ -261,7 +379,30 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
   selectedTimelineRange: null,
   selectedGap: null,
 
-  zoomScale: ZOOM.default,
+  activeNestedSequenceId: null,
+  enterNestedSequence: (activeNestedSequenceId) =>
+    set({
+      activeNestedSequenceId,
+      selectedClipIds: new Set(),
+      selectedGap: null,
+      selectedTimelineRange: null,
+      currentFrame: 0,
+      activeFrame: 0,
+      scrollLeft: 0,
+      scrollTop: 0,
+    }),
+  exitNestedSequence: () =>
+    set({
+      activeNestedSequenceId: null,
+      selectedClipIds: new Set(),
+      selectedGap: null,
+      selectedTimelineRange: null,
+      currentFrame: 0,
+      activeFrame: 0,
+      scrollLeft: 0,
+      scrollTop: 0,
+    }),
+  zoomScale: loadZoomScale(),
   minZoomScale: 0.05,
   scrollLeft: 0,
   scrollTop: 0,
@@ -273,9 +414,18 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
   canvasOffset: { width: 0, height: 0 },
   previewQualityShortEdge: null,
   previewMediaId: null,
+  motionTrackingSelection: null,
+  setMotionTrackingSelection: (motionTrackingSelection) => set({ motionTrackingSelection }),
+  setMotionTrackingRegion: (region) =>
+    set((state) => ({
+      motionTrackingSelection: state.motionTrackingSelection
+        ? { ...state.motionTrackingSelection, region }
+        : null,
+    })),
 
   focusedPanel: "timeline",
   maximizedPanel: null,
+  fullscreen: false,
   layoutPreset: loadPreset(),
   agentPanelVisible: loadBool(LS.agentPanelVisible, false),
   mediaPanelVisible: loadBool(LS.mediaPanelVisible, true),
@@ -342,13 +492,22 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
   // Selecting clips clears any gap selection (upstream: a clip mousedown sets
   // `selectedGap = nil` — the two are mutually exclusive).
   selectClips: (selectedClipIds) =>
-    set({ selectedClipIds, selectedGap: null, cropEditingActive: false }),
+    set((state) => ({
+      selectedClipIds,
+      selectedGap: null,
+      cropEditingActive: false,
+      motionTrackingSelection:
+        state.motionTrackingSelection && selectedClipIds.has(state.motionTrackingSelection.clipId)
+          ? state.motionTrackingSelection
+          : null,
+    })),
   clearSelection: () =>
     set({
       selectedClipIds: new Set(),
       selectedGap: null,
       isMarqueeSelecting: false,
       cropEditingActive: false,
+      motionTrackingSelection: null,
     }),
   selectMediaAssets: (selectedMediaAssetIds) => set({ selectedMediaAssetIds }),
   clearMediaSelection: () => set({ selectedMediaAssetIds: new Set() }),
@@ -373,8 +532,12 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
   selectGap: (selectedGap) =>
     set(selectedGap ? { selectedGap, selectedClipIds: new Set() } : { selectedGap: null }),
 
-  setZoomScale: (zoomScale) =>
-    set({ zoomScale: Math.max(get().minZoomScale, Math.min(ZOOM.max, zoomScale)) }),
+  setZoomScale: (zoomScale) => {
+    const requested = Number.isFinite(zoomScale) ? zoomScale : ZOOM.default;
+    const bounded = Math.max(get().minZoomScale, Math.min(ZOOM.max, requested));
+    persist(LS.zoomScale, String(bounded));
+    set({ zoomScale: bounded });
+  },
   setMinZoomScale: (minZoomScale) => set({ minZoomScale }),
   setScroll: (scrollLeft, scrollTop) => set({ scrollLeft, scrollTop }),
   setVisibleWidth: (timelineVisibleWidth) => set({ timelineVisibleWidth }),
@@ -398,6 +561,41 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
     else set({ focusedPanel: panel });
   },
   setMaximizedPanel: (maximizedPanel) => set({ maximizedPanel }),
+  toggleMaximizedFocusedPanel: () =>
+    set((state) => {
+      if (!state.focusedPanel) return {};
+      return {
+        maximizedPanel: state.maximizedPanel ? null : state.focusedPanel,
+      };
+    }),
+  syncFullscreen: async () => {
+    if (isTauri) {
+      const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      set({ fullscreen: await getCurrentWindow().isFullscreen() });
+      return;
+    }
+    set({ fullscreen: Boolean(document.fullscreenElement) });
+  },
+  toggleFullscreen: async () => {
+    try {
+      if (isTauri) {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const window = getCurrentWindow();
+        const fullscreen = !(await window.isFullscreen());
+        await window.setFullscreen(fullscreen);
+        set({ fullscreen });
+        return;
+      }
+      if (document.fullscreenElement) {
+        await document.exitFullscreen?.();
+      } else {
+        await document.documentElement.requestFullscreen?.();
+      }
+      set({ fullscreen: Boolean(document.fullscreenElement) });
+    } catch {
+      get().pushToast(t("view.fullscreenFailed"));
+    }
+  },
   setLayoutPreset: (layoutPreset) => {
     persist(LS.layoutPreset, layoutPreset);
     set({ layoutPreset });
@@ -406,19 +604,43 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
     set((s) => {
       const agentPanelVisible = !s.agentPanelVisible;
       persist(LS.agentPanelVisible, String(agentPanelVisible));
-      return { agentPanelVisible };
+      return {
+        agentPanelVisible,
+        ...(agentPanelVisible
+          ? {}
+          : {
+              focusedPanel: s.focusedPanel === "agent" ? "timeline" : s.focusedPanel,
+              maximizedPanel: s.maximizedPanel === "agent" ? null : s.maximizedPanel,
+            }),
+      };
     }),
   toggleMediaPanel: () =>
     set((s) => {
       const mediaPanelVisible = !s.mediaPanelVisible;
       persist(LS.mediaPanelVisible, String(mediaPanelVisible));
-      return { mediaPanelVisible };
+      return {
+        mediaPanelVisible,
+        ...(mediaPanelVisible
+          ? {}
+          : {
+              focusedPanel: s.focusedPanel === "media" ? "timeline" : s.focusedPanel,
+              maximizedPanel: s.maximizedPanel === "media" ? null : s.maximizedPanel,
+            }),
+      };
     }),
   toggleInspectorPanel: () =>
     set((s) => {
       const inspectorPanelVisible = !s.inspectorPanelVisible;
       persist(LS.inspectorPanelVisible, String(inspectorPanelVisible));
-      return { inspectorPanelVisible };
+      return {
+        inspectorPanelVisible,
+        ...(inspectorPanelVisible
+          ? {}
+          : {
+              focusedPanel: s.focusedPanel === "inspector" ? "timeline" : s.focusedPanel,
+              maximizedPanel: s.maximizedPanel === "inspector" ? null : s.maximizedPanel,
+            }),
+      };
     }),
   toggleKeyframesPanel: () =>
     set((s) => {
@@ -432,8 +654,14 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
   // Leaving the Video tab ends crop editing (InspectorView.swift:66-68:
   // `if newTab != .video { editor.cropEditingActive = false }`).
   setInspectorTab: (inspectorTab) =>
-    set({ inspectorTab, cropEditingActive: inspectorTab === "video" ? get().cropEditingActive : false }),
-  resetProjectRuntimeState: () =>
+    set({
+      inspectorTab,
+      cropEditingActive: inspectorTab === "video" ? get().cropEditingActive : false,
+      motionTrackingSelection:
+        inspectorTab === "video" ? get().motionTrackingSelection : null,
+    }),
+  resetProjectRuntimeState: () => {
+    get().projectSettingsPromptResolver?.(false);
     set({
       currentFrame: 0,
       activeFrame: 0,
@@ -454,15 +682,21 @@ export const useEditorUiStore = create<UiState>((set, get) => ({
       canvasZoom: 1,
       canvasOffset: { width: 0, height: 0 },
       previewMediaId: null,
+      motionTrackingSelection: null,
       focusedPanel: "timeline",
       maximizedPanel: null,
       cropEditingActive: false,
       cropAspectLock: "free",
       mediaPanelCurrentFolderId: null,
       pendingSwapClipId: null,
-    }),
+      projectSettingsPrompt: null,
+      projectSettingsPromptResolver: null,
+    });
+  },
 
   toast: null,
   pushToast: (message) => set({ toast: { message, id: Date.now() } }),
   clearToast: () => set({ toast: null }),
 }));
+
+export const useEditorUiStore = createEditorUiStore();

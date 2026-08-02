@@ -35,7 +35,7 @@ describe("library import warnings", () => {
 
     const imported = await useLibraryStore.getState().importToProject("library-1");
 
-    expect(imported).toBe("clip.mp4");
+    expect(imported).toMatchObject({ id: "asset-1", name: "clip.mp4" });
     expect(useLibraryStore.getState().lastImportWarning).toEqual(warning);
     expect(refreshMedia).toHaveBeenCalledOnce();
     expect(useEditorUiStore.getState().toast?.message).toBe(
@@ -43,7 +43,7 @@ describe("library import warnings", () => {
     );
   });
 
-  it("keeps the legacy successful return and emits no warning toast", async () => {
+  it("returns the imported asset identity and emits no warning toast", async () => {
     vi.mocked(libraryApi.libraryImportToProject).mockResolvedValue({
       id: "asset-2",
       name: "clean.mp4",
@@ -52,7 +52,7 @@ describe("library import warnings", () => {
 
     const imported = await useLibraryStore.getState().importToProject("library-2");
 
-    expect(imported).toBe("clean.mp4");
+    expect(imported).toMatchObject({ id: "asset-2", name: "clean.mp4" });
     expect(useLibraryStore.getState().lastImportWarning).toBeNull();
     expect(useEditorUiStore.getState().toast).toBeNull();
   });
@@ -73,7 +73,7 @@ describe("library import warnings", () => {
 
     const imported = await useLibraryStore.getState().importToProject("library-3");
 
-    expect(imported).toBe("committed.mp4");
+    expect(imported).toMatchObject({ id: "asset-3", name: "committed.mp4" });
     expect(useLibraryStore.getState().lastImportWarning).toEqual(warning);
     expect(useLibraryStore.getState().error).toBe("mirror refresh failed");
     expect(useEditorUiStore.getState().toast?.message).toBe(

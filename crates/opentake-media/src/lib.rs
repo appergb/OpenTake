@@ -2,7 +2,7 @@
 //!
 //! Ports PalmierPro's AVFoundation / DSWaveformImage / macOS-Speech / CoreML
 //! media stack to cross-platform Rust:
-//! - **probe / decode / encode**: system ffmpeg CLI via [`ff`] (no libav* link).
+//! - **probe / decode / encode**: packaged/development ffmpeg CLI via [`ff`] (no libav* link).
 //! - **thumbnails**: seek-decode + JPEG sprite-grid disk cache.
 //! - **waveform**: Symphonia PCM decode → RMS downsample → normalized buckets.
 //! - **transcribe**: `Transcriber` trait (+ data model, locale, cache, search);
@@ -20,15 +20,40 @@
 //! ## Why ffmpeg over the CLI
 //! The local toolchain is ffmpeg 8.1 (libavcodec 62), which the C-binding crates
 //! (`ffmpeg-next` / `ffmpeg-the-third`) do not support, and `pkg-config` is
-//! absent. `ffmpeg-sidecar` drives the binaries on `PATH` — zero native linkage
-//! and a clean cross-platform build — so it is the chosen backend (SPEC §1.2,
+//! absent. `ffmpeg-sidecar` drives checksum-pinned packaged binaries (or PATH in
+//! development only) — zero native linkage and a clean cross-platform build —
+//! so it is the chosen backend (SPEC §1.2,
 //! "若 ffmpeg-next 不支持 8.x … 改用 ffmpeg-sidecar").
 
 mod ff;
 
+#[cfg(all(feature = "ort-backend", target_os = "windows"))]
+pub(crate) fn initialize_ort_backend() {
+    static INITIALIZE: std::sync::Once = std::sync::Once::new();
+    INITIALIZE.call_once(|| {
+        assert!(
+            ort::set_api(ort_tract::api()),
+            "ort API was initialized before the Windows tract backend"
+        );
+    });
+}
+
+#[cfg(all(feature = "ort-backend", not(target_os = "windows")))]
+pub(crate) fn initialize_ort_backend() {}
+
+#[cfg(all(test, feature = "ort-backend", target_os = "windows"))]
+mod windows_ort_backend_tests {
+    #[test]
+    fn tract_backend_initializes_before_ort_session_use() {
+        crate::initialize_ort_backend();
+        ort::session::Session::builder().expect("tract must provide the ort session API");
+    }
+}
+
 pub mod analysis;
 pub mod cache_key;
 pub mod cancel;
+pub mod color;
 pub mod decode;
 pub mod encode;
 pub mod error;
@@ -37,6 +62,7 @@ pub mod index_coordinator;
 pub mod library;
 pub mod ort_worker;
 pub mod probe;
+pub mod proxy;
 pub mod search;
 pub mod thumbnail;
 pub mod timecode;
@@ -123,13 +149,17 @@ pub use cancel::MediaCancelToken;
 pub use error::{MediaError, Result};
 pub use frame::RgbaFrame;
 
-pub use probe::{probe, MediaProbe};
+pub use color::{hdr_decode_input_args, hdr_tonemap_filter};
+pub use probe::{parse_probe, probe, MediaProbe};
+pub use proxy::{create_proxy, file_sha256, ProxyProgressCallback, ProxyRequest, ProxyResult};
 
 pub use decode::{
-    decode_frame_at, decode_frame_at_cancellable, decode_frames_at, decode_frames_at_cancellable,
-    decode_pcm_interleaved, decode_pcm_interleaved_cancellable, extract_pcm,
-    extract_pcm_cancellable, extract_pcm_cancellable_with_progress, FrameRequest, PcmBuffer,
-    PcmFormat, PcmProgressCallback, PcmSpec, StreamDecodeControl, StreamVideoFrame, VideoStream,
+    convert_frame_rate, decode_frame_at, decode_frame_at_cancellable, decode_frames_at,
+    decode_frames_at_cancellable, decode_pcm_interleaved, decode_pcm_interleaved_cancellable,
+    extract_pcm, extract_pcm_cancellable, extract_pcm_cancellable_with_progress,
+    interpolate_frame_pair, FrameInterpolationFallback, FrameInterpolationMode,
+    FrameInterpolationResult, FrameRateSample, FrameRequest, PcmBuffer, PcmFormat,
+    PcmProgressCallback, PcmSpec, StreamDecodeControl, StreamVideoFrame, VideoStream,
     VideoStreamRequest, DEFAULT_VIDEO_STREAM_QUEUE_CAPACITY,
 };
 
@@ -168,8 +198,8 @@ pub use transcribe::{
 pub use transcribe::whisper::WhisperTranscriber;
 
 pub use search::{
-    rank as search_visual_ranked, AssetIndex, CancelToken, Embedder, EmbedderSpec, Hit,
-    SamplerOptions,
+    rank as search_visual_ranked, AssetIndex, CancelToken, Embedder, EmbedderSpec, Header, Hit,
+    Row, SamplerOptions,
 };
 
 pub use index_coordinator::{work_needed, ExportPause, IndexProgress, WorkNeeded};
@@ -179,7 +209,10 @@ pub use ort_worker::ExecutionProvider;
 /// ffmpeg/ffprobe availability probes (re-exported for integration tests and
 /// host-capability checks).
 pub mod ffmpeg_status {
-    pub use crate::ff::{ffmpeg_available, ffprobe_available};
+    pub use crate::ff::{
+        ffmpeg_available, ffmpeg_path, ffprobe_available, packaged_sidecar_beside,
+        packaged_sidecar_path,
+    };
 }
 
 /// Facade bundling the media engine's roots for `opentake-core` (SPEC §8.4).
@@ -219,6 +252,33 @@ impl MediaEngine {
     /// Probe through an already-open regular-file handle.
     pub fn probe_file(&self, file: &std::fs::File) -> Result<MediaProbe> {
         probe::probe_file(file)
+    }
+
+    /// Decode the nearest source frame for preview/render materialization.
+    pub fn decode_frame(&self, path: &Path, request: &FrameRequest) -> Result<(f64, RgbaFrame)> {
+        decode::decode_frame_at(path, request)
+    }
+
+    /// Decode the first audio track into the requested PCM contract.
+    pub fn extract_pcm(
+        &self,
+        path: &Path,
+        spec: &PcmSpec,
+        range: Option<(f64, f64)>,
+    ) -> Result<PcmBuffer> {
+        decode::extract_pcm(path, spec, range)
+    }
+
+    /// Start the streaming encoder used by the render/export adapter.
+    pub fn video_encoder(
+        &self,
+        output: &Path,
+        width: u32,
+        height: u32,
+        fps: i32,
+        preset: &ExportPreset,
+    ) -> Result<VideoEncoder> {
+        encode::VideoEncoder::new(output, width, height, fps, preset)
     }
 
     /// Generate (and cache) a video thumbnail sequence.
@@ -261,6 +321,20 @@ impl MediaEngine {
         limit: usize,
     ) -> Vec<SpokenHit> {
         transcribe::search::search(&self.cache_root, query, assets, limit)
+    }
+
+    /// Rank one encoded visual query against caller-owned current index
+    /// snapshots. Model loading/text encoding stay in the bounded worker; this
+    /// facade owns the deterministic index/ranking boundary.
+    pub fn search_visual(
+        &self,
+        query_vector: &[f32],
+        indexes: &[(String, AssetIndex)],
+        limit: usize,
+        relative_cutoff: f32,
+        min_score: Option<f32>,
+    ) -> Vec<Hit> {
+        search::rank(query_vector, indexes, limit, relative_cutoff, min_score)
     }
 
     /// The shared export-pause signal; `opentake-render` calls `begin`/`end`
@@ -379,6 +453,13 @@ mod tests {
         let _: Option<Hit> = None;
         let _ = PcmFormat::F32;
         let _ = VideoCodec::H264;
+
+        // The high-level facade owns every service family as methods; callers
+        // do not need to assemble the flat modules themselves.
+        let _ = MediaEngine::decode_frame;
+        let _ = MediaEngine::extract_pcm;
+        let _ = MediaEngine::video_encoder;
+        let _ = MediaEngine::search_visual;
     }
 
     // --- extract_audio codec selection (Issue #39 review #3) ---

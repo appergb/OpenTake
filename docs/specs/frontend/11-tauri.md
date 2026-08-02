@@ -1,60 +1,40 @@
 # Tauri command / event 对接点
 
-> 依据 ARCHITECTURE.md §2「真相源在 Rust,前端持镜像」+ §5 EditCommand 枚举。前端**所有编辑都经 invoke 发命令**,**绝不本地改镜像**;镜像由 event 更新。
+前端的时间线是 Rust 真相源的只读投影。所有提交性编辑通过 `api.editApply(command)` 调用 `edit_apply`；成功后根据事件中的 project epoch/version 重取 `get_timeline`。拖拽 ghost、hover、playhead 等短暂 UI 状态可本地更新，不得写回时间线镜像。
 
 ### 11.1 命令（invoke）—— 编辑 / 读取 / 播放 / 工程
 
-> 上游所有编辑手势最终调 `EditorViewModel` 的方法(如 `moveClips`/`commitTrim`/`splitClip`/`addClips`...),OpenTake 归一到 `EditCommand`(ARCHITECTURE §5)。前端把 §9 各手势的"提交"映射到对应 invoke。
+| 前端行为 | 生产命令 |
+|---|---|
+| 41 种时间线编辑（移动、trim、split、文字、字幕、属性、关键帧、轨道、文件夹等） | `edit_apply { command }` |
+| 撤销/重做/可用性 | `undo`, `redo`, `can_undo`, `can_redo` |
+| 工程新建/打开/保存 | `project_new`, `project_open`, `project_save { path }` |
+| 导入/重链/媒体目录 | `import_folder`, `import_media`, `relink_media`, `get_media` |
+| 播放/精确 seek/预览端点 | `playback_start`, `playback_pause`, `playback_stop`, `playback_seek`, `get_preview_endpoint` |
+| 视频导出/取消 | `export_video`, `cancel_export` |
+| 时间线交换/字幕 | `export_xmeml`, `export_fcpxml_modern`, `export_edl`, `export_otio`, `export_subtitles` |
+| 生成/转录/字幕/语义搜索 | 使用核心规范第 6.1 节的同名已注册 handler |
 
-| 前端动作（来自 §9 手势/菜单） | invoke 命令（建议名）| 上游对应方法 |
+全部前端字面量 invoke 名由 `api.commandContract.test.ts#frontend_command_names_match_invoke_handler` 与 Rust 注册表比对。安全的自包含 bundle 导出尚未完成 Rust 持有的目标选择/披露流程，因此 UI 不提供该选项，`exportBundle` 能力门会明确拒绝，不会伪造成功或调用未注册命令。
+
+### 11.2 事件（listen）
+
+| event | 核心载荷/语义 | 前端处理 |
 |---|---|---|
-| 移动 clip 提交 | `edit_apply` { MoveClips } | `moveClips` (TimelineInputController:862-868) |
-| 复制 clip 到位 | `edit_apply` { DuplicateClips } | `duplicateClipsToPositions` |
-| trim 提交 | `edit_apply` { TrimClips } | `commitTrim` (:440-458) |
-| split | `edit_apply` { SplitClip } | `splitClip` (:74) |
-| 删除 / ripple 删 | `edit_apply` { RemoveClips / RippleDeleteRanges } | `deleteSelectedClips`/`rippleDelete*` |
-| 拖入添加 / ripple 插 | `edit_apply` { AddClips / InsertClips } | `addClips`/`rippleInsertClips` (:966-1020) |
-| 改属性(scale/rotation/opacity/volume/speed/fade/flip/crop) | `edit_apply` { SetClipProperties } | `commitScale/Rotation/Opacity/Volume/ClipSpeed/Fade` 等 (InspectorView) |
-| 关键帧 戳/删/移/插值 | `edit_apply` { SetKeyframes } | `stampKeyframe`/`removeKeyframe`/`commitMoveVolumeKeyframe`/`setInterpolation` |
-| 加文字 | `edit_apply` { AddTexts } | `addTextClip` (ToolbarView:39) |
-| 加字幕 | `edit_apply` { AddCaptions } | CaptionTab 生成 |
-| Link / Unlink | `edit_apply` { Link / Unlink } | `linkClips`/`unlinkClips` (:840-848) |
-| 轨道 mute/hide/sync/高度 | `edit_apply` { SetTrackProps } | `toggleTrackMute/Hidden/SyncLock`/`setTrackHeight` (TimelineHeaderView) |
-| 删轨 | `edit_apply` { RemoveTracks } | `removeTracks` |
-| 文件夹 建/移/重命名/删 | `edit_apply` { CreateFolder/MoveToFolder/... } | EditorViewModel+Folders |
-| Undo / Redo | `undo` / `redo`（或 `edit_apply{Undo/Redo}`）| `undo:`/`redo:` (ToolbarView:79-85) |
-| Copy / Paste clip | `clip_copy` / `clip_paste`{trackIndex,frame} | `copySelectedClipsToClipboard`/`pasteClips` |
-| 工程 新建/打开/保存/另存 | `project_new`/`project_open`/`project_save`/`project_save_as` | NSDocument (MainMenu) |
-| 导入媒体 | `import_media`{urls} | `importMedia` |
-| 导出 | `export_start`{preset} | `showExportDialog`→导出 |
-| seek(播放头) | `seek`{frame, mode} | `seekToFrame` (EditorViewModel:259-267) |
-| 播放/暂停 | `play`/`pause`/`toggle_playback` | `togglePlayback` (:227-233) |
-| 改工程设置(fps/分辨率/宽高比) | `set_timeline_settings`{fps,width,height} | `applyTimelineSettings` (PreviewContainerView:160) |
-| 截帧到媒体 | `capture_frame` | `captureCurrentFrameToMedia` (:117) |
-| Swap/Save as Media | `swap_media`/`save_clip_as_media` | `beginMediaSwap`/`saveClipAsMedia` |
-| 读时间线 | `get_timeline` → Timeline + version | (镜像同步用) |
-| 读媒体库 | `get_media` → assets/folders | (镜像同步用) |
-| relink 离线 | `relink_asset`{id,url} / `relink_folder`{url} | `relinkAsset`/`relinkOfflineAssets` (PreviewContainerView:367-390) |
+| `timeline_changed` | `{ kind, projectEpoch, version }` | 刷新不低于事件版本的权威快照 |
+| `project_opened` | `{ kind, path, projectEpoch, version }` | 原子切换工程 identity 后刷新 |
+| `media_changed` | `{ kind, projectEpoch, count }` | 重取工程媒体 |
+| `export://progress` | `{ operationId, done, total }` | 只更新同 operation 的导出进度 |
+| `transcribe://progress`, `search-model://progress`, `search-index://progress` | 各任务进度 DTO | 更新对应任务状态 |
+| `playback://frame` | 带 playback identity 的帧位置 | 仅接收当前 session |
+| `chat://delta`, `chat://tool-call`, `chat://done` | 带 session/turn identity 的流式消息 | 隔离迟到或已取消 turn |
 
-> `edit_apply` 返回 `EditResult`{changed, action_name, affected_clip_ids, timeline_version, summary}（ARCHITECTURE §5）。前端据 `changed/timeline_version` 决定是否重取。
+`src-tauri/src/lib.rs#forward_core_event` 负责将每个 `CoreEvent` 转换为同名 Tauri 事件；单个 WebView emit 失败不得中断后续 `EventBus` 观察者。
 
-### 11.2 事件（listen）—— Rust → 前端推送
+### 11.3 缩略图、波形与预览帧
 
-| event | payload | 前端处理 |
-|---|---|---|
-| `timeline_changed` | `{ version: u64 }` | 若 version > 本地 → `get_timeline` 重取镜像 → 触发重绘（对应上游 `timelineRenderRevision` 自增→刷新，`EditorViewModel.swift:27-29,304-312`）|
-| `preview_frame` | 帧数据(纹理/位图引用 或 共享内存句柄) | 上屏到 `PreviewCanvas`（对应上游 `videoEngine` 帧回调）|
-| `playhead_changed` | `{ frame }` | 播放时更新 `activeFrame`（上游 playheadState 由 engine 推进）|
-| `media_changed` | `{}` 或增量 | 重取 `get_media`（缩略图/波形就绪、导入完成、生成完成）|
-| `media_thumbnails` | `{ assetId, sprite/samples }` | 更新 timeline clip 缩略图/波形缓存（上游 `MediaVisualCache`）|
-| `generation_progress` | `{ assetId, status, ... }` | 更新生成中 overlay / 失败态 |
-| `export_progress` | `{ progress, ... }` | 导出进度 UI |
-| `settings_mismatch` | `{ ... }` | 弹导入设置不匹配对话框（上游 `pendingSettingsMismatch`，`EditorViewModel.swift:221`）|
+Rust 媒体层生成波形和 timeline sprite，前端通过 `get_waveform`、`request_timeline_sprite`、`generate_thumbnail`、`preview_poster` 和 `preload_media` 按需取得并缓存。复合预览通过 `composite_frame`；持续播放通过 playback engine 的环回传输，不使用已废弃的 `preview_frame` 大块 event 契约。
 
-### 11.3 缩略图 / 波形 / 帧 的传输
+### 11.4 命令节流与提交
 
-上游 `MediaVisualCache`(`Timeline/MediaVisualCache.swift`)在内存持 sprite 网格 + PCM 降采样。OpenTake：Rust 媒体层算好（ffmpeg 抽帧 sprite + symphonia 波形），经 `media_thumbnails` event 或专门 command 传给前端（图片用 data-url / blob / 共享内存）。前端缓存后供 TimelineCanvas 的 `drawClip` 使用。**预览帧** `preview_frame` 优先共享内存/零拷贝（WebGL 纹理）以满足 scrub 实时性。
-
-### 11.4 命令节流（复刻上游 debounce）
-
-上游对快速重建做合并（`notifyTimelineChangedDebounced` 120ms，`EditorViewModel.swift:315-324`），对 scrub 用 `interactiveScrub` 模式只更 `playheadState` 不提交（`:261-265`）。前端：scrub/拖拽过程中**本地乐观更新 UI 态**（playhead、ghost），**松手才发 `edit_apply`**；连续属性拖拽（ScrubbableNumberField onChanged）可节流或仅在 onCommit 发命令。
+Scrub 和拖拽过程只改 playhead/ghost 等 UI 态；松手时提交一次 `edit_apply`。连续属性控件在 commit 边界合并。命令成功后仍以 Rust 快照为准，不将本地乐观状态当成已提交时间线。

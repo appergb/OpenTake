@@ -5,8 +5,8 @@
 //! that serde cannot see after a Swift-compatible `try?` fallback.
 
 use opentake_domain::{
-    AnimPair, Clip, Crop, Fill, Keyframe, KeyframeTrack, KeyframeValueWireShape, Rgba, Shadow,
-    TextStyle, Timeline, Track, Transform,
+    AnimPair, Clip, Crop, Fill, Keyframe, KeyframeTrack, KeyframeValueWireShape, NestedSequence,
+    Rgba, Shadow, TextStyle, Timeline, Track, Transform,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -27,6 +27,25 @@ pub(crate) struct TimelineFallback {
 /// and clip ordering; a Track.clips fallback yields an empty decoded vector and
 /// is therefore skipped safely.
 pub(crate) fn repair_timeline_ids(timeline: &mut Timeline, document: &Value) {
+    repair_timeline_ids_inner(timeline, document);
+}
+
+fn repair_timeline_ids_inner(timeline: &mut Timeline, document: &Value) {
+    if let Some(raw_sequences) = document
+        .get(Timeline::NESTED_SEQUENCES_WIRE_FIELD)
+        .and_then(Value::as_array)
+    {
+        for (sequence_index, sequence) in timeline.nested_sequences.iter_mut().enumerate() {
+            let Some(raw_timeline) = raw_sequences
+                .get(sequence_index)
+                .and_then(|value| value.get(NestedSequence::TIMELINE_WIRE_FIELD))
+            else {
+                continue;
+            };
+            repair_timeline_ids_inner(&mut sequence.timeline, raw_timeline);
+        }
+    }
+
     let Some(raw_tracks) = document
         .get(Timeline::TRACKS_WIRE_FIELD)
         .and_then(Value::as_array)
@@ -112,6 +131,44 @@ pub(crate) fn scan_timeline(
     failed_tracks: &[bool],
     ignored: &mut Vec<String>,
 ) {
+    scan_timeline_inner(document, "", file, failed_tracks, ignored);
+}
+
+fn scan_timeline_inner(
+    document: &Value,
+    prefix: &str,
+    file: &str,
+    failed_tracks: &[bool],
+    ignored: &mut Vec<String>,
+) {
+    if let Some(sequences) = document
+        .get(Timeline::NESTED_SEQUENCES_WIRE_FIELD)
+        .and_then(Value::as_array)
+    {
+        for (sequence_index, sequence) in sequences.iter().enumerate() {
+            let sequence_path = prefixed(
+                prefix,
+                &format!("{}.{sequence_index}", Timeline::NESTED_SEQUENCES_WIRE_FIELD),
+            );
+            scan_object_keys(
+                Some(sequence),
+                &sequence_path,
+                NestedSequence::WIRE_FIELDS,
+                file,
+                ignored,
+            );
+            if let Some(child) = sequence.get(NestedSequence::TIMELINE_WIRE_FIELD) {
+                scan_timeline_inner(
+                    child,
+                    &format!("{sequence_path}.{}", NestedSequence::TIMELINE_WIRE_FIELD),
+                    file,
+                    &[],
+                    ignored,
+                );
+            }
+        }
+    }
+
     let Some(tracks) = document
         .get(Timeline::TRACKS_WIRE_FIELD)
         .and_then(Value::as_array)
@@ -120,7 +177,10 @@ pub(crate) fn scan_timeline(
     };
 
     for (track_index, track) in tracks.iter().enumerate() {
-        let track_path = format!("{}.{track_index}", Timeline::TRACKS_WIRE_FIELD);
+        let track_path = prefixed(
+            prefix,
+            &format!("{}.{track_index}", Timeline::TRACKS_WIRE_FIELD),
+        );
         for field in Track::TOLERANT_SCALAR_WIRE_FIELDS {
             scan_future_scalar_shape(
                 track.get(*field),
@@ -216,6 +276,14 @@ pub(crate) fn scan_timeline(
                 }
             }
         }
+    }
+}
+
+fn prefixed(prefix: &str, suffix: &str) -> String {
+    if prefix.is_empty() {
+        suffix.to_string()
+    } else {
+        format!("{prefix}.{suffix}")
     }
 }
 

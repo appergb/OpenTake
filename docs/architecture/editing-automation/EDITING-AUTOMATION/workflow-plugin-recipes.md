@@ -33,7 +33,7 @@ Stages:
 
 1. `get_transcript` when available.
 2. `tighten_silences` on the `VoiceOver` track.
-3. `remove_filler_words` only after transcript is truly wired.
+3. `remove_filler_words` when capability discovery exposes it; review word-aligned cuts before applying accepted ripple ranges.
 4. `smart_reframe` for vertical repurposing if target aspect differs.
 
 Rules:

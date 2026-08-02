@@ -55,7 +55,7 @@ const CORNER_POSITION: Record<TransformResizeCorner, { left: string; top: string
   bottomRight: { left: "100%", top: "100%" },
 };
 
-const CORNER_CURSOR: Record<TransformResizeCorner, string> = {
+export const CORNER_CURSOR: Record<TransformResizeCorner, string> = {
   topLeft: "nwse-resize",
   bottomRight: "nwse-resize",
   topRight: "nesw-resize",
@@ -214,7 +214,7 @@ export function TransformOverlay({
             position: "absolute",
             inset: 0,
             border: `${BORDER_WIDTH}px solid ${BORDER_COLOR}`,
-            cursor: "move",
+            cursor: dragTransform ? "grabbing" : "move",
             pointerEvents: "auto",
           }}
         />

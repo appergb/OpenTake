@@ -489,6 +489,71 @@ mod tests {
     }
 
     #[test]
+    fn ripple_delete_ranges_keeps_linked_av_frame_exact() {
+        let mut tl = Timeline::new();
+        let mut video = Track::new("video", ClipType::Video);
+        let mut video_clip = clip("video-clip", 0, 900);
+        video_clip.link_group_id = Some("av".into());
+        video.clips.push(video_clip);
+        let mut audio = Track::new("audio", ClipType::Audio);
+        let mut audio_clip = clip("audio-clip", 0, 900);
+        audio_clip.media_type = ClipType::Audio;
+        audio_clip.link_group_id = Some("av".into());
+        audio.clips.push(audio_clip);
+        tl.tracks.extend([video, audio]);
+
+        let g = SeqIdGen::new("r-");
+        let out = ripple_delete_ranges_on_track(&mut tl, 1, &[FrameRange::new(6, 12)], &label, &g);
+        assert!(matches!(out, RippleOutcome::Ok(_)));
+        let spans = |track: &Track| {
+            track
+                .clips
+                .iter()
+                .map(|clip| (clip.start_frame, clip.end_frame()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(spans(&tl.tracks[0]), vec![(0, 6), (6, 894)]);
+        assert_eq!(spans(&tl.tracks[1]), vec![(0, 6), (6, 894)]);
+    }
+
+    #[test]
+    fn ripple_delete_multiple_ranges_with_sync_locked_captions_is_atomic() {
+        let mut tl = Timeline::new();
+        let mut captions = Track::new("captions", ClipType::Video);
+        captions.sync_locked = true;
+        captions.clips.extend([
+            clip("caption-1", 0, 86),
+            clip("caption-2", 146, 116),
+            clip("caption-3", 350, 21),
+            clip("caption-4", 371, 57),
+            clip("caption-5", 428, 82),
+        ]);
+        let mut video = Track::new("video", ClipType::Video);
+        let mut video_clip = clip("video-clip", 0, 900);
+        video_clip.link_group_id = Some("av".into());
+        video.clips.push(video_clip);
+        let mut audio = Track::new("audio", ClipType::Audio);
+        let mut audio_clip = clip("audio-clip", 0, 900);
+        audio_clip.media_type = ClipType::Audio;
+        audio_clip.link_group_id = Some("av".into());
+        audio.clips.push(audio_clip);
+        tl.tracks.extend([captions, video, audio]);
+        let before = tl.clone();
+
+        let g = SeqIdGen::new("r-");
+        let out = ripple_delete_ranges_on_track(
+            &mut tl,
+            2,
+            &[FrameRange::new(151, 154), FrameRange::new(358, 365)],
+            &label,
+            &g,
+        );
+
+        assert!(matches!(out, RippleOutcome::Refused(_)));
+        assert_eq!(tl, before, "a follower collision must be side-effect free");
+    }
+
+    #[test]
     fn ripple_delete_ranges_refuses_on_locked_follower_collision() {
         let mut tl = Timeline::new();
         tl.tracks.push(one_track(vec![clip("a", 0, 200)], true));

@@ -14,7 +14,7 @@
 
 ## 关键决策：为何 CLI sidecar 而非 libav 绑定
 
-`ff.rs` 模块注释明确：**有意不链接 `libav*`**。本机工具链是 ffmpeg 8.1（libavcodec 62），C 绑定 crate（`ffmpeg-next` / `ffmpeg-the-third`）不支持该版本，且 `pkg-config` 缺失。改用 `ffmpeg-sidecar`：shell 出 `PATH` 上的二进制，零原生链接、跨平台干净构建。
+`ff.rs` 模块注释明确：**有意不链接 `libav*`**。本机工具链是 ffmpeg 8.1（libavcodec 62），C 绑定 crate（`ffmpeg-next` / `ffmpeg-the-third`）不支持该版本，且 `pkg-config` 缺失。改用 `ffmpeg-sidecar`：显式环境覆盖优先，其次选择应用可执行文件旁的常规非符号链接 sidecar，开发构建最后回退 `PATH`；零 libav 原生链接。
 
 > ⚠️ **与文档的偏差**：[SPEC.md](SPEC.md) §1.2、[ARCHITECTURE.md](../../architecture/ARCHITECTURE.md) §1、[ROADMAP.md](../../architecture/ROADMAP.md) 都仍写 `ffmpeg-next`（libav 绑定）。**以代码为准**——实际全栈走 CLI sidecar。这影响所有解码路径：帧用裸 stdin/stdout 原始像素管道交换，而非内存中的 `AVFrame`。
 
@@ -24,7 +24,7 @@
 
 | 函数 | 作用 |
 |---|---|
-| `ffmpeg_path()` / `ffprobe_path()` | 返回二进制路径：优先环境变量 `OPENTAKE_FFMPEG` / `OPENTAKE_FFPROBE`，否则 `PATH` 上的 `ffmpeg` / `ffprobe`。打包构建可指向 bundled 二进制（与 `src-tauri/src/lib.rs` 一致）。 |
+| `ffmpeg_path()` / `ffprobe_path()` | 返回二进制路径：优先环境变量 `OPENTAKE_FFMPEG` / `OPENTAKE_FFPROBE`，其次应用可执行文件旁的常规非符号链接 sidecar，最后回退 `PATH` 上的 `ffmpeg` / `ffprobe`。纯 `resolve_cli_path` 测试覆盖优先级而不修改并行测试的全局环境。 |
 | `ffmpeg()` | 构造绑定到 `ffmpeg_path()` 的 `FfmpegCommand`。 |
 | `ffmpeg_available()` / `ffprobe_available()` | `-version` 是否退出 0。集成测试用它在无 ffmpeg 的机器上 skip，保证默认测试运行绿。经 `lib.rs::ffmpeg_status` 重导出供宿主能力检查。 |
 | `ffprobe_json(path)` | 运行 `ffprobe -v quiet -of json -show_streams -show_format <path>`，返回解析后的 `serde_json::Value`。**零解码**，仅读头/流参数。spawn 失败或非零退出 → `MediaError::Ffmpeg`。 |
@@ -61,6 +61,13 @@ pub fn parse_probe(json: &serde_json::Value) -> MediaProbe; // 纯函数，可�
 
 ### 测试
 `parse_probe` 有约 12 条 fixture 单测：横屏不交换、tags 旋转 90 交换、side-data −90 折叠为 270 交换、180 不交换、fps 回退 `r_frame_rate`、纯音频无视频尺寸、时长回退容器、全空为 0、视频带音轨双标记、0 声道音轨不计音频、多声道计音频。
+
+2026-08-01 后续合规复核：Apple Silicon 的 FFmpeg/ffprobe 已替换为双哈希
+锁定的 7.0 GPL 构建；两者均不含 `--enable-nonfree`，`-L` 也不再报告不可
+再分发。供应脚本会在下载解包后、替换目标前检查版本、二进制摘要、configure
+flags 与许可输出。媒体 crate 的真实探测、解码、PCM、缩略图、波形、H.264、
+H.265 与 ProRes 往返均在这对二进制上通过。旧 6.0 包证据保留为历史记录，
+替换证据见 [`ffmpeg-license-replacement-2026-08-01.md`](../../audit/2026-07-14/runtime-artifacts/automated/ffmpeg-license-replacement-2026-08-01.md)。
 
 ---
 

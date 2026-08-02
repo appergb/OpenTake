@@ -29,7 +29,6 @@ use crate::plugin::registry::PluginRegistry;
 use crate::prompt::assemble::assemble_system_prompt;
 use crate::signal::engine::build_signal;
 use crate::tools::descriptions::{description, input_schema};
-use crate::tools::names::ToolName;
 use crate::tools::panic_boundary::with_redacted_dispatch_panic;
 use crate::tools::result::ToolResult;
 
@@ -251,7 +250,7 @@ impl ChatLoop {
     }
 
     /// The tool catalog in the OpenAI function-calling shape. Built fresh per
-    /// turn (cheap; currently 38 live tools) so the model always sees the
+    /// turn (cheap; currently 39 base live tools) so the model always sees the
     /// current fail-closed catalog.
     ///
     /// When the dispatcher lacks a media bridge, hide the bridge-dependent
@@ -260,13 +259,6 @@ impl ChatLoop {
         self.dispatcher
             .advertised_tools()
             .into_iter()
-            .filter(|tool| {
-                self.dispatcher.has_media_bridge()
-                    || !matches!(
-                        tool,
-                        ToolName::InspectMedia | ToolName::InspectTimeline | ToolName::ImportMedia
-                    )
-            })
             .map(|tool| ToolSchema {
                 name: tool.as_str().to_string(),
                 description: description(tool).to_string(),
@@ -285,7 +277,10 @@ impl ChatLoop {
         if let Ok(json) = serde_json::to_value(&signal) {
             s.push_str("\n\n# Current timeline context signal\n");
             s.push_str(&serde_json::to_string_pretty(&json).unwrap_or_default());
-            s.push_str("\n\nUse this signal to pick the right tool without re-reading the timeline first. For example, if the user asks to tighten silences on a talking-head timeline, call `tighten_silences` then `ripple_delete_ranges` with the returned ranges.");
+            s.push_str("\n\nUse this signal to pick the right tool without re-reading the timeline first. For example, if the user asks to tighten silences on a talking-head timeline, call `tighten_silences` then `ripple_delete_ranges` with the accepted returned ranges.");
+            if self.dispatcher.has_media_bridge() {
+                s.push_str(" If the user asks to remove filler words, call `remove_filler_words`, let them review the word-aligned cuts, then apply only the accepted ranges with `ripple_delete_ranges`.");
+            }
         }
         s
     }
@@ -607,6 +602,9 @@ mod tests {
         let loop_ = build_loop(talking_head_timeline(), Arc::new(MemoryKeyStore::new()));
         let tools = loop_.tool_catalog();
         assert!(tools.iter().any(|t| t.name == "tighten_silences"));
+        assert!(!tools.iter().any(|t| t.name == "remove_filler_words"));
+        assert!(!tools.iter().any(|t| t.name == "get_transcript"));
+        assert!(!tools.iter().any(|t| t.name == "search_media"));
         assert!(!tools.iter().any(|t| t.name == "inspect_media"));
         assert!(!tools.iter().any(|t| t.name == "inspect_timeline"));
         assert!(!tools.iter().any(|t| t.name == "import_media"));

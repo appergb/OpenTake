@@ -11,6 +11,7 @@
 import type {
   AccountInfo,
   AccountStatus,
+  AudioDenoise,
   CaptionRequest,
   ChatMessage,
   ChatSession,
@@ -20,6 +21,21 @@ import type {
   EditResult,
   GenerateCaptionsResult,
   MediaList,
+  MattingModelStatus,
+  MotionTrackingRegion,
+  MotionTrackingResult,
+  GenerateMatteResult,
+  RemoveObjectResult,
+  MatchColorResult,
+  CaptionTranslationResult,
+  CaptionTranslationReviewChange,
+  ScriptToVideoResult,
+  ScriptToVideoSegmentInput,
+  AvatarGenerationResult,
+  VoiceCloneResult,
+  LutReference,
+  LoudnessNormalization,
+  DenoiseMode,
   ModelStatus,
   PlaybackCommandError,
   PlaybackFrameEvent,
@@ -29,6 +45,7 @@ import type {
   SearchModelStatus,
   SearchResults,
   SecretStatus,
+  StabilizationTrack,
   Transcript,
 } from "./types";
 
@@ -42,6 +59,31 @@ type ListenFn = (
   event: string,
   handler: (e: { payload: unknown }) => void,
 ) => Promise<() => void>;
+
+/** Stable machine-readable error returned by typed core/edit Tauri commands. */
+export class TauriCommandError extends Error {
+  readonly code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = "TauriCommandError";
+    this.code = code;
+  }
+}
+
+function asTauriCommandError(error: unknown): Error {
+  if (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string" &&
+    "message" in error &&
+    typeof error.message === "string"
+  ) {
+    return new TauriCommandError(error.code, error.message);
+  }
+  return error instanceof Error ? error : new Error(String(error));
+}
 
 let invokeImpl: InvokeFn | null = null;
 let listenImpl: ListenFn | null = null;
@@ -70,29 +112,31 @@ export async function getTimeline(): Promise<RuntimeTimelineSnapshot> {
 
 export async function editApply(command: EditRequest): Promise<EditResult> {
   await ensureTauri();
-  if (invokeImpl) return invokeImpl<EditResult>("edit_apply", { command });
-  return fallback.editApply(command);
-}
-
-/** Sequential automation wrapper: each command still goes through the single
- * Rust `EditCommand` authority via `edit_apply`. */
-export async function editApplyMany(commands: EditRequest[]): Promise<EditResult[]> {
-  const results: EditResult[] = [];
-  for (const command of commands) {
-    results.push(await editApply(command));
+  if (invokeImpl) {
+    return invokeImpl<EditResult>("edit_apply", { command }).catch((error: unknown) => {
+      throw asTauriCommandError(error);
+    });
   }
-  return results;
+  return fallback.editApply(command);
 }
 
 export async function undo(): Promise<EditResult> {
   await ensureTauri();
-  if (invokeImpl) return invokeImpl<EditResult>("undo");
+  if (invokeImpl) {
+    return invokeImpl<EditResult>("undo").catch((error: unknown) => {
+      throw asTauriCommandError(error);
+    });
+  }
   return fallback.noop("Undo");
 }
 
 export async function redo(): Promise<EditResult> {
   await ensureTauri();
-  if (invokeImpl) return invokeImpl<EditResult>("redo");
+  if (invokeImpl) {
+    return invokeImpl<EditResult>("redo").catch((error: unknown) => {
+      throw asTauriCommandError(error);
+    });
+  }
   return fallback.noop("Redo");
 }
 
@@ -108,10 +152,10 @@ export async function canRedo(): Promise<boolean> {
   return false;
 }
 
-export async function projectNew(): Promise<RuntimeTimelineSnapshot> {
+export async function projectNew(path: string | null = null): Promise<RuntimeTimelineSnapshot> {
   await ensureTauri();
   if (invokeImpl) {
-    return invokeImpl<RuntimeTimelineSnapshot>("project_new");
+    return invokeImpl<RuntimeTimelineSnapshot>("project_new", { path });
   }
   fallback.reset();
   return {
@@ -137,7 +181,11 @@ export async function projectOpen(path: string): Promise<RuntimeTimelineSnapshot
 
 export async function projectSave(path: string | null): Promise<string> {
   await ensureTauri();
-  if (invokeImpl) return invokeImpl<string>("project_save", { path });
+  if (invokeImpl) {
+    return invokeImpl<string>("project_save", { path }).catch((error: unknown) => {
+      throw asTauriCommandError(error);
+    });
+  }
   return path ?? "";
 }
 
@@ -147,6 +195,62 @@ export async function getDefaultProjectDir(): Promise<string> {
   await ensureTauri();
   if (invokeImpl) return invokeImpl<string>("get_default_project_dir");
   return "";
+}
+
+export async function sampleProjectMaterialize(slug: string): Promise<string> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<string>("sample_project_materialize", { slug });
+  throw new Error("Sample projects require the OpenTake desktop app");
+}
+
+export interface HomeProjectEntry {
+  path: string;
+  name: string;
+  createdAt: number;
+  openedAt: number;
+  modifiedAt: number;
+  thumbnailPath?: string | null;
+  missing: boolean;
+}
+
+export interface LegacyRecentProject {
+  path: string;
+  openedAt: number;
+  createdAt?: number;
+  modifiedAt?: number;
+  thumbnailPath?: string | null;
+}
+
+export async function homeProjectsSync(
+  entries: LegacyRecentProject[],
+): Promise<HomeProjectEntry[]> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<HomeProjectEntry[]>("home_projects_sync", { entries });
+  throw new Error("Recent project sync requires the OpenTake desktop app");
+}
+
+export async function homeProjectRegister(path: string, openedAt: number): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<void>("home_project_register", { path, openedAt });
+  throw new Error("Recent project registration requires the OpenTake desktop app");
+}
+
+export async function homeProjectRemove(path: string): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<void>("home_project_remove", { path });
+  throw new Error("Recent project removal requires the OpenTake desktop app");
+}
+
+export async function homeProjectTrash(path: string): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<void>("home_project_trash", { path });
+  throw new Error("Moving a project to trash requires the OpenTake desktop app");
+}
+
+export async function homeProjectReveal(path: string): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<void>("home_project_reveal", { path });
+  throw new Error("Revealing a project requires the OpenTake desktop app");
 }
 
 // MARK: - Timeline interchange export (XMEML / EDL / OTIO / FCPXML)
@@ -329,6 +433,76 @@ export async function retryGeneration(
   throw new Error("Generation retry is available only in the desktop app");
 }
 
+export type MotionProgressPhase =
+  | "validating"
+  | "rendering"
+  | "encoding"
+  | "committing"
+  | "complete";
+
+export interface MotionAddRequest {
+  code?: string;
+  templateId?: "title-card" | "lower-third.glass";
+  params?: Record<string, string>;
+  startFrame: number;
+  durationFrames: number;
+  transparent?: boolean;
+  trackIndex?: number;
+}
+
+export interface MotionCommit {
+  clipId: string;
+  assetId: string;
+  contentHash: string;
+  actionName: string;
+  output: {
+    renderer: string;
+    rendererVersion: string;
+    outputFile: string;
+    fps: number;
+    width: number;
+    height: number;
+    durationFrames: number;
+    durationSeconds: number;
+    contentHash: string;
+  };
+}
+
+export async function motionCapability(): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("motion_capability");
+  return false;
+}
+
+export async function addMotion(request: MotionAddRequest): Promise<MotionCommit> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<MotionCommit>("motion_add", { request });
+  throw new Error("Motion graphics require the desktop app");
+}
+
+export async function cancelMotion(): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("motion_cancel");
+  return false;
+}
+
+export async function onMotionProgress(
+  handler: (phase: MotionProgressPhase) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("motion_progress", (event) => {
+    if (
+      typeof event.payload === "string" &&
+      ["validating", "rendering", "encoding", "committing", "complete"].includes(
+        event.payload,
+      )
+    ) {
+      handler(event.payload as MotionProgressPhase);
+    }
+  });
+}
+
 /** Progress payload for `"export://progress"`: `done` of `total` frames
  *  composited so far. */
 export interface ExportProgress {
@@ -363,7 +537,11 @@ export async function onExportProgress(
 
 // MARK: - Self-contained `.opentake` bundle export (#29 / upstream `.palmier`)
 //
-// `export_bundle` writes a self-contained `.opentake` bundle to disk: every
+// The self-contained `.opentake` bundle capability is intentionally withdrawn:
+// its Rust-owned destination/disclosure workflow is not integrated yet. The
+// compatibility types and fail-closed function stay available to the disabled
+// UI branch, but no renderer call is sent to an unregistered Tauri command.
+// A future secure command may write a bundle containing every
 // resolvable media reference is copied inside and the manifest is rewritten to
 // bundle-relative paths, so the project opens on any machine (port of upstream
 // `ExportService.exportPalmierProject` / `PalmierProjectExporter`). It carries
@@ -392,12 +570,10 @@ export interface BundleReport {
   totalBytes: number;
 }
 
-/** Write a self-contained `.opentake` bundle to `outPath`, returning the
- *  missing-media report. Rejects outside Tauri (no core / no FS). */
+/** Fail-closed capability gate for the unavailable secure bundle workflow. */
 export async function exportBundle(outPath: string): Promise<BundleReport> {
-  await ensureTauri();
-  if (invokeImpl) return invokeImpl<BundleReport>("export_bundle", { outPath });
-  throw new Error("bundle export requires the desktop app");
+  void outPath;
+  throw new Error("secure bundle export is not available in this build");
 }
 
 // MARK: - Media commands
@@ -420,6 +596,13 @@ export async function importMedia(paths: string[]): Promise<MediaList> {
   await ensureTauri();
   if (invokeImpl) return invokeImpl<MediaList>("import_media", { paths });
   return { items: [], folders: [] };
+}
+
+/** Validate and copy one `.cube` into the active project's managed storage. */
+export async function importLut(path: string): Promise<LutReference> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<LutReference>("import_lut", { path });
+  throw new Error("3D LUT import requires the desktop app");
 }
 
 export async function getMedia(): Promise<MediaList> {
@@ -558,6 +741,227 @@ export async function onTranscribeProgress(
     const p = e.payload as { fraction?: number } | undefined;
     if (p && typeof p.fraction === "number") handler(p.fraction);
   });
+}
+
+// MARK: - On-device AI matting
+
+export async function mattingModelStatus(): Promise<MattingModelStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<MattingModelStatus>("matting_model_status");
+  return { installed: false, model: "", bytes: 0, sha256: "" };
+}
+
+export async function downloadMattingModel(): Promise<MattingModelStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<MattingModelStatus>("download_matting_model");
+  throw new Error("matting model download requires the desktop app");
+}
+
+export async function cancelMattingModelDownload(): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("cancel_matting_model_download");
+  return false;
+}
+
+export async function onMattingProgress(
+  handler: (progress: { fraction: number; downloadedBytes: number; totalBytes: number }) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("matting://progress", (event) => {
+    const value = event.payload as
+      | { fraction?: number; downloadedBytes?: number; totalBytes?: number }
+      | undefined;
+    if (
+      value &&
+      typeof value.fraction === "number" &&
+      typeof value.downloadedBytes === "number" &&
+      typeof value.totalBytes === "number"
+    ) {
+      handler({
+        fraction: value.fraction,
+        downloadedBytes: value.downloadedBytes,
+        totalBytes: value.totalBytes,
+      });
+    }
+  });
+}
+
+export async function generateMatte(
+  clipId: string,
+  apply: boolean,
+  range?: { startFrame?: number; endFrame?: number },
+): Promise<GenerateMatteResult> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<GenerateMatteResult>("advanced_generate_matte", {
+      request: {
+        clipId,
+        apply,
+        ...(range?.startFrame == null ? {} : { startFrame: range.startFrame }),
+        ...(range?.endFrame == null ? {} : { endFrame: range.endFrame }),
+      },
+    });
+  }
+  throw new Error("AI matting requires the desktop app");
+}
+
+export async function trackMotion(
+  clipId: string,
+  region: MotionTrackingRegion,
+  range: { startFrame: number; endFrame: number },
+  apply: boolean,
+): Promise<MotionTrackingResult> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<MotionTrackingResult>("advanced_track_motion", {
+      request: {
+        clipId,
+        region,
+        startFrame: range.startFrame,
+        endFrame: range.endFrame,
+        apply,
+      },
+    });
+  }
+  throw new Error("motion tracking requires the desktop app");
+}
+
+export async function removeObject(
+  clipId: string,
+  apply: boolean,
+  range: { startFrame: number; endFrame: number },
+): Promise<RemoveObjectResult> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<RemoveObjectResult>("advanced_remove_object", {
+      request: {
+        clipId,
+        maskId: "primary",
+        provider: "local",
+        model: "opentake-boundary-fill-v1",
+        startFrame: range.startFrame,
+        endFrame: range.endFrame,
+        apply,
+      },
+    });
+  }
+  throw new Error("object removal requires the desktop app");
+}
+
+export async function matchColor(
+  clipId: string,
+  referenceMediaRef: string,
+  referenceFrame: number,
+  targetFrame: number,
+  apply: boolean,
+): Promise<MatchColorResult> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<MatchColorResult>("advanced_match_color", {
+      request: {
+        clipId,
+        referenceMediaRef,
+        referenceFrame,
+        targetFrame,
+        apply,
+      },
+    });
+  }
+  throw new Error("color match requires the desktop app");
+}
+
+export async function translateCaptions(
+  captionClipIds: string[],
+  sourceLocale: string,
+  targetLocale: string,
+  provider: "openai" | "anthropic",
+  costAuthorized: boolean,
+): Promise<CaptionTranslationResult> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<CaptionTranslationResult>("advanced_translate_captions", {
+      request: {
+        captionClipIds,
+        sourceLocale: sourceLocale.trim() || "auto",
+        targetLocale: targetLocale.trim(),
+        provider,
+        costAuthorized,
+        apply: false,
+      },
+    });
+  }
+  throw new Error("caption translation requires the desktop app");
+}
+
+export async function applyCaptionTranslationReview(
+  result: CaptionTranslationResult["result"],
+  changes: CaptionTranslationReviewChange[],
+): Promise<GenerateMatteResult> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<GenerateMatteResult>("advanced_apply_caption_translation_review", {
+      request: {
+        projectEpoch: result.projectEpoch,
+        version: result.version,
+        sourceLocale: result.sourceLocale,
+        targetLocale: result.targetLocale,
+        provider: result.provider,
+        model: result.model,
+        changes,
+      },
+    });
+  }
+  throw new Error("caption translation review requires the desktop app");
+}
+
+export async function scriptToVideo(
+  segments: ScriptToVideoSegmentInput[],
+  apply: boolean,
+): Promise<ScriptToVideoResult> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<ScriptToVideoResult>("advanced_script_to_video", {
+      request: { segments, apply },
+    });
+  }
+  throw new Error("script-to-video requires the desktop app");
+}
+
+export async function generateAvatar(request: {
+  portraitMediaRef: string;
+  audioMediaRef: string;
+  consentId: string;
+  costAuthorized: boolean;
+  startFrame?: number;
+}): Promise<AvatarGenerationResult> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<AvatarGenerationResult>("advanced_generate_avatar", { request });
+  }
+  throw new Error("avatar generation requires the desktop app");
+}
+
+export async function cloneVoice(request: {
+  action: "enroll" | "generate" | "revoke";
+  consentId: string;
+  referenceAudioMediaRef?: string;
+  voiceId?: string;
+  voiceName?: string;
+  prompt?: string;
+  costAuthorized?: boolean;
+}): Promise<VoiceCloneResult> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<VoiceCloneResult>("advanced_clone_voice", { request });
+  }
+  throw new Error("voice cloning requires the desktop app");
+}
+
+export async function cancelAdvancedWorkflow(): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("cancel_advanced_workflow");
+  return false;
 }
 
 /** Transcribe one asset (cached, so repeats are instant). `language` is an
@@ -836,6 +1240,7 @@ export interface CompositeStillRequest {
   sessionId: string;
   sessionGeneration: number;
   seekGeneration: number;
+  sequenceId?: string;
 }
 
 export interface CancelCompositeStillRequest {
@@ -920,6 +1325,262 @@ export async function getWaveform(mediaRef: string): Promise<number[] | null> {
   return null;
 }
 
+export async function analyzeStabilization(clipId: string): Promise<StabilizationTrack> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<StabilizationTrack>("analyze_stabilization", { clipId });
+  }
+  throw new Error("stabilization analysis requires the desktop app");
+}
+
+export async function cancelStabilizationAnalysis(): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("cancel_stabilization_analysis");
+  return false;
+}
+
+export interface LoudnessProgress {
+  clipId: string;
+  done: number;
+  total: number;
+}
+
+export async function analyzeLoudness(
+  clipId: string,
+  targetLufs: number,
+  truePeakCeilingDbtp: number,
+): Promise<LoudnessNormalization> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<LoudnessNormalization>("analyze_loudness", {
+      clipId,
+      targetLufs,
+      truePeakCeilingDbtp,
+    });
+  }
+  throw new Error("loudness analysis requires the desktop app");
+}
+
+export async function cancelLoudnessAnalysis(): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("cancel_loudness_analysis");
+  return false;
+}
+
+export async function onLoudnessProgress(
+  clipId: string,
+  handler: (progress: LoudnessProgress) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("loudness://progress", (event) => {
+    const progress = event.payload as Partial<LoudnessProgress> | undefined;
+    if (
+      progress?.clipId === clipId &&
+      typeof progress.done === "number" &&
+      typeof progress.total === "number"
+    ) {
+      handler(progress as LoudnessProgress);
+    }
+  });
+}
+
+export interface DenoiseProgress {
+  clipId: string;
+  done: number;
+  total: number;
+}
+
+export async function prepareDenoise(
+  clipId: string,
+  mode: DenoiseMode,
+  strength: number,
+  previewEnabled: boolean,
+): Promise<AudioDenoise> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<AudioDenoise>("prepare_denoise", {
+      clipId,
+      mode,
+      strength,
+      previewEnabled,
+    });
+  }
+  throw new Error("audio denoise requires the desktop app");
+}
+
+export async function cancelDenoiseAnalysis(): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("cancel_denoise_analysis");
+  return false;
+}
+
+export async function onDenoiseProgress(
+  clipId: string,
+  handler: (progress: DenoiseProgress) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("denoise://progress", (event) => {
+    const progress = event.payload as Partial<DenoiseProgress> | undefined;
+    if (
+      progress?.clipId === clipId &&
+      typeof progress.done === "number" &&
+      typeof progress.total === "number"
+    ) {
+      handler(progress as DenoiseProgress);
+    }
+  });
+}
+
+export interface StemSeparationProgress {
+  sourceAssetId: string;
+  done: number;
+  total: number;
+}
+
+export interface StemSeparationResult {
+  vocalsAssetId: string;
+  accompanimentAssetId: string;
+  sourceSha256: string;
+  execution: string;
+  modelSha256?: string | null;
+  vocalSdrImprovementDb: number;
+}
+
+export async function separateAudioStems(
+  sourceAssetId: string,
+  execution: "local" | "hosted",
+  provider: string | null = null,
+  model: string | null = null,
+  uploadConfirmed = false,
+): Promise<StemSeparationResult> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<StemSeparationResult>("separate_audio_stems", {
+      sourceAssetId,
+      execution,
+      provider,
+      model,
+      uploadConfirmed,
+    });
+  }
+  throw new Error("stem separation requires the desktop app");
+}
+
+export async function cancelStemSeparation(): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("cancel_stem_separation");
+  return false;
+}
+
+export interface ImportStemsToTracksResult {
+  clipIds: string[];
+  actionName: string;
+}
+
+export async function importStemsToTracks(
+  vocalsAssetId: string,
+  accompanimentAssetId: string,
+  startFrame: number,
+): Promise<ImportStemsToTracksResult> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<ImportStemsToTracksResult>("import_stems_to_tracks", {
+      vocalsAssetId,
+      accompanimentAssetId,
+      startFrame,
+    });
+  }
+  throw new Error("stem track import requires the desktop app");
+}
+
+export interface MediaProxyResult {
+  assetId: string;
+  path: string;
+  sourceSha256: string;
+  width: number;
+  height: number;
+}
+
+export interface MediaProxyProgress {
+  assetId: string;
+  done: number;
+  total: number;
+}
+
+export async function createMediaProxy(
+  assetId: string,
+  maxWidth = 1280,
+  maxHeight = 720,
+): Promise<MediaProxyResult> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<MediaProxyResult>("create_media_proxy", { assetId, maxWidth, maxHeight });
+  }
+  throw new Error("proxy creation requires the desktop app");
+}
+
+export async function cancelMediaProxy(): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("cancel_media_proxy");
+  return false;
+}
+
+export async function removeMediaProxy(assetId: string): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("remove_media_proxy", { assetId });
+  return false;
+}
+
+export async function setProxyPlaybackEnabled(enabled: boolean): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("set_proxy_playback_enabled", { enabled });
+  return enabled;
+}
+
+export async function getProxyPlaybackEnabled(): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("get_proxy_playback_enabled");
+  return false;
+}
+
+export async function onMediaProxyProgress(
+  assetId: string,
+  handler: (progress: MediaProxyProgress) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("proxy://progress", (event) => {
+    const progress = event.payload as Partial<MediaProxyProgress> | undefined;
+    if (
+      progress?.assetId === assetId &&
+      typeof progress.done === "number" &&
+      typeof progress.total === "number"
+    ) {
+      handler(progress as MediaProxyProgress);
+    }
+  });
+}
+
+export async function onStemSeparationProgress(
+  sourceAssetId: string,
+  handler: (progress: StemSeparationProgress) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("stems://progress", (event) => {
+    const progress = event.payload as Partial<StemSeparationProgress> | undefined;
+    if (
+      progress?.sourceAssetId === sourceAssetId &&
+      typeof progress.done === "number" &&
+      typeof progress.total === "number"
+    ) {
+      handler(progress as StemSeparationProgress);
+    }
+  });
+}
+
 // MARK: - BYOK secret store
 //
 // API keys are stored in the OS keychain by the Rust backend (`secret_*`
@@ -949,6 +1610,54 @@ export async function secretDelete(provider: string): Promise<SecretStatus> {
   await ensureTauri();
   if (invokeImpl) return invokeImpl<SecretStatus>("secret_delete", { provider });
   return NO_SECRET;
+}
+
+// MARK: - Official Codex / ChatGPT authentication
+//
+// OpenTake never receives a ChatGPT token. These commands only ask the
+// user-installed official Codex CLI to report, start, cancel, or clear its own
+// login session.
+
+export interface CodexAuthStatus {
+  available: boolean;
+  authenticated: boolean;
+  authMethod: string | null;
+  version: string | null;
+  loginInProgress: boolean;
+  message: string;
+}
+
+const NO_CODEX: CodexAuthStatus = {
+  available: false,
+  authenticated: false,
+  authMethod: null,
+  version: null,
+  loginInProgress: false,
+  message: "Official Codex CLI is available only in the desktop app",
+};
+
+export async function codexAuthStatus(): Promise<CodexAuthStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<CodexAuthStatus>("codex_auth_status");
+  return NO_CODEX;
+}
+
+export async function codexLoginStart(): Promise<CodexAuthStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<CodexAuthStatus>("codex_login_start");
+  return NO_CODEX;
+}
+
+export async function codexLoginCancel(): Promise<CodexAuthStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<CodexAuthStatus>("codex_login_cancel");
+  return NO_CODEX;
+}
+
+export async function codexLogout(): Promise<CodexAuthStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<CodexAuthStatus>("codex_logout");
+  return NO_CODEX;
 }
 
 // MARK: - Optional account backend

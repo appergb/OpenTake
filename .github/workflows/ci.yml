@@ -35,6 +35,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  motion-canvas:
+    name: Motion Canvas (locked build / audit / license)
+    if: github.event_name != 'workflow_dispatch' || inputs.red_task == 'none'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: plugins/motion-canvas-studio/package-lock.json
+
+      - name: Install locked Motion Canvas dependencies
+        run: npm --prefix plugins/motion-canvas-studio ci --ignore-scripts
+
+      - name: Audit dependencies and licenses
+        run: |
+          npm --prefix plugins/motion-canvas-studio audit --audit-level=moderate
+          npm --prefix plugins/motion-canvas-studio run licenses
+
+      - name: Test and reproduce embedded runner
+        run: |
+          npm --prefix plugins/motion-canvas-studio test
+          npm --prefix plugins/motion-canvas-studio run build
+          git diff --exit-code -- plugins/motion-canvas-studio/bundle/runner.html plugins/motion-canvas-studio/package-lock.json
+
   rust:
     name: Rust (fmt / clippy / test)
     if: github.event_name != 'workflow_dispatch' || inputs.red_task == 'none'
@@ -78,7 +105,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Validate Windows product gate contract
@@ -98,6 +125,8 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: cargo test
+        env:
+          OPENTAKE_MOTION_TRACE: '1'
         run: cargo test --workspace
 
       - name: live playback transport integration (fail closed)
@@ -160,8 +189,16 @@ jobs:
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
 
-      - name: Install FFmpeg
-        run: choco install ffmpeg --no-progress -y
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+
+      - name: Provision checksum-pinned packaged FFmpeg sidecars
+        run: python scripts/provision_ffmpeg_sidecars.py --target x86_64-pc-windows-msvc
+
+      - name: Verify sidecar supply and probe/decode/encode boundary without PATH
+        shell: bash
+        run: ruby scripts/tests/packaged-sidecars-test.rb --name packaged_macos_windows_sidecars_resolve_and_execute
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -181,10 +218,27 @@ jobs:
       - name: Rust workspace clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Windows Chromium motion capture regression
+        shell: bash
+        env:
+          OPENTAKE_MOTION_TRACE: '1'
+        run: |
+          cargo test -p opentake-motion --features chromium --lib \
+            renderer::tests::chromium_skeleton_reports_unavailable_not_panic \
+            -- --exact --nocapture --test-threads=1
+          cargo test -p opentake-motion --features chromium --test chromium \
+            virtual_time_network_csp_timeout_cleanup_and_frame_identity \
+            -- --exact --nocapture --test-threads=1
+          cargo test -p opentake-tauri --test motion_command \
+            sandbox_progress_cancel_validated_mp4_result \
+            -- --exact --nocapture --test-threads=1
+
       - name: Web editor behavior suite
         run: pnpm -C web test
 
       - name: Rust workspace tests
+        env:
+          OPENTAKE_MOTION_TRACE: '1'
         run: cargo test --workspace -- --test-threads=1
 
       - name: Minimal-feature Tauri clippy
@@ -199,6 +253,40 @@ jobs:
           Remove-Item 'target/release/bundle/msi' -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item 'target/release/bundle/nsis' -Recurse -Force -ErrorAction SilentlyContinue
           & .\web\node_modules\.bin\tauri.cmd build --ci --bundles msi,nsis
+
+      - name: Install NSIS package and execute installed product without PATH
+        shell: pwsh
+        run: |
+          $installer = @(Get-ChildItem 'target/release/bundle/nsis/*.exe' -File)
+          if ($installer.Count -ne 1) { throw 'expected exactly one NSIS installer' }
+          $process = Start-Process -FilePath $installer[0].FullName -ArgumentList '/S' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "silent NSIS install failed: $($process.ExitCode)" }
+          $candidates = @(
+            (Join-Path $env:LOCALAPPDATA 'OpenTake/opentake.exe'),
+            (Join-Path $env:LOCALAPPDATA 'Programs/OpenTake/opentake.exe'),
+            (Join-Path $env:ProgramFiles 'OpenTake/opentake.exe')
+          )
+          $application = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $application) {
+            $uninstall = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' `
+              -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq 'OpenTake' } | Select-Object -First 1
+            if ($uninstall.InstallLocation) {
+              $application = Get-ChildItem $uninstall.InstallLocation -Filter 'opentake.exe' -File `
+                -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName -First 1
+            }
+          }
+          if (-not $application) { throw "installed OpenTake executable not found: $($candidates -join ', ')" }
+          $installDirectory = Split-Path -Parent $application
+          ruby scripts/tests/packaged-sidecars-test.rb `
+            --name packaged_macos_windows_sidecars_resolve_and_execute `
+            --package $installDirectory
+          $app = Start-Process -FilePath $application -PassThru
+          Start-Sleep -Seconds 5
+          if ($app.HasExited) {
+            throw "installed OpenTake exited during launch smoke test: $($app.ExitCode)"
+          }
+          Stop-Process -Id $app.Id -Force
+          Wait-Process -Id $app.Id -ErrorAction SilentlyContinue
 
       - name: Bind installers to the exact source SHA
         shell: pwsh
@@ -249,8 +337,8 @@ jobs:
       - name: Install Rust toolchain
         run: rustup component add rustfmt
 
-      - name: Install FFmpeg
-        run: choco install ffmpeg --no-progress -y
+      - name: Provision checksum-pinned packaged FFmpeg sidecars
+        run: python scripts/provision_ffmpeg_sidecars.py --target x86_64-pc-windows-msvc
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -258,15 +346,105 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-security-cargo-${{ hashFiles('**/Cargo.toml') }}
+          key: ${{ runner.os }}-security-cargo-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}
           restore-keys: ${{ runner.os }}-security-cargo-
 
       - name: Portable FFmpeg cancellation lifecycle
         shell: pwsh
+        env:
+          OPENTAKE_FFMPEG: ${{ github.workspace }}\src-tauri\binaries\ffmpeg-x86_64-pc-windows-msvc.exe
         run: |
+          & $env:OPENTAKE_FFMPEG -version
+          if ($LASTEXITCODE -ne 0) { throw 'checksum-pinned packaged FFmpeg is not runnable' }
           cargo test -p opentake-media --lib windows_cancelling_running_pcm_child_reaps_both_pipe_readers
           cargo test -p opentake-media --lib windows_cancelling_mux_wait_reaps_child
+
+      - name: Verify portable Tauri test image imports
+        shell: pwsh
+        run: |
+          cargo test -p opentake-tauri --lib --no-run
+          $testImage = Get-ChildItem 'target/debug/deps/opentake_tauri_lib-*.exe' -File |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (-not $testImage) { throw 'compiled Tauri test image not found' }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $dumpbin = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -find 'VC/Tools/MSVC/**/bin/Hostx64/x64/dumpbin.exe' |
+            Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin.exe not found' }
+          & $dumpbin /DEPENDENTS $testImage.FullName | Set-Content windows-tauri-test-imports.txt
+          & $dumpbin /IMPORTS $testImage.FullName | Add-Content windows-tauri-test-imports.txt
+          $imports = Get-Content windows-tauri-test-imports.txt -Raw
+          if ($imports -match '(?im)^\s*(MSVCP140|VCRUNTIME140(?:_1)?|api-ms-win-crt-[^\s]+|onnxruntime|DirectML)\.dll\s*$') {
+            throw 'Tauri test image retains a non-portable native runtime dependency'
+          }
+
+          $mt = Get-ChildItem (Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin') `
+            -Filter mt.exe -File -Recurse |
+            Where-Object { $_.FullName -match '\\x64\\mt\.exe$' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $mt) { throw 'mt.exe not found' }
+          $manifestLog = & $mt.FullName "-inputresource:$($testImage.FullName);#1" `
+            '-out:windows-tauri-test.manifest' 2>&1
+          $manifestLog | Set-Content windows-tauri-test-manifest.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Tauri test image has no readable RT_MANIFEST resource #1' }
+          Get-Content windows-tauri-test.manifest | Add-Content windows-tauri-test-manifest.txt
+          if ((Get-Content windows-tauri-test.manifest -Raw) -notmatch 'Microsoft\.Windows\.Common-Controls') {
+            throw 'Tauri test image manifest does not activate Common Controls v6'
+          }
+
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class OpenTakeNativeExportProbe {
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            public static extern IntPtr LoadLibraryExW(string path, IntPtr file, uint flags);
+            [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true, ExactSpelling = true)]
+            public static extern IntPtr GetProcAddress(IntPtr module, string name);
+          }
+          '@
+          $modules = @{}
+          $currentDll = $null
+          $inImportSection = $false
+          $missingExports = @()
+          foreach ($line in (Get-Content windows-tauri-test-imports.txt)) {
+            if ($line -match '^\s*Section contains the following imports:\s*$') {
+              $inImportSection = $true
+              $currentDll = $null
+              continue
+            }
+            if ($line -match '^\s*Summary\s*$') {
+              $inImportSection = $false
+              $currentDll = $null
+              continue
+            }
+            if (-not $inImportSection) { continue }
+            if ($line -match '^\s{4}([A-Za-z0-9_.-]+\.dll)\s*$') {
+              $currentDll = $Matches[1]
+              if (-not $modules.ContainsKey($currentDll)) {
+                $modules[$currentDll] = [OpenTakeNativeExportProbe]::LoadLibraryExW(
+                  $currentDll, [IntPtr]::Zero, 0x00000800
+                )
+              }
+            } elseif ($currentDll -and $line -match '^\s+[0-9A-F]+\s+(\S+)\s*$') {
+              $name = $Matches[1]
+              $module = $modules[$currentDll]
+              $activationContextExport =
+                $currentDll -ieq 'comctl32.dll' -and $name -eq 'TaskDialogIndirect'
+              if (-not $activationContextExport -and ($module -eq [IntPtr]::Zero -or
+                  [OpenTakeNativeExportProbe]::GetProcAddress($module, $name) -eq [IntPtr]::Zero)) {
+                $missingExports += "$currentDll!$name"
+              }
+            }
+          }
+          $modules.GetEnumerator() | Sort-Object Name | ForEach-Object {
+            "LOAD $($_.Name)=$($_.Value)"
+          } | Set-Content windows-tauri-export-probe.txt
+          $missingExports | ForEach-Object { "MISSING $_" } | Add-Content windows-tauri-export-probe.txt
+          if ($missingExports.Count -ne 0) {
+            throw "Tauri test image imports unavailable system exports: $($missingExports -join ', ')"
+          }
 
       - name: Reserved output identity and reparse safety
         shell: pwsh
@@ -274,6 +452,19 @@ jobs:
           cargo test -p opentake-tauri --lib windows_project_media_junction_is_rejected_without_writing_target
           cargo test -p opentake-tauri --lib windows_directory_handoff_blocks_junction_replacement_before_child_create
           cargo test -p opentake-tauri --lib windows_retained_output_handle_blocks_final_name_replacement
+
+      - name: Upload Tauri test image imports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-tauri-test-imports-${{ github.sha }}
+          path: |
+            windows-tauri-test-imports.txt
+            windows-tauri-test-manifest.txt
+            windows-tauri-test.manifest
+            windows-tauri-export-probe.txt
+          if-no-files-found: error
+          retention-days: 7
 
   web:
     name: Web (install / build)
@@ -311,14 +502,16 @@ jobs:
       - name: Install Rust toolchain
         run: rustup component add rustfmt clippy
 
+      - name: Provision checksum-pinned packaged FFmpeg sidecars
+        run: python scripts/provision_ffmpeg_sidecars.py --target x86_64-pc-windows-msvc
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-library-security-${{ hashFiles('**/Cargo.toml') }}
+          key: ${{ runner.os }}-library-security-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}
           restore-keys: ${{ runner.os }}-library-security-
 
       - name: Test retained-handle and junction defenses

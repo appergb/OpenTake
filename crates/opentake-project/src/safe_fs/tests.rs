@@ -109,6 +109,119 @@ fn component_accepts_safe_names_and_rejects_too_long_and_unsafe_names() {
     }
 }
 
+#[cfg(windows)]
+struct WindowsContractDir(std::path::PathBuf);
+
+#[cfg(windows)]
+impl WindowsContractDir {
+    fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "opentake-windows-contract-{}-{id}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&path).expect("create Windows contract fixture");
+        Self(path)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for WindowsContractDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_contract() {
+    use std::io::SeekFrom;
+
+    let fixture = WindowsContractDir::new();
+    let root = capture_absolute_directory(&fixture.0, DirectoryAccess::MutateChildren)
+        .expect("capture local Windows fixture");
+
+    let stage_name = ComponentName::new("stage").unwrap();
+    let quarantine_name = ComponentName::new("quarantine").unwrap();
+    let nested_name = ComponentName::new("nested").unwrap();
+    let leaf_name = ComponentName::new("leaf.bin").unwrap();
+    let stage = create_stage_dir_new(&root, &stage_name, CreatePermissions::Inherit)
+        .expect("create retained stage");
+    let nested = create_dir_new(
+        stage.directory(),
+        &nested_name,
+        CreatePermissions::Inherit,
+        DirectoryAccess::MutateChildren,
+    )
+    .expect("create nested directory");
+    let mut leaf = create_file_new(&nested, &leaf_name, CreatePermissions::Inherit)
+        .expect("create retained file");
+    leaf.write_all(b"windows-capability-relative")
+        .expect("write retained file");
+    leaf.flush().expect("flush retained file");
+    leaf.sync_all().expect("sync retained file");
+    leaf.seek(SeekFrom::Start(0)).expect("rewind retained file");
+    let mut bytes = [0; 27];
+    assert_eq!(leaf.read(&mut bytes).unwrap(), bytes.len());
+    assert_eq!(&bytes, b"windows-capability-relative");
+    drop(leaf);
+    drop(nested);
+
+    let quarantine = quarantine_stage(stage, &root, quarantine_name.clone())
+        .expect("quarantine retained stage without replacement");
+    cleanup_quarantined_tree(quarantine).expect("delete quarantined tree by retained handles");
+    assert!(matches!(
+        query_child_nofollow(&root, &quarantine_name).unwrap(),
+        ChildState::Absent
+    ));
+
+    let published_name = ComponentName::new("published").unwrap();
+    let published_stage_name = ComponentName::new("publish-stage").unwrap();
+    let published_stage =
+        create_stage_dir_new(&root, &published_stage_name, CreatePermissions::Inherit)
+            .expect("create publish stage");
+    publish_stage_noreplace(published_stage, &root, published_name.clone())
+        .expect("publish retained stage without replacement");
+    assert!(matches!(
+        query_child_nofollow(&root, &published_name).unwrap(),
+        ChildState::Present(EntryMetadata {
+            kind: EntryKind::Directory,
+            ..
+        })
+    ));
+
+    let collision_stage_name = ComponentName::new("collision-stage").unwrap();
+    let collision_stage =
+        create_stage_dir_new(&root, &collision_stage_name, CreatePermissions::Inherit)
+            .expect("create collision stage");
+    assert!(matches!(
+        publish_stage_noreplace(collision_stage, &root, published_name),
+        Err(SafeFsError::AlreadyExists {
+            operation: SafeFsOperation::RenameNoReplaceSameParent,
+        })
+    ));
+    assert!(matches!(
+        query_child_nofollow(&root, &collision_stage_name).unwrap(),
+        ChildState::Present(EntryMetadata {
+            kind: EntryKind::Directory,
+            ..
+        })
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn synchronous_nt_pending_is_invariant_error() {
+    assert!(matches!(
+        super::windows::synchronous_pending_contract_for_test(),
+        Err(SafeFsError::Os {
+            operation: SafeFsOperation::ReadFile,
+            raw: RawOsError::NtStatus { .. },
+        })
+    ));
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod unix_contract {
     use super::super::capability::CleanupCapability;

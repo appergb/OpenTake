@@ -34,6 +34,7 @@ pub enum ToolName {
     AutoCutToBeats,
     SmartReframe,
     TightenSilences,
+    RemoveFillerWords,
     // --- Media generation / import (5) ---
     GenerateVideo,
     GenerateImage,
@@ -60,9 +61,35 @@ pub enum ToolName {
     // --- OpenTake Motion Canvas graphics (docs/MOTION-GRAPHICS-PLUGIN.md, Issue #34) ---
     AddMotionGraphic,
     EditMotionGraphic,
+    // --- Advanced AI workflows (capability-gated by the desktop host) ---
+    TrackMotion,
+    GenerateMatte,
+    RemoveObject,
+    MatchColor,
+    SeparateStems,
+    TranslateCaptions,
+    ScriptToVideo,
+    GenerateAvatar,
+    CloneVoice,
 }
 
 impl ToolName {
+    /// Whether discovery of this tool requires a live host media bridge.
+    /// Keeping this predicate next to the catalog prevents MCP and in-app Chat
+    /// from drifting into different fail-closed capability sets.
+    pub const fn requires_media_bridge(self) -> bool {
+        matches!(
+            self,
+            ToolName::InspectMedia
+                | ToolName::GetTranscript
+                | ToolName::InspectTimeline
+                | ToolName::SearchMedia
+                | ToolName::AddCaptions
+                | ToolName::RemoveFillerWords
+                | ToolName::ImportMedia
+        )
+    }
+
     /// The wire name (matches upstream / spec exactly).
     pub fn as_str(self) -> &'static str {
         match self {
@@ -89,6 +116,7 @@ impl ToolName {
             ToolName::AutoCutToBeats => "auto_cut_to_beats",
             ToolName::SmartReframe => "smart_reframe",
             ToolName::TightenSilences => "tighten_silences",
+            ToolName::RemoveFillerWords => "remove_filler_words",
             ToolName::GenerateVideo => "generate_video",
             ToolName::GenerateImage => "generate_image",
             ToolName::GenerateAudio => "generate_audio",
@@ -110,13 +138,22 @@ impl ToolName {
             ToolName::ApplyEffect => "apply_effect",
             ToolName::AddMotionGraphic => "add_motion_graphic",
             ToolName::EditMotionGraphic => "edit_motion_graphic",
+            ToolName::TrackMotion => "track_motion",
+            ToolName::GenerateMatte => "generate_matte",
+            ToolName::RemoveObject => "remove_object",
+            ToolName::MatchColor => "match_color",
+            ToolName::SeparateStems => "separate_stems",
+            ToolName::TranslateCaptions => "translate_captions",
+            ToolName::ScriptToVideo => "script_to_video",
+            ToolName::GenerateAvatar => "generate_avatar",
+            ToolName::CloneVoice => "clone_voice",
         }
     }
 
-    /// Tools advertised to MCP and in-app Chat in registration order. Provider-
-    /// backed generation and Motion Canvas tools remain known wire names, but
-    /// stay out of discovery until their production backends are connected.
-    pub const ALL: [ToolName; 38] = [
+    /// Base tools advertised to MCP and in-app Chat in registration order.
+    /// Provider-backed generation and Motion tools are appended only when the
+    /// current host reports their respective live capabilities.
+    pub const ALL: [ToolName; 39] = [
         ToolName::GetTimeline,
         ToolName::GetMedia,
         ToolName::InspectMedia,
@@ -140,6 +177,7 @@ impl ToolName {
         ToolName::AutoCutToBeats,
         ToolName::SmartReframe,
         ToolName::TightenSilences,
+        ToolName::RemoveFillerWords,
         ToolName::ImportMedia,
         ToolName::ListFolders,
         ToolName::CreateFolder,
@@ -166,11 +204,31 @@ impl ToolName {
         ToolName::UpscaleMedia,
     ];
 
+    /// Motion tools appended only by a host with a production render/import/
+    /// placement bridge. They remain known for strict compatibility parsing in
+    /// all other hosts.
+    pub const MOTION: [ToolName; 2] = [ToolName::AddMotionGraphic, ToolName::EditMotionGraphic];
+
+    /// Advanced workflows are schema-known but never unconditionally
+    /// advertised. The desktop host appends only the exact capabilities backed
+    /// by installed local models or a configured provider.
+    pub const ADVANCED_AI: [ToolName; 9] = [
+        ToolName::TrackMotion,
+        ToolName::GenerateMatte,
+        ToolName::RemoveObject,
+        ToolName::MatchColor,
+        ToolName::SeparateStems,
+        ToolName::TranslateCaptions,
+        ToolName::ScriptToVideo,
+        ToolName::GenerateAvatar,
+        ToolName::CloneVoice,
+    ];
+
     /// Every recognized schema/wire name, including capabilities deliberately
     /// hidden from discovery until a real backend exists. Keeping this set lets
     /// strict argument validation and compatibility tests cover future tools
     /// without advertising placeholder behavior to models.
-    pub const KNOWN: [ToolName; 44] = [
+    pub const KNOWN: [ToolName; 54] = [
         ToolName::GetTimeline,
         ToolName::GetMedia,
         ToolName::InspectMedia,
@@ -194,6 +252,7 @@ impl ToolName {
         ToolName::AutoCutToBeats,
         ToolName::SmartReframe,
         ToolName::TightenSilences,
+        ToolName::RemoveFillerWords,
         ToolName::GenerateVideo,
         ToolName::GenerateImage,
         ToolName::GenerateAudio,
@@ -215,6 +274,15 @@ impl ToolName {
         ToolName::ApplyEffect,
         ToolName::AddMotionGraphic,
         ToolName::EditMotionGraphic,
+        ToolName::TrackMotion,
+        ToolName::GenerateMatte,
+        ToolName::RemoveObject,
+        ToolName::MatchColor,
+        ToolName::SeparateStems,
+        ToolName::TranslateCaptions,
+        ToolName::ScriptToVideo,
+        ToolName::GenerateAvatar,
+        ToolName::CloneVoice,
     ];
 
     /// The 31 upstream-equivalent tools (Issue #9's "31 tools").
@@ -274,12 +342,22 @@ mod tests {
     }
 
     #[test]
-    fn advertised_set_is_38_and_known_set_is_44() {
-        assert_eq!(ToolName::ALL.len(), 38);
-        assert_eq!(ToolName::KNOWN.len(), 44);
+    fn advertised_set_is_39_and_known_set_is_54() {
+        assert_eq!(ToolName::ALL.len(), 39);
+        assert_eq!(ToolName::KNOWN.len(), 54);
         assert!(ToolName::ALL
             .iter()
             .all(|tool| ToolName::KNOWN.contains(tool)));
+    }
+
+    #[test]
+    fn advanced_ai_tools_are_known_but_capability_gated() {
+        for tool in ToolName::ADVANCED_AI {
+            assert_eq!(ToolName::from_str(tool.as_str()), Ok(tool));
+            assert!(ToolName::KNOWN.contains(&tool));
+            assert!(!ToolName::ALL.contains(&tool));
+            assert!(!ToolName::UPSTREAM.contains(&tool));
+        }
     }
 
     #[test]
@@ -288,11 +366,13 @@ mod tests {
         assert_eq!(ToolName::AutoCutToBeats.as_str(), "auto_cut_to_beats");
         assert_eq!(ToolName::SmartReframe.as_str(), "smart_reframe");
         assert_eq!(ToolName::TightenSilences.as_str(), "tighten_silences");
+        assert_eq!(ToolName::RemoveFillerWords.as_str(), "remove_filler_words");
         for t in [
             ToolName::DetectBeats,
             ToolName::AutoCutToBeats,
             ToolName::SmartReframe,
             ToolName::TightenSilences,
+            ToolName::RemoveFillerWords,
         ] {
             assert_eq!(ToolName::from_str(t.as_str()), Ok(t));
             assert!(!ToolName::UPSTREAM.contains(&t));
@@ -307,8 +387,8 @@ mod tests {
         for t in [ToolName::AddMotionGraphic, ToolName::EditMotionGraphic] {
             assert_eq!(ToolName::from_str(t.as_str()), Ok(t));
         }
-        // They remain known for schema compatibility, but are not advertised
-        // until the production Motion Canvas renderer is wired.
+        // They stay out of the unconditional base catalog: a capable desktop
+        // host appends MOTION, while non-rendering hosts remain fail-closed.
         assert_eq!(
             ToolName::KNOWN
                 .iter()

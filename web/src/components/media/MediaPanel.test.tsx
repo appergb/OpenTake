@@ -20,6 +20,10 @@ vi.mock("../../lib/api", () => ({
   generateThumbnail: vi.fn().mockResolvedValue(null),
   toggleFavorite: vi.fn(),
   extractAudio: vi.fn(),
+  scriptToVideo: vi.fn(),
+  generateAvatar: vi.fn(),
+  cloneVoice: vi.fn(),
+  cancelAdvancedWorkflow: vi.fn(),
 }));
 
 vi.mock("../../lib/asset", () => ({

@@ -258,7 +258,9 @@ cd web && pnpm install && pnpm build
 cd .. && cargo tauri dev
 ```
 
-> ⚠️ **当前状态**: 早期设计阶段。架构设计、路线图、模块移植地图已完成，代码正在落地中。
+> **当前状态**：`1.0.0-beta.1` 候选版。本地剪辑、预览、持久化、导出、Agent、
+> Motion Canvas 与可审阅 AI 工作流竖切均已实现。验证范围及平台/provider 限制见
+> [Beta 发布说明](docs/releases/1.0.0-beta.1.md)。
 
 ---
 
@@ -267,6 +269,7 @@ cd .. && cargo tauri dev
 | 版本 | 日期 | 里程碑 |
 |:--|:--|:--|
 | `0.1.0-dev` | 2026-06 | Phase 0+1: Cargo workspace + Domain models + Edit ops + Tauri scaffold |
+| `1.0.0-beta.1` | 2026-08-01 | 首个可安装 Beta：本地编辑闭环、Agent、Motion 与可审阅 AI 工作流 |
 | *(planned)* `0.2.0` | TBD | Phase 2: Persistence + Media import + Thumbnails + Waveform |
 | *(planned)* `0.3.0` | TBD | Phase 3: Timeline UI + Preview + MCP Server |
 | *(planned)* `0.4.0` | TBD | Phase 4: GPU Compositor (wgpu) + Text rasterization |

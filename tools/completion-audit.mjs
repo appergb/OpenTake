@@ -6416,6 +6416,9 @@ const REVIEWED_REPORT_SLICE_DEFINITIONS_RAW = [
     tests: [
       { path: "web/src/store/sync.test.ts", name: "does not let a late old snapshot replace a newer project", evidenceClass: "existing-owned" },
       { path: "web/src/store/commandRouting.test.ts", name: "project_store_has_no_timeline_mutator_and_refreshes_only_from_native_events", evidenceClass: "reviewed-planned" },
+      { path: "web/src/store/sync.test.ts", name: "refetches when an event-promised version is newer than the first snapshot", evidenceClass: "reviewed-planned" },
+      { path: "web/src/store/sync.test.ts", name: "converges to N+2 when N+1 and N+2 event refreshes complete out of order", evidenceClass: "reviewed-planned" },
+      { path: "web/src/store/sync.test.ts", name: "never publishes a stale snapshot when catch-up retries are exhausted", evidenceClass: "reviewed-planned" },
     ],
     rationale: "Core mapping report CC-readonly-versioned-mirror: the versioned refresh path exists, but whole-store read-only projection ownership lacks a closed proof.",
   },
@@ -6432,6 +6435,8 @@ const REVIEWED_REPORT_SLICE_DEFINITIONS_RAW = [
     tests: [
       { path: "web/src/store/editActions.test.ts", name: "forwards swapTracks for whole-track reordering", evidenceClass: "existing-owned" },
       { path: "web/src/store/commandRouting.test.ts", name: "every_edit_action_emits_exact_edit_request", evidenceClass: "reviewed-planned" },
+      { path: "web/src/lib/api.editApply.test.ts", name: "edit_apply_forwards_exact_command_envelope", evidenceClass: "reviewed-planned" },
+      { path: "src-tauri/src/commands.rs", name: "every_frontend_edit_request_deserializes_to_intended_command", evidenceClass: "reviewed-planned" },
     ],
     rationale: "Core mapping report CC-edit-gesture-parity: focused gesture tests exist, but no closed inventory proves every UI path emits the exact shared request.",
   },
@@ -6492,6 +6497,8 @@ const REVIEWED_REPORT_SLICE_DEFINITIONS_RAW = [
     tests: [
       { path: "crates/opentake-core/src/events.rs", name: "core_event_serializes_with_kind_tag", evidenceClass: "existing-owned" },
       { path: "crates/opentake-core/src/events.rs", name: "media_changed_serializes_with_kind_tag", evidenceClass: "existing-owned" },
+      { path: "src-tauri/src/lib.rs", name: "core_event_forwarding_maps_every_name_and_tagged_payload", evidenceClass: "reviewed-planned" },
+      { path: "src-tauri/src/lib.rs", name: "core_event_forwarding_swallows_emit_failure_and_delivery_continues", evidenceClass: "reviewed-planned" },
     ],
     rationale: "Core mapping report CC-event-forwarding-complete: tagged events and intentional nonfatal WebView forwarding are implemented and need ledger evidence closure.",
   },

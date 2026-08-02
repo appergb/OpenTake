@@ -6,6 +6,7 @@
 
 import type { ReactNode } from "react";
 import { useEditorUiStore, type Panel } from "../../store/uiStore";
+import { useT } from "../../i18n";
 
 interface PanelShellProps {
   panel: Panel;
@@ -13,6 +14,7 @@ interface PanelShellProps {
 }
 
 export function PanelShell({ panel, children }: PanelShellProps) {
+  const t = useT();
   const focusedPanel = useEditorUiStore((s) => s.focusedPanel);
   const focusPanel = useEditorUiStore((s) => s.focusPanel);
   const focused = focusedPanel === panel;
@@ -20,44 +22,29 @@ export function PanelShell({ panel, children }: PanelShellProps) {
   return (
     // Outer = base groove color; the inner card is the surface (SPEC §2.5).
     <div
-      style={{
-        position: "relative",
-        width: "100%",
-        height: "100%",
-        background: "var(--bg-base)",
-        padding: "calc(var(--panel-gap) / 2)", // 2.5px
-        minWidth: 0,
-        minHeight: 0,
-      }}
+      data-editor-panel={panel}
+      data-focused={focused ? "true" : "false"}
+      role="region"
+      aria-label={t(`layout.panel.${panel}`)}
+      tabIndex={0}
+      className="editor-panel-shell"
+      style={{ background: "var(--bg-base)" }}
       onMouseDown={() => focusPanel(panel)}
+      onFocus={() => focusPanel(panel)}
     >
       <div
-        style={{
-          position: "relative",
-          width: "100%",
-          height: "100%",
-          background: "var(--bg-surface)",
-          borderRadius: "var(--radius-sm)",
-          overflow: "hidden",
-          display: "flex",
-          flexDirection: "column",
-          minWidth: 0,
-          minHeight: 0,
-        }}
+        className="editor-panel-card"
+        style={{ background: "var(--bg-surface)" }}
       >
         {children}
       </div>
       {/* Focus ring overlay — never intercepts the mouse. */}
       <div
         aria-hidden
+        data-panel-focus-ring
+        className="editor-panel-focus-ring"
         style={{
-          position: "absolute",
-          inset: "calc(var(--panel-gap) / 2)",
-          borderRadius: "var(--radius-sm)",
-          border: "var(--bw-medium) solid var(--accent-primary)",
           opacity: focused ? 0.6 : 0,
-          transition: "opacity var(--anim-transition) var(--ease-out)",
-          pointerEvents: "none",
         }}
       />
     </div>

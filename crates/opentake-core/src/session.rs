@@ -35,8 +35,8 @@
 use std::path::{Path, PathBuf};
 
 use opentake_domain::{
-    ClipType, GenerationInput, GenerationJobStatus, MediaAsset, MediaManifest, MediaManifestEntry,
-    MediaSource, Timeline,
+    ClipType, GenerationInput, GenerationJobStatus, MediaAsset, MediaColorMetadata, MediaManifest,
+    MediaManifestEntry, MediaProxy, MediaSource, Timeline,
 };
 use opentake_ops::command::{self, EditCommand, EditResult};
 use opentake_ops::{EditorState, IdGen};
@@ -68,6 +68,20 @@ pub struct ProbedMedia {
     pub fps: Option<f64>,
     /// Whether the file carries an audio track.
     pub has_audio: bool,
+    /// Source color signalling for HDR-aware decode and durable project state.
+    pub color: Option<MediaColorMetadata>,
+}
+
+/// Non-secret provenance attached when a separated audio stem re-enters the
+/// ordinary media manifest. Content/model hashes make the derivation auditable
+/// without persisting provider credentials or result URLs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DerivedStemProvenance {
+    pub source_asset_id: String,
+    pub source_sha256: String,
+    pub execution: String,
+    pub model_sha256: Option<String>,
+    pub stem: String,
 }
 
 /// Validated provider-neutral generation job prepared by the Agent/Tauri host.
@@ -165,6 +179,10 @@ fn safe_provider_prefix(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn safe_generation_error_code(value: &str) -> bool {
@@ -477,6 +495,98 @@ impl EditorSession {
         self.import_media_file_checked(path, id, name, probe, || Ok(()))
     }
 
+    /// Import a ready vocals/accompaniment file through the shared media path
+    /// and attach durable provenance. The original asset remains immutable.
+    pub fn import_derived_stem_file(
+        &mut self,
+        path: impl AsRef<Path>,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        probe: &ProbedMedia,
+        provenance: DerivedStemProvenance,
+    ) -> Result<MediaManifestEntry> {
+        self.ensure_mutable()?;
+        let source = self
+            .state
+            .manifest
+            .entries
+            .iter()
+            .find(|entry| entry.id == provenance.source_asset_id)
+            .ok_or_else(|| {
+                CoreError::Media(format!(
+                    "stem source asset does not exist: {}",
+                    provenance.source_asset_id
+                ))
+            })?;
+        if !matches!(source.kind, ClipType::Audio | ClipType::Video)
+            || !source.has_audio.unwrap_or(source.kind == ClipType::Audio)
+        {
+            return Err(CoreError::Media(
+                "stem source asset has no audio".to_string(),
+            ));
+        }
+        if !valid_sha256(&provenance.source_sha256)
+            || provenance
+                .model_sha256
+                .as_deref()
+                .is_some_and(|digest| !valid_sha256(digest))
+        {
+            return Err(CoreError::Media(
+                "stem provenance checksum is invalid".to_string(),
+            ));
+        }
+        let (provider, model) = provenance.execution.split_once(':').ok_or_else(|| {
+            CoreError::Media("stem execution must be '<provider>:<model>'".to_string())
+        })?;
+        if !safe_provider_prefix(provider) || model.trim().is_empty() {
+            return Err(CoreError::Media(
+                "stem execution provider or model is invalid".to_string(),
+            ));
+        }
+        let output_index = match provenance.stem.as_str() {
+            "vocals" => 0,
+            "accompaniment" => 1,
+            _ => {
+                return Err(CoreError::Media(
+                    "stem kind must be vocals or accompaniment".to_string(),
+                ))
+            }
+        };
+
+        let before = self.state.manifest.clone();
+        let result = (|| {
+            let entry = self.import_media_file(path, id, name, probe)?;
+            let target = self
+                .state
+                .manifest
+                .entries
+                .iter_mut()
+                .find(|candidate| candidate.id == entry.id)
+                .ok_or_else(|| CoreError::Media("imported stem disappeared".to_string()))?;
+            target.generation_input = Some(GenerationInput {
+                prompt: format!("stem:{}", provenance.stem),
+                model: model.to_string(),
+                duration: probe.duration_secs.max(0.0).round() as i32,
+                aspect_ratio: "audio".to_string(),
+                quality: provenance
+                    .model_sha256
+                    .map(|digest| format!("model-sha256:{digest}")),
+                reference_audio_urls: Some(vec![format!("sha256:{}", provenance.source_sha256)]),
+                provider: Some(provider.to_string()),
+                status: Some(GenerationJobStatus::Ready),
+                progress: Some(1.0),
+                output_index: Some(output_index),
+                source_asset_id: Some(provenance.source_asset_id),
+                ..GenerationInput::default()
+            });
+            Ok(target.clone())
+        })();
+        if result.is_err() {
+            self.state.manifest = before;
+        }
+        result
+    }
+
     /// Import one file and roll the manifest back if `postcondition` fails.
     /// Save-as-media uses this to bind its final retained-file identity check to
     /// the live manifest mutation: an attacker-triggered swap can never leave a
@@ -498,6 +608,7 @@ impl EditorSession {
         asset.source_width = probe.width;
         asset.source_height = probe.height;
         asset.source_fps = probe.fps;
+        asset.color = probe.color.clone();
         // Video defaults to having audio (MediaAsset::new); refine from the probe.
         // Non-video never carries a video-track-linked audio flag upstream.
         asset.has_audio = match kind {
@@ -572,6 +683,8 @@ impl EditorSession {
         entry.source_width = probe.width;
         entry.source_height = probe.height;
         entry.source_fps = probe.fps;
+        entry.color = probe.color.clone();
+        entry.proxy = None;
         entry.has_audio = Some(match kind {
             ClipType::Audio => true,
             ClipType::Video => probe.has_audio,
@@ -588,6 +701,47 @@ impl EditorSession {
     pub fn set_media_favorite(&mut self, asset_ids: &[String], favorite: bool) -> Result<usize> {
         self.ensure_mutable()?;
         Ok(self.state.manifest.set_favorites(asset_ids, favorite))
+    }
+
+    /// Attach or clear a project-local playback proxy without changing the
+    /// authoritative source used by export. The proxy path is deliberately
+    /// constrained to `media/proxies/` and the source digest is fixed-width so
+    /// corrupt or externally-authored manifests cannot redirect playback.
+    pub fn set_media_proxy(
+        &mut self,
+        asset_id: &str,
+        proxy: Option<MediaProxy>,
+    ) -> Result<MediaManifestEntry> {
+        self.ensure_mutable()?;
+        if let Some(proxy) = proxy.as_ref() {
+            let path = Path::new(&proxy.relative_path);
+            let components: Vec<_> = path.components().collect();
+            if path.is_absolute()
+                || components.len() != 3
+                || components[0] != std::path::Component::Normal("media".as_ref())
+                || components[1] != std::path::Component::Normal("proxies".as_ref())
+                || !matches!(components[2], std::path::Component::Normal(_))
+                || path.extension().and_then(|extension| extension.to_str()) != Some("mp4")
+                || proxy.width == 0
+                || proxy.height == 0
+                || proxy.source_sha256.len() != 64
+                || !proxy
+                    .source_sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err(CoreError::Media("invalid media proxy metadata".to_string()));
+            }
+        }
+        let entry = self
+            .state
+            .manifest
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == asset_id)
+            .ok_or_else(|| CoreError::Media(format!("unknown media asset: {asset_id}")))?;
+        entry.proxy = proxy;
+        Ok(entry.clone())
     }
 
     /// Set or clear one asset's content-addressed global favorite id. This is a
@@ -778,6 +932,8 @@ impl EditorSession {
                     plan.kind == ClipType::Audio
                         || (plan.kind == ClipType::Video && input.generate_audio.unwrap_or(true)),
                 ),
+                color: None,
+                proxy: None,
                 folder_id: plan.folder_id.clone(),
                 cached_remote_url: None,
                 cached_remote_url_expires_at: None,
@@ -894,6 +1050,8 @@ impl EditorSession {
         entry.source_height = output.probe.height;
         entry.source_fps = output.probe.fps;
         entry.has_audio = Some(output.probe.has_audio);
+        entry.color = output.probe.color.clone();
+        entry.proxy = None;
         input.status = Some(GenerationJobStatus::Ready);
         input.progress = Some(1.0);
         input.error_code = None;
@@ -1366,6 +1524,7 @@ mod tests {
             height: Some(1080),
             fps: Some(30.0),
             has_audio: true,
+            color: None,
         };
         let entry = s
             .import_media_file("/abs/clip.mp4", "asset-1", "clip", &probe)
@@ -1398,6 +1557,48 @@ mod tests {
     }
 
     #[test]
+    fn derived_stem_import_reuses_media_path_and_persists_provenance() {
+        let mut session = EditorSession::new_project();
+        let source_probe = ProbedMedia {
+            duration_secs: 5.0,
+            has_audio: true,
+            ..ProbedMedia::default()
+        };
+        session
+            .import_media_file("/abs/source.wav", "source-asset", "Source", &source_probe)
+            .unwrap();
+        let stem = session
+            .import_derived_stem_file(
+                "/abs/source-vocals.wav",
+                "stem-asset",
+                "Source Vocals",
+                &source_probe,
+                DerivedStemProvenance {
+                    source_asset_id: "source-asset".into(),
+                    source_sha256: "a".repeat(64),
+                    execution: "local:opentake-center-v1".into(),
+                    model_sha256: Some("b".repeat(64)),
+                    stem: "vocals".into(),
+                },
+            )
+            .unwrap();
+        let provenance = stem.generation_input.expect("derived provenance");
+        assert_eq!(provenance.prompt, "stem:vocals");
+        assert_eq!(provenance.provider.as_deref(), Some("local"));
+        assert_eq!(provenance.model, "opentake-center-v1");
+        assert_eq!(provenance.source_asset_id.as_deref(), Some("source-asset"));
+        assert_eq!(
+            provenance.reference_audio_urls,
+            Some(vec![format!("sha256:{}", "a".repeat(64))])
+        );
+        assert_eq!(
+            provenance.quality,
+            Some(format!("model-sha256:{}", "b".repeat(64)))
+        );
+        assert_eq!(provenance.status, Some(GenerationJobStatus::Ready));
+    }
+
+    #[test]
     fn reimporting_the_same_file_reuses_the_entry_instead_of_duplicating() {
         // #91: importing a file already in the manifest must not append a second
         // entry (the "素材重复出现" bug). The existing entry — id and all — is
@@ -1409,6 +1610,7 @@ mod tests {
             height: Some(480),
             fps: Some(24.0),
             has_audio: true,
+            color: None,
         };
         let first = s
             .import_media_file("/abs/clip.mp4", "asset-1", "clip", &probe)
@@ -1425,6 +1627,55 @@ mod tests {
     }
 
     #[test]
+    fn media_proxy_metadata_is_confined_and_never_replaces_source() {
+        let mut session = EditorSession::new_project();
+        let source = "/abs/source.mp4";
+        let entry = session
+            .import_media_file(source, "asset", "source", &ProbedMedia::default())
+            .unwrap();
+        let original_source = entry.source;
+        let proxy = MediaProxy {
+            relative_path: "media/proxies/asset.mp4".into(),
+            source_sha256: "a".repeat(64),
+            width: 640,
+            height: 360,
+        };
+        let updated = session
+            .set_media_proxy("asset", Some(proxy.clone()))
+            .unwrap();
+        assert_eq!(updated.source, original_source);
+        assert_eq!(updated.proxy, Some(proxy));
+
+        assert!(session
+            .set_media_proxy(
+                "asset",
+                Some(MediaProxy {
+                    relative_path: "../outside.mp4".into(),
+                    source_sha256: "a".repeat(64),
+                    width: 640,
+                    height: 360,
+                }),
+            )
+            .is_err());
+        assert!(session
+            .set_media_proxy(
+                "asset",
+                Some(MediaProxy {
+                    relative_path: "media/proxies/nested/asset.mp4".into(),
+                    source_sha256: "a".repeat(64),
+                    width: 640,
+                    height: 360,
+                }),
+            )
+            .is_err());
+        assert!(session
+            .set_media_proxy("asset", None)
+            .unwrap()
+            .proxy
+            .is_none());
+    }
+
+    #[test]
     fn import_image_has_no_audio_regardless_of_probe() {
         let mut s = EditorSession::new_project();
         let probe = ProbedMedia {
@@ -1433,6 +1684,7 @@ mod tests {
             height: Some(600),
             fps: None,
             has_audio: true, // probe lies; an image never has audio
+            color: None,
         };
         let entry = s
             .import_media_file("/abs/pic.png", "img-1", "pic", &probe)
@@ -1534,6 +1786,8 @@ mod tests {
             source_height: Some(2),
             source_fps: None,
             has_audio: None,
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,

@@ -58,7 +58,7 @@ export function EditorSplit() {
   // Maximized panel takes the whole area.
   if (maximized) {
     return (
-      <div style={{ width: "100%", height: "100%" }}>
+      <div data-maximized-panel={maximized} style={{ width: "100%", height: "100%" }}>
         {maximized === "media" && <Media />}
         {maximized === "preview" && <PreviewPanel />}
         {maximized === "inspector" && <InspectorPanel />}
@@ -120,7 +120,11 @@ function DefaultLayout() {
   );
 
   return (
-    <div ref={ref} style={{ width: "100%", height: "100%" }}>
+    <div
+      ref={ref}
+      data-layout-preset="default"
+      style={{ width: "100%", height: "100%" }}
+    >
       {size.h > 0 && (
         <SplitPane
           mode="vertical"
@@ -159,7 +163,7 @@ function MediaLayout() {
   );
 
   return (
-    <div ref={ref} style={{ width: "100%", height: "100%" }}>
+    <div ref={ref} data-layout-preset="media" style={{ width: "100%", height: "100%" }}>
       {size.w > 0 &&
         (mediaVisible ? (
           <SplitPane
@@ -188,21 +192,27 @@ function VerticalLayout() {
     <RightVerticalSplit
       topRatio={0.55}
       top={
-        <ThreeColumn
-          left={mediaVisible ? <Media /> : null}
-          leftWidth={MEDIA_DEFAULT}
-          center={<InspectorPanel />}
-          right={null}
-          rightWidth={0}
-          centerIsInspector={inspectorVisible}
-        />
+        <div data-layout-slot="vertical-top" style={{ width: "100%", height: "100%" }}>
+          <ThreeColumn
+            left={mediaVisible ? <Media /> : null}
+            leftWidth={MEDIA_DEFAULT}
+            center={<InspectorPanel />}
+            right={null}
+            rightWidth={0}
+            centerIsInspector={inspectorVisible}
+          />
+        </div>
       }
       bottom={<TimelineRegion />}
     />
   );
 
   return (
-    <div ref={ref} style={{ width: "100%", height: "100%" }}>
+    <div
+      ref={ref}
+      data-layout-preset="vertical"
+      style={{ width: "100%", height: "100%" }}
+    >
       {size.w > 0 && (
         <SplitPane
           mode="horizontal"
@@ -257,6 +267,16 @@ function ThreeColumn({
 }) {
   // center may itself be the inspector (vertical layout) — collapse when hidden.
   const renderedCenter = centerIsInspector === false ? null : center;
+
+  // In Vertical layout the center is the Inspector. When it is collapsed, do
+  // not retain a split whose second pane is only an empty base-colored slot;
+  // the remaining Media panel must consume the full top-left region just as a
+  // collapsed NSSplitView item does upstream.
+  if (!renderedCenter) {
+    if (left) return <div style={{ width: "100%", height: "100%" }}>{left}</div>;
+    if (right) return <div style={{ width: "100%", height: "100%" }}>{right}</div>;
+    return <div style={{ width: "100%", height: "100%", background: "var(--bg-base)" }} />;
+  }
 
   if (left && right) {
     return (

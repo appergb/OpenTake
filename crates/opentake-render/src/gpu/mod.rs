@@ -17,7 +17,7 @@ pub use compositor::{Compositor, TextureResolver};
 pub use device::RenderDevice;
 pub use text_engine::CosmicTextRasterizer;
 pub use text_raster::{NullTextRasterizer, TextRasterRequest, TextRasterizer};
-pub use texture::{upload_rgba, GpuTexture, TextureCache};
+pub use texture::{upload_lut_3d, upload_rgba, GpuLutTexture, GpuTexture, TextureCache};
 
 /// Errors from GPU device acquisition and frame compositing.
 #[derive(Debug, thiserror::Error)]
@@ -29,4 +29,14 @@ pub enum RenderError {
     DeviceRequest(String),
     #[error("frame read-back failed: {0}")]
     Readback(String),
+    #[error("invalid effect chain: {0}")]
+    InvalidEffect(#[from] opentake_domain::EffectValidationError),
+    #[error("invalid color grade: {0}")]
+    InvalidColorGrade(#[from] opentake_domain::ColorGradeValidationError),
+    #[error("invalid LUT reference: {0}")]
+    InvalidLutReference(#[from] opentake_domain::LutReferenceValidationError),
+    #[error("LUT asset could not be resolved: {0}")]
+    MissingLut(String),
+    #[error("invalid LUT asset: {0}")]
+    InvalidLut(String),
 }
