@@ -1187,7 +1187,7 @@ where
     run_agent_turn_with_executable_until(&path, context, prompt, on_tool_call, deadline).await
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn run_agent_turn_with_executable<F>(
     path: &Path,
     context: CodexTurnContext,

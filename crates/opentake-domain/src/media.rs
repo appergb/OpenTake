@@ -653,10 +653,13 @@ impl MediaAsset {
     pub fn to_manifest_entry(&self, project_base: Option<&Path>, now: f64) -> MediaManifestEntry {
         let source = match project_base {
             Some(base) if self.url.starts_with(base) => {
+                // Bundle paths must be portable between host platforms; the
+                // stripped path uses the host separator ('\' on Windows),
+                // which `path_policy` rejects — emit forward slashes everywhere.
                 let relative = self
                     .url
                     .strip_prefix(base)
-                    .map(|p| p.to_string_lossy().into_owned())
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
                     .unwrap_or_default();
                 MediaSource::Project {
                     relative_path: relative,
@@ -1065,6 +1068,19 @@ mod tests {
             e.source,
             MediaSource::External {
                 absolute_path: "/elsewhere/x.mp4".into()
+            }
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn to_manifest_entry_project_relative_uses_forward_slashes_on_windows() {
+        let a = MediaAsset::new("a", "C:\\proj\\media\\x.mp4", ClipType::Video, "X", 2.0);
+        let e = a.to_manifest_entry(Some(Path::new("C:\\proj")), 0.0);
+        assert_eq!(
+            e.source,
+            MediaSource::Project {
+                relative_path: "media/x.mp4".into()
             }
         );
     }

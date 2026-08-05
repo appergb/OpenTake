@@ -50,13 +50,15 @@ fn metadata_is_dataless(metadata: &Metadata) -> bool {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn metadata_is_dataless(_metadata: &Metadata) -> bool {
+fn metadata_is_dataless(metadata: &Metadata) -> bool {
     #[cfg(target_os = "windows")]
     {
-        return windows_attributes_are_unavailable(_metadata.file_attributes());
+        windows_attributes_are_unavailable(metadata.file_attributes())
     }
     #[cfg(not(target_os = "windows"))]
-    false
+    {
+        false
+    }
 }
 
 #[cfg(any(target_os = "windows", test))]
