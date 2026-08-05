@@ -309,7 +309,10 @@ impl TauriMotionBridge {
         });
         let renderer = HeadlessChromiumRenderer::new(
             MotionCache::new(self.cache_root.join("motion-frames")),
-            SandboxPolicy::offline_with_timeout(Duration::from_secs(90)),
+            // Bounded but generous: a complex motion graphic on a slow or
+            // loaded machine can legitimately exceed a minute; 180s still
+            // fails closed rather than hanging forever.
+            SandboxPolicy::offline_with_timeout(Duration::from_secs(180)),
         )
         .with_cancellation_token(render_cancel);
         (self.progress)(MotionProgress::Rendering);

@@ -30,7 +30,10 @@ mod live {
     fn renderer(root: &std::path::Path) -> HeadlessChromiumRenderer {
         HeadlessChromiumRenderer::new(
             MotionCache::new(root),
-            SandboxPolicy::offline_with_timeout(Duration::from_secs(20)),
+            // Generous bound: Chrome boot + virtual-time seeks + capture must
+            // finish within it even on a loaded CI runner. The timeout
+            // semantics themselves are asserted by the 500ms test below.
+            SandboxPolicy::offline_with_timeout(Duration::from_secs(60)),
         )
         .with_browser_path(browser())
     }
@@ -142,7 +145,7 @@ mod live {
         let allowed_root = tempfile::tempdir().unwrap();
         let allowed = HeadlessChromiumRenderer::new(
             MotionCache::new(allowed_root.path()),
-            SandboxPolicy::offline_with_timeout(Duration::from_secs(20)).allow_origin(&origin),
+            SandboxPolicy::offline_with_timeout(Duration::from_secs(60)).allow_origin(&origin),
         )
         .with_browser_path(browser())
         .render(&request(&format!("<img src=\"{origin}/pixel.svg\">")))
@@ -220,7 +223,7 @@ mod live {
         let render_thread = thread::spawn(move || {
             HeadlessChromiumRenderer::new(
                 MotionCache::new(cancelled_cache),
-                SandboxPolicy::offline_with_timeout(Duration::from_secs(20)),
+                SandboxPolicy::offline_with_timeout(Duration::from_secs(60)),
             )
             .with_browser_path(cancelled_browser)
             .with_cancellation_token(cancellation_for_render)
