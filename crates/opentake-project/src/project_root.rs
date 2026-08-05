@@ -2323,6 +2323,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn project_asset_open_stays_bound_to_retained_root_after_namespace_rebind() {
         let tmp = TmpDir::new("asset-root-rebind");
@@ -2342,6 +2343,29 @@ mod tests {
         asset.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, b"project-a");
         assert!(!root.is_current_namespace().unwrap());
+    }
+
+    /// On Windows cap-std opens retained directory handles without
+    /// FILE_SHARE_DELETE, so while the root is retained the namespace cannot be
+    /// mutated: the rename fails closed instead of rebinding. Assert that
+    /// hardening, then prove the rename works once the root is dropped.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn project_asset_open_blocks_namespace_rebind_while_retained() {
+        let tmp = TmpDir::new("asset-root-rebind");
+        let selected = tmp.path().join("Selected.opentake");
+        let retained = tmp.path().join("Retained-A.opentake");
+        let relative = Path::new("media/nested/clip.mp4");
+        fs::create_dir_all(selected.join("media/nested")).unwrap();
+        fs::write(selected.join(relative), b"project-a").unwrap();
+        let root = ProjectRoot::open(&selected).unwrap();
+
+        assert!(fs::rename(&selected, &retained).is_err());
+        assert!(root.is_current_namespace().unwrap());
+
+        drop(root);
+        fs::rename(&selected, &retained).unwrap();
+        assert_eq!(fs::read(retained.join(relative)).unwrap(), b"project-a");
     }
 
     #[test]

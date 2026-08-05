@@ -745,7 +745,12 @@ fn retained_metadata_is_unavailable(_file: &File, _metadata: &std::fs::Metadata)
 #[cfg(target_os = "windows")]
 fn platform_path_is_local(path: &Path) -> bool {
     use std::path::{Component, Prefix};
-    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, DRIVE_FIXED, DRIVE_REMOVABLE};
+    use windows_sys::Win32::Storage::FileSystem::GetDriveTypeW;
+
+    // DRIVE_* constants are not exported from Win32::Storage::FileSystem in
+    // windows-sys 0.61; define locally like safe_fs/windows.rs.
+    const DRIVE_REMOVABLE: u32 = 2;
+    const DRIVE_FIXED: u32 = 3;
     let Some(Component::Prefix(prefix)) = path.components().next() else {
         return false;
     };
