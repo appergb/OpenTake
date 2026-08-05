@@ -690,17 +690,34 @@ fn directory_identity(directory: &Dir, path: &Path) -> Result<ProjectBundleIdent
 
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::fs::MetadataExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Foundation::HANDLE;
+        use windows_sys::Win32::Storage::FileSystem::{
+            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        };
+
+        // `MetadataExt::volume_serial_number/file_index` are unstable
+        // (rust-lang/rust#63010); use the stable handle query instead.
+        let mut information = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: `file` owns a live handle and `information` is writable.
+        if unsafe {
+            GetFileInformationByHandle(
+                file.as_raw_handle() as HANDLE,
+                std::ptr::addr_of_mut!(information),
+            )
+        } == 0
+        {
+            return Err(format!(
+                "retain directory identity for {}: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        let file_index =
+            (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
         Ok(ProjectBundleIdentity {
-            volume: metadata.volume_serial_number().ok_or_else(|| {
-                format!(
-                    "directory has no stable volume identity: {}",
-                    path.display()
-                )
-            })? as u64,
-            file: metadata.file_index().ok_or_else(|| {
-                format!("directory has no stable file identity: {}", path.display())
-            })?,
+            volume: u64::from(information.dwVolumeSerialNumber),
+            file: file_index,
         })
     }
 }

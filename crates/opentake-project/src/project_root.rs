@@ -834,22 +834,31 @@ fn stable_project_root_identity(file: &fs::File) -> std::io::Result<ProjectRootI
 
 #[cfg(target_os = "windows")]
 fn stable_project_root_identity(file: &fs::File) -> std::io::Result<ProjectRootIdentity> {
-    use std::os::windows::fs::MetadataExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
 
-    let metadata = file.metadata()?;
+    // `std::os::windows::fs::MetadataExt::volume_serial_number/file_index` are
+    // unstable (rust-lang/rust#63010); use the stable handle query instead,
+    // mirroring src-tauri's retained_file_etag.
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `file` owns a live handle and `information` is writable.
+    if unsafe {
+        GetFileInformationByHandle(
+            file.as_raw_handle() as HANDLE,
+            std::ptr::addr_of_mut!(information),
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    let file_index =
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
     Ok(ProjectRootIdentity {
-        volume: metadata.volume_serial_number().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "project root has no stable volume identity",
-            )
-        })? as u64,
-        file: metadata.file_index().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "project root has no stable file identity",
-            )
-        })?,
+        volume: u64::from(information.dwVolumeSerialNumber),
+        file: file_index,
     })
 }
 
