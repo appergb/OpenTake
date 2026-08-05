@@ -40,18 +40,33 @@ fn packaged_webview_csp_is_explicit_and_local_only() {
     assert!(!connect.contains("ws:"));
     assert!(!connect.contains("ws://*"));
 
-    for directive in ["img-src", "media-src"] {
-        let value = csp
-            .get(directive)
-            .and_then(Value::as_str)
-            .unwrap_or_else(|| panic!("{directive} must be explicit"));
-        assert!(value.contains("opentake-asset:"));
-        assert!(value.contains("http://opentake-asset.localhost"));
-        assert!(!value.contains(" asset:"));
-        assert!(!value.contains("http://asset.localhost"));
-        assert!(!value.contains("https:"));
-        assert!(!value.contains('*'));
-    }
+    // The streaming-playback preview canvas loads one JPEG per rendered frame
+    // from the in-process MJPEG server on a RANDOM loopback port, so img-src
+    // must carry the loopback port wildcard (the only wildcard any media
+    // directive may carry). media-src never touches loopback — media elements
+    // load exclusively through the asset protocol — so it stays wildcard-free.
+    let img_src = csp
+        .get("img-src")
+        .and_then(Value::as_str)
+        .expect("img-src must be explicit");
+    assert!(img_src.contains("opentake-asset:"));
+    assert!(img_src.contains("http://opentake-asset.localhost"));
+    assert!(img_src.contains("http://127.0.0.1:*"));
+    assert_eq!(img_src.matches('*').count(), 1);
+    assert!(!img_src.contains(" asset:"));
+    assert!(!img_src.contains("http://asset.localhost"));
+    assert!(!img_src.contains("https:"));
+
+    let media_src = csp
+        .get("media-src")
+        .and_then(Value::as_str)
+        .expect("media-src must be explicit");
+    assert!(media_src.contains("opentake-asset:"));
+    assert!(media_src.contains("http://opentake-asset.localhost"));
+    assert!(!media_src.contains(" asset:"));
+    assert!(!media_src.contains("http://asset.localhost"));
+    assert!(!media_src.contains("https:"));
+    assert!(!media_src.contains('*'));
 }
 
 #[test]

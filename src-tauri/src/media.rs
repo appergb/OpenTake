@@ -1309,7 +1309,12 @@ fn import_saved_media_with_hooks(
             || postcondition().map_err(CoreError::Media),
         )
         .map_err(|error| error.to_string())?;
-    let result = schedule_import_poster(core, engine, prewarm, &entry, path);
+    let mut result = schedule_import_poster(core, engine, prewarm, &entry, path);
+    if result.result == prewarm::PrewarmResult::Busy {
+        // One bounded re-attempt: a single saved-media import racing a
+        // saturated prewarm queue may catch a slot the workers just freed.
+        result = schedule_import_poster(core, engine, prewarm, &entry, path);
+    }
     Ok(MediaListDto::from_core_with_import_results(
         core,
         Some(engine.cache_root()),
@@ -2250,18 +2255,49 @@ fn directory_entry_name_cmp(left: &OsStr, right: &OsStr) -> std::cmp::Ordering {
         .then_with(|| left.to_string_lossy().cmp(&right.to_string_lossy()))
 }
 
+/// Schedule the grid poster for every committed import, re-attempting the ones
+/// the bounded prewarm queue rejected mid-batch until they fit. The three
+/// workers drain the queue while a large folder import commits, so a tail poster
+/// that lost the queue race fits on a later attempt — without this a 50+ file
+/// import permanently drops its last posters until a card scroll happens to
+/// request them lazily. The drain wait is bounded so a saturated queue can never
+/// stall the import command.
 fn schedule_committed_posters(
     core: &AppCore,
     engine: &MediaEngine,
     prewarm: &prewarm::PrewarmScheduler,
     committed: &[CommittedMediaImport],
 ) -> Vec<ImportPrewarmDto> {
-    committed
+    let mut results: Vec<ImportPrewarmDto> = committed
         .iter()
         .map(|imported| {
             schedule_import_poster(core, engine, prewarm, &imported.entry, &imported.path)
         })
-        .collect()
+        .collect();
+    let mut busy: Vec<usize> = results
+        .iter()
+        .enumerate()
+        .filter(|(_, dto)| dto.result == prewarm::PrewarmResult::Busy)
+        .map(|(index, _)| index)
+        .collect();
+    if !busy.is_empty() {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !busy.is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            busy.retain(|&index| {
+                let imported = &committed[index];
+                let dto =
+                    schedule_import_poster(core, engine, prewarm, &imported.entry, &imported.path);
+                if dto.result == prewarm::PrewarmResult::Busy {
+                    true
+                } else {
+                    results[index].result = dto.result;
+                    false
+                }
+            });
+        }
+    }
+    results
 }
 
 /// Directory display name (its last path component), falling back to "folder".
@@ -6489,6 +6525,58 @@ mod tests {
         }
         assert_eq!(scheduler.in_flight_count(), 0);
         assert!(!target.exists(), "stale queued import poster was published");
+    }
+
+    #[test]
+    fn large_folder_import_schedules_a_poster_for_every_committed_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("batch");
+        fs::create_dir(&root).unwrap();
+        // More files than the bounded prewarm queue (64) so the tail of the
+        // batch exercises the Busy re-pass; tiny PNGs keep the import and the
+        // poster decode fast.
+        let file_count = 72;
+        let mut files = Vec::with_capacity(file_count);
+        for index in 0..file_count {
+            let path = root.join(format!("still-{index:03}.png"));
+            image::RgbaImage::from_pixel(32, 24, image::Rgba([index as u8, 20, 30, 255]))
+                .save(&path)
+                .unwrap();
+            files.push(path);
+        }
+        let core = AppCore::new();
+        let bundle = tmp.path().join("batch.opentake");
+        core.save_project(Some(bundle)).unwrap();
+        let engine = engine_for(tmp.path());
+        let scheduler = prewarm::PrewarmScheduler::new(core.project_revision().project_epoch);
+
+        let dto = import_folder_impl(
+            &core,
+            &engine,
+            &scheduler,
+            root.to_string_lossy().into_owned(),
+            Some(false),
+        )
+        .expect("folder import succeeds");
+        assert_eq!(dto.items.len(), file_count);
+        assert!(
+            dto.prewarm
+                .iter()
+                .all(|r| r.result != prewarm::PrewarmResult::Busy),
+            "the bounded queue must not permanently drop batch posters: {:?}",
+            dto.prewarm
+        );
+
+        // Every poster must land on disk; the re-pass + drain wait converge
+        // well inside the deadline for these tiny images.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        for path in &files {
+            let target = poster_path_for(engine.cache_root(), &cache_key_for(path).unwrap());
+            while !target.is_file() && std::time::Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            assert!(target.is_file(), "poster missing for {}", path.display());
+        }
     }
 
     #[test]

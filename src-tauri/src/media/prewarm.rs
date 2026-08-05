@@ -22,7 +22,7 @@ use opentake_media::{
 };
 use serde::Serialize;
 
-const PREWARM_QUEUE_CAPACITY: usize = 24;
+const PREWARM_QUEUE_CAPACITY: usize = 64;
 const PREWARM_WORKERS: usize = 3;
 const LOW_PRIORITY_QUEUE_CAPACITY: usize = 8;
 static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(1);
