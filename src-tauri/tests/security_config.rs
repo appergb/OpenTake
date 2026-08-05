@@ -129,7 +129,9 @@ fn dialog_asset_grants_are_persisted_after_fs_initialization() {
 
 #[test]
 fn legacy_and_current_asset_schemes_use_the_safe_async_handler() {
-    let runtime = include_str!("../src/lib.rs");
+    // Normalize checkout line endings (Windows git may materialize CRLF) so
+    // the source-format assertions are line-ending agnostic.
+    let runtime = include_str!("../src/lib.rs").replace("\r\n", "\n");
     assert!(runtime.contains(".register_asynchronous_uri_scheme_protocol(\"asset\","));
     assert!(runtime
         .contains(".register_asynchronous_uri_scheme_protocol(\n            \"opentake-asset\","));
