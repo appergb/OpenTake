@@ -209,6 +209,60 @@ describe("volumeKeyframeMenuItems", () => {
   });
 });
 
+describe("timeline edit frame boundaries", () => {
+  it("consumes and reports rejected atomic new-track drops", () => {
+    expect(timelineContainerSource).toMatch(
+      /moveOrDuplicateClipsToNewTrack\([\s\S]*?\)\.catch\([\s\S]*?timeline\.moveFailed/,
+    );
+  });
+
+  it("retains gesture-start authority for audio keyframe drags", () => {
+    expect(timelineContainerSource).toMatch(
+      /kind: "audioVolumeKf"[\s\S]*?editContext: edit\.captureProjectEditContext\(\)/,
+    );
+    expect(timelineContainerSource).toMatch(
+      /moveKeyframe\([\s\S]*?d\.editContext,[\s\S]*?\)\.catch/,
+    );
+  });
+
+  it("converts non-zero-start volume keyframe coordinates to absolute frames", () => {
+    const audio = clip({
+      id: "audio",
+      mediaType: "audio",
+      startFrame: 100,
+      durationFrames: 40,
+      volumeTrack: {
+        keyframes: [{ frame: 40, value: 1, interpolationOut: "hold" }],
+      },
+    });
+
+    expect(timelineContainer.volumeKeyframeAbsoluteFrame?.(audio, 20)).toBe(120);
+    expect(timelineContainer.volumeKeyframeAbsoluteFrame?.(audio, 30)).toBe(130);
+    expect(timelineContainer.volumeKeyframeAbsoluteFrame?.(audio, 40)).toBe(140);
+    expect(timelineContainer.writableVolumeKeyframeAbsoluteFrame?.(audio, 40)).toBe(139);
+    expect(
+      timelineContainer.findVolumeKeyframeInterpolation?.(
+        timeline([track("a1", [audio], "audio")]),
+        audio.id,
+        140,
+      ),
+    ).toBe("hold");
+  });
+
+  it("refuses razor splits at either clip edge", () => {
+    const video = clip({
+      id: "video",
+      mediaType: "video",
+      startFrame: 100,
+      durationFrames: 40,
+    });
+
+    expect(timelineContainer.strictSplitFrameForClip?.(video, 100)).toBeNull();
+    expect(timelineContainer.strictSplitFrameForClip?.(video, 120)).toBe(120);
+    expect(timelineContainer.strictSplitFrameForClip?.(video, 140)).toBeNull();
+  });
+});
+
 describe("marked range context routing", () => {
   it("routes only frames in the half-open marked range", () => {
     const range = { startFrame: 10, endFrame: 20 };

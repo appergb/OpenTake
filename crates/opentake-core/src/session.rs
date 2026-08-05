@@ -32,6 +32,7 @@
 //! are a media-layer concern injected via [`crate::deps`] and are not performed
 //! here.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use opentake_domain::{
@@ -42,6 +43,7 @@ use opentake_ops::command::{self, EditCommand, EditResult};
 use opentake_ops::{EditorState, IdGen};
 use opentake_project::{
     GenerationLog, GenerationLogEntry, Project, ProjectCompatibility, ProjectRoot,
+    ProjectRootIdentity,
 };
 use same_file::Handle;
 
@@ -602,24 +604,7 @@ impl EditorSession {
         self.ensure_mutable()?;
         let manifest_before = self.state.manifest.clone();
         let path = path.as_ref();
-        let kind = importable_clip_type(path).ok_or(CoreError::Unsupported("media"))?;
-
-        let mut asset = MediaAsset::new(id, path, kind, name, probe.duration_secs);
-        asset.source_width = probe.width;
-        asset.source_height = probe.height;
-        asset.source_fps = probe.fps;
-        asset.color = probe.color.clone();
-        // Video defaults to having audio (MediaAsset::new); refine from the probe.
-        // Non-video never carries a video-track-linked audio flag upstream.
-        asset.has_audio = match kind {
-            ClipType::Audio => true,
-            ClipType::Video => probe.has_audio,
-            _ => false,
-        };
-
-        // `now = 0`: a freshly imported local file has no cached remote URL, so
-        // the freshness clock is irrelevant to the produced entry.
-        let entry = asset.to_manifest_entry(self.project_dir.as_deref(), 0.0);
+        let entry = self.prepare_media_file_entry(path, id, name, probe)?;
         // Dedup (#91 "素材重复出现"): importing a file that is already in the
         // manifest reuses the existing entry — keeping its id so any clip that
         // references it stays valid — instead of appending a second entry for the
@@ -642,6 +627,39 @@ impl EditorSession {
             return Err(error);
         }
         Ok(entry)
+    }
+
+    /// Build the manifest representation of a validated local file without
+    /// mutating the manifest, history, or version. Deferred render workflows
+    /// use this to prepare a command that will later register the entry and
+    /// edit the timeline in one revision-bound transaction.
+    pub fn prepare_media_file_entry(
+        &self,
+        path: impl AsRef<Path>,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        probe: &ProbedMedia,
+    ) -> Result<MediaManifestEntry> {
+        self.ensure_mutable()?;
+        let path = path.as_ref();
+        let kind = importable_clip_type(path).ok_or(CoreError::Unsupported("media"))?;
+
+        let mut asset = MediaAsset::new(id, path, kind, name, probe.duration_secs);
+        asset.source_width = probe.width;
+        asset.source_height = probe.height;
+        asset.source_fps = probe.fps;
+        asset.color = probe.color.clone();
+        // Video defaults to having audio (MediaAsset::new); refine from the probe.
+        // Non-video never carries a video-track-linked audio flag upstream.
+        asset.has_audio = match kind {
+            ClipType::Audio => true,
+            ClipType::Video => probe.has_audio,
+            _ => false,
+        };
+
+        // `now = 0`: a freshly prepared local file has no cached remote URL, so
+        // the freshness clock is irrelevant to the produced entry.
+        Ok(asset.to_manifest_entry(self.project_dir.as_deref(), 0.0))
     }
 
     /// Relink an existing asset to a new on-disk file, **keeping the same id** so
@@ -817,6 +835,16 @@ impl EditorSession {
         self.state.can_undo()
     }
 
+    /// Label of the current top-level undo transaction.
+    pub fn undo_action_name(&self) -> Option<&str> {
+        self.state.undo_action_name()
+    }
+
+    /// Stable version identity of the undo transaction at the top of history.
+    pub fn undo_transaction_version(&self) -> Option<u64> {
+        self.state.undo_transaction_version()
+    }
+
     /// Whether a redo is available.
     pub fn can_redo(&self) -> bool {
         self.state.can_redo()
@@ -827,12 +855,34 @@ impl EditorSession {
         self.project_dir.as_deref()
     }
 
+    /// Open a project-local asset through the retained no-follow bundle
+    /// authority. Reads never re-resolve [`Self::project_dir`], so an ambient
+    /// rename or replacement of the bundle pathname cannot redirect the open
+    /// to a rebound bundle. The returned file is read-only and opened with
+    /// no-follow semantics on every directory component and the final leaf.
+    pub fn open_asset_file(&self, relative: &Path) -> Result<fs::File> {
+        let root = self.project_root.as_ref().ok_or(CoreError::NoProjectOpen)?;
+        Ok(root.open_asset_file(relative)?)
+    }
+
     /// Compare a caller's retained no-follow bundle handle with the handle
     /// retained when this exact session opened or saved the project.
     pub(crate) fn matches_project_root_identity(&self, current: &Handle) -> Result<bool> {
         self.ensure_mutable()?;
         let expected = self.project_root.as_ref().ok_or(CoreError::NoProjectOpen)?;
         Ok(expected.matches_identity(current))
+    }
+
+    pub(crate) fn project_root_identity(&self) -> Option<ProjectRootIdentity> {
+        self.project_root.as_ref().map(ProjectRoot::stable_identity)
+    }
+
+    pub(crate) fn project_root_is_current_namespace(&self) -> Result<bool> {
+        self.project_root
+            .as_ref()
+            .ok_or(CoreError::NoProjectOpen)?
+            .is_current_namespace()
+            .map_err(CoreError::from)
     }
 
     /// Read-only access to the generation log.

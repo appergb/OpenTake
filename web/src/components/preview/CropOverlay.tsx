@@ -24,6 +24,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useEditorUiStore } from "../../store/uiStore";
 import * as edit from "../../store/editActions";
+import { useT } from "../../i18n";
 import { cropAt, rotateDeltaIntoLocalFrame, sampledTransform } from "../../lib/clip";
 import {
   cropAspectLockPixelAspect,
@@ -33,6 +34,7 @@ import {
   type CropResizeCorner,
 } from "../../lib/cropOverlay";
 import { ACCENT, SPACE } from "../../lib/theme";
+import { playbackFrameFromActiveFrame } from "./timelinePlayback";
 import type { Clip, Crop } from "../../lib/types";
 
 /** AppTheme.Spacing.smMd (CropOverlayView.swift:6). */
@@ -68,6 +70,24 @@ const CORNER_CURSOR: Record<CropResizeCorner, string> = {
   bottomLeft: "nesw-resize",
 };
 
+const CORNER_LABEL_KEY: Record<CropResizeCorner, string> = {
+  topLeft: "preview.crop.resizeTopLeft",
+  topRight: "preview.crop.resizeTopRight",
+  bottomLeft: "preview.crop.resizeBottomLeft",
+  bottomRight: "preview.crop.resizeBottomRight",
+};
+
+type CropKeyboardTarget = "pan" | CropResizeCorner;
+
+interface CropKeyboardGesture {
+  target: CropKeyboardTarget;
+  start: Crop;
+  delta: { width: number; height: number };
+  next: Crop;
+  frame: number;
+  context: edit.ProjectEditContext;
+}
+
 function cropRectPx(crop: Crop, clipRectPx: { width: number; height: number }) {
   const visW = Math.max(0, 1 - crop.left - crop.right);
   const visH = Math.max(0, 1 - crop.top - crop.bottom);
@@ -91,59 +111,149 @@ export function CropOverlay({
    *  `sourcePixelAspect(for:)` (CropOverlayView.swift:207-212). */
   sourcePixelAspect: number | null;
 }) {
+  const t = useT();
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
+  const editFrame = playbackFrameFromActiveFrame(activeFrame);
+  const pushToast = useEditorUiStore((s) => s.pushToast);
   const cropAspectLock = useEditorUiStore((s) => s.cropAspectLock);
 
   // Live-sampled rest transform/crop (matches upstream `clip.transformAt(frame:)`
   // / `clip.cropAt(frame:)`) — follows keyframed tracks so the overlay always
   // aligns with the rendered frame (CropOverlayView.swift:16-19).
-  const restTransform = sampledTransform(clip, activeFrame);
-  const restCrop = cropAt(clip, activeFrame);
+  const restTransform = sampledTransform(clip, editFrame);
+  const restCrop = cropAt(clip, editFrame);
   const [dragCrop, setDragCrop] = useState<Crop | null>(null);
+  const [keyboardCrop, setKeyboardCrop] = useState<Crop | null>(null);
   const dragCleanupRef = useRef<(() => void) | null>(null);
+  const dragCropRef = useRef<Crop | null>(null);
+  const keyboardGestureRef = useRef<CropKeyboardGesture | null>(null);
 
   const cropAnimated = !!clip.cropTrack && clip.cropTrack.keyframes.length > 0;
+  const editable =
+    !cropAnimated ||
+    (editFrame >= clip.startFrame && editFrame < clip.startFrame + clip.durationFrames);
 
   useEffect(() => {
+    dragCleanupRef.current?.();
+    dragCleanupRef.current = null;
+    dragCropRef.current = null;
+    keyboardGestureRef.current = null;
     setDragCrop(null);
-  }, [clip.id]);
+    setKeyboardCrop(null);
+  }, [clip.id, editFrame]);
 
   useEffect(() => {
     return () => {
       dragCleanupRef.current?.();
       dragCleanupRef.current = null;
+      dragCropRef.current = null;
+      keyboardGestureRef.current = null;
     };
   }, []);
 
-  const display = dragCrop ?? restCrop;
+  const display = dragCrop ?? keyboardCrop ?? restCrop;
 
-  const commitCrop = (next: Crop) => {
-    if (cropAnimated) {
-      void edit.upsertKeyframe(clip.id, "crop", activeFrame, { kind: "crop", value: next });
-    } else {
-      void edit.setClipProperties([clip.id], { crop: next });
+  const commitCrop = (next: Crop, frame: number, context: edit.ProjectEditContext) => {
+    const request = cropAnimated
+      ? edit.upsertKeyframe(clip.id, "crop", frame, { kind: "crop", value: next }, context)
+      : edit.setClipProperties([clip.id], { crop: next }, context);
+    void request.catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      pushToast(t("preview.cropEditFailed", { error: message }));
+    });
+  };
+
+  const finishKeyboardGesture = () => {
+    const gesture = keyboardGestureRef.current;
+    keyboardGestureRef.current = null;
+    setKeyboardCrop(null);
+    if (gesture) commitCrop(gesture.next, gesture.frame, gesture.context);
+  };
+
+  const updateKeyboardGesture = (
+    target: CropKeyboardTarget,
+    delta: { width: number; height: number },
+    compute: (start: Crop, total: { width: number; height: number }) => Crop,
+  ) => {
+    let gesture = keyboardGestureRef.current;
+    if (!gesture) {
+      gesture = {
+        target,
+        start: restCrop,
+        delta: { width: 0, height: 0 },
+        next: restCrop,
+        frame: editFrame,
+        context: edit.captureProjectEditContext(),
+      };
+    } else if (gesture.target !== target) {
+      gesture = {
+        ...gesture,
+        target,
+        start: gesture.next,
+        delta: { width: 0, height: 0 },
+      };
     }
+    gesture.delta = {
+      width: gesture.delta.width + delta.width,
+      height: gesture.delta.height + delta.height,
+    };
+    gesture.next = compute(gesture.start, gesture.delta);
+    keyboardGestureRef.current = gesture;
+    setKeyboardCrop(gesture.next);
+  };
+
+  const handleKeyboardKeyUp = (e: React.KeyboardEvent) => {
+    if (!keyboardDelta(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    finishKeyboardGesture();
+  };
+
+  const keyboardDelta = (e: React.KeyboardEvent): { width: number; height: number } | null => {
+    const step = e.shiftKey ? 10 : 1;
+    if (e.key === "ArrowLeft") return { width: -step, height: 0 };
+    if (e.key === "ArrowRight") return { width: step, height: 0 };
+    if (e.key === "ArrowUp") return { width: 0, height: -step };
+    if (e.key === "ArrowDown") return { width: 0, height: step };
+    return null;
   };
 
   // Shared drag scaffolding, mirroring `TransformOverlay`'s `beginDrag`:
   // registers window pointermove/up, feeds each move's pixel delta through
   // `computeNext` for live local preview, and commits once on release.
-  const beginDrag = (e: React.PointerEvent, computeNext: (dxPx: number, dyPx: number) => Crop) => {
+  const beginDrag = (
+    e: React.PointerEvent,
+    computeNext: (start: Crop, dxPx: number, dyPx: number) => Crop,
+  ) => {
+    if (!editable) return;
     e.stopPropagation();
     e.preventDefault();
+    dragCleanupRef.current?.();
+    dragCleanupRef.current = null;
+    const pendingKeyboard = keyboardGestureRef.current;
+    keyboardGestureRef.current = null;
+    setKeyboardCrop(null);
+    const start = pendingKeyboard?.next ?? restCrop;
+    const editContext = pendingKeyboard?.context ?? edit.captureProjectEditContext();
+    const gestureFrame = pendingKeyboard?.frame ?? editFrame;
+    dragCropRef.current = pendingKeyboard ? start : null;
+    setDragCrop(pendingKeyboard ? start : null);
+    (e.currentTarget as HTMLElement).focus();
     const startClientX = e.clientX;
     const startClientY = e.clientY;
     const onMove = (ev: PointerEvent) => {
-      setDragCrop(computeNext(ev.clientX - startClientX, ev.clientY - startClientY));
+      const next = computeNext(start, ev.clientX - startClientX, ev.clientY - startClientY);
+      dragCropRef.current = next;
+      setDragCrop(next);
     };
     const onUp = () => {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       dragCleanupRef.current = null;
-      setDragCrop((cur) => {
-        if (cur) commitCrop(cur);
-        return null;
-      });
+      const committed = dragCropRef.current;
+      dragCropRef.current = null;
+      setDragCrop(null);
+      if (committed) commitCrop(committed, gestureFrame, editContext);
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
@@ -156,21 +266,49 @@ export function CropOverlay({
   const clipRectPx = { width: restTransform.width * canvasPx.width, height: restTransform.height * canvasPx.height };
 
   const handlePanDown = (e: React.PointerEvent) => {
-    const start = restCrop;
-    beginDrag(e, (dx, dy) => {
+    beginDrag(e, (start, dx, dy) => {
       const local = rotateDeltaIntoLocalFrame({ width: dx, height: dy }, restTransform.rotation);
       return pannedCrop(start, local, clipRectPx);
     });
   };
 
+  const handlePanKeyDown = (e: React.KeyboardEvent) => {
+    if (!editable) return;
+    const delta = keyboardDelta(e);
+    if (!delta) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (dragCleanupRef.current) return;
+    updateKeyboardGesture("pan", delta, (start, total) =>
+      pannedCrop(start, rotateDeltaIntoLocalFrame(total, restTransform.rotation), clipRectPx),
+    );
+  };
+
   const handleResizeDown = (e: React.PointerEvent, corner: CropResizeCorner) => {
-    const start = restCrop;
     const targetPixelAspect = cropAspectLockPixelAspect(cropAspectLock);
     const aspectN = lockedAspectNormalized(targetPixelAspect, sourcePixelAspect);
-    beginDrag(e, (dx, dy) => {
+    beginDrag(e, (start, dx, dy) => {
       const local = rotateDeltaIntoLocalFrame({ width: dx, height: dy }, restTransform.rotation);
       return resizedCrop(start, corner, local, clipRectPx, aspectN);
     });
+  };
+
+  const handleResizeKeyDown = (e: React.KeyboardEvent, corner: CropResizeCorner) => {
+    if (!editable) return;
+    const delta = keyboardDelta(e);
+    if (!delta) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (dragCleanupRef.current) return;
+    updateKeyboardGesture(corner, delta, (start, total) =>
+      resizedCrop(
+        start,
+        corner,
+        rotateDeltaIntoLocalFrame(total, restTransform.rotation),
+        clipRectPx,
+        lockedAspectNormalized(cropAspectLockPixelAspect(cropAspectLock), sourcePixelAspect),
+      ),
+    );
   };
 
   if (
@@ -289,38 +427,75 @@ export function CropOverlay({
       />
 
       {/* Drag-inside-to-pan surface (CropOverlayView.swift:42-50). */}
-      <div
+      <button
+        type="button"
+        data-crop-pan-surface
+        aria-label={t("preview.crop.pan")}
+        aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight"
+        aria-disabled={!editable}
+        disabled={!editable}
         onPointerDown={handlePanDown}
+        onKeyDown={handlePanKeyDown}
+        onKeyUp={handleKeyboardKeyUp}
+        onBlur={finishKeyboardGesture}
         style={{
           position: "absolute",
           left: rect.left,
           top: rect.top,
           width: rect.width,
           height: rect.height,
-          cursor: dragCrop ? "grabbing" : "grab",
-          pointerEvents: "auto",
+          minWidth: 24,
+          minHeight: 24,
+          padding: 0,
+          border: 0,
+          background: "transparent",
+          cursor: !editable ? "not-allowed" : dragCrop ? "grabbing" : "grab",
+          pointerEvents: editable ? "auto" : "none",
         }}
       />
 
       {CORNERS.map((corner) => {
         const frac = CORNER_FRACTION[corner];
         return (
-          <div
+          <button
+            type="button"
             key={corner}
+            aria-label={t(CORNER_LABEL_KEY[corner])}
+            aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight"
+            aria-disabled={!editable}
+            disabled={!editable}
             onPointerDown={(e) => handleResizeDown(e, corner)}
+            onKeyDown={(e) => handleResizeKeyDown(e, corner)}
+            onKeyUp={handleKeyboardKeyUp}
+            onBlur={finishKeyboardGesture}
             style={{
               position: "absolute",
               left: rect.left + rect.width * frac.x,
               top: rect.top + rect.height * frac.y,
-              width: HANDLE_SIZE,
-              height: HANDLE_SIZE,
-              marginLeft: -HANDLE_SIZE / 2,
-              marginTop: -HANDLE_SIZE / 2,
-              background: BORDER_COLOR,
-              cursor: CORNER_CURSOR[corner],
-              pointerEvents: "auto",
+              width: 24,
+              height: 24,
+              marginLeft: -12,
+              marginTop: -12,
+              padding: 0,
+              border: 0,
+              background: "transparent",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: editable ? CORNER_CURSOR[corner] : "not-allowed",
+              pointerEvents: editable ? "auto" : "none",
             }}
-          />
+          >
+            <span
+              aria-hidden
+              style={{
+                width: HANDLE_SIZE,
+                height: HANDLE_SIZE,
+                background: BORDER_COLOR,
+                pointerEvents: "none",
+              }}
+            />
+          </button>
         );
       })}
     </div>

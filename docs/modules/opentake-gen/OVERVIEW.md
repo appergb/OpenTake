@@ -94,11 +94,11 @@ GenerationInput(持久化) + uploaded URLs
 - `HttpTransport` + `ReqwestTransport` / `MockTransport`（全套测试零 socket）。
 - **已接线**：`list_models` 工具已从存根接到内置静态目录（agent `mcp/gen_catalog.rs`，ROADMAP #111）；BYOK 钥匙串 save/load/delete Tauri 命令（聊天 LLM key）。
 
-**计划中 / 未接线**
+**计划中 / 后续版本（Beta 1/2 已交付之外）：**
 
-- **`generate_*` / `upscale_media` 仍待 async + BYOK 接线**：agent dispatch 层这四个工具目前是诚实存根（`"...: not yet implemented"`），缺 async `GenClient` 装配 + `ProviderRegistry` + BYOK key 注入。
-- **托管 proxy `opentake-gen-proxy` 未实现**（Phase 9 自建后端：`/v1/models`、`/v1/generations`、`/v1/uploads/sign`、SSE stream、对象存储预签名、可选积分计费；SPEC §3）。客户端侧已就绪，等服务端。
-- **生成 provider（fal/replicate/elevenlabs）key 的前端写入命令尚未开放**（`secret.rs` 白名单当前只含聊天三 provider）。
+- **`generate_*` / `upscale_media` 已接线**：agent `dispatch.rs` 的四个生成工具经 `GenerationBridge`（异步 job + BYOK/托管授权 + 成本确认 + 进度/取消/重试/恢复 + 产物安全下载落库）接入；存在兼容凭据时动态进入 MCP/Chat 发现面，无凭据 fail-closed 隐藏（ROADMAP Phase 9 / Phase 7 进度注记）。
+- **托管 proxy `opentake-gen-proxy` 未实现**（Phase 9 自建后端：`/v1/models`、`/v1/generations`、`/v1/uploads/sign`、SSE stream、对象存储预签名、可选积分计费；SPEC §3）。客户端侧已就绪，等服务端；Beta 阶段以 BYOK 直连为准。
+- **生成 provider（fal/replicate/elevenlabs）与聊天 provider 的 key 均可由前端写入**：`secret.rs` 白名单已含全部 6 个账户（`anthropic` / `fal` / `replicate` / `openai` / `elevenlabs` / `google`，3 聊天 + 3 生成），生成类 key 经 `secret_save` 直接落系统钥匙串。
 - 引用预处理 / 上传缓存 / Rerun / 成本显示 UI / `ModelPreferences` 等编排与 UI 层未实现。
 - 同步厂商字节结果当前裹 `data:` URL（无对象存储时的权宜）；正式部署应改持久化 S3/R2。
 

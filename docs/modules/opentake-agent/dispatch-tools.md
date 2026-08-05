@@ -33,7 +33,7 @@
 - `apply(cmd)` → `apply_raw` 调 `handle.apply`；若 `res.changed`，把 `action_name` 压入 agent-undo 栈。
 - `undo()` 只在栈非空（即本会话 Agent 真改过）时弹栈并 `apply_raw(EditCommand::Undo)`；否则 `"undo: no agent edits to revert"`。这保护用户的手动编辑不被 Agent 撤销（照搬上游 `agentUndoStack` 守卫）。
 
-### body 分类（最多 39 个基础工具；45 个兼容线名）
+### body 分类（最多 39 个基础工具；KNOWN wire 名 54）
 
 - **读类（序列化状态/媒体桥）**：`get_timeline`、`get_media`、`list_folders`、`list_models`、`inspect_media`、`get_transcript`、`inspect_timeline`、`search_media`。
 - **编辑类（→ EditCommand → CoreHandle::apply）**：`add_clips`（含 `AddClipsAutoTrack` 自动建轨）、`insert_clips`、`move_clips`、`remove_clips`、`remove_tracks`、`split_clip`、`set_keyframes`、`ripple_delete_ranges`、`add_texts`、`set_clip_properties`、`create_folder`、`move_to_folder`、`rename_media`、`rename_folder`、`delete_media`、`delete_folder`、`set_color_grade`、`chroma_key`、`set_mask`、`apply_effect`、`undo`。
@@ -48,12 +48,14 @@
 
 ## 工具层文件（`tools/`）
 
-### names.rs：45 工具枚举
+### names.rs：54 工具枚举
 
-`ToolName` 枚举 + `as_str()`（线名，与上游/规格逐字一致）+ `FromStr`。三个常量：
+`ToolName` 枚举 + `as_str()`（线名，与上游/规格逐字一致）+ `FromStr`。五个常量：
 
 - **`ALL: [ToolName; 39]`** — 最大基础发现面，注册顺序；其中 7 个媒体桥工具按主机能力 fail-closed 过滤。
-- **`KNOWN: [ToolName; 45]`** — 含动态生成与尚未发布 Motion 能力的全部兼容线名。
+- **`GENERATION: [ToolName; 4]`** — 生成工具，仅存在兼容托管/BYOK 凭据时追加。
+- **`MOTION: [ToolName; 2]`** — Motion 工具，仅生产渲染桥可用时追加（其余主机 fail-closed）。
+- **`KNOWN: [ToolName; 54]`** — 全部已知 wire 名：`ALL` 39 + 生成 4 + Motion 2 + 高级 AI 9（`ADVANCED_AI`，schema 已知但不主动发布）。
 - **`UPSTREAM: [ToolName; 31]`** — 上游对齐子集（Issue #9 的"31 工具"）。
 
 14 个 OpenTake 扩展由分析驱动 5 + 工作流 3 + A-tier 效果 4 + Motion Canvas 2 组成；Motion 2 由具备生产渲染桥的主机动态追加（详见 [总览](OVERVIEW.md)）。

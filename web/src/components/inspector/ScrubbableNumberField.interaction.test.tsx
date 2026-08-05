@@ -13,7 +13,7 @@ let root: Root;
 let onChange: ReturnType<typeof vi.fn>;
 let onCommit: ReturnType<typeof vi.fn>;
 
-function renderField(): void {
+function renderField(disabled = false): void {
   root.render(
     <ScrubbableNumberField
       ariaLabel="Opacity"
@@ -23,6 +23,7 @@ function renderField(): void {
       sensitivity={1}
       format={(value) => value.toFixed(1)}
       suffix="%"
+      disabled={disabled}
       onChange={onChange}
       onCommit={onCommit}
     />,
@@ -172,4 +173,39 @@ it("control-3e4fc80f4dde046e pointer-scrubbable numeric value", async () => {
   expect(onChange).toHaveBeenCalledWith(6);
   expect(onCommit).not.toHaveBeenCalled();
   expect(document.activeElement).toBe(display);
+});
+
+it("cancels text and pointer commits when the field becomes disabled", async () => {
+  const input = await enterTextMode();
+  await setInput(input, "7");
+  await act(async () => renderField(true));
+  expect(container.querySelector("input")).toBeNull();
+  expect(container.querySelector("[role='spinbutton']")?.getAttribute("aria-disabled")).toBe("true");
+  expect(onCommit).not.toHaveBeenCalled();
+
+  await act(async () => renderField(false));
+  const display = container.querySelector<HTMLElement>("[role='spinbutton']")!;
+  await act(async () => {
+    display.dispatchEvent(new PointerEvent("pointerdown", {
+      bubbles: true,
+      pointerId: 9,
+      clientX: 10,
+    }));
+    display.dispatchEvent(new PointerEvent("pointermove", {
+      bubbles: true,
+      pointerId: 9,
+      clientX: 14,
+    }));
+  });
+  expect(onChange).toHaveBeenCalledWith(9);
+  await act(async () => renderField(true));
+  await act(async () => {
+    display.dispatchEvent(new PointerEvent("pointerup", {
+      bubbles: true,
+      pointerId: 9,
+      clientX: 14,
+    }));
+  });
+  expect(onCommit).not.toHaveBeenCalled();
+  expect(container.querySelector("input")).toBeNull();
 });

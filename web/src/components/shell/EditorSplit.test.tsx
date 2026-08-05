@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../media/MediaPanel", () => ({
-  MediaPanel: () => <div data-panel-content="media" />,
+  MediaPanel: () => <input aria-label="Media search" data-panel-content="media" />,
 }));
 vi.mock("../preview/Preview", () => ({
   Preview: () => <div data-panel-content="preview" />,
@@ -14,7 +14,7 @@ vi.mock("../inspector/Inspector", () => ({
   Inspector: () => <div data-panel-content="inspector" />,
 }));
 vi.mock("../agent/AgentPanel", () => ({
-  AgentPanel: () => <div data-panel-content="agent" />,
+  AgentPanel: () => <input aria-label="Agent draft" data-panel-content="agent" />,
 }));
 vi.mock("../timeline/TimelineRegion", async () => {
   const React = await import("react");
@@ -37,18 +37,52 @@ import { EditorSplit } from "./EditorSplit";
   .IS_REACT_ACT_ENVIRONMENT = true;
 
 let viewport = { width: 1600, height: 1000 };
+let layoutAwareSizing = false;
+const resizeObservers = new Set<ImmediateResizeObserver>();
+
+function measuredSize(target: Element): { width: number; height: number } {
+  if (!layoutAwareSizing || !(target instanceof HTMLElement)) return viewport;
+
+  const editorRoot = target.closest<HTMLElement>("[data-editor-split-root]");
+  const agentExpanded = useEditorUiStore.getState().agentPanelVisible &&
+    editorRoot?.getAttribute("data-responsive-collapsed-agent") !== "true";
+  const defaultWorkspaceMinimum = 160 + 200 + 160;
+  const agentWidth = agentExpanded
+    ? Math.max(240, Math.min(320, viewport.width - defaultWorkspaceMinimum))
+    : 0;
+  const workspaceWidth = viewport.width - agentWidth;
+
+  if (target.closest("[data-layout-split='preview-inspector']")) {
+    const mediaWidth = Math.max(160, Math.min(500, workspaceWidth - 200 - 160));
+    return { width: workspaceWidth - mediaWidth, height: viewport.height };
+  }
+  if (target.closest("[data-layout-preset='default']")) {
+    return { width: workspaceWidth, height: viewport.height };
+  }
+  return viewport;
+}
 
 class ImmediateResizeObserver implements ResizeObserver {
-  constructor(private readonly callback: ResizeObserverCallback) {}
+  private readonly targets = new Set<Element>();
+
+  constructor(private readonly callback: ResizeObserverCallback) {
+    resizeObservers.add(this);
+  }
 
   observe(target: Element): void {
+    this.targets.add(target);
+    this.emit(target);
+  }
+
+  private emit(target: Element): void {
+    const size = measuredSize(target);
     this.callback(
       [
         {
           target,
           contentRect: {
-            width: viewport.width,
-            height: viewport.height,
+            width: size.width,
+            height: size.height,
           },
         } as ResizeObserverEntry,
       ],
@@ -56,8 +90,18 @@ class ImmediateResizeObserver implements ResizeObserver {
     );
   }
 
-  disconnect(): void {}
-  unobserve(): void {}
+  flush(): void {
+    for (const target of this.targets) this.emit(target);
+  }
+
+  disconnect(): void {
+    this.targets.clear();
+    resizeObservers.delete(this);
+  }
+
+  unobserve(target: Element): void {
+    this.targets.delete(target);
+  }
 }
 
 let root: Root | null = null;
@@ -76,12 +120,31 @@ async function renderPreset(layoutPreset: LayoutPreset): Promise<void> {
   });
 }
 
+async function resizeViewport(width: number, height: number): Promise<void> {
+  viewport = { width, height };
+  await act(async () => {
+    for (const observer of [...resizeObservers]) observer.flush();
+  });
+}
+
 beforeEach(() => {
   viewport = { width: 1600, height: 1000 };
+  layoutAwareSizing = false;
+  resizeObservers.clear();
   vi.stubGlobal("ResizeObserver", ImmediateResizeObserver);
   Object.defineProperties(HTMLElement.prototype, {
-    clientWidth: { configurable: true, get: () => viewport.width },
-    clientHeight: { configurable: true, get: () => viewport.height },
+    clientWidth: {
+      configurable: true,
+      get: function (this: HTMLElement) {
+        return measuredSize(this).width;
+      },
+    },
+    clientHeight: {
+      configurable: true,
+      get: function (this: HTMLElement) {
+        return measuredSize(this).height;
+      },
+    },
   });
   useEditorUiStore.setState({
     layoutPreset: "default",
@@ -104,10 +167,122 @@ afterEach(async () => {
   container?.remove();
   root = null;
   container = null;
+  resizeObservers.clear();
   vi.unstubAllGlobals();
 });
 
 describe("EditorSplit", () => {
+  it("propagates the default workspace minimum through the Agent split at 760px", async () => {
+    viewport = { width: 760, height: 480 };
+    layoutAwareSizing = true;
+    useEditorUiStore.setState({ agentPanelVisible: true });
+    await renderPreset("default");
+
+    const agentSeparator = [
+      ...(container?.querySelectorAll<HTMLElement>("[role='separator']") ?? []),
+    ].find((separator) => separator.getAttribute("aria-valuemin") === "240");
+
+    expect(agentSeparator?.getAttribute("aria-valuemax")).toBe("240");
+    expect(agentSeparator?.getAttribute("aria-valuenow")).toBe("240");
+    const mediaSeparator = [
+      ...(container?.querySelectorAll<HTMLElement>("[role='separator']") ?? []),
+    ].find((separator) => separator.getAttribute("aria-valuemin") === "160");
+    const previewSeparator = [
+      ...(container?.querySelectorAll<HTMLElement>("[role='separator']") ?? []),
+    ].find((separator) => separator.getAttribute("aria-valuemin") === "200");
+    expect(mediaSeparator?.getAttribute("aria-valuemax")).toBe("160");
+    expect(mediaSeparator?.getAttribute("aria-valuenow")).toBe("160");
+    expect(previewSeparator?.getAttribute("aria-valuemax")).toBe("200");
+    expect(previewSeparator?.getAttribute("aria-valuenow")).toBe("200");
+    expect(container?.querySelector("[data-responsive-collapsed-agent='true']")).toBeNull();
+    expect(panels()).toEqual(["agent", "media", "preview", "inspector", "timeline"]);
+  });
+
+  it("folds and restores Agent live without destroying its state or focus", async () => {
+    viewport = { width: 800, height: 480 };
+    useEditorUiStore.setState({ agentPanelVisible: true });
+    await renderPreset("media");
+
+    const agentDraft = container?.querySelector<HTMLInputElement>("[data-panel-content='agent']")!;
+    await act(async () => {
+      agentDraft.value = "keep this draft";
+      agentDraft.focus();
+    });
+    expect(container?.querySelector("[data-responsive-collapsed-agent='true']")).toBeNull();
+
+    await resizeViewport(760, 480);
+
+    expect(container?.querySelector("[data-responsive-collapsed-agent='true']")).not.toBeNull();
+    expect(agentDraft.isConnected).toBe(true);
+    expect(container?.querySelector("[data-panel-content='agent']")).toBe(agentDraft);
+    expect(agentDraft.value).toBe("keep this draft");
+    expect(
+      container?.querySelector("[data-responsive-agent-content]")?.getAttribute("aria-hidden"),
+    ).toBe("true");
+    expect(document.activeElement).toBe(
+      container?.querySelector("[data-editor-panel='media']"),
+    );
+
+    await resizeViewport(800, 480);
+
+    expect(container?.querySelector("[data-responsive-collapsed-agent='true']")).toBeNull();
+    expect(container?.querySelector("[data-panel-content='agent']")).toBe(agentDraft);
+    expect(agentDraft.value).toBe("keep this draft");
+
+    const mediaSearch = container?.querySelector<HTMLInputElement>("[data-panel-content='media']")!;
+    await act(async () => mediaSearch.focus());
+    await resizeViewport(760, 480);
+    expect(document.activeElement).toBe(mediaSearch);
+
+    await resizeViewport(800, 480);
+    expect(panels()).toEqual(["agent", "media", "preview", "inspector", "timeline"]);
+  });
+
+  it("keeps Vertical Home at or above its nested Media and Inspector minimum", async () => {
+    await renderPreset("vertical");
+
+    const verticalOuterSeparator = [
+      ...(container?.querySelectorAll<HTMLElement>("[role='separator']") ?? []),
+    ].find((separator) =>
+      separator.getAttribute("aria-orientation") === "vertical" &&
+      separator.getAttribute("aria-valuemin") === "320"
+    );
+
+    expect(verticalOuterSeparator).not.toBeUndefined();
+    verticalOuterSeparator?.focus();
+    await act(async () =>
+      verticalOuterSeparator?.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Home", bubbles: true }),
+      ),
+    );
+    expect(verticalOuterSeparator?.getAttribute("aria-valuenow")).toBe("320");
+    expect(document.activeElement).toBe(verticalOuterSeparator);
+  });
+
+  it("reserves the combined preview and inspector minimum at 760px", async () => {
+    viewport = { width: 760, height: 480 };
+    await renderPreset("default");
+
+    const threeColumnSeparator = [
+      ...(container?.querySelectorAll<HTMLElement>("[role='separator']") ?? []),
+    ].find((separator) =>
+      separator.getAttribute("aria-orientation") === "vertical" &&
+      separator.getAttribute("aria-valuemin") === "160"
+    );
+
+    expect(threeColumnSeparator?.getAttribute("aria-valuemax")).toBe("400");
+    expect(threeColumnSeparator?.getAttribute("aria-valuenow")).toBe("400");
+
+    threeColumnSeparator?.focus();
+    await act(async () =>
+      threeColumnSeparator?.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true }),
+      ),
+    );
+    expect(threeColumnSeparator?.getAttribute("aria-valuenow")).toBe("390");
+    expect(document.activeElement).toBe(threeColumnSeparator);
+  });
+
   it.each([
     "all_presets_match_geometry_visibility_maximize_and_focus_shell",
     "all_presets_ratios_gutters_surfaces_focus",

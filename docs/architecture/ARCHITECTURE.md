@@ -150,7 +150,10 @@ struct EditResult { changed: bool, action_name: String, affected_clip_ids: Vec<S
 
 ## 7. MCP + Agent(单一能力层、双前端)
 
-- **MCP server**:用官方 **`rmcp`**(streamable-http-server feature,基于 axum)起在 `127.0.0.1:19789`。**只绑 loopback + Origin 校验**(DNS-rebinding 防护,用 tower layer 复刻),Claude Desktop 经 stdio→HTTP shim 接入。
+- **MCP server**:能力层使用官方 **`rmcp`**（streamable-http-server feature，基于 axum）。
+  Beta 2 的产品入口仅供官方 Codex / ChatGPT 每轮创建：随机 loopback 端口 + 256-bit
+  Bearer + 当前工程身份，并在取消、deadline、切工程或轮次结束后销毁。早期固定、未认证的
+  `127.0.0.1:19789` 外部入口已禁用；Claude/Cursor 等客户端等待带认证的显式配对 UX。
 - **31 个工具**(读 7 / 时间线编辑 11 / 生成导入 5 / 库组织 7 / Resources 2)全是 `EditorCore` 方法的薄包装——见 MODULE-PORT-MAP.md「Agent」与横切报告 04。工具描述字符串(承载行为契约)**原样照搬**。
 - **必须复刻的三个横切机制**:① 短 ID 系统(出站缩短 UUID 到唯一最短前缀≥8 字符、入站展开,省 token)② 统一执行壳(快照→展开ID→执行→变更则压 agentUndoStack→遥测→缩短ID)③ 面向 LLM 的精确路径错误(`entries[3].startFrame: missing required field`,用 `serde_path_to_error`)。
 - **应用内 chat 与 MCP 共享同一套工具 + 同一系统提示词**;chat 走 reqwest→Anthropic(BYOK)或自建代理;复刻 prompt caching(system+tools+会话前缀打 ephemeral)。

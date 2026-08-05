@@ -2,18 +2,18 @@
 
 > 上级：[模块文档树](../INDEX.md) · [docs 总目录](../../INDEX.md)
 >
-> `opentake-agent` = 工具层（= 上游 `ToolExecutor`，**44 工具**）+ MCP server（rmcp Streamable-HTTP，`127.0.0.1:19789/mcp`）+ Context Signal + 工作流插件 + 内置 Agent 提示。能力层：依赖 `domain / ops / core / media / gen`，被 `src-tauri` 集成启动。
+> `opentake-agent` = 工具层（= 上游 `ToolExecutor`，**44 个可发布工具：38 基础 + 4 生成 + 2 动效，能力门控后按能力发布；KNOWN wire 名共 54**）+ MCP server（rmcp Streamable-HTTP，`127.0.0.1:19789/mcp`）+ Context Signal + 工作流插件 + 内置 Agent 提示。能力层：依赖 `domain / ops / core / media / gen`，被 `src-tauri` 集成启动。
 
 ---
 
 ## 总览
 
-- **[OVERVIEW.md](OVERVIEW.md)** — 一句话定位与依赖分层、职责边界、关键概念与数据流（MCP 网络面 / 派发归一 / Context Signal / 工作流插件 / 内置提示）、对应上游 Swift、完成状态（已实现 vs stub）、工具总数 44（31 上游 + 13 扩展）。
+- **[OVERVIEW.md](OVERVIEW.md)** — 一句话定位与依赖分层、职责边界、关键概念与数据流（MCP 网络面 / 派发归一 / Context Signal / 工作流插件 / 内置提示）、对应上游 Swift、完成状态（已实现 vs stub）、工具总数：最多 44 个可发布（当前 38 基础 + 4 生成 + 2 动效 = 31 上游 + 13 扩展，能力门控后按能力发布）；KNOWN wire 名共 54（另含 9 个高级 AI 工具，仅 schema 已知、不主动发布）。
 
 ## 子系统文档
 
 - **[mcp-server.md](mcp-server.md)** — `mcp/server.rs`：rmcp `StreamableHttpService` 网络面、端口 `127.0.0.1:19789`、`Host`/`Origin` 回环守卫（DNS-rebinding 防御）、OAuth well-known、`McpServer`（`get_info`/`list_tools`/`call_tool`）+ `serve()`。
-- **[dispatch-tools.md](dispatch-tools.md)** — `mcp/dispatch.rs` 统一派发壳（单一能力管线，归一到 `EditCommand` + agent-undo 栈）+ `tools/`：`names`（44 工具枚举 / `ALL` / `UPSTREAM`）、`args`（类型化参数）、`descriptions`（逐字描述 + Schema）、`errors`（精确路径错误）、`result`（中立结果类型）、`short_id`（短 id 展开/缩短）、`encode_timeline`（`get_timeline` 紧凑编码）。
+- **[dispatch-tools.md](dispatch-tools.md)** — `mcp/dispatch.rs` 统一派发壳（单一能力管线，归一到 `EditCommand` + agent-undo 栈）+ `tools/`：`names`（工具枚举：`ALL`(39) / `KNOWN`(54) / `UPSTREAM`(31)）、`args`（类型化参数）、`descriptions`（逐字描述 + Schema）、`errors`（精确路径错误）、`result`（中立结果类型）、`short_id`（短 id 展开/缩短）、`encode_timeline`（`get_timeline` 紧凑编码）。
 - **[core-handle-convert.md](core-handle-convert.md)** — `mcp/core_handle.rs`（`CoreHandle` 窄接口 + `AppCoreHandle` 生产实现，适配 `AppCore`）+ `mcp/convert.rs`（`ToolResult` → rmcp `CallToolResult`）+ `mcp/gen_catalog.rs`（`list_models` 投影 `opentake-gen` 静态目录）。
 - **[context-signal.md](context-signal.md)** — `signal/`：`classify`（视频类型结构化判定）、`track_roles`（轨道角色检测 + 逐角色建议）、`stages`（剪辑阶段推断 + 阶段指引 + 剪辑骨架）、`rules`（内置规则告警 + `OpContext`）、`engine`（构建并附挂 `context_signal`，应用插件覆盖）。对应 [AGENT-CONTEXT-SIGNAL.md](AGENT-CONTEXT-SIGNAL.md)。
 - **[plugin-system.md](plugin-system.md)** — `plugin/`：`model`（`plugin.json` 容错 serde 模型）、`registry`（扫描/校验/激活 + 内置 `audio-first`）、`rules`（插件 `dont` 规则层）、`builtin/audio-first/`（编译进二进制的默认工作流）。对应 [WORKFLOW-PLUGIN-SYSTEM.md](WORKFLOW-PLUGIN-SYSTEM.md)。
@@ -61,7 +61,7 @@ crates/opentake-agent/src/
 │   └── gen_catalog.rs      list_models 投影 opentake-gen 目录
 ├── tools/
 │   ├── mod.rs              工具层模块说明
-│   ├── names.rs            ToolName 枚举 + ALL(44) / UPSTREAM(31)
+│   ├── names.rs            ToolName 枚举 + ALL(39) / GENERATION(4) / MOTION(2) / KNOWN(54) / UPSTREAM(31)
 │   ├── args.rs             类型化参数结构 + ALLOWED_KEYS
 │   ├── descriptions.rs     工具描述（逐字）+ 输入 Schema
 │   ├── errors.rs           ToolError + 精确路径解码错误

@@ -1,12 +1,17 @@
 // @vitest-environment happy-dom
 
-import { act } from "react";
+import { act, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { Clip } from "../../lib/types";
 import { useEditorUiStore } from "../../store/uiStore";
 
+const editContext = vi.hoisted(() => ({
+  expected: { projectEpoch: 7, projectPath: "/project.opentake", timelineVersion: 11 },
+  sequenceId: "sequence-a",
+}));
 const editSpies = vi.hoisted(() => ({
+  captureProjectEditContext: vi.fn(() => editContext),
   moveKeyframe: vi.fn(),
   removeKeyframe: vi.fn(),
   setKeyframeInterpolation: vi.fn(),
@@ -48,17 +53,20 @@ let root: Root;
 beforeEach(async () => {
   vi.clearAllMocks();
   for (const spy of Object.values(editSpies)) spy.mockResolvedValue(undefined);
+  editSpies.captureProjectEditContext.mockReturnValue(editContext);
   useEditorUiStore.setState({ activeFrame: 100, toast: null });
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
   await act(async () => {
     root.render(
-      <KeyframesLaneRow
-        clip={clip}
-        property="opacity"
-        t={(key) => key}
-      />,
+      <StrictMode>
+        <KeyframesLaneRow
+          clip={clip}
+          property="opacity"
+          t={(key) => key}
+        />
+      </StrictMode>,
     );
   });
 });
@@ -66,22 +74,24 @@ beforeEach(async () => {
 async function renderOpacityKeyframe(): Promise<void> {
   await act(async () => {
     root.render(
-      <KeyframesLaneRow
-        clip={{
-          ...clip,
-          opacityTrack: {
-            kind: "scalar",
-            keyframes: [{ frame: 5, value: 0.5, interpolation: "linear" }],
-          },
-        }}
-        property="opacity"
-        t={(key, vars) => {
-          if (key === "inspector.keyframes.diamondLabel") {
-            return `${vars?.property} keyframe at frame ${vars?.frame}`;
-          }
-          return vars?.error ? `${key}:${vars.error}` : key;
-        }}
-      />,
+      <StrictMode>
+        <KeyframesLaneRow
+          clip={{
+            ...clip,
+            opacityTrack: {
+              kind: "scalar",
+              keyframes: [{ frame: 5, value: 0.5, interpolation: "linear" }],
+            },
+          }}
+          property="opacity"
+          t={(key, vars) => {
+            if (key === "inspector.keyframes.diamondLabel") {
+              return `${vars?.property} keyframe at frame ${vars?.frame}`;
+            }
+            return vars?.error ? `${key}:${vars.error}` : key;
+          }}
+        />
+      </StrictMode>,
     );
   });
   const lane = container.querySelector<HTMLElement>("[data-keyframe-lane]");
@@ -136,6 +146,11 @@ it("control-4e0a20c7d0e54f3e keyframe diamond drag/context menu", async () => {
   expect(diamond?.getAttribute("role")).toBe("button");
   expect(diamond?.tabIndex).toBe(0);
   expect(diamond?.getAttribute("aria-label")).toContain("105");
+  expect(diamond?.style.width).toBe("24px");
+  expect(diamond?.style.height).toBe("24px");
+  const diamondGlyph = diamond?.querySelector<HTMLElement>("[data-keyframe-diamond-glyph]");
+  expect(diamondGlyph?.style.width).toBe("8px");
+  expect(diamondGlyph?.style.height).toBe("8px");
 
   await act(async () => {
     diamond?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 150 }));
@@ -145,11 +160,17 @@ it("control-4e0a20c7d0e54f3e keyframe diamond drag/context menu", async () => {
 
   await act(async () => {
     diamond?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 150 }));
-    window.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: 240 }));
-    window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: 240 }));
+    window.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: 230 }));
+    window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: 230 }));
   });
   expect(editSpies.moveKeyframe).toHaveBeenCalledTimes(1);
-  expect(editSpies.moveKeyframe).toHaveBeenLastCalledWith("clip-1", "opacity", 105, 114);
+  expect(editSpies.moveKeyframe).toHaveBeenLastCalledWith(
+    "clip-1",
+    "opacity",
+    105,
+    113,
+    editContext,
+  );
 
   vi.clearAllMocks();
   await act(async () => {
@@ -181,6 +202,53 @@ it("control-4e0a20c7d0e54f3e keyframe diamond drag/context menu", async () => {
   expect(useEditorUiStore.getState().toast?.message).toBe(
     "inspector.keyframes.moveFailed:occupied",
   );
+});
+
+it("keeps dragged keyframes inside the backend half-open clip range", async () => {
+  await renderOpacityKeyframe();
+  const diamond = container.querySelector<HTMLElement>("[data-keyframe-diamond='105']")!;
+
+  await act(async () => {
+    diamond.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: 150 }));
+    window.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: 300 }));
+    window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: 300 }));
+  });
+
+  expect(editSpies.moveKeyframe).toHaveBeenCalledWith(
+    "clip-1",
+    "opacity",
+    105,
+    119,
+    editContext,
+  );
+});
+
+it("disables lane stamping while the playhead is outside the clip", async () => {
+  await act(async () => {
+    useEditorUiStore.setState({ activeFrame: 99 });
+    root.render(
+      <StrictMode>
+        <KeyframesLaneRow clip={clip} property="opacity" t={(key) => key} />
+      </StrictMode>,
+    );
+  });
+
+  const stamp = container.querySelector<HTMLButtonElement>(
+    "[data-keyframe-stamp]",
+  );
+  expect(stamp?.disabled).toBe(true);
+  await act(async () => stamp?.click());
+  expect(editSpies.stampKeyframe).not.toHaveBeenCalled();
+});
+
+it("normalizes a fractional playback frame before stamping", async () => {
+  await act(async () => useEditorUiStore.setState({ activeFrame: 100.4 }));
+  const stamp = container.querySelector<HTMLButtonElement>("[data-keyframe-stamp]")!;
+
+  await act(async () => stamp.click());
+
+  expect(editSpies.stampKeyframe).toHaveBeenCalledOnce();
+  expect(editSpies.stampKeyframe).toHaveBeenCalledWith("clip-1", "opacity", 100);
 });
 
 it("control-6e36c47f93f0d4fb dismiss keyframe context menu", async () => {
@@ -236,6 +304,7 @@ it("control-c191a17716450b1a delete keyframe", async () => {
   );
   expect(deleteItem?.getAttribute("role")).toBe("menuitem");
   expect(deleteItem?.type).toBe("button");
+  expect(deleteItem?.style.minHeight).toBe("24px");
   await act(async () => deleteItem?.click());
   expect(editSpies.removeKeyframe).toHaveBeenCalledTimes(1);
   expect(editSpies.removeKeyframe).toHaveBeenCalledWith("clip-1", "opacity", 105);

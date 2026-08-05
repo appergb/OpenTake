@@ -159,7 +159,7 @@ export function LibraryView() {
 
           <div style={{ flex: 1 }} />
 
-          <SearchBox value={search} onChange={setSearch} placeholder={t("library.search")} />
+          <LibrarySearchBox value={search} onChange={setSearch} placeholder={t("library.search")} />
           <SortSelect value={sort} onChange={setSort} />
         </header>
 
@@ -294,7 +294,7 @@ function CategoryRow({
   );
 }
 
-function SearchBox({
+export function LibrarySearchBox({
   value,
   onChange,
   placeholder,
@@ -319,13 +319,19 @@ function SearchBox({
     >
       <Icon icon={Search} size={13} />
       <input
+        type="search"
+        aria-label={placeholder}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
         style={{
           width: 160,
+          height: "100%",
+          minHeight: 24,
+          padding: 0,
           border: "none",
           outline: "none",
+          appearance: "none",
           background: "transparent",
           color: "var(--text-primary)",
           fontSize: "var(--fs-sm)",

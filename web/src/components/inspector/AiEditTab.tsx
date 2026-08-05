@@ -7,8 +7,10 @@ import { Icon } from "../ui/Icon";
 
 export interface AiEditProposal {
   id: string;
-  title: string;
-  explanation: string;
+  /** i18n 键：标题与解释文案（数值经 explanationParams 插值）。 */
+  titleKey: string;
+  explanationKey: string;
+  explanationParams: Record<string, string | number>;
   properties: ClipPropertiesReq;
 }
 
@@ -37,8 +39,9 @@ export const suggestAiEdits: AiEditSuggester = async (clip, intent, fps, signal)
     return [
       {
         id: "pace-up",
-        title: "节奏加快 / Faster pacing",
-        explanation: `将速度从 ${clip.speed.toFixed(2)}x 调整为 ${speed.toFixed(2)}x。`,
+        titleKey: "inspector.aiEdit.proposal.paceUp.title",
+        explanationKey: "inspector.aiEdit.proposal.paceUp.explanation",
+        explanationParams: { from: clip.speed.toFixed(2), to: speed.toFixed(2) },
         properties: { speed },
       },
     ];
@@ -47,8 +50,9 @@ export const suggestAiEdits: AiEditSuggester = async (clip, intent, fps, signal)
     return [
       {
         id: "gentle-fade",
-        title: "柔和淡入淡出 / Gentle fade",
-        explanation: `在片段两端添加 ${fadeFrames} 帧淡化。`,
+        titleKey: "inspector.aiEdit.proposal.gentleFade.title",
+        explanationKey: "inspector.aiEdit.proposal.gentleFade.explanation",
+        explanationParams: { frames: fadeFrames },
         properties: { fadeInFrames: fadeFrames, fadeOutFrames: fadeFrames },
       },
     ];
@@ -56,8 +60,9 @@ export const suggestAiEdits: AiEditSuggester = async (clip, intent, fps, signal)
   return [
     {
       id: "balanced-polish",
-      title: "平衡优化 / Balanced polish",
-      explanation: `添加 ${fadeFrames} 帧淡入淡出并保持画面不透明度。`,
+      titleKey: "inspector.aiEdit.proposal.balancedPolish.title",
+      explanationKey: "inspector.aiEdit.proposal.balancedPolish.explanation",
+      explanationParams: { frames: fadeFrames },
       properties: { fadeInFrames: fadeFrames, fadeOutFrames: fadeFrames, opacity: 1 },
     },
   ];
@@ -203,6 +208,11 @@ export function AiEditTab({
         {t("inspector.aiEdit.heading")}
       </div>
 
+      {/* 诚实披露：这里是本地确定性启发式（suggestAiEdits），不调用任何 AI 模型。 */}
+      <div style={{ color: "var(--text-tertiary)", fontSize: "var(--fs-xs)" }}>
+        {t("inspector.aiEdit.disclosure")}
+      </div>
+
       {unavailableReason ? (
         <div role="status" style={{ color: "var(--text-tertiary)", fontSize: "var(--fs-sm)" }}>
           {unavailableReason}
@@ -292,10 +302,10 @@ export function AiEditTab({
               }}
             >
               <strong style={{ display: "block", fontSize: "var(--fs-sm)" }}>
-                {proposal.title}
+                {t(proposal.titleKey)}
               </strong>
               <span style={{ color: "var(--text-tertiary)", fontSize: "var(--fs-xs)" }}>
-                {proposal.explanation}
+                {t(proposal.explanationKey, proposal.explanationParams)}
               </span>
             </button>
           ))}

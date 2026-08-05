@@ -41,7 +41,14 @@ it("control-d88c7103e09bb382 resize two editor panes", async () => {
         initial={200}
         min={100}
         secondMin={150}
-        first={<div data-pane="first" />}
+        first={(
+          <>
+            <button data-pane="first" />
+            <div role="gridcell" data-pane="gridcell" />
+            <div role="spinbutton" data-pane="spinbutton" />
+            <div draggable data-pane="draggable" />
+          </>
+        )}
         second={<div data-pane="second" />}
       />,
     );
@@ -54,6 +61,32 @@ it("control-d88c7103e09bb382 resize two editor panes", async () => {
   expect(separator.getAttribute("aria-orientation")).toBe("vertical");
   expect(separator.getAttribute("aria-valuemin")).toBe("100");
   expect(separator.getAttribute("aria-valuemax")).toBe("450");
+  expect(separator.style.width).toBe("24px");
+  expect(separator.style.pointerEvents).toBe("none");
+
+  const seamControl = container.querySelector<HTMLButtonElement>("[data-pane='first']")!;
+  await act(async () => {
+    seamControl.dispatchEvent(new PointerEvent("pointerdown", {
+      bubbles: true,
+      pointerId: 2,
+      clientX: 300,
+    }));
+  });
+  expect(setPointerCapture).not.toHaveBeenCalled();
+  expect(separator.getAttribute("aria-valuenow")).toBe("200");
+
+  for (const kind of ["gridcell", "spinbutton", "draggable"]) {
+    const customControl = container.querySelector<HTMLElement>(`[data-pane='${kind}']`)!;
+    await act(async () => {
+      customControl.dispatchEvent(new PointerEvent("pointerdown", {
+        bubbles: true,
+        pointerId: 2,
+        clientX: 300,
+      }));
+    });
+  }
+  expect(setPointerCapture).not.toHaveBeenCalled();
+  expect(separator.getAttribute("aria-valuenow")).toBe("200");
 
   await act(async () => {
     separator.dispatchEvent(new PointerEvent("pointerdown", {
@@ -114,4 +147,5 @@ it("control-d88c7103e09bb382 resize two editor panes", async () => {
   const vertical = container.querySelector<HTMLElement>("[role='separator']")!;
   expect(vertical.getAttribute("aria-orientation")).toBe("horizontal");
   expect(vertical.getAttribute("aria-valuemax")).toBe("280");
+  expect(vertical.style.height).toBe("24px");
 });

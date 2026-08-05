@@ -3,7 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { ScrubBar } from "./Preview";
+import { exactTimelineFrame, ScrubBar } from "./Preview";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
   .IS_REACT_ACT_ENVIRONMENT = true;
@@ -11,11 +11,19 @@ import { ScrubBar } from "./Preview";
 let container: HTMLDivElement;
 let root: Root;
 let onSeek: ReturnType<typeof vi.fn>;
+let onExactSeek: ReturnType<typeof vi.fn>;
 let onScrubbingChange: ReturnType<typeof vi.fn>;
 let setPointerCapture: ReturnType<typeof vi.spyOn>;
 
+it("normalizes fractional playback ticks before exact frame stepping", () => {
+  expect(exactTimelineFrame(26.4, 100)).toBe(26);
+  expect(exactTimelineFrame(-0.6, 100)).toBe(0);
+  expect(exactTimelineFrame(100.6, 100)).toBe(100);
+});
+
 beforeEach(() => {
   onSeek = vi.fn();
+  onExactSeek = vi.fn();
   onScrubbingChange = vi.fn();
   setPointerCapture = vi.spyOn(HTMLElement.prototype, "setPointerCapture")
     .mockImplementation(() => {});
@@ -29,6 +37,7 @@ beforeEach(() => {
         frame={25}
         total={100}
         onSeek={onSeek}
+        onExactSeek={onExactSeek}
         onScrubbingChange={onScrubbingChange}
       />,
     );
@@ -49,6 +58,7 @@ it("control-200c9fd6ec3f0f35 pointer scrub preview playhead", async () => {
   expect(scrub?.getAttribute("aria-valuemin")).toBe("0");
   expect(scrub?.getAttribute("aria-valuemax")).toBe("100");
   expect(scrub?.getAttribute("aria-valuenow")).toBe("25");
+  expect(scrub?.style.height).toBe("24px");
   scrub!.getBoundingClientRect = () =>
     ({ left: 100, width: 200, right: 300, top: 0, bottom: 18, height: 18 }) as DOMRect;
 
@@ -112,9 +122,11 @@ it("control-200c9fd6ec3f0f35 pointer scrub preview playhead", async () => {
   scrub?.focus();
   await act(async () => {
     scrub?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }));
+    scrub?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", shiftKey: true, bubbles: true }));
     scrub?.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true }));
     scrub?.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
   });
-  expect(onSeek.mock.calls).toEqual([[26], [0], [100]]);
+  expect(onSeek).not.toHaveBeenCalled();
+  expect(onExactSeek.mock.calls).toEqual([[26], [20], [0], [100]]);
   expect(document.activeElement).toBe(scrub);
 });

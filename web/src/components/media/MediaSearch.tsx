@@ -28,11 +28,30 @@ import { formatTimecode } from "../../lib/geometry";
 import { assetUrl } from "../../lib/asset";
 import { setDraggingMedia } from "../../lib/mediaDragState";
 import { setDraggingMomentRange } from "../../lib/momentDragState";
-import { MEDIA_DND_TYPE, setMediaThumbnailDragImage } from "./MediaPanel";
-import { useMediaStore } from "../../store/mediaStore";
+import {
+  MEDIA_DND_TYPE,
+  TileContextMenu,
+  handleMediaTileArrowNavigation,
+  keyboardMenuPoint,
+  selectMediaForPreview,
+  setMediaThumbnailDragImage,
+  type TileMenuPoint,
+} from "./MediaPanel";
+import {
+  isCurrentMediaProject,
+  useMediaStore,
+  type MediaProjectIdentity,
+} from "../../store/mediaStore";
+import {
+  deleteMediaFromContextMenu,
+  deleteSelectedMediaAssets,
+} from "../../store/mediaDeleteActions";
 import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
-import { addMediaToTimeline } from "../../store/editActions";
+import {
+  addMediaToTimeline,
+  reportMediaPlacementFailure,
+} from "../../store/editActions";
 import {
   generateThumbnail,
   preloadMedia,
@@ -51,6 +70,110 @@ const SEARCH_DEBOUNCE_MS = 250;
  *  placeholder (bytes 0). ~380 MB is the two fp32 ONNX encoders + tokenizer. */
 const FALLBACK_MODEL_MB = 380;
 
+function emptySearchResults(): SearchResults {
+  return { moments: [], spoken: [], files: [] };
+}
+
+interface MediaSearchRequestHandle {
+  cancel: () => void;
+  pending: () => Promise<void> | null;
+}
+
+/** Request lifecycle shared by the effect and race regression tests. Every
+ * query transition, including clearing the field, advances the sequence. */
+export function beginMediaSearchRequest({
+  query,
+  requestSequence,
+  search,
+  onResults,
+  onError,
+  schedule = (task, delay) => window.setTimeout(task, delay),
+  cancelScheduled = (handle) => window.clearTimeout(handle),
+}: {
+  query: string;
+  requestSequence: { current: number };
+  search: (query: string) => Promise<SearchResults>;
+  onResults: (results: SearchResults) => void;
+  onError: (error: string | null) => void;
+  schedule?: (task: () => void, delay: number) => number;
+  cancelScheduled?: (handle: number) => void;
+}): MediaSearchRequestHandle {
+  const id = ++requestSequence.current;
+  const q = query.trim();
+  let disposed = false;
+  let scheduled: number | null = null;
+  let pendingRequest: Promise<void> | null = null;
+
+  // Do not display a previous query's semantic hits during debounce or after a
+  // rejection. Filename matches are supplied independently by nameMatches.
+  onResults(emptySearchResults());
+  onError(null);
+
+  if (q === "") {
+    return {
+      cancel: () => {
+        disposed = true;
+      },
+      pending: () => null,
+    };
+  }
+
+  scheduled = schedule(() => {
+    pendingRequest = search(q).then(
+      (results) => {
+        if (!disposed && id === requestSequence.current) onResults(results);
+      },
+      (error: unknown) => {
+        if (disposed || id !== requestSequence.current) return;
+        onResults(emptySearchResults());
+        onError(searchErrorMessage(error));
+      },
+    );
+  }, SEARCH_DEBOUNCE_MS);
+
+  return {
+    cancel: () => {
+      disposed = true;
+      if (scheduled !== null) cancelScheduled(scheduled);
+    },
+    pending: () => pendingRequest,
+  };
+}
+
+function searchErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message.trim() !== "") return error.message;
+  const message = String(error);
+  return message === "" ? "Search failed" : message;
+}
+
+/** Bridge an asynchronously-created Tauri listener into synchronous React
+ * cleanup. Late callbacks are ignored and a late unlisten handle is invoked. */
+export function subscribeWithAsyncCleanup<T>(
+  subscribe: (listener: (payload: T) => void) => Promise<() => void>,
+  listener: (payload: T) => void,
+): () => void {
+  let disposed = false;
+  let unlisten: (() => void) | null = null;
+  void subscribe((payload) => {
+    if (!disposed) listener(payload);
+  }).then(
+    (off) => {
+      if (disposed) off();
+      else unlisten = off;
+    },
+    () => {
+      // Progress listeners are best-effort outside Tauri. Polling and action
+      // buttons remain usable when registration is unavailable.
+    },
+  );
+  return () => {
+    if (disposed) return;
+    disposed = true;
+    unlisten?.();
+    unlisten = null;
+  };
+}
+
 function formatModelBytes(bytes: number): string {
   const mb = bytes > 0 ? bytes / (1024 * 1024) : FALLBACK_MODEL_MB;
   return `${Math.round(mb)} MB`;
@@ -63,7 +186,63 @@ type IndexPhase =
   | { kind: "downloading"; fraction: number }
   | { kind: "readyToIndex" }
   | { kind: "indexing"; done: number; total: number; fraction: number }
-  | { kind: "failed" };
+  | { kind: "failed"; action: "download" | "index" };
+
+interface SearchProjectOperation {
+  project: MediaProjectIdentity;
+  token: symbol;
+  phase: Extract<IndexPhase, { kind: "downloading" | "indexing" }>;
+}
+
+type SearchOperationAction = "download" | "index";
+
+interface SearchOperationEvent {
+  action: SearchOperationAction;
+  operation: SearchProjectOperation;
+  state: "started" | "settled";
+  succeeded?: boolean;
+}
+
+interface SearchIndexController {
+  phase: IndexPhase;
+  startDownload: () => void;
+  startIndex: () => void;
+}
+
+/** Backend progress events do not carry project identity. Keep the one global
+ * backend job associated with the project that started it, and do not start a
+ * second project's job until the first settles. */
+let activeModelDownload: SearchProjectOperation | null = null;
+let activeIndexBuild: SearchProjectOperation | null = null;
+const searchOperationListeners = new Set<(event: SearchOperationEvent) => void>();
+
+function publishSearchOperation(event: SearchOperationEvent): void {
+  for (const listener of [...searchOperationListeners]) listener(event);
+}
+
+function subscribeSearchOperations(listener: (event: SearchOperationEvent) => void): () => void {
+  searchOperationListeners.add(listener);
+  return () => searchOperationListeners.delete(listener);
+}
+
+function settleSearchOperation(
+  action: SearchOperationAction,
+  operation: SearchProjectOperation,
+  succeeded: boolean,
+): void {
+  const active = action === "download" ? activeModelDownload : activeIndexBuild;
+  if (active?.token !== operation.token) return;
+  if (action === "download") activeModelDownload = null;
+  else activeIndexBuild = null;
+  publishSearchOperation({ action, operation, state: "settled", succeeded });
+}
+
+function sameSearchProject(
+  left: MediaProjectIdentity,
+  right: MediaProjectIdentity,
+): boolean {
+  return left.projectEpoch === right.projectEpoch && left.projectPath === right.projectPath;
+}
 
 /**
  * The full search view: index-status affordance + the three result groups.
@@ -79,39 +258,89 @@ export function MediaSearchResults({
   hasIndexableAssets: boolean;
 }) {
   const t = useT();
-  const [results, setResults] = useState<SearchResults>({ moments: [], spoken: [], files: [] });
-  const phase = useSearchIndexPhase(hasIndexableAssets);
+  const [results, setResults] = useState<SearchResults>(emptySearchResults);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const projectEpoch = useProjectStore((s) => s.projectEpoch);
+  const projectPath = useProjectStore((s) => s.projectPath);
+  const indexController = useSearchIndexPhase(hasIndexableAssets, projectEpoch, projectPath);
 
   // Debounced backend query for Moments + Spoken. Files come from `nameMatches`.
   const reqId = useRef(0);
   useEffect(() => {
-    const q = query.trim();
-    if (q === "") {
-      setResults({ moments: [], spoken: [], files: [] });
-      return;
-    }
-    const id = ++reqId.current;
-    const handle = window.setTimeout(() => {
-      void searchQueryApi(q).then((r) => {
-        // Ignore a stale response (a newer query superseded this one).
-        if (id === reqId.current) setResults(r);
-      });
-    }, SEARCH_DEBOUNCE_MS);
-    return () => window.clearTimeout(handle);
-  }, [query]);
+    const project = { projectEpoch, projectPath };
+    const request = beginMediaSearchRequest({
+      query,
+      requestSequence: reqId,
+      search: searchQueryApi,
+      onResults: (next) => {
+        if (isCurrentMediaProject(project)) setResults(next);
+      },
+      onError: (next) => {
+        if (isCurrentMediaProject(project)) setSearchError(next);
+      },
+    });
+    return request.cancel;
+  }, [projectEpoch, projectPath, query]);
 
   const { moments, spoken } = results;
-  const isEmpty = moments.length === 0 && spoken.length === 0 && nameMatches.length === 0;
+  const selectedMediaAssetIds = useEditorUiStore((s) => s.selectedMediaAssetIds);
+  const activeMomentIndex = Math.max(
+    0,
+    moments.findIndex((hit) => selectedMediaAssetIds.has(hit.mediaId)),
+  );
+  const activeSpokenIndex = Math.max(
+    0,
+    spoken.findIndex((hit) => selectedMediaAssetIds.has(hit.mediaId)),
+  );
+  const activeFileIndex = Math.max(
+    0,
+    nameMatches.findIndex((item) => selectedMediaAssetIds.has(item.id)),
+  );
+  const isEmpty =
+    searchError === null &&
+    moments.length === 0 &&
+    spoken.length === 0 &&
+    nameMatches.length === 0;
 
   return (
     <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" }}>
-      <SearchIndexAffordance phase={phase} />
+      <SearchIndexAffordance
+        phase={indexController.phase}
+        onDownload={indexController.startDownload}
+        onIndex={indexController.startIndex}
+      />
+
+      {searchError && (
+        <div
+          role="alert"
+          aria-live="polite"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "var(--space-xs)",
+            margin: "var(--space-xs) var(--space-sm) 0",
+            padding: "var(--space-xs) var(--space-sm)",
+            borderRadius: "var(--radius-sm)",
+            border: "var(--bw-thin) solid var(--status-error)",
+            color: "var(--status-error)",
+            fontSize: "var(--fs-xs)",
+          }}
+        >
+          <Icon icon={AlertTriangle} size={13} />
+          <span>{searchError}</span>
+        </div>
+      )}
 
       {moments.length > 0 && (
         <Group icon={Film} label={t("search.group.moments")} count={moments.length}>
           <ResultsGrid>
             {moments.map((hit, i) => (
-              <MomentCard key={`${hit.mediaId}:${hit.frame}:${i}`} hit={hit} />
+              <div key={`${hit.mediaId}:${hit.frame}:${i}`} role="row" style={{ minWidth: 0 }}>
+                <MomentCard
+                  hit={hit}
+                  rovingTabIndex={i === activeMomentIndex ? 0 : -1}
+                />
+              </div>
             ))}
           </ResultsGrid>
         </Group>
@@ -119,9 +348,18 @@ export function MediaSearchResults({
 
       {spoken.length > 0 && (
         <Group icon={Mic} label={t("search.group.spoken")} count={spoken.length}>
-          <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-xs)", padding: "0 var(--space-sm) var(--space-sm)" }}>
+          <div
+            role="grid"
+            data-media-roving-container="true"
+            style={{ display: "flex", flexDirection: "column", gap: "var(--space-xs)", padding: "0 var(--space-sm) var(--space-sm)" }}
+          >
             {spoken.map((hit, i) => (
-              <SpokenRow key={`${hit.mediaId}:${hit.startSec}:${i}`} hit={hit} />
+              <div key={`${hit.mediaId}:${hit.startSec}:${i}`} role="row" style={{ minWidth: 0 }}>
+                <SpokenRow
+                  hit={hit}
+                  rovingTabIndex={i === activeSpokenIndex ? 0 : -1}
+                />
+              </div>
             ))}
           </div>
         </Group>
@@ -130,8 +368,13 @@ export function MediaSearchResults({
       {nameMatches.length > 0 && (
         <Group icon={FileText} label={t("search.group.files")} count={nameMatches.length}>
           <ResultsGrid>
-            {nameMatches.map((item) => (
-              <FileCard key={item.id} item={item} />
+            {nameMatches.map((item, index) => (
+              <div key={item.id} role="row" style={{ minWidth: 0 }}>
+                <FileCard
+                  item={item}
+                  rovingTabIndex={index === activeFileIndex ? 0 : -1}
+                />
+              </div>
             ))}
           </ResultsGrid>
         </Group>
@@ -159,13 +402,62 @@ export function MediaSearchResults({
 
 /** Poll model + index status and subscribe to progress, deriving the affordance
  *  phase. Mirrors upstream `searchIndexStatus`'s state machine. */
-function useSearchIndexPhase(hasIndexableAssets: boolean): IndexPhase {
+function useSearchIndexPhase(
+  hasIndexableAssets: boolean,
+  projectEpoch: number,
+  projectPath: string | null,
+): SearchIndexController {
   const [phase, setPhase] = useState<IndexPhase>({ kind: "hidden" });
   const mediaCount = useMediaStore((s) => s.items.length);
+  const mounted = useRef(false);
+  const statusGeneration = useRef(0);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+      statusGeneration.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    statusGeneration.current += 1;
+    setPhase({ kind: "hidden" });
+  }, [projectEpoch, projectPath]);
 
   // Re-evaluate whenever the library changes (new assets → maybe need indexing).
-  const refresh = useCallback(async () => {
-    const status = await searchIndexStatus();
+  const refresh = useCallback(async (failedAction?: SearchOperationAction) => {
+    const project = { projectEpoch, projectPath };
+    const generation = ++statusGeneration.current;
+    let status: Awaited<ReturnType<typeof searchIndexStatus>>;
+    try {
+      status = await searchIndexStatus();
+    } catch {
+      if (
+        mounted.current &&
+        generation === statusGeneration.current &&
+        isCurrentMediaProject(project)
+      ) {
+        setPhase(failedAction ? { kind: "failed", action: failedAction } : { kind: "hidden" });
+      }
+      return;
+    }
+    if (
+      !mounted.current ||
+      generation !== statusGeneration.current ||
+      !isCurrentMediaProject(project)
+    ) return;
+    const running = [activeModelDownload, activeIndexBuild].find(
+      (operation) => operation && sameSearchProject(operation.project, project),
+    );
+    if (running) {
+      setPhase(running.phase);
+      return;
+    }
+    if (failedAction) {
+      setPhase({ kind: "failed", action: failedAction });
+      return;
+    }
     if (!status.modelInstalled) {
       setPhase(hasIndexableAssets ? { kind: "needsModel" } : { kind: "hidden" });
       return;
@@ -175,70 +467,142 @@ function useSearchIndexPhase(hasIndexableAssets: boolean): IndexPhase {
     } else {
       setPhase({ kind: "hidden" });
     }
-  }, [hasIndexableAssets]);
+  }, [hasIndexableAssets, projectEpoch, projectPath]);
 
   useEffect(() => {
-    let cancelled = false;
-    void refresh().catch(() => {
-      if (!cancelled) setPhase({ kind: "hidden" });
-    });
-    return () => {
-      cancelled = true;
-    };
+    void refresh();
   }, [refresh, mediaCount]);
+
+  useEffect(
+    () =>
+      subscribeSearchOperations((event) => {
+        const project = { projectEpoch, projectPath };
+        if (event.state === "started") {
+          if (
+            mounted.current &&
+            isCurrentMediaProject(project) &&
+            sameSearchProject(event.operation.project, project)
+          ) {
+            setPhase(event.operation.phase);
+          }
+          return;
+        }
+        const failedAction =
+          event.succeeded === false && sameSearchProject(event.operation.project, project)
+            ? event.action
+            : undefined;
+        void refresh(failedAction);
+      }),
+    [projectEpoch, projectPath, refresh],
+  );
 
   // Live download + indexing progress events keep the ring moving.
   useEffect(() => {
-    let offDownload = () => {};
-    let offIndex = () => {};
-    void onSearchModelProgress((fraction) => {
-      setPhase((p) =>
-        p.kind === "downloading" || p.kind === "needsModel" ? { kind: "downloading", fraction } : p,
-      );
-    }).then((off) => (offDownload = off));
-    void onSearchIndexProgress(({ completed, total, fraction }) => {
-      if (total === 0) {
-        void refresh();
-        return;
-      }
-      setPhase({ kind: "indexing", done: completed, total, fraction });
-      // On the final tick, settle back to the resting state.
-      if (completed >= total) void refresh();
-    }).then((off) => (offIndex = off));
+    const offDownload = subscribeWithAsyncCleanup(onSearchModelProgress, (fraction) => {
+      const operation = activeModelDownload;
+      if (!operation || !isCurrentMediaProject(operation.project)) return;
+      operation.phase = { kind: "downloading", fraction };
+      setPhase(operation.phase);
+    });
+    const offIndex = subscribeWithAsyncCleanup(
+      onSearchIndexProgress,
+      ({ completed, total, fraction }) => {
+        if (total === 0) {
+          void refresh();
+          return;
+        }
+        const operation = activeIndexBuild;
+        if (!operation || !isCurrentMediaProject(operation.project)) return;
+        operation.phase = { kind: "indexing", done: completed, total, fraction };
+        setPhase(operation.phase);
+        // On the final tick, settle back to the resting state.
+        if (completed >= total) {
+          void refresh();
+        }
+      },
+    );
     return () => {
       offDownload();
       offIndex();
     };
   }, [refresh]);
 
-  // Expose setters through a module ref so the button handlers can drive it.
-  phaseSetterRef.current = setPhase;
-  return phase;
-}
+  const startDownload = useCallback(() => {
+    const project = { projectEpoch, projectPath };
+    const active = activeModelDownload;
+    if (active) {
+      setPhase(
+        sameSearchProject(active.project, project)
+          ? { kind: "downloading", fraction: 0 }
+          : { kind: "failed", action: "download" },
+      );
+      return;
+    }
+    const operation: SearchProjectOperation = {
+      project,
+      token: Symbol("search-model-download"),
+      phase: { kind: "downloading", fraction: 0 },
+    };
+    activeModelDownload = operation;
+    publishSearchOperation({ action: "download", operation, state: "started" });
+    void downloadSearchModel().then(
+      () => {
+        settleSearchOperation("download", operation, true);
+      },
+      () => {
+        settleSearchOperation("download", operation, false);
+      },
+    );
+  }, [projectEpoch, projectPath]);
 
-/** Lets the affordance's buttons flip the phase optimistically before the async
- *  command's first progress event lands (module ref — avoids prop threading). */
-const phaseSetterRef: { current: ((p: IndexPhase) => void) | null } = { current: null };
+  const startIndex = useCallback(() => {
+    const project = { projectEpoch, projectPath };
+    if (projectPath === null) {
+      setPhase({ kind: "failed", action: "index" });
+      return;
+    }
+    const active = activeIndexBuild;
+    if (active) {
+      setPhase(
+        sameSearchProject(active.project, project)
+          ? { kind: "indexing", done: 0, total: 1, fraction: 0 }
+          : { kind: "failed", action: "index" },
+      );
+      return;
+    }
+    const operation: SearchProjectOperation = {
+      project,
+      token: Symbol("search-index-build"),
+      phase: { kind: "indexing", done: 0, total: 1, fraction: 0 },
+    };
+    activeIndexBuild = operation;
+    publishSearchOperation({ action: "index", operation, state: "started" });
+    void searchIndexStart(projectEpoch, projectPath).then(
+      () => {
+        settleSearchOperation("index", operation, true);
+      },
+      () => {
+        settleSearchOperation("index", operation, false);
+      },
+    );
+  }, [projectEpoch, projectPath]);
+
+  return { phase, startDownload, startIndex };
+}
 
 /** The status affordance: a download/enable button (no model) or a progress ring
  *  (downloading / indexing). Hidden when nothing needs attention (upstream
  *  `MediaTab+IndexStatus.swift`). */
-function SearchIndexAffordance({ phase }: { phase: IndexPhase }) {
+function SearchIndexAffordance({
+  phase,
+  onDownload,
+  onIndex,
+}: {
+  phase: IndexPhase;
+  onDownload: () => void;
+  onIndex: () => void;
+}) {
   const t = useT();
-
-  const onDownload = useCallback(() => {
-    phaseSetterRef.current?.({ kind: "downloading", fraction: 0 });
-    void downloadSearchModel()
-      .then(() => phaseSetterRef.current?.({ kind: "readyToIndex" }))
-      .catch(() => phaseSetterRef.current?.({ kind: "failed" }));
-  }, []);
-
-  const onIndex = useCallback(() => {
-    phaseSetterRef.current?.({ kind: "indexing", done: 0, total: 1, fraction: 0 });
-    void searchIndexStart()
-      .then(() => phaseSetterRef.current?.({ kind: "hidden" }))
-      .catch(() => phaseSetterRef.current?.({ kind: "hidden" }));
-  }, []);
 
   if (phase.kind === "hidden") return null;
 
@@ -285,7 +649,7 @@ function SearchIndexAffordance({ phase }: { phase: IndexPhase }) {
     return (
       <button
         type="button"
-        onClick={onDownload}
+        onClick={phase.action === "download" ? onDownload : onIndex}
         title={t("search.retryHint")}
         style={{ ...barStyle, cursor: "pointer", textAlign: "left", color: "var(--status-error)" }}
       >
@@ -372,6 +736,8 @@ function Group({
 function ResultsGrid({ children }: { children: React.ReactNode }) {
   return (
     <div
+      role="grid"
+      data-media-roving-container="true"
       style={{
         display: "grid",
         gridTemplateColumns: "repeat(auto-fill, minmax(112px, 1fr))",
@@ -435,13 +801,120 @@ function useMediaItem(mediaId: string): MediaItem | undefined {
   return useMediaStore((s) => s.items.find((m) => m.id === mediaId));
 }
 
+/** All search result variants participate in the same media selection contract
+ * as the main grid, including keyboard activation and deletion. */
+function useSearchResultInteraction(item: MediaItem | undefined) {
+  const t = useT();
+  const tileRef = useRef<HTMLDivElement | null>(null);
+  const selected = useEditorUiStore((s) =>
+    item ? s.selectedMediaAssetIds.has(item.id) : false,
+  );
+  const [focused, setFocused] = useState(false);
+  const [menuPoint, setMenuPoint] = useState<
+    (TileMenuPoint & { restoreFocus: boolean }) | null
+  >(null);
+  const activate = useCallback(() => {
+    if (!item) return;
+    selectMediaForPreview(item.id);
+    void preloadMedia(item.id);
+  }, [item]);
+  const onClick = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      event.currentTarget.focus();
+      activate();
+    },
+    [activate],
+  );
+  const onContextMenu = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    if (!item) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setMenuPoint({
+      x: event.clientX,
+      y: event.clientY,
+      restoreFocus: false,
+    });
+  }, [item]);
+  const onKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLDivElement>) => {
+      if (!item || event.target !== event.currentTarget) return;
+      if (handleMediaTileArrowNavigation(event)) return;
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        event.stopPropagation();
+        activate();
+      } else if (event.key === "Delete" || event.key === "Backspace") {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!event.repeat) {
+          void deleteSelectedMediaAssets().catch((error) => {
+            useEditorUiStore.getState().pushToast(String(error));
+          });
+        }
+      } else if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+        event.preventDefault();
+        event.stopPropagation();
+        setMenuPoint({
+          ...keyboardMenuPoint(event.currentTarget),
+          restoreFocus: true,
+        });
+      }
+    },
+    [activate, item],
+  );
+  const onFocus = useCallback((event: React.FocusEvent<HTMLDivElement>) => {
+    setFocused(true);
+    if (event.target === event.currentTarget) activate();
+  }, [activate]);
+  const onBlur = useCallback((event: React.FocusEvent<HTMLDivElement>) => {
+    if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false);
+  }, []);
+  const menu =
+    item && menuPoint ? (
+      <TileContextMenu
+        point={menuPoint}
+        onClose={() => setMenuPoint(null)}
+        returnFocus={tileRef}
+        restoreFocus={menuPoint.restoreFocus}
+        actions={[
+          {
+            label: t("contextMenu.delete"),
+            destructive: true,
+            onSelect: () => {
+              void deleteMediaFromContextMenu(item.id).catch((error) => {
+                useEditorUiStore.getState().pushToast(String(error));
+              });
+            },
+          },
+        ]}
+      />
+    ) : null;
+  return {
+    tileRef,
+    selected,
+    focused,
+    menu,
+    onClick,
+    onContextMenu,
+    onKeyDown,
+    onFocus,
+    onBlur,
+  };
+}
+
 /** A visual "Moments" card: frame thumb + name + timecode range, draggable to the
  *  timeline as a trimmed source-range clip (upstream `momentCard`). */
-function MomentCard({ hit }: { hit: MomentHit }) {
+function MomentCard({
+  hit,
+  rovingTabIndex,
+}: {
+  hit: MomentHit;
+  rovingTabIndex: number;
+}) {
   const t = useT();
   const item = useMediaItem(hit.mediaId);
   const fps = useProjectStore((s) => s.timeline.fps);
-  const setPreviewMedia = useEditorUiStore((s) => s.setPreviewMedia);
+  const interaction = useSearchResultInteraction(item);
   const thumbnailRef = useRef<HTMLDivElement | null>(null);
   if (!item) return null;
 
@@ -467,15 +940,34 @@ function MomentCard({ hit }: { hit: MomentHit }) {
 
   return (
     <div
+      ref={interaction.tileRef}
       draggable
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
-      onClick={() => {
-        setPreviewMedia(item.id);
-        void preloadMedia(item.id);
-      }}
+      onClick={interaction.onClick}
+      onContextMenu={interaction.onContextMenu}
+      onKeyDown={interaction.onKeyDown}
+      onFocus={interaction.onFocus}
+      onBlur={interaction.onBlur}
       title={t("search.dragToTimeline")}
-      style={{ display: "flex", flexDirection: "column", gap: 3, cursor: "grab" }}
+      role="gridcell"
+      tabIndex={rovingTabIndex}
+      aria-selected={interaction.selected}
+      aria-haspopup="menu"
+      data-media-tile="true"
+      data-media-asset-id={item.id}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 3,
+        cursor: "grab",
+        borderRadius: "var(--radius-sm)",
+        outline:
+          interaction.selected || interaction.focused
+            ? "2px solid var(--accent-primary)"
+            : "none",
+        outlineOffset: 2,
+      }}
     >
       <HitThumbnail
         mediaId={hit.mediaId}
@@ -499,17 +991,24 @@ function MomentCard({ hit }: { hit: MomentHit }) {
           {formatTimecode(startFrames, fps)}–{formatTimecode(endFrames, fps)}
         </span>
       )}
+      {interaction.menu}
     </div>
   );
 }
 
 /** A "Spoken" transcript row: thumb + text + name·timecode, draggable as a
  *  trimmed range (upstream `spokenRow`). */
-function SpokenRow({ hit }: { hit: SpokenHit }) {
+function SpokenRow({
+  hit,
+  rovingTabIndex,
+}: {
+  hit: SpokenHit;
+  rovingTabIndex: number;
+}) {
   const t = useT();
   const item = useMediaItem(hit.mediaId);
   const fps = useProjectStore((s) => s.timeline.fps);
-  const setPreviewMedia = useEditorUiStore((s) => s.setPreviewMedia);
+  const interaction = useSearchResultInteraction(item);
   const thumbnailRef = useRef<HTMLDivElement | null>(null);
   if (!item) return null;
 
@@ -530,19 +1029,33 @@ function SpokenRow({ hit }: { hit: SpokenHit }) {
 
   return (
     <div
+      ref={interaction.tileRef}
       draggable
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
-      onClick={() => {
-        setPreviewMedia(item.id);
-        void preloadMedia(item.id);
-      }}
+      onClick={interaction.onClick}
+      onContextMenu={interaction.onContextMenu}
+      onKeyDown={interaction.onKeyDown}
+      onFocus={interaction.onFocus}
+      onBlur={interaction.onBlur}
       title={t("search.dragToTimeline")}
+      role="gridcell"
+      tabIndex={rovingTabIndex}
+      aria-selected={interaction.selected}
+      aria-haspopup="menu"
+      data-media-tile="true"
+      data-media-asset-id={item.id}
       style={{
         display: "flex",
         gap: "var(--space-sm)",
         cursor: "grab",
         alignItems: "flex-start",
+        borderRadius: "var(--radius-sm)",
+        outline:
+          interaction.selected || interaction.focused
+            ? "2px solid var(--accent-primary)"
+            : "none",
+        outlineOffset: 2,
       }}
     >
       <div style={{ width: 96, flex: "0 0 auto" }}>
@@ -579,14 +1092,21 @@ function SpokenRow({ hit }: { hit: SpokenHit }) {
           {item.name} · {formatTimecode(Math.round(hit.startSec * fps), fps)}
         </span>
       </div>
+      {interaction.menu}
     </div>
   );
 }
 
 /** A "Files" name-match card: thumb + name, draggable as the whole asset (the
  *  pre-existing behavior; upstream `fileCard`). */
-function FileCard({ item }: { item: MediaItem }) {
-  const setPreviewMedia = useEditorUiStore((s) => s.setPreviewMedia);
+function FileCard({
+  item,
+  rovingTabIndex,
+}: {
+  item: MediaItem;
+  rovingTabIndex: number;
+}) {
+  const interaction = useSearchResultInteraction(item);
   const thumb = item.missing ? null : assetUrl(item.thumbnail);
   const thumbnailRef = useRef<HTMLDivElement | null>(null);
 
@@ -604,16 +1124,35 @@ function FileCard({ item }: { item: MediaItem }) {
 
   return (
     <div
+      ref={interaction.tileRef}
       draggable
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
-      onClick={() => {
-        setPreviewMedia(item.id);
-        void preloadMedia(item.id);
-      }}
-      onDoubleClick={() => void addMediaToTimeline(item)}
+      onClick={interaction.onClick}
+      onContextMenu={interaction.onContextMenu}
+      onKeyDown={interaction.onKeyDown}
+      onFocus={interaction.onFocus}
+      onBlur={interaction.onBlur}
+      onDoubleClick={() => void addMediaToTimeline(item).catch(reportMediaPlacementFailure)}
       title={item.name}
-      style={{ display: "flex", flexDirection: "column", gap: 3, cursor: "grab" }}
+      role="gridcell"
+      tabIndex={rovingTabIndex}
+      aria-selected={interaction.selected}
+      aria-haspopup="menu"
+      data-media-tile="true"
+      data-media-asset-id={item.id}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 3,
+        cursor: "grab",
+        borderRadius: "var(--radius-sm)",
+        outline:
+          interaction.selected || interaction.focused
+            ? "2px solid var(--accent-primary)"
+            : "none",
+        outlineOffset: 2,
+      }}
     >
       <div
         ref={thumbnailRef}
@@ -644,6 +1183,7 @@ function FileCard({ item }: { item: MediaItem }) {
       >
         {item.name}
       </span>
+      {interaction.menu}
     </div>
   );
 }

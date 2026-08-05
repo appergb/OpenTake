@@ -228,6 +228,7 @@ export function ClipContextMenu({
     )?.timeline ?? rootTimeline;
   const selectedClipIds = useEditorUiStore((s) => s.selectedClipIds);
   const selectClips = useEditorUiStore((s) => s.selectClips);
+  const pushToast = useEditorUiStore((s) => s.pushToast);
   const setPendingSwapClipId = useEditorUiStore((s) => s.setPendingSwapClipId);
   const hasClipboardContent = useClipboardStore((s) => s.hasContent);
   const ref = useRef<HTMLDivElement>(null);
@@ -324,7 +325,14 @@ export function ClipContextMenu({
       selectedClipIds: () => [...useEditorUiStore.getState().selectedClipIds],
       onCopy: edit.copyClips,
       onPaste: edit.pasteClipsAtPlayhead,
-      onSplit: edit.splitAtPlayhead,
+      onSplit: async () => {
+        try {
+          await edit.splitAtPlayhead();
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          pushToast(t("timeline.splitFailed", { error: message }));
+        }
+      },
       onDelete: edit.deleteSelectedClips,
       onLink: edit.linkClips,
       onUnlink: edit.unlinkClips,

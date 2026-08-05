@@ -8,7 +8,7 @@
  * persisted state.
  */
 
-import { useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   Bot,
   Check,
@@ -16,6 +16,7 @@ import {
   Download,
   ExternalLink,
   FolderOpen,
+  HardDrive,
   Info,
   Palette,
   Plug,
@@ -47,10 +48,13 @@ import {
 } from "../../lib/api";
 import type { SecretStatus } from "../../lib/types";
 import { AccountPane } from "./AccountPane";
+import { StoragePane } from "./StoragePane";
 
 const settingsPanelStyle: CSSProperties = {
-  width: 960,
-  height: 620,
+  width: "100%",
+  height: "100%",
+  maxWidth: 960,
+  maxHeight: 620,
   background: "var(--bg-base)",
   borderRadius: "var(--radius-lg)",
   boxShadow: "var(--shadow-lg)",
@@ -58,7 +62,6 @@ const settingsPanelStyle: CSSProperties = {
   flexDirection: "column",
   overflow: "hidden",
   position: "relative",
-  animation: "scaleIn 0.2s var(--ease-out)",
 };
 
 const settingsSectionStyle: CSSProperties = {
@@ -81,24 +84,85 @@ const SETTINGS_PANES: Array<{ id: SettingsPaneId; icon: typeof SettingsIcon; lab
   { id: "mcp", icon: Plug, labelKey: "settings.section.mcp" },
   { id: "shortcuts", icon: Copy, labelKey: "settings.section.shortcuts" },
   { id: "account", icon: User, labelKey: "settings.section.account" },
+  { id: "storage", icon: HardDrive, labelKey: "settings.section.storage" },
   { id: "about", icon: Info, labelKey: "settings.section.about" },
 ];
 
 const settingsSidebarStyle: CSSProperties = {
   width: 150,
   flex: "0 0 auto",
+  minHeight: 0,
   padding: "var(--space-xs)",
   background: "rgba(0, 0, 0, 0.22)",
+  overflowY: "auto",
 };
+
+const SETTINGS_FOCUSABLE = [
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "[href]",
+  '[tabindex]:not([tabindex="-1"])',
+].join(",");
 
 export function SettingsView() {
   const t = useT();
   const setSettingsOpen = useEditorUiStore((s) => s.setSettingsOpen);
   const activePane = useEditorUiStore((s) => s.settingsPane);
   const setActivePane = useEditorUiStore((s) => s.setSettingsPane);
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const previousFocus = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+
+    dialog.focus({ preventScroll: true });
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setSettingsOpen(false);
+        return;
+      }
+      if (event.key !== "Tab") return;
+
+      const focusable = [...dialog.querySelectorAll<HTMLElement>(SETTINGS_FOCUSABLE)].filter(
+        (element) => element.tabIndex >= 0 && element.getAttribute("aria-hidden") !== "true",
+      );
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus({ preventScroll: true });
+        return;
+      }
+
+      const first = focusable[0]!;
+      const last = focusable[focusable.length - 1]!;
+      const active = document.activeElement;
+      if (event.shiftKey && (active === dialog || active === first || !dialog.contains(active))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      if (previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
+    };
+  }, [setSettingsOpen]);
 
   return (
     <div
+      role="presentation"
+      className="app-dialog-backdrop"
       style={{
         position: "fixed",
         top: 0,
@@ -111,16 +175,17 @@ export function SettingsView() {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
+        padding: "var(--space-xl)",
         zIndex: 1000,
       }}
     >
-      <style>{`
-        @keyframes scaleIn {
-          from { opacity: 0; transform: scale(0.96); }
-          to { opacity: 1; transform: scale(1); }
-        }
-      `}</style>
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-dialog-title"
+        tabIndex={-1}
+        className="app-dialog-surface"
         style={settingsPanelStyle}
       >
         <header
@@ -135,6 +200,7 @@ export function SettingsView() {
           }}
         >
           <span
+            id="settings-dialog-title"
             data-tauri-drag-region
             style={{ fontSize: "var(--fs-md-lg)", fontWeight: "var(--fw-semibold)", flex: 1 }}
           >
@@ -257,6 +323,8 @@ function renderActivePane(activePane: SettingsPaneId) {
       return <ShortcutsPane />;
     case "account":
       return <AccountPane />;
+    case "storage":
+      return <StoragePane />;
     case "about":
       return <AboutPane />;
   }
@@ -390,13 +458,24 @@ function GeneralPane() {
         label={t("settings.proxyPlayback")}
         description={t("settings.proxyPlaybackDesc")}
         control={
-          <input
-            type="checkbox"
-            role="switch"
-            aria-label={t("settings.proxyPlayback")}
-            checked={proxyPlaybackEnabled}
-            onChange={(event) => setProxyPlaybackEnabled(event.currentTarget.checked)}
-          />
+          <label
+            style={{
+              width: 24,
+              height: 24,
+              display: "inline-grid",
+              placeItems: "center",
+              cursor: "pointer",
+            }}
+          >
+            <input
+              type="checkbox"
+              role="switch"
+              aria-label={t("settings.proxyPlayback")}
+              checked={proxyPlaybackEnabled}
+              onChange={(event) => setProxyPlaybackEnabled(event.currentTarget.checked)}
+              style={{ width: 16, height: 16, margin: 0 }}
+            />
+          </label>
         }
       />
     </Section>
@@ -533,22 +612,31 @@ function AiPane() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [codexStatus, setCodexStatus] = useState<CodexAuthStatus | null>(null);
+  const codexRequestGeneration = useRef(0);
+  const codexActionInFlight = useRef(false);
   const isCodex = provider === "codex";
 
   // Reflect the keychain status for the active provider; reload on switch. The
   // plaintext key is never fetched — only `hasKey` and the masked form.
   useEffect(() => {
     let alive = true;
+    const requestGeneration = ++codexRequestGeneration.current;
+    codexActionInFlight.current = false;
+    setBusy(false);
     setDraft("");
     setError(null);
     if (provider === "codex") {
       setCodexStatus(null);
       void codexAuthStatus().then(
         (next) => {
-          if (alive) setCodexStatus(next);
+          if (alive && requestGeneration === codexRequestGeneration.current) {
+            setCodexStatus(next);
+          }
         },
         (reason) => {
-          if (alive) setError(t("settings.codexActionFailed", { error: errorMessage(reason) }));
+          if (alive && requestGeneration === codexRequestGeneration.current) {
+            setError(t("settings.codexActionFailed", { error: errorMessage(reason) }));
+          }
         },
       );
       return () => {
@@ -573,9 +661,13 @@ function AiPane() {
     if (!isCodex || !codexStatus?.loginInProgress) return;
     let alive = true;
     const timer = window.setInterval(() => {
+      if (codexActionInFlight.current) return;
+      const requestGeneration = ++codexRequestGeneration.current;
       void codexAuthStatus().then(
         (next) => {
-          if (alive) setCodexStatus(next);
+          if (alive && requestGeneration === codexRequestGeneration.current) {
+            setCodexStatus(next);
+          }
         },
         () => undefined,
       );
@@ -620,14 +712,24 @@ function AiPane() {
     action: () => Promise<CodexAuthStatus>,
   ) => {
     if (busy) return;
+    const requestGeneration = ++codexRequestGeneration.current;
+    codexActionInFlight.current = true;
     setBusy(true);
     setError(null);
     try {
-      setCodexStatus(await action());
+      const next = await action();
+      if (requestGeneration === codexRequestGeneration.current) {
+        setCodexStatus(next);
+      }
     } catch (reason) {
-      setError(t("settings.codexActionFailed", { error: errorMessage(reason) }));
+      if (requestGeneration === codexRequestGeneration.current) {
+        setError(t("settings.codexActionFailed", { error: errorMessage(reason) }));
+      }
     } finally {
-      setBusy(false);
+      if (requestGeneration === codexRequestGeneration.current) {
+        codexActionInFlight.current = false;
+        setBusy(false);
+      }
     }
   };
 
@@ -719,10 +821,10 @@ function AiPane() {
             ) : (
               <button
                 type="button"
-                disabled={busy || codexStatus?.available === false}
+                disabled={busy || codexStatus === null || codexStatus.available === false}
                 onClick={() => void runCodexAction(codexLoginStart)}
                 className="hover-area"
-                style={{ display: "inline-flex", alignItems: "center", gap: "var(--space-xs)", height: 28, padding: "0 var(--space-lg)", borderRadius: "var(--radius-sm)", ...settingsControlStyle, color: "var(--text-primary)", fontSize: "var(--fs-sm)", opacity: busy || codexStatus?.available === false ? 0.4 : 1 }}
+                style={{ display: "inline-flex", alignItems: "center", gap: "var(--space-xs)", height: 28, padding: "0 var(--space-lg)", borderRadius: "var(--radius-sm)", ...settingsControlStyle, color: "var(--text-primary)", fontSize: "var(--fs-sm)", opacity: busy || codexStatus === null || codexStatus.available === false ? 0.4 : 1 }}
               >
                 <Icon icon={ExternalLink} size={13} />
                 {t("settings.codexLogin")}
@@ -870,59 +972,13 @@ function Value({ children }: { children: React.ReactNode }) {
   );
 }
 
-/** Endpoint of the built-in MCP server. Fixed by the Rust backend
- *  (`opentake-agent::mcp::server::DEFAULT_ADDR` = 127.0.0.1:19789, mounted at
- *  `/mcp`), so we hardcode it rather than round-tripping to Tauri. */
-const MCP_SERVER_URL = "http://127.0.0.1:19789/mcp";
-
 /**
- * MCP Instructions pane. Surfaces the loopback MCP server URL and one-line
- * install commands for Cursor / Claude Code / Codex / Claude Desktop. The i18n
- * keys (`mcp.*`) already shipped in `dict.ts`; this wires them into the UI that
- * beta's settings rewrite had left unrendered.
+ * External MCP is fail-closed in this Beta until the app has an explicit,
+ * authenticated pairing flow. Official Codex sign-in uses a separate
+ * per-turn authenticated endpoint and remains available in the AI pane.
  */
 function McpPane() {
   const t = useT();
-  const [copiedKey, setCopiedKey] = useState<string | null>(null);
-
-  const copy = async (key: string, text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopiedKey(key);
-      setTimeout(() => setCopiedKey(null), 1500);
-    } catch {
-      // Clipboard may be unavailable (non-Tauri / denied permission); no-op.
-    }
-  };
-
-  const cursorConfig = JSON.stringify(
-    { mcpServers: { opentake: { type: "http", url: MCP_SERVER_URL } } },
-    null,
-    2,
-  );
-
-  const rows: Array<{ key: string; label: string; hint: string; code: string }> = [
-    { key: "url", label: t("mcp.serverUrl"), hint: t("mcp.serverUrlDesc"), code: MCP_SERVER_URL },
-    {
-      key: "claudeCode",
-      label: t("mcp.claudeCode"),
-      hint: t("mcp.claudeCodeCmd"),
-      code: `claude mcp add --transport http opentake ${MCP_SERVER_URL}`,
-    },
-    {
-      key: "codex",
-      label: t("mcp.codex"),
-      hint: t("mcp.codexCmd"),
-      code: `codex mcp add opentake --url ${MCP_SERVER_URL}`,
-    },
-    { key: "cursor", label: t("mcp.cursor"), hint: t("mcp.cursorManual"), code: cursorConfig },
-    {
-      key: "claudeDesktop",
-      label: t("mcp.claudeDesktop"),
-      hint: t("mcp.claudeDesktopManual"),
-      code: `npx mcp-remote ${MCP_SERVER_URL}`,
-    },
-  ];
 
   return (
     <Section title={t("settings.section.mcp")}>
@@ -932,56 +988,29 @@ function McpPane() {
       <div style={{ fontSize: "var(--fs-xs)", color: "var(--text-tertiary)", marginTop: -12 }}>
         {t("mcp.overview")}
       </div>
-      {rows.map((row) => (
-        <div key={row.key} style={{ display: "flex", flexDirection: "column", gap: "var(--space-xs)" }}>
-          <div style={{ fontSize: "var(--fs-sm-md)", color: "var(--text-primary)" }}>{row.label}</div>
-          <div style={{ fontSize: "var(--fs-xs)", color: "var(--text-tertiary)" }}>{row.hint}</div>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "flex-start",
-              gap: "var(--space-sm)",
-              ...settingsControlStyle,
-              borderRadius: "var(--radius-sm)",
-              padding: "var(--space-sm) var(--space-md)",
-            }}
-          >
-            <code
-              style={{
-                flex: 1,
-                minWidth: 0,
-                fontSize: "var(--fs-sm)",
-                color: "var(--text-secondary)",
-                whiteSpace: "pre-wrap",
-                wordBreak: "break-all",
-                fontFamily: "var(--font-mono, ui-monospace, monospace)",
-              }}
-            >
-              {row.code}
-            </code>
-            <button
-              type="button"
-              onClick={() => copy(row.key, row.code)}
-              className="hover-area"
-              style={{
-                flex: "0 0 auto",
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 4,
-                height: 24,
-                padding: "0 var(--space-sm)",
-                borderRadius: "var(--radius-xs-sm)",
-                color: "var(--text-secondary)",
-                fontSize: "var(--fs-xs)",
-                fontWeight: "var(--fw-medium)",
-              }}
-            >
-              <Icon icon={copiedKey === row.key ? Check : Copy} size={11} />
-              {copiedKey === row.key ? t("mcp.copied") : t("mcp.copy")}
-            </button>
+      <div
+        role="status"
+        aria-live="polite"
+        data-external-mcp-status="paused"
+        style={{
+          display: "flex",
+          alignItems: "flex-start",
+          gap: "var(--space-md)",
+          ...settingsControlStyle,
+          borderRadius: "var(--radius-sm)",
+          padding: "var(--space-md)",
+        }}
+      >
+        <Icon icon={Plug} size={16} />
+        <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-xs)" }}>
+          <div style={{ fontSize: "var(--fs-sm-md)", color: "var(--text-primary)", fontWeight: "var(--fw-medium)" }}>
+            {t("mcp.pausedTitle")}
+          </div>
+          <div style={{ fontSize: "var(--fs-xs)", color: "var(--text-tertiary)" }}>
+            {t("mcp.pausedDesc")}
           </div>
         </div>
-      ))}
+      </div>
       <div style={{ fontSize: "var(--fs-xs)", color: "var(--text-tertiary)" }}>{t("mcp.note")}</div>
     </Section>
   );

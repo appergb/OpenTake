@@ -37,8 +37,8 @@ const exactOwners: ExactOwner[] = [
     capability: "画布变换覆盖层",
     owner: "TransformOverlay",
     source: new URL("../preview/TransformOverlay.tsx", import.meta.url),
-    liveBoundary: "edit.setClipProperties",
-    visibleEvidence: new URL("../preview/TransformOverlay.test.tsx", import.meta.url),
+    liveBoundary: "edit.setTransformAtFrame",
+    visibleEvidence: new URL("../preview/TransformOverlay.interaction.test.tsx", import.meta.url),
   },
   {
     capability: "画布裁剪覆盖层",

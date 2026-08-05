@@ -1,8 +1,9 @@
 /**
- * Two-pane split with a draggable divider. The divider hit-area is widened by
- * panelGap/2 each side (SPEC §2.4 `effectiveRect`). `initial` is the first
- * pane's size in px; `mode` is the split axis. Sizes are clamped to [min, max]
- * for the first pane and a minimum for the second.
+ * Two-pane split with a draggable divider. The semantic separator has a 24px
+ * effective target centered on the visual seam without consuming layout. The
+ * container starts a resize only when that band is hit over non-interactive
+ * content, so controls that touch a seam remain clickable. `initial` is the
+ * first pane's size in px; `mode` is the split axis.
  */
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
@@ -17,7 +18,33 @@ interface SplitPaneProps {
   second: ReactNode;
 }
 
-const GAP = 5; // --panel-gap
+const SEPARATOR_HIT_TARGET = 24;
+const INTERACTIVE_SELECTOR = [
+  "button",
+  "a[href]",
+  "input",
+  "select",
+  "textarea",
+  "summary",
+  "canvas",
+  "video",
+  "[contenteditable='true']",
+  "[role='button']",
+  "[role='checkbox']",
+  "[role='combobox']",
+  "[role='gridcell']",
+  "[role='link']",
+  "[role='menuitem']",
+  "[role='option']",
+  "[role='radio']",
+  "[role='slider']",
+  "[role='spinbutton']",
+  "[role='switch']",
+  "[role='tab']",
+  "[role='textbox']",
+  "[draggable='true']",
+  "[data-split-pane-interactive]",
+].join(",");
 
 export function SplitPane({
   mode,
@@ -30,11 +57,13 @@ export function SplitPane({
   const t = useT();
   const isH = mode === "horizontal";
   const containerRef = useRef<HTMLDivElement>(null);
+  const separatorRef = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState(initial);
   const [totalSize, setTotalSize] = useState(initial + secondMin);
   const dragging = useRef(false);
   const captureRef = useRef<{ element: HTMLElement; pointerId: number } | null>(null);
   const [dragActive, setDragActive] = useState(false);
+  const [pointerNear, setPointerNear] = useState(false);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -62,29 +91,53 @@ export function SplitPane({
     [min, secondMin, totalSize],
   );
 
+  const isInEffectiveTarget = useCallback(
+    (clientX: number, clientY: number) => {
+      const container = containerRef.current;
+      if (!container) return false;
+      const rect = container.getBoundingClientRect();
+      const position = isH ? clientX - rect.left : clientY - rect.top;
+      return Math.abs(position - size) <= SEPARATOR_HIT_TARGET / 2;
+    },
+    [isH, size],
+  );
+
   const onPointerDown = useCallback(
     (e: React.PointerEvent) => {
+      if (!isInEffectiveTarget(e.clientX, e.clientY)) return;
+      const target = e.target instanceof Element ? e.target : null;
+      if (target?.closest(INTERACTIVE_SELECTOR)) return;
       e.preventDefault();
+      e.stopPropagation();
       dragging.current = true;
       setDragActive(true);
+      setPointerNear(true);
       const element = e.currentTarget as HTMLElement;
-      element.focus();
+      separatorRef.current?.focus();
       captureRef.current = { element, pointerId: e.pointerId };
       element.setPointerCapture(e.pointerId);
     },
-    [],
+    [isInEffectiveTarget],
   );
 
   const onPointerMove = useCallback(
     (e: React.PointerEvent) => {
-      if (!dragging.current || !containerRef.current) return;
+      if (!dragging.current) {
+        const target = e.target instanceof Element ? e.target : null;
+        setPointerNear(
+          !target?.closest(INTERACTIVE_SELECTOR) &&
+            isInEffectiveTarget(e.clientX, e.clientY),
+        );
+        return;
+      }
+      if (!containerRef.current) return;
       const rect = containerRef.current.getBoundingClientRect();
       const total = isH ? rect.width : rect.height;
       const pos = isH ? e.clientX - rect.left : e.clientY - rect.top;
       setTotalSize(total);
       setClampedSize(pos, total);
     },
-    [isH, setClampedSize],
+    [isH, isInEffectiveTarget, setClampedSize],
   );
 
   const endPointerDrag = useCallback((releaseCapture: boolean) => {
@@ -130,6 +183,15 @@ export function SplitPane({
         height: "100%",
         minWidth: 0,
         minHeight: 0,
+        cursor: pointerNear ? (isH ? "col-resize" : "row-resize") : undefined,
+      }}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={() => endPointerDrag(true)}
+      onLostPointerCapture={() => endPointerDrag(false)}
+      onPointerLeave={() => {
+        if (!dragging.current) setPointerNear(false);
       }}
     >
       <div
@@ -149,8 +211,10 @@ export function SplitPane({
           zIndex: 50,
         }}
       >
-        {/* widened hit-area centered on the seam */}
+        {/* Pointer events stay on the container so seam-adjacent controls win
+            hit testing; the 24px semantic rect remains focusable by keyboard. */}
         <div
+          ref={separatorRef}
           className="split-pane-separator"
           role="separator"
           aria-label={t("layout.resizePanels")}
@@ -160,19 +224,26 @@ export function SplitPane({
           aria-valuenow={Math.round(size)}
           aria-valuetext={t("layout.positionPixels", { value: Math.round(size) })}
           data-interaction-state={dragActive ? "dragging" : "enabled"}
+          data-pointer-near={pointerNear ? "true" : undefined}
           tabIndex={0}
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
-          onPointerCancel={() => endPointerDrag(true)}
-          onLostPointerCapture={() => endPointerDrag(false)}
           onKeyDown={onKeyDown}
           style={{
             position: "absolute",
+            pointerEvents: "none",
             cursor: isH ? "col-resize" : "row-resize",
             ...(isH
-              ? { top: 0, bottom: 0, left: -(GAP / 2), width: GAP }
-              : { left: 0, right: 0, top: -(GAP / 2), height: GAP }),
+              ? {
+                  top: 0,
+                  bottom: 0,
+                  left: -SEPARATOR_HIT_TARGET / 2,
+                  width: SEPARATOR_HIT_TARGET,
+                }
+              : {
+                  left: 0,
+                  right: 0,
+                  top: -SEPARATOR_HIT_TARGET / 2,
+                  height: SEPARATOR_HIT_TARGET,
+                }),
           }}
         />
       </div>

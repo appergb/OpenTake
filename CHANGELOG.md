@@ -2,6 +2,45 @@
 
 本文件记录 OpenTake 的重要改动。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/)。
 
+## [1.0.0-beta.2] — 2026-08-03
+
+### 新增（Added）
+
+- ChatGPT 的 AI 登录新增官方 Codex CLI 直接登录；登录、退出和状态完全交由官方 CLI 管理，
+  OpenTake 不读取、复制或保存 ChatGPT 凭据。
+- 素材放置、复制/移动到新轨和完整片段粘贴改为单一 Rust 事务，支持根/嵌套序列、链接音视频、
+  字幕组、转场、文本与 compound 字段的身份重映射和一次撤销。
+- 播放头多选/链接片段分割和画布 Transform 写入新增原子命令；整批预检后只产生一次版本推进和
+  一次撤销，动画 Transform 在当前帧写入关键帧。
+
+### 修复（Fixed）
+
+- 修复跨工程、另存为、序列切换和外部版本推进期间的迟到媒体/AI 结果、队列串扰与未处理
+  Promise；失败保持原状态并显示可见错误。
+- 修复极端帧值、trim、ripple、split、nested sequence 和 script 组装可能触发的整数溢出、
+  部分写入或 ID 消耗；Rust 与浏览器 fallback 现在均先完整预检再原子提交。
+- 保持 Home / Library / Editor mounted state 与滚动位置，补齐弹窗焦点圈、24px 有效命中区、
+  小窗口分栏和 reduced-motion 行为。
+- 修复预览逐帧在片段边界回跳、非零起点音量关键帧坐标、末端关键帧拖动、razor 边界拒绝、
+  片段外动画字段误写，以及 Inspector/字幕控件缺少上下文可访问名称。
+
+### 安全与可靠性（Security / Reliability）
+
+- 官方 Codex 每轮使用独立、工程绑定、带 256-bit Bearer 的临时 loopback MCP；切工程、取消、
+  deadline 和进程树清理均 fail closed。未认证的固定端口外部 MCP 在本 Beta 默认关闭。
+- 导入路径使用 retained capability、no-follow/reparse 检查、目录预算、可取消 ffprobe；远程 URL
+  拒绝内网/环回/保留地址、逐跳重解析并固定 DNS 结果，禁用代理绕过。
+- Agent 所有模型可见结果改为白名单 DTO；本机路径、签名 URL、provider request ID、prompt、
+  hash 与底层诊断不会进入 MCP 返回或工程聊天记录。
+
+### Beta 已知边界
+
+- macOS 包仍为本地 ad-hoc Beta，不是 Developer ID 签名/公证分发包。
+- Windows Job Object、reparse-point 与安装器运行测试由候选提交的 exact-SHA Windows CI 执行；
+  macOS 本机结果不能替代真实 Windows 证据。
+- Claude、Cursor 等外部 MCP 客户端连接等待后续带身份验证的显式配对流程；官方 Codex / ChatGPT
+  登录使用独立的逐轮认证通道，不受影响。
+
 ## [1.0.0-beta.1] — 2026-08-01
 
 OpenTake 的第一个可安装 Beta。核心闭环为：创建/打开工程 → 导入与管理素材 →
@@ -36,7 +75,9 @@ OpenTake 的第一个可安装 Beta。核心闭环为：创建/打开工程 → 
   平台发布门槛，不影响本次 Apple Silicon macOS 本地 Beta。
 - 任意 Motion Canvas TSX、透明动效、神经语义级任意人声分离等属于后续 Beta 范围。
 
-## [未发布] — 2026-06-23 第三轮（自动 PR 审核：全局素材库 + 文本工具 + 字幕/视频导出 + list_models）
+## 历史开发记录 — 2026-06-23 第三轮（已由 Beta 1/2 状态替代）
+
+> 本节及后续“未完成”表记录当时的开发现场，不代表 Beta 2 的当前阻断项。
 
 本轮为**自动 PR 审核流程**:逐 PR 专家审核 + 对抗验证 + 对照开发文档,审核通过且 CI 双绿的纯新增项合并,其余 @作者 rebase/修改。
 
@@ -66,7 +107,7 @@ OpenTake 的第一个可安装 Beta。核心闭环为：创建/打开工程 → 
 
 ---
 
-## [未发布] — 2026-06-23 第二轮（剪映式 UI + 时间线剪辑修复 + 导出）
+## 历史开发记录 — 2026-06-23 第二轮（已由 Beta 1/2 状态替代）
 
 合并自 PR #102（基于已合并的 #81）。多 Agent 协作：主控修 Bug + 编排 workflow 做功能。
 
@@ -97,7 +138,7 @@ web `tsc` 干净 + `vitest` 43；Rust `fmt`/`clippy` 干净 + `opentake-project`
 
 ---
 
-## 未完成 / 已知问题（已建 Issue 跟踪）
+## 当时未完成 / 已知问题（历史 Issue 快照）
 
 每个 Issue 含「现状位置 + 如何完成 + 上游/剪映参照」。
 

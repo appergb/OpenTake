@@ -34,7 +34,7 @@ docs/
 | 能力 | `opentake-render` | wgpu 合成器 + 文本栅格化（预览/导出共享 RenderPlan） | [总览](modules/opentake-render/OVERVIEW.md) · [目录](modules/opentake-render/INDEX.md) |
 | 能力 | `opentake-media` | FFmpeg 编解码 / 缩略图 / 波形 / 转写 / 语义搜索 | [总览](modules/opentake-media/OVERVIEW.md) · [目录](modules/opentake-media/INDEX.md) |
 | 能力 | `opentake-motion` | Lottie / web 动态图形 | [总览](modules/opentake-motion/OVERVIEW.md) · [目录](modules/opentake-motion/INDEX.md) |
-| 能力 | `opentake-agent` | MCP server(44 工具) + 内置 Agent + Context Signal | [总览](modules/opentake-agent/OVERVIEW.md) · [目录](modules/opentake-agent/INDEX.md) |
+| 能力 | `opentake-agent` | MCP server(当前 44 个可发布工具：38 基础 + 4 生成 + 2 动效，能力门控后按能力发布) + 内置 Agent + Context Signal | [总览](modules/opentake-agent/OVERVIEW.md) · [目录](modules/opentake-agent/INDEX.md) |
 | 能力 | `opentake-gen` | 生成式 AI 客户端(BYOK，无后端) | [总览](modules/opentake-gen/OVERVIEW.md) · [目录](modules/opentake-gen/INDEX.md) |
 | 装配 | `opentake-core` | 会话管理 / DI / 事件总线（命令路由层） | [总览](modules/opentake-core/OVERVIEW.md) · [目录](modules/opentake-core/INDEX.md) |
 | 装配 | `src-tauri` | Tauri 2 桌面壳 + Tauri 命令 | [总览](modules/src-tauri/OVERVIEW.md) · [目录](modules/src-tauri/INDEX.md) |
@@ -63,4 +63,5 @@ docs/
 | [CHANGELOG.md](../CHANGELOG.md) | 变更历史 |
 | [CONTRIBUTING.md](../CONTRIBUTING.md) | 贡献指南 |
 | [Specs Index](specs/INDEX.md) | 已批准/历史规格目录 |
-| [Superpowers Recovery](superpowers/specs/2026-07-08-opentake-recovery-integration-design.md) | 本轮恢复集成设计与计划入口 |
+| [Beta 发布与验证](releases/1.0.0-beta.2.md) · [功能验证记录](audit/2026-08-02/beta-functional-verification.md) | ★ 当前 Beta 2 范围、发布门槛与逐项执行证据 |
+| [Superpowers Recovery](superpowers/specs/2026-07-08-opentake-recovery-integration-design.md) | 历史恢复集成设计与计划入口（Beta 2 已收口） |

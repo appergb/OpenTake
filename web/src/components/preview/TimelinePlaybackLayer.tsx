@@ -47,8 +47,10 @@ export function TimelinePlayback({
   const visuals = activeVisualClips(timeline, frame);
   const audios = activeAudioClips(timeline, frame);
 
-  const urlFor = (mediaRef: string): string | null =>
-    assetUrl(items.find((m) => m.id === mediaRef)?.path);
+  const urlFor = (mediaRef: string): string | null => {
+    const item = items.find((candidate) => candidate.id === mediaRef);
+    return item?.missing ? null : assetUrl(item?.path);
+  };
 
   // Stable ref callback per playback key (cached) so a same-source split clip's
   // element isn't detached/re-attached at the edit boundary. Only a changing

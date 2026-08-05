@@ -1,5 +1,12 @@
 # 交接 · 未完成工作规划(2026-07-04)
 
+> **2026-08-03 状态裁决：**本文件是历史交接记录，不再是当前状态真值。Beta 1
+> 已发布（`v1.0.0-beta.1`，起点 `c73c192`），Beta 2 收尾进行中；当前范围与发布
+> 门槛见 `docs/releases/1.0.0-beta.2.md`，逐项执行证据见
+> `docs/audit/2026-08-02/beta-functional-verification.md`，代码现状以 `agent/advanced-ai-workflows`
+> 分支工作树为准（前端 129 文件 / 1072 测试全绿）。本文档仅保留 2026-07-04 快照与
+> Wave 1A 增补作为历史/设计参考，不再作为操作手册。
+
 ## 2026-07-10/11 Wave 1A reviewed addendum
 
 This dated addendum supersedes the **current-status** playback and real-device

@@ -42,6 +42,7 @@ import { ExportDialog } from "./ExportDialog";
 
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
+let returnFocus: HTMLButtonElement | null = null;
 
 function buttonWithLabel(label: string): HTMLButtonElement {
   const button = container?.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
@@ -95,16 +96,57 @@ beforeEach(() => {
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
+  returnFocus = document.createElement("button");
+  returnFocus.textContent = "Open export";
+  document.body.append(returnFocus);
+  returnFocus.focus();
 });
 
 afterEach(async () => {
   if (root) await act(async () => root?.unmount());
   container?.remove();
+  returnFocus?.remove();
   root = null;
   container = null;
+  returnFocus = null;
 });
 
 describe("ExportDialog control acceptance", () => {
+  it("moves focus into the modal, contains both Tab directions, and restores its trigger", async () => {
+    await renderDialog();
+    const dialog = container?.querySelector<HTMLElement>('[role="dialog"]')!;
+    const controls = [...dialog.querySelectorAll<HTMLButtonElement>("button")].filter(
+      (button) => !button.disabled && button.tabIndex >= 0,
+    );
+    const first = controls[0]!;
+    const last = controls.at(-1)!;
+    expect(dialog.contains(document.activeElement)).toBe(true);
+
+    await act(async () => {
+      last.focus();
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }),
+      );
+    });
+    expect(document.activeElement).toBe(first);
+
+    await act(async () => {
+      first.focus();
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Tab",
+          shiftKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(document.activeElement).toBe(last);
+
+    await act(async () => buttonWithLabel("export.close").click());
+    expect(document.activeElement).toBe(returnFocus);
+  });
+
   it("control-580ab884755388a9 dismiss Export by clicking the backdrop", async () => {
     await renderDialog();
     const dialog = container?.querySelector<HTMLElement>('[role="dialog"]');

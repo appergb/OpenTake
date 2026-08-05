@@ -20,13 +20,20 @@ pub struct DocSnapshot {
     pub manifest: MediaManifest,
 }
 
+#[derive(Clone, Debug)]
+struct HistoryEntry {
+    snapshot: DocSnapshot,
+    action_name: String,
+    transaction_version: u64,
+}
+
 /// The editable document + undo/redo history + version.
 #[derive(Clone, Debug)]
 pub struct EditorState {
     pub timeline: Timeline,
     pub manifest: MediaManifest,
-    undo_stack: Vec<DocSnapshot>,
-    redo_stack: Vec<DocSnapshot>,
+    undo_stack: Vec<HistoryEntry>,
+    redo_stack: Vec<HistoryEntry>,
     version: u64,
 }
 
@@ -64,6 +71,23 @@ impl EditorState {
         !self.undo_stack.is_empty()
     }
 
+    /// Label of the most recent undoable transaction. Agent-only undo uses this
+    /// together with an exact project revision so it never consumes a user's
+    /// intervening edit, including one that happens to have the same label.
+    pub fn undo_action_name(&self) -> Option<&str> {
+        self.undo_stack
+            .last()
+            .map(|entry| entry.action_name.as_str())
+    }
+
+    /// Document version created by the transaction currently at the top of the
+    /// undo stack. This stable identity disambiguates equal action labels.
+    pub fn undo_transaction_version(&self) -> Option<u64> {
+        self.undo_stack
+            .last()
+            .map(|entry| entry.transaction_version)
+    }
+
     /// Whether a redo is available.
     pub fn can_redo(&self) -> bool {
         !self.redo_stack.is_empty()
@@ -91,8 +115,12 @@ impl EditorState {
     /// Commit a structural change: push `before` onto the undo stack, clear the
     /// redo stack (a new edit invalidates redo), bump the version. Called only
     /// when `before != after`.
-    pub(crate) fn commit(&mut self, before: DocSnapshot) {
-        self.undo_stack.push(before);
+    pub(crate) fn commit(&mut self, before: DocSnapshot, action_name: impl Into<String>) {
+        self.undo_stack.push(HistoryEntry {
+            snapshot: before,
+            action_name: action_name.into(),
+            transaction_version: self.version.saturating_add(1),
+        });
         self.redo_stack.clear();
         self.version += 1;
     }
@@ -110,13 +138,17 @@ impl EditorState {
     /// version.
     pub(crate) fn undo(&mut self) -> bool {
         let current = self.snapshot();
-        while let Some(mut prev) = self.undo_stack.pop() {
-            preserve_voice_models(&mut prev, &current);
-            if prev == current {
+        while let Some(mut entry) = self.undo_stack.pop() {
+            preserve_voice_models(&mut entry.snapshot, &current);
+            if entry.snapshot == current {
                 continue;
             }
-            self.restore(prev);
-            self.redo_stack.push(current);
+            self.restore(entry.snapshot);
+            self.redo_stack.push(HistoryEntry {
+                snapshot: current,
+                action_name: entry.action_name,
+                transaction_version: entry.transaction_version,
+            });
             self.version += 1;
             return true;
         }
@@ -128,13 +160,17 @@ impl EditorState {
     /// version.
     pub(crate) fn redo(&mut self) -> bool {
         let current = self.snapshot();
-        while let Some(mut next) = self.redo_stack.pop() {
-            preserve_voice_models(&mut next, &current);
-            if next == current {
+        while let Some(mut entry) = self.redo_stack.pop() {
+            preserve_voice_models(&mut entry.snapshot, &current);
+            if entry.snapshot == current {
                 continue;
             }
-            self.restore(next);
-            self.undo_stack.push(current);
+            self.restore(entry.snapshot);
+            self.undo_stack.push(HistoryEntry {
+                snapshot: current,
+                action_name: entry.action_name,
+                transaction_version: self.version.saturating_add(1),
+            });
             self.version += 1;
             return true;
         }
@@ -197,7 +233,7 @@ mod tests {
         let before = s.snapshot();
         // mutate then commit
         s.timeline.tracks[0].clips[0].start_frame = 99;
-        s.commit(before);
+        s.commit(before, "Move Clip");
         assert_eq!(s.version(), 1);
         assert!(s.can_undo());
         assert!(!s.can_redo());
@@ -230,7 +266,7 @@ mod tests {
             voice_name: "Narrator".into(),
             revoked: false,
         });
-        state.commit(before_enroll);
+        state.commit(before_enroll, "Enroll Voice");
         state.timeline.voice_models[0].revoked = true;
         state.commit_irreversible();
 
@@ -248,7 +284,7 @@ mod tests {
         let mut state = state_with_clip();
         let before_edit = state.snapshot();
         state.timeline.tracks[0].clips[0].start_frame = 12;
-        state.commit(before_edit);
+        state.commit(before_edit, "Move Clip");
         state.timeline.voice_models.push(VoiceModelRecord {
             id: "voice-1".into(),
             provider: "elevenlabs".into(),
@@ -274,13 +310,13 @@ mod tests {
         let mut s = state_with_clip();
         let b1 = s.snapshot();
         s.timeline.tracks[0].clips[0].start_frame = 10;
-        s.commit(b1);
+        s.commit(b1, "Move Clip");
         assert!(s.undo());
         assert!(s.can_redo());
         // a fresh commit invalidates redo
         let b2 = s.snapshot();
         s.timeline.tracks[0].clips[0].start_frame = 20;
-        s.commit(b2);
+        s.commit(b2, "Move Clip");
         assert!(!s.can_redo());
     }
 

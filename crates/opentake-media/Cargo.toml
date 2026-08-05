@@ -26,6 +26,7 @@ tracing = "0.1"
 unicode-normalization = "0.1"
 tempfile = "3"
 rustfft = "6"
+tokio = { version = "1", features = ["io-util", "macros", "process", "rt", "sync", "time"] }
 
 # Media IO. We drive the system ffmpeg/ffprobe over the CLI rather than linking
 # libav*: the local toolchain is ffmpeg 8.1 (libavcodec 62), which the C-binding
@@ -60,8 +61,12 @@ libc = "0.2"
 windows-sys = { version = "0.61", features = [
     "Wdk_Storage_FileSystem",
     "Win32_Foundation",
+    "Win32_Security",
     "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
     "Win32_System_IO",
+    "Win32_System_Threading",
 ] }
 
 [features]

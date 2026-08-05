@@ -14,18 +14,24 @@ import { ProjectSettingsMismatchDialog } from "./ProjectSettingsMismatchDialog";
 
 let root: Root;
 let container: HTMLDivElement;
+let returnFocus: HTMLButtonElement;
 
 beforeEach(() => {
   useEditorUiStore.getState().resetProjectRuntimeState();
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
+  returnFocus = document.createElement("button");
+  returnFocus.textContent = "Import media";
+  document.body.append(returnFocus);
+  returnFocus.focus();
 });
 
 afterEach(async () => {
   useEditorUiStore.getState().resolveProjectSettingsPrompt(false);
   await act(async () => root.unmount());
   container.remove();
+  returnFocus.remove();
 });
 
 async function openPrompt(): Promise<{ choice: Promise<boolean> }> {
@@ -52,12 +58,39 @@ it("renders an accessible mismatch and resolves match or keep choices", async ()
     (button) => button.textContent === "projectSettingsMismatch.match",
   );
   expect(document.activeElement).toBe(match);
+  const keep = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+    (button) => button.textContent === "projectSettingsMismatch.keep",
+  );
+  expect(match?.style.minHeight).toBe("28px");
+  expect(keep?.style.minHeight).toBe("28px");
+  await act(async () => {
+    match?.focus();
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }),
+    );
+  });
+  expect(document.activeElement).toBe(keep);
+  await act(async () => {
+    keep?.focus();
+    window.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Tab",
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  });
+  expect(document.activeElement).toBe(match);
   await act(async () => match?.click());
   await expect(matchChoice).resolves.toBe(true);
   expect(container.querySelector('[role="dialog"]')).toBeNull();
+  expect(document.activeElement).toBe(returnFocus);
 
+  returnFocus.focus();
   const { choice: keepChoice } = await openPrompt();
   await act(async () => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
   await expect(keepChoice).resolves.toBe(false);
   expect(container.querySelector('[role="dialog"]')).toBeNull();
+  expect(document.activeElement).toBe(returnFocus);
 });

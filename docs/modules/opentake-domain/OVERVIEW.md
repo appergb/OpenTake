@@ -81,7 +81,7 @@ opentake-core / src-tauri / web
 - `TextLayout::natural_size` 是**近似实现**：用固定字符步进估算宽度，复刻了 canvas-scale 基准（`canvas_height/1080`）、阴影 padding（`12*2`）与 `+4` 余量的**公式形状**，但**宽度不与上游 CoreText 像素一致**，必须由 render 层文本引擎（cosmic-text）重算以求像素对齐（见 `MODULE-PORT-MAP.md` 文字度量 needs-replacement）。
 - Context Signal 的**检测/填充**逻辑不在本 crate（Phase B–D，落在 agent 层）；domain 只定义形状 + serde。
 - `Effect` 保持稳定的字符串键序列化契约，但编辑和渲染边界会按闭合注册表校验。首批 `grayscale` / `sepia` / `invert` 均接受可选 `amount`（0–1，默认 1），并在预览与导出共用的 WGSL 顺序链中真实执行；未知名称或参数会明确报错。
-- 调色/抠像/蒙版的 domain 值与参考数学已就位，但**着色器接入、command（`SetColorGrade`/`SetChromaKey`/`SetMask`/`SetEffects`）与 UI** 属 ROADMAP Phase 3/A 层后续。
+- 调色/抠像/蒙版的 domain 值与参考数学已就位，且**着色器接入、command（`SetColorGrade`/`SetChromaKey`/`SetMask`/`SetEffects`）与 UI 已随 Beta 1 落地**（预览与导出逐字节一致）；多边形蒙版超过 4 个或 16 点会在命令边界被拒绝。
 
 ## 适用的移植铁律
 

@@ -130,7 +130,7 @@ function SoundRow({
             display: "inline-flex",
             alignItems: "center",
             gap: 4,
-            height: 22,
+            height: 24,
             padding: "0 8px",
             borderRadius: "var(--radius-sm)",
             border: "none",

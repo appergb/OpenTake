@@ -98,17 +98,23 @@ Knowledge source: [ClipSkills](https://github.com/appergb/ClipSkills) — 12-vol
 
 📖 [Context Signal Design](docs/modules/opentake-agent/AGENT-CONTEXT-SIGNAL.md)
 
-### 🔌 MCP Server — 31 Tools
+### 🔌 Agent Tool Surface
 
-Full MCP server at `127.0.0.1:19789`. Agents control the timeline directly:
+OpenTake exposes 45 compatible Agent tools, filtered at runtime so unavailable media,
+generation, or provider capabilities fail closed instead of being advertised:
 
-| Group | Count | Key Tools |
-|:--|:--:|:--|
-| Read / Introspect | 7 | `get_timeline`, `get_media`, `inspect_media`, `search_media` |
-| Timeline Edit | 11 | `add_clips`, `split_clip`, `set_clip_properties`, `set_keyframes`, `ripple_delete_ranges` |
-| Generate / Import | 5 | `generate_video`, `generate_image`, `generate_audio`, `import_media` |
-| Library | 7 | `create_folder`, `move_to_folder`, `rename_media` |
-| Resources | 2 | `models/video`, `models/image` |
+| Group | Key Tools |
+|:--|:--|
+| Read / Introspect | `get_timeline`, `get_media`, `inspect_media`, `search_media` |
+| Timeline Edit | `add_clips`, `split_clip`, `set_clip_properties`, `set_keyframes`, `ripple_delete_ranges` |
+| Generate / Import | `generate_video`, `generate_image`, `generate_audio`, `import_media` |
+| Library | `create_folder`, `move_to_folder`, `rename_media` |
+| Resources | `models/video`, `models/image` |
+
+Official Codex / ChatGPT turns use a fresh loopback endpoint with a random port,
+256-bit Bearer token, and current-project identity for that turn only. The legacy
+fixed unauthenticated `127.0.0.1:19789` endpoint is disabled in Beta 2; external
+Claude/Cursor pairing will return only with an authenticated opt-in flow.
 
 Built-in Agent chat panel shares tool definitions and system prompt with MCP. It can use direct
 OpenAI/Anthropic BYOK or the user-installed official Codex CLI's ChatGPT sign-in; OpenTake never
@@ -211,7 +217,7 @@ plugins/
 │  opentake-core      Session / DI / Events             │
 │                                                      │
 │         ▲                          │                 │
-│   MCP Server (:19789)      invokes ▼                 │
+│   Authenticated per-turn MCP invokes ▼               │
 │   In-app Agent Chat   FFmpeg + wgpu + cpal + whisper │
 └──────────────────────────────────────────────────────┘
 ```
@@ -297,9 +303,9 @@ cd ..
 cargo tauri dev
 ```
 
-> **Current Status**: `1.0.0-beta.1` candidate. The local editing, preview,
+> **Current Status**: `1.0.0-beta.2` candidate. The local editing, preview,
 > persistence, export, Agent, Motion Canvas, and reviewed AI workflow verticals
-> are implemented. See the [Beta release notes](docs/releases/1.0.0-beta.1.md)
+> are implemented. See the [Beta release notes](docs/releases/1.0.0-beta.2.md)
 > for validation scope and platform/provider limits.
 
 The sibling directory `palmier-pro-upstream/` contains upstream Swift sources for reference during porting.
@@ -312,9 +318,7 @@ The sibling directory `palmier-pro-upstream/` contains upstream Swift sources fo
 |:--|:--|:--|
 | `0.1.0-dev` | 2026-06 | Phase 0+1: Cargo workspace + Domain models + Edit ops + Tauri scaffold |
 | `1.0.0-beta.1` | 2026-08-01 | First installable Beta: end-to-end local editor, Agent, Motion and reviewed AI workflows |
-| *(planned)* `0.2.0` | TBD | Phase 2: Persistence + Media import + Thumbnails + Waveform |
-| *(planned)* `0.3.0` | TBD | Phase 3: Timeline UI + Preview + MCP Server |
-| *(planned)* `0.4.0` | TBD | Phase 4: GPU Compositor (wgpu) + Text rasterization |
+| `1.0.0-beta.2` | 2026-08-03 | Hardened Beta: official Codex login, atomic timeline gestures, secure MCP and interaction polish |
 | *(planned)* `1.0.0` | TBD | Phase 10: Full release — CapCut parity + deep Agent integration |
 
 📖 [Full Roadmap](docs/architecture/ROADMAP.md)

@@ -10,6 +10,7 @@ import { useMediaStore } from "../../store/mediaStore";
 import { useProjectStore } from "../../store/projectStore";
 import * as edit from "../../store/editActions";
 import * as api from "../../lib/api";
+import { t } from "../../i18n";
 import { Inspector } from "./Inspector";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
@@ -78,6 +79,36 @@ afterEach(() => {
 });
 
 describe("Inspector completion surface", () => {
+  it("keeps compact transform, crop, and HSL glyphs inside 24px hit frames", async () => {
+    const clip = visualClip();
+    useProjectStore.setState({ timeline: timelineWith(clip) });
+    useEditorUiStore.setState({
+      selectedClipIds: new Set([clip.id]),
+      inspectorTab: "video",
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Inspector />));
+
+    for (const title of [
+      t("inspector.action.resetTransform"),
+      t("inspector.action.cropEditStart"),
+    ]) {
+      const button = container.querySelector<HTMLButtonElement>(`button[title="${title}"]`);
+      expect(button?.style.width, title).toBe("24px");
+      expect(button?.style.height, title).toBe("24px");
+    }
+
+    await act(async () => useEditorUiStore.setState({ inspectorTab: "color" }));
+    const hslReset = container.querySelector<HTMLButtonElement>(
+      `button[title="${t("inspector.action.resetHslSecondary")}"]`,
+    );
+    expect(hslReset?.style.width).toBe("24px");
+    expect(hslReset?.style.height).toBe("24px");
+    await act(async () => root.unmount());
+  });
+
   it("renders a generated media source without entering a selector update loop", async () => {
     useProjectStore.setState({
       timeline: {
@@ -144,6 +175,119 @@ describe("Inspector completion surface", () => {
     await act(async () => tabs[1]?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     expect(container.querySelector('[data-testid="ai-edit-tab"]')).not.toBeNull();
 
+    await act(async () => root.unmount());
+  });
+
+  it("keeps every compact keyframe navigation glyph inside a 24px target", async () => {
+    const clip = visualClip();
+    useProjectStore.setState({ timeline: timelineWith(clip), projectPath: "/tmp/demo.opentake" });
+    useEditorUiStore.setState({
+      selectedClipIds: new Set([clip.id]),
+      inspectorTab: "video",
+      activeFrame: 10,
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Inspector />));
+
+    const controls = [...container.querySelectorAll<HTMLButtonElement>(
+      'button[aria-label="跳到上一个关键帧"], button[aria-label="跳到下一个关键帧"], button[aria-label="在播放头处添加关键帧"]',
+    )];
+    expect(controls.length).toBeGreaterThan(0);
+    expect(controls.every((button) => button.style.width === "24px")).toBe(true);
+    expect(controls.every((button) => button.style.height === "24px")).toBe(true);
+
+    await act(async () => root.unmount());
+  });
+
+  it("labels numeric controls and disables animated writes outside the clip", async () => {
+    const crop = { left: 0, top: 0, right: 0, bottom: 0 };
+    const clip = visualClip({
+      startFrame: 100,
+      durationFrames: 20,
+      positionTrack: { keyframes: [{ frame: 0, value: { a: 0, b: 0 }, interpolationOut: "linear" }] },
+      scaleTrack: { keyframes: [{ frame: 0, value: { a: 1, b: 1 }, interpolationOut: "linear" }] },
+      rotationTrack: { keyframes: [{ frame: 0, value: 0, interpolationOut: "linear" }] },
+      opacityTrack: { keyframes: [{ frame: 0, value: 1, interpolationOut: "linear" }] },
+      cropTrack: { keyframes: [{ frame: 0, value: crop, interpolationOut: "linear" }] },
+      volumeTrack: { keyframes: [{ frame: 0, value: 1, interpolationOut: "linear" }] },
+    });
+    useProjectStore.setState({ timeline: timelineWith(clip) });
+    useMediaStore.setState({
+      items: [{ id: clip.mediaRef, name: "clip.mp4", type: "video", duration: 1, hasAudio: true }],
+      folders: [],
+      importing: false,
+      error: null,
+    });
+    useEditorUiStore.setState({
+      selectedClipIds: new Set([clip.id]),
+      inspectorTab: "video",
+      activeFrame: 99,
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Inspector />));
+
+    for (const label of ["缩放", "旋转", "不透明度", "X 位置", "Y 位置", "左侧", "顶部", "右侧", "底部"]) {
+      const control = container.querySelector<HTMLElement>(`[role="spinbutton"][aria-label="${label}"]`);
+      expect(control, label).not.toBeNull();
+      expect(control?.getAttribute("aria-disabled"), label).toBe("true");
+      expect(control?.tabIndex, label).toBe(-1);
+    }
+    expect(container.querySelector('[aria-label="Value"]')).toBeNull();
+    expect(container.querySelector<HTMLSelectElement>('[aria-label="选择裁剪比例"]')?.disabled).toBe(true);
+
+    await act(async () => useEditorUiStore.setState({ inspectorTab: "audio" }));
+    const volume = container.querySelector<HTMLElement>('[role="spinbutton"][aria-label="音量"]');
+    expect(volume?.getAttribute("aria-disabled")).toBe("true");
+
+    await act(async () => root.unmount());
+  });
+
+  it("normalizes fractional playback frames for animated inspector edits", async () => {
+    const clip = visualClip({
+      startFrame: 100,
+      durationFrames: 20,
+      opacityTrack: {
+        keyframes: [{ frame: 10, value: 0.5, interpolationOut: "linear" }],
+      },
+    });
+    useProjectStore.setState({ timeline: timelineWith(clip) });
+    useEditorUiStore.setState({
+      selectedClipIds: new Set([clip.id]),
+      inspectorTab: "video",
+      activeFrame: 110.4,
+    });
+    const upsert = vi.spyOn(edit, "upsertKeyframe").mockResolvedValue();
+    const remove = vi.spyOn(edit, "removeKeyframe").mockResolvedValue();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<Inspector />));
+
+    const opacity = container.querySelector<HTMLElement>(
+      '[role="spinbutton"][aria-label="不透明度"]',
+    )!;
+    await act(async () => {
+      opacity.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    });
+    expect(upsert).toHaveBeenCalledWith(
+      clip.id,
+      "opacity",
+      110,
+      expect.objectContaining({ kind: "scalar" }),
+    );
+
+    const removeAtPlayhead = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="移除播放头处的关键帧"]',
+    )!;
+    await act(async () => removeAtPlayhead.click());
+    expect(remove).toHaveBeenCalledWith(clip.id, "opacity", 110);
+
+    upsert.mockRestore();
+    remove.mockRestore();
     await act(async () => root.unmount());
   });
 

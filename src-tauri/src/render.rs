@@ -1251,13 +1251,19 @@ fn freeze_capture_png_path(
     captures_dir.join(format!("freeze_{safe_id}_{at_frame}_{}.png", uuid_like()))
 }
 
+#[derive(Debug)]
+pub struct PreparedFreezeFrame {
+    pub path: PathBuf,
+    pub media: opentake_domain::MediaManifestEntry,
+}
+
 pub fn capture_freeze_frame(
     core: &AppCore,
     render: &RenderState,
     media: &crate::media::MediaState,
     clip_id: &str,
     at_frame: i32,
-) -> Result<String, String> {
+) -> Result<PreparedFreezeFrame, String> {
     capture_freeze_frame_impl(core, || {
         capture_freeze_frame_workflow(core, render, media.engine(), clip_id, at_frame)
     })
@@ -1265,8 +1271,8 @@ pub fn capture_freeze_frame(
 
 fn capture_freeze_frame_impl(
     core: &AppCore,
-    workflow: impl FnOnce() -> Result<String, String>,
-) -> Result<String, String> {
+    workflow: impl FnOnce() -> Result<PreparedFreezeFrame, String>,
+) -> Result<PreparedFreezeFrame, String> {
     core.ensure_project_mutable().map_err(|e| e.to_string())?;
     workflow()
 }
@@ -1277,7 +1283,7 @@ fn capture_freeze_frame_workflow(
     engine: &opentake_media::MediaEngine,
     clip_id: &str,
     at_frame: i32,
-) -> Result<String, String> {
+) -> Result<PreparedFreezeFrame, String> {
     let snapshot = core.runtime_snapshot();
     let timeline = snapshot.timeline;
     let manifest = snapshot.media;
@@ -1298,10 +1304,18 @@ fn capture_freeze_frame_workflow(
     let png_path = freeze_capture_png_path(&captures_dir, clip_id, at_frame);
     let bytes = encode_png_bytes(&composite)?;
     std::fs::write(&png_path, &bytes).map_err(|e| format!("write freeze png: {e}"))?;
-    let entry = crate::media::import_one(core, engine, &png_path)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| "freeze frame import failed".to_string())?;
-    Ok(entry.id)
+    let probe = crate::media::probe_media(engine, &png_path);
+    let name = png_path
+        .file_stem()
+        .map(|value| value.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Freeze frame".to_string());
+    let media = core
+        .prepare_media_file_entry(&png_path, name, &probe)
+        .map_err(|error| error.to_string())?;
+    Ok(PreparedFreezeFrame {
+        path: png_path,
+        media,
+    })
 }
 
 fn build_freeze_capture_snapshot(

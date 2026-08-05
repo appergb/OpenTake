@@ -3,10 +3,12 @@ import type { RuntimeTimelineSnapshot, Timeline } from "../lib/types";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
     resolve = done;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 const srv = vi.hoisted(() => {
@@ -38,6 +40,9 @@ const srv = vi.hoisted(() => {
     order: [] as string[],
     onProjectOpened: null as null | ((path: string, projectEpoch: number, version: number) => Promise<void> | void),
     onTimelineChanged: null as null | ((projectEpoch: number, version: number) => Promise<void> | void),
+    onProjectSaved: null as null | ((path: string, projectEpoch: number) => void),
+    savedListenerResponses: [] as Array<Promise<() => void>>,
+    savedListenerCalls: 0,
     invalidate: vi.fn(async () => {
       srv.order.push("invalidate");
       const queued = srv.playbackResponses.shift();
@@ -76,6 +81,7 @@ vi.mock("../lib/api", () => ({
     handler: (projectEpoch: number, version: number) => Promise<void> | void,
   ) => {
     srv.timelineListenerCalls += 1;
+    srv.order.push("timeline-listen");
     srv.onTimelineChanged = handler;
     return (await srv.timelineListenerResponses.shift()) ?? (() => {});
   },
@@ -83,9 +89,16 @@ vi.mock("../lib/api", () => ({
     handler: (path: string, projectEpoch: number, version: number) => Promise<void> | void,
   ) => {
     srv.openedListenerCalls += 1;
+    srv.order.push("opened-listen");
     srv.onProjectOpened = handler;
     srv.projectOpenedHandlers.push(handler);
     return (await srv.openedListenerResponses.shift()) ?? (() => {});
+  },
+  onProjectSaved: async (handler: (path: string, projectEpoch: number) => void) => {
+    srv.savedListenerCalls += 1;
+    srv.order.push("saved-listen");
+    srv.onProjectSaved = handler;
+    return (await srv.savedListenerResponses.shift()) ?? (() => {});
   },
 }));
 
@@ -125,16 +138,20 @@ beforeEach(() => {
   srv.redoResponses.length = 0;
   srv.timelineListenerResponses.length = 0;
   srv.openedListenerResponses.length = 0;
+  srv.savedListenerResponses.length = 0;
   srv.undoCalls = 0;
   srv.redoCalls = 0;
   srv.timelineListenerCalls = 0;
   srv.openedListenerCalls = 0;
+  srv.savedListenerCalls = 0;
   srv.mediaError = null;
   srv.projectOpenedHandlers.length = 0;
   srv.onTimelineChanged = null;
+  srv.onProjectSaved = null;
   srv.playbackResponses.length = 0;
   srv.resetMediaTransient.mockClear();
   srv.refreshMedia.mockClear();
+  useEditorUiStore.setState({ toast: null });
 });
 
 afterEach(() => {
@@ -142,11 +159,89 @@ afterEach(() => {
   srv.order.length = 0;
   srv.invalidate.mockClear();
   srv.onProjectOpened = null;
+  srv.onProjectSaved = null;
   srv.projectPath = null;
   srv.compatibilityReadOnly = false;
 });
 
 describe("project event sync", () => {
+  it("refreshes again after both listeners register so an event in the setup gap is not lost", async () => {
+    srv.snapshotResponses.push(
+      Promise.resolve(snapshot(1, 0, "/tmp/old.opentake")),
+      Promise.resolve(snapshot(2, 0, "/tmp/new.opentake")),
+    );
+
+    await startSync();
+
+    expect(srv.order.slice(0, 5)).toEqual([
+      "refresh",
+      "timeline-listen",
+      "opened-listen",
+      "saved-listen",
+      "refresh",
+    ]);
+    expect(useProjectStore.getState().projectEpoch).toBe(2);
+    expect(useProjectStore.getState().projectPath).toBe("/tmp/new.opentake");
+  });
+
+  it("does not let the startup gap refresh supersede an observed timeline floor", async () => {
+    const openedRegistration = deferred<() => void>();
+    const eventSnapshot = deferred<RuntimeTimelineSnapshot>();
+    const startupGapSnapshot = deferred<RuntimeTimelineSnapshot>();
+    srv.openedListenerResponses.push(openedRegistration.promise);
+    srv.snapshotResponses.push(
+      Promise.resolve(snapshot(1, 0, null)),
+      eventSnapshot.promise,
+      startupGapSnapshot.promise,
+      Promise.resolve(snapshot(1, 2, null)),
+    );
+
+    const startup = startSync();
+    await vi.waitFor(() => expect(srv.openedListenerCalls).toBe(1));
+
+    const event = srv.onTimelineChanged?.(1, 2);
+    await vi.waitFor(() => {
+      expect(srv.order.filter((entry) => entry === "refresh")).toHaveLength(2);
+    });
+    openedRegistration.resolve(() => {});
+
+    eventSnapshot.resolve(snapshot(1, 2, null));
+    await event;
+    const versionWhenEventSettled = useProjectStore.getState().timelineVersion;
+
+    await vi.waitFor(() => {
+      expect(srv.order.filter((entry) => entry === "refresh")).toHaveLength(3);
+    });
+    startupGapSnapshot.resolve(snapshot(1, 1, null));
+    await startup;
+
+    expect(versionWhenEventSettled).toBe(2);
+    expect(useProjectStore.getState().timelineVersion).toBe(2);
+  });
+
+  it("can retry startup after the initial mirror refresh rejects", async () => {
+    srv.snapshotResponses.push(Promise.reject(new Error("initial timeline unavailable")));
+
+    await expect(startSync()).rejects.toThrow("initial timeline unavailable");
+    await startSync();
+
+    expect(srv.timelineListenerCalls).toBe(1);
+    expect(srv.openedListenerCalls).toBe(1);
+  });
+
+  it("cleans a partial listener and can retry when the second registration rejects", async () => {
+    const timelineUnsubscribe = vi.fn();
+    srv.timelineListenerResponses.push(Promise.resolve(timelineUnsubscribe));
+    srv.openedListenerResponses.push(Promise.reject(new Error("project listener unavailable")));
+
+    await expect(startSync()).rejects.toThrow("project listener unavailable");
+    expect(timelineUnsubscribe).toHaveBeenCalledOnce();
+
+    await startSync();
+    expect(srv.timelineListenerCalls).toBe(2);
+    expect(srv.openedListenerCalls).toBe(2);
+  });
+
   it("invalidates project scoped playback on externally initiated project_opened", async () => {
     await startSync();
     srv.order.length = 0;
@@ -177,6 +272,137 @@ describe("project event sync", () => {
     expect(ui.layoutPreset).toBe("media");
     expect(srv.resetMediaTransient).toHaveBeenCalledTimes(1);
     expect(srv.refreshMedia).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries a rejected timeline event refresh and converges without leaking a rejection", async () => {
+    await startSync();
+    srv.snapshotResponses.push(
+      Promise.reject(new Error("transient timeline read failed")),
+      Promise.resolve(snapshot(1, 1, null)),
+    );
+
+    await srv.onTimelineChanged?.(1, 1);
+
+    expect(useProjectStore.getState().timelineVersion).toBe(1);
+    expect(useEditorUiStore.getState().toast).toBeNull();
+  });
+
+  it("reports a timeline event refresh that still fails after its bounded retry", async () => {
+    await startSync();
+    srv.snapshotResponses.push(
+      Promise.reject(new Error("timeline read unavailable")),
+      Promise.reject(new Error("timeline read still unavailable")),
+    );
+
+    await srv.onTimelineChanged?.(1, 1);
+
+    expect(useEditorUiStore.getState().toast?.message).toContain(
+      "timeline read still unavailable",
+    );
+    expect(useProjectStore.getState().timelineVersion).toBe(0);
+  });
+
+  it("waits for a force-refresh owner that reaches the observed event floor", async () => {
+    await startSync();
+    const eventSnapshot = deferred<RuntimeTimelineSnapshot>();
+    const forceSnapshot = deferred<RuntimeTimelineSnapshot>();
+    srv.snapshotResponses.push(eventSnapshot.promise, forceSnapshot.promise);
+
+    const event = srv.onTimelineChanged?.(1, 1);
+    await vi.waitFor(() => {
+      expect(srv.order.filter((entry) => entry === "refresh")).toHaveLength(3);
+    });
+    const forced = forceRefresh();
+    await vi.waitFor(() => {
+      expect(srv.order.filter((entry) => entry === "refresh")).toHaveLength(4);
+    });
+
+    eventSnapshot.resolve(snapshot(1, 1, null));
+    forceSnapshot.resolve(snapshot(1, 1, null));
+    await Promise.all([event, forced]);
+
+    expect(useProjectStore.getState().timelineVersion).toBe(1);
+    expect(useEditorUiStore.getState().toast).toBeNull();
+  });
+
+  it("chases the observed event floor when the force-refresh owner stops below it", async () => {
+    await startSync();
+    const eventSnapshot = deferred<RuntimeTimelineSnapshot>();
+    const forceSnapshot = deferred<RuntimeTimelineSnapshot>();
+    srv.snapshotResponses.push(
+      eventSnapshot.promise,
+      forceSnapshot.promise,
+      Promise.resolve(snapshot(1, 2, null)),
+    );
+
+    const event = srv.onTimelineChanged?.(1, 2);
+    await vi.waitFor(() => {
+      expect(srv.order.filter((entry) => entry === "refresh")).toHaveLength(3);
+    });
+    const forced = forceRefresh();
+    await vi.waitFor(() => {
+      expect(srv.order.filter((entry) => entry === "refresh")).toHaveLength(4);
+    });
+
+    eventSnapshot.resolve(snapshot(1, 2, null));
+    forceSnapshot.resolve(snapshot(1, 1, null));
+    await Promise.all([event, forced]);
+
+    expect(srv.order.filter((entry) => entry === "refresh")).toHaveLength(5);
+    expect(useProjectStore.getState().timelineVersion).toBe(2);
+    expect(useEditorUiStore.getState().toast).toBeNull();
+  });
+
+  it("propagates the final event-owner failure to a superseded force refresh", async () => {
+    await startSync();
+    const forcedSnapshot = deferred<RuntimeTimelineSnapshot>();
+    const firstEventAttempt = deferred<RuntimeTimelineSnapshot>();
+    const finalEventAttempt = deferred<RuntimeTimelineSnapshot>();
+    srv.snapshotResponses.push(
+      forcedSnapshot.promise,
+      firstEventAttempt.promise,
+      finalEventAttempt.promise,
+    );
+
+    const forced = forceRefresh();
+    const forcedOutcome = forced.then(
+      () => ({ error: null as Error | null }),
+      (error: unknown) => ({
+        error: error instanceof Error ? error : new Error(String(error)),
+      }),
+    );
+    await vi.waitFor(() => {
+      expect(srv.order.filter((entry) => entry === "refresh")).toHaveLength(3);
+    });
+
+    const event = srv.onTimelineChanged?.(1, 1);
+    await vi.waitFor(() => {
+      expect(srv.order.filter((entry) => entry === "refresh")).toHaveLength(4);
+    });
+    forcedSnapshot.resolve(snapshot(1, 0, null));
+
+    firstEventAttempt.reject(new Error("first event refresh failed"));
+    await vi.waitFor(() => {
+      expect(srv.order.filter((entry) => entry === "refresh")).toHaveLength(5);
+    });
+    finalEventAttempt.reject(new Error("final event refresh failed"));
+
+    const [, outcome] = await Promise.all([event, forcedOutcome]);
+    expect(outcome.error?.message).toBe("final event refresh failed");
+    expect(useProjectStore.getState().timelineVersion).toBe(0);
+  });
+
+  it("continues project-open convergence when stopping old playback rejects", async () => {
+    await startSync();
+    srv.playbackResponses.push(Promise.reject(new Error("playback stop unavailable")));
+    srv.snapshotResponses.push(
+      Promise.resolve(snapshot(2, 0, "/tmp/new-project.opentake")),
+    );
+
+    await srv.onProjectOpened?.("/tmp/new-project.opentake", 2, 0);
+
+    expect(useProjectStore.getState().projectEpoch).toBe(2);
+    expect(useEditorUiStore.getState().toast?.message).toContain("playback stop unavailable");
   });
 
   it("resets media at snapshot commit before later new-project errors can appear", async () => {
@@ -219,9 +445,8 @@ describe("project event sync", () => {
     await vi.waitFor(() => expect(srv.invalidate).toHaveBeenCalled());
     const winningRefresh = forceRefresh();
     openedSnapshot.resolve(snapshot(2, 0, "/tmp/new-project.opentake"));
-    await opened;
     winningSnapshot.resolve(snapshot(2, 0, "/tmp/new-project.opentake"));
-    await winningRefresh;
+    await Promise.all([opened, winningRefresh]);
 
     expect(useProjectStore.getState().projectPath).toBe("/tmp/new-project.opentake");
     expect(srv.resetMediaTransient).toHaveBeenCalledTimes(1);
@@ -256,10 +481,10 @@ describe("project event sync", () => {
     await srv.onTimelineChanged?.(1, 2);
 
     expect(useProjectStore.getState().timelineVersion).toBe(2);
-    expect(srv.order.filter((entry) => entry === "refresh")).toHaveLength(3);
+    expect(srv.order.filter((entry) => entry === "refresh")).toHaveLength(4);
   });
 
-  it("converges to N+2 when N+1 and N+2 event refreshes complete out of order", async () => {
+  it("coalesces N+1 and N+2 events into the highest observed floor", async () => {
     await startSync();
     const n1 = deferred<RuntimeTimelineSnapshot>();
     const n2 = deferred<RuntimeTimelineSnapshot>();
@@ -267,11 +492,40 @@ describe("project event sync", () => {
 
     const first = srv.onTimelineChanged?.(1, 1);
     const second = srv.onTimelineChanged?.(1, 2);
-    n2.resolve(snapshot(1, 2, null));
-    await second;
     n1.resolve(snapshot(1, 1, null));
-    await first;
+    await vi.waitFor(() => {
+      expect(srv.order.filter((entry) => entry === "refresh")).toHaveLength(4);
+    });
+    n2.resolve(snapshot(1, 2, null));
+    await Promise.all([first, second]);
 
+    expect(useProjectStore.getState().timelineVersion).toBe(2);
+  });
+
+  it("hands a reused convergence caller the newer floor after the owner exhausts retries", async () => {
+    await startSync();
+    const firstAttempt = deferred<RuntimeTimelineSnapshot>();
+    const secondAttempt = deferred<RuntimeTimelineSnapshot>();
+    srv.snapshotResponses.push(
+      firstAttempt.promise,
+      secondAttempt.promise,
+      Promise.resolve(snapshot(1, 2, null)),
+    );
+
+    const n1 = srv.onTimelineChanged?.(1, 1);
+    await vi.waitFor(() => {
+      expect(srv.order.filter((entry) => entry === "refresh")).toHaveLength(3);
+    });
+    const n2 = srv.onTimelineChanged?.(1, 2);
+
+    firstAttempt.reject(new Error("N+1 first attempt failed"));
+    await vi.waitFor(() => {
+      expect(srv.order.filter((entry) => entry === "refresh")).toHaveLength(4);
+    });
+    secondAttempt.reject(new Error("N+1 final attempt failed"));
+
+    await Promise.all([n1, n2]);
+    expect(srv.order.filter((entry) => entry === "refresh")).toHaveLength(5);
     expect(useProjectStore.getState().timelineVersion).toBe(2);
   });
 
@@ -524,5 +778,54 @@ describe("project event sync", () => {
     expect(state.compatibilityReadOnly).toBe(true);
     expect(state.canUndo).toBe(false);
     expect(state.canRedo).toBe(false);
+  });
+});
+
+describe("project_saved event sync", () => {
+  it("registers the save listener during startup", async () => {
+    srv.snapshotResponses.push(Promise.resolve(snapshot(1, 0, "/tmp/p.opentake")));
+    await startSync();
+    expect(srv.savedListenerCalls).toBe(1);
+    expect(srv.order).toContain("saved-listen");
+  });
+
+  it("records the save completion for the current session without touching the dirty-state version", async () => {
+    srv.snapshotResponses.push(Promise.resolve(snapshot(3, 2, "/tmp/p.opentake")));
+    await startSync();
+    // Simulate an un-saved document: nothing persisted yet, dirty version floor 0.
+    useProjectStore.setState({ lastSavedAt: null, lastSavedVersion: 0 });
+
+    srv.onProjectSaved?.("/tmp/p.opentake", 3);
+
+    const state = useProjectStore.getState();
+    expect(state.lastSavedAt).not.toBeNull();
+    expect(state.lastSavedAt).toBeGreaterThan(0);
+    // The event carries no document version, so the dirty-state floor is
+    // deliberately left untouched.
+    expect(state.lastSavedVersion).toBe(0);
+  });
+
+  it("ignores saves of a different session", async () => {
+    srv.snapshotResponses.push(Promise.resolve(snapshot(3, 2, "/tmp/p.opentake")));
+    await startSync();
+    useProjectStore.setState({ lastSavedAt: null, lastSavedVersion: 0 });
+
+    srv.onProjectSaved?.("/tmp/other.opentake", 4);
+
+    expect(useProjectStore.getState().lastSavedAt).toBeNull();
+    expect(useProjectStore.getState().lastSavedVersion).toBe(0);
+  });
+
+  it("does not record saves after sync has been stopped", async () => {
+    srv.snapshotResponses.push(Promise.resolve(snapshot(3, 2, "/tmp/p.opentake")));
+    await startSync();
+    useProjectStore.setState({ lastSavedAt: null, lastSavedVersion: 0 });
+    const handler = srv.onProjectSaved;
+    expect(handler).not.toBeNull();
+
+    stopSync();
+    handler?.("/tmp/p.opentake", 3);
+
+    expect(useProjectStore.getState().lastSavedAt).toBeNull();
   });
 });

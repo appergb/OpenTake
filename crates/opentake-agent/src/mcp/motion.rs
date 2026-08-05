@@ -44,6 +44,57 @@ pub struct MotionCommit {
     pub output: MotionOutputMetadata,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelSafeMotionCommit<'a> {
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    clip_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    asset_id: Option<&'a str>,
+    duration_frames: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_seconds: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fps: Option<f64>,
+    dimensions: ModelSafeMotionDimensions,
+}
+
+#[derive(Debug, Serialize)]
+struct ModelSafeMotionDimensions {
+    width: u32,
+    height: u32,
+}
+
+/// Rebuild the renderer-owned commit as the minimal model-facing contract.
+/// Provenance hashes, renderer versions, filesystem names, and action text stay
+/// behind the host boundary.
+pub(crate) fn model_safe_commit(commit: &MotionCommit) -> Value {
+    let finite_positive = |value: f64| value.is_finite().then_some(value).filter(|v| *v >= 0.0);
+    let dto = ModelSafeMotionCommit {
+        status: "completed",
+        clip_id: safe_motion_id(&commit.clip_id),
+        asset_id: safe_motion_id(&commit.asset_id),
+        duration_frames: commit.output.duration_frames.max(0),
+        duration_seconds: finite_positive(commit.output.duration_seconds),
+        fps: finite_positive(commit.output.fps),
+        dimensions: ModelSafeMotionDimensions {
+            width: commit.output.width,
+            height: commit.output.height,
+        },
+    };
+    serde_json::to_value(dto).unwrap_or_else(|_| serde_json::json!({"status": "completed"}))
+}
+
+fn safe_motion_id(value: &str) -> Option<&str> {
+    (!value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')))
+    .then_some(value)
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MotionOutputMetadata {

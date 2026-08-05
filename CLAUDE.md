@@ -1,8 +1,11 @@
-# OpenTake — 工作交接 / 状态文档（给压缩上下文后的自己）
+# OpenTake — 历史工作交接 / 状态快照
 
-> 本文件是 OpenTake 开发的**权威状态 + 操作手册**。每次上下文压缩后先读它,再读 **`docs/architecture/HANDOFF-2026-07.md`(★ 当前权威 TODO / 交接文档:issue 盘点 + 未完成清单 + 每项怎么写)**。旧的 `PORT-1TO1-GAP.md` 已过时,仅作历史参考。
+> **2026-08-03 状态裁决：**本文件保留早期开发过程，不再是当前状态真值。Beta 2
+> 的当前范围与发布门槛见 `docs/releases/1.0.0-beta.2.md`，执行证据见
+> `docs/audit/2026-08-02/beta-functional-verification.md`。`HANDOFF-2026-07.md` 和
+> `PORT-1TO1-GAP.md` 同样仅作历史/设计参考。
 
-## ✅ 2026-07-04 状态快照
+## 历史：2026-07-04 状态快照
 
 - **播放引擎收官**:#170(流式引擎全链路)已合并;**PR #189(Rust 引擎默认开 + 运行时回退安全网)本次提交**。唯一欠账 = 真机视觉验收(清单 `docs/architecture/PLAYBACK-ENGINE.md`)。
 - **#171–#188 已把"引擎建成没接 UI"主缺口清完**:whisper 转写/字幕、SigLIP2 搜索、.opentake 打包、导入白名单、save-as bug、Inspector 关键帧、画布 overlay/zoom、时间线 I/O 范围/nudge、H.265/ProRes 导出、agent MediaBridge。
@@ -60,7 +63,7 @@
 - **真机测试循环**:`./web/node_modules/.bin/tauri build` → `cp -R target/release/bundle/macos/OpenTake.app /Applications/` → `open -a OpenTake` → computer-use(已授权 `com.opentake.app`,tier full)。dev 裸二进制识别不到,必须装到 /Applications。
 - 同一工作树勿并行两个写同批文件的 workflow;workflow 可能撞 Cloudflare 522 让"写/审"步骤失败、审核被跳过 → 本人接手验证+自审+盯 CI。
 
-## 4. 🟥 下一步(我认领的"第一个大开发":时间线)
+## 历史：当时的下一步（已被 Beta 1/2 收口裁决替代）
 **先做 #47 + #48(时间线合成预览/播放 + 片段编辑收尾)——这是用户点名的"时间线的工作还没做"。**
 - **#47 时间线合成预览 + 播放**:src-tauri 新增 `composite_frame(frame)->RGBA/PNG`(RenderPlan.frame + opentake-media 实现 FrameProvider + 已就绪的 Compositor.render_to_rgba)→ 前端 Preview 在 Timeline 标签暂停/seek 时贴 `<canvas>`(替换 1920×1080 占位,现在时间线预览是黑的不播放);再做播放引擎(连续解码+cpal 音频+A/V 同步)。
 - **#48 片段编辑收尾**:验证/修原生里时间线**片段点击选中**(`TimelineContainer` onPointerDown→hitTestClip→selectClips 已接,但实测 Delete 无效,疑选中没生效)→ Delete 删除、Cmd+K/剃刀分割可用;**片段右键菜单**(Copy/Swap Media/Save as Media/AI Edit);Inspector 三段式;Toolbar `[`/`]`/`T` 接线。
@@ -82,8 +85,10 @@
 - **#39 提取音频星标 · #40 设置多分页+主页 1:1 · #34 motion dispatch · #27–30 进阶 B/C/D/E · #22–25 #12 follow-up · #35 bundle id 改名**。
 - 冲突注意:我(#47/#48)动 opentake-render/opentake-media(decode/FrameProvider)/src-tauri(composite_frame、autosave)/web Preview+timeline;#36 动 agent+src-tauri(server 段);#37/#49 动 opentake-media(library/folders)+web media。**src-tauri/lib.rs、opentake-media 是多方交汇点,合并按 issue 顺序、各自小段、勤 rebase。**
 
-## 6. MCP 配置(#36 落地后)
-Streamable-HTTP `http://127.0.0.1:19789/mcp`(loopback+Origin 校验)。`claude mcp add --transport http opentake http://127.0.0.1:19789/mcp`;Cursor/Codex/Claude Desktop 同址。当前发布 38 个真实路径工具，返回附 context_signal。
+## 6. 历史 MCP 配置（Beta 2 已替代）
+旧设计使用未认证的固定 `http://127.0.0.1:19789/mcp`。Beta 2 不启动该产品入口：
+官方 Codex / ChatGPT 每轮创建随机端口、256-bit Bearer、工程绑定的临时回环 MCP，
+取消、deadline、切工程或轮次结束后关闭。Claude/Cursor 外部连接等待后续带认证的显式配对流程。
 
-## 7. 压缩后立即执行
+## 7. 历史执行说明（不再作为当前操作手册）
 1. 读本文件 + `docs/architecture/PORT-1TO1-GAP.md`。2. `git -C OpenTake pull`(main)。3. 盘点 `gh issue list`,挑最高价值且可完整交付的:**首选 🔴 #53 播放引擎**(大,需专门会话),或 #48 片段编辑收尾、#49/#37 库与文件夹、剩余 MCP 工具 stub。4. 每项走 分支→写→自审→`cargo fmt`+clippy+test→真机/确定性验证→`gh run watch` 双绿→`--admin` 合并。5. 新依赖先读 `~/.cargo/registry/src` 真实源码核实 API(cosmic-text/rmcp 都这么做的),别照猜测写。

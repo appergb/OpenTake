@@ -90,6 +90,7 @@ export function TextTab({ clip, t }: { clip: Clip; t: TFunction }) {
       <div>
         <SectionLabel label={t("inspector.section.text")} />
         <textarea
+          aria-label={t("inspector.section.text")}
           value={value}
           placeholder={t("inspector.textPlaceholder")}
           onChange={(e) => setValue(e.target.value)}
@@ -142,6 +143,7 @@ export function TextTab({ clip, t }: { clip: Clip; t: TFunction }) {
 
         <Row label={t("inspector.field.fontSize")}>
           <ScrubbableNumberField
+            ariaLabel={t("inspector.field.fontSize")}
             value={style.fontSize}
             min={4}
             max={512}
@@ -231,7 +233,7 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   return (
     <div
       style={{
-        minHeight: 22,
+        minHeight: 24,
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
@@ -311,7 +313,7 @@ function AlignButton({
         alignItems: "center",
         justifyContent: "center",
         width: 24,
-        height: 22,
+        height: 24,
         color: active ? "var(--text-primary)" : "var(--text-tertiary)",
         background: active ? "var(--bg-raised)" : "transparent",
         border: `var(--bw-thin) solid ${active ? "var(--accent-primary)" : "var(--border-primary)"}`,

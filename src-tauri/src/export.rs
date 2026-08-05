@@ -57,7 +57,7 @@ use opentake_media::encode::ClipAudio;
 use opentake_media::encode::{mix, MIX_SAMPLE_RATE};
 use opentake_media::{
     decode_frame_at, extract_pcm, extract_pcm_cancellable_with_progress, interpolate_frame_pair,
-    ExportPreset, ExportResolution as EncodeResolution, FrameInterpolationFallback,
+    probe, ExportPreset, ExportResolution as EncodeResolution, FrameInterpolationFallback,
     FrameInterpolationMode, FrameRequest, MediaCancelToken, PcmBuffer, PcmFormat,
     PcmProgressCallback, PcmSpec, RgbaFrame, VideoCodec, VideoEncoder,
 };
@@ -1265,6 +1265,21 @@ pub(crate) fn write_timeline_audio_wav_for_manifest_with_control(
     if let Some(report) = &on_progress {
         report(AUDIO_WAV_END, AUDIO_PROGRESS_TOTAL);
     }
+    // Post-write verification (same contract as the video path above): probe the
+    // finished WAV back through its retained handle and fail unless it reads as
+    // mono s16 PCM at the expected length. The reserved-output drop guard
+    // removes the partial file on error.
+    let probe = opentake_media::probe::probe_file(file)
+        .map_err(|error| format!("wav output validation failed: {error}"))?;
+    validate_export_probe(
+        &probe,
+        &ExportProbeExpectations {
+            video_codec: None,
+            audio_codec: Some(ProbeAudioCodec::PcmS16Le),
+            expected_duration_secs: written_samples as f64 / MIX_SAMPLE_RATE as f64,
+            duration_tolerance_secs: 0.05,
+        },
+    )?;
     Ok(Some(written_samples))
 }
 
@@ -1410,6 +1425,10 @@ pub(crate) fn run_export_with_control(
     if !text_rasterizer.has_fonts() {
         eprintln!("[render] no system fonts discovered; text clips will render blank");
     }
+    // Fail closed: a text-bearing export with no font faces would complete
+    // "successfully" with invisible text. Reject it before the encoder starts;
+    // the preview path (render.rs) deliberately stays lenient.
+    ensure_text_export_fonts(!plan.text_plans.is_empty(), &text_rasterizer)?;
 
     let mut encoder = match options.output_file.take() {
         Some(output) => VideoEncoder::new_with_file(
@@ -1593,6 +1612,37 @@ pub(crate) fn run_export_with_control(
         }
         return Err(CANCELLED_SENTINEL.to_string());
     }
+    // Post-encode verification (mirrors motion.rs's post-encode probe): the
+    // ffmpeg child may exit 0 while the output is truncated or corrupt, so a
+    // clean exit alone is not proof of a usable file. Probe the produced file
+    // and fail (removing the partial output, consistent with the cancel/error
+    // cleanup path above) unless the streams, codec, and duration match the
+    // request. A zero-frame export is documented as valid and is skipped.
+    if range_total > 0 {
+        let fps = plan.fps.max(1) as f64;
+        let expectations = ExportProbeExpectations {
+            video_codec: Some(match preset.codec {
+                VideoCodec::H264 => ProbeVideoCodec::H264,
+                VideoCodec::H265 => ProbeVideoCodec::H265,
+                VideoCodec::ProRes422 | VideoCodec::ProRes4444 => ProbeVideoCodec::ProRes,
+            }),
+            audio_codec: has_audio.then_some(match preset.codec {
+                VideoCodec::ProRes422 | VideoCodec::ProRes4444 => ProbeAudioCodec::PcmS16Le,
+                _ => ProbeAudioCodec::Aac,
+            }),
+            expected_duration_secs: range_total as f64 / fps,
+            duration_tolerance_secs: 1.5 / fps,
+        };
+        let probe_result = probe(&out_path)
+            .map_err(|error| format!("output validation failed: {error}"))
+            .and_then(|probe| validate_export_probe(&probe, &expectations));
+        if let Err(error) = probe_result {
+            if !reserved_output {
+                let _ = std::fs::remove_file(&out_path);
+            }
+            return Err(error);
+        }
+    }
     if let Some(emit) = &on_progress {
         emit(completion_progress(defer_completion), AUDIO_PROGRESS_TOTAL);
     }
@@ -1613,6 +1663,137 @@ fn completion_progress(defer_completion: bool) -> i32 {
     } else {
         AUDIO_PROGRESS_TOTAL
     }
+}
+
+// MARK: - Post-encode output validation
+
+/// Expected video codec family of a finished export, as reported by ffprobe's
+/// `codec_name`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProbeVideoCodec {
+    H264,
+    H265,
+    ProRes,
+}
+
+impl ProbeVideoCodec {
+    /// ffprobe `codec_name` values this family accepts. `prores_ks` is the
+    /// encoder token; the demuxed name is `prores`, so both are accepted.
+    fn accepts(&self, codec_name: &str) -> bool {
+        match self {
+            ProbeVideoCodec::H264 => codec_name == "h264",
+            ProbeVideoCodec::H265 => matches!(codec_name, "hevc" | "h265"),
+            ProbeVideoCodec::ProRes => matches!(codec_name, "prores" | "prores_ks"),
+        }
+    }
+}
+
+/// Expected audio codec family of a finished export, as reported by ffprobe's
+/// `codec_name`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProbeAudioCodec {
+    Aac,
+    PcmS16Le,
+}
+
+impl ProbeAudioCodec {
+    fn accepts(&self, codec_name: &str) -> bool {
+        match self {
+            ProbeAudioCodec::Aac => codec_name == "aac",
+            ProbeAudioCodec::PcmS16Le => codec_name == "pcm_s16le",
+        }
+    }
+}
+
+/// Expected stream/codec/duration contract for a completed media encode,
+/// checked by [`validate_export_probe`] before the export is reported as
+/// success. Text-only exports (SRT/VTT/XMEML/EDL/OTIO) are not media encodes
+/// and never reach this check.
+#[derive(Clone, Debug, PartialEq)]
+struct ExportProbeExpectations {
+    /// Expected video codec family of the primary video stream. `None` for
+    /// audio-only exports (WAV).
+    video_codec: Option<ProbeVideoCodec>,
+    /// Expected audio codec family. `None` when the export carries no audio.
+    audio_codec: Option<ProbeAudioCodec>,
+    /// Expected container duration in seconds (`frames / fps`).
+    expected_duration_secs: f64,
+    /// Allowed duration drift in seconds (a couple of frame periods).
+    duration_tolerance_secs: f64,
+}
+
+/// Verify a finished media encode against its request: the expected streams
+/// exist, their codecs match the requested encoder (or family), and the
+/// container duration is within tolerance of frames/fps. Mirrors the motion
+/// path's post-encode probe (`motion.rs` `render_and_encode`); unlike a
+/// non-zero-exit check alone, this also catches an ffmpeg child that exits 0
+/// while leaving a truncated or corrupt output.
+fn validate_export_probe(
+    probe: &opentake_media::MediaProbe,
+    expectations: &ExportProbeExpectations,
+) -> Result<(), String> {
+    if let Some(expected_video) = expectations.video_codec {
+        if !probe.has_video {
+            return Err("output validation failed: no video stream in exported file".to_string());
+        }
+        match probe.video_codec.as_deref() {
+            Some(codec_name) if expected_video.accepts(codec_name) => {}
+            Some(codec_name) => {
+                return Err(format!(
+                    "output validation failed: video codec '{codec_name}' does not match the \
+                     requested encoder (expected h264/hevc/prores)"
+                ));
+            }
+            None => {
+                return Err("output validation failed: video stream reports no codec".to_string());
+            }
+        }
+    }
+    if let Some(expected_audio) = expectations.audio_codec {
+        if !probe.has_audio {
+            return Err("output validation failed: no audio stream in exported file".to_string());
+        }
+        match probe.audio_codec.as_deref() {
+            Some(codec_name) if expected_audio.accepts(codec_name) => {}
+            Some(codec_name) => {
+                return Err(format!(
+                    "output validation failed: audio codec '{codec_name}' does not match the \
+                     requested encoder (expected aac/pcm_s16le)"
+                ));
+            }
+            None => {
+                return Err("output validation failed: audio stream reports no codec".to_string());
+            }
+        }
+    }
+    let drift = (probe.duration_secs - expectations.expected_duration_secs).abs();
+    if drift > expectations.duration_tolerance_secs {
+        return Err(format!(
+            "output validation failed: exported duration {}s does not match the expected {}s \
+             (off by {drift:.3}s)",
+            probe.duration_secs, expectations.expected_duration_secs
+        ));
+    }
+    Ok(())
+}
+
+/// Fail-closed guard for text-bearing exports: an export whose plan contains
+/// text clips must not report success when the rasterizer has no font faces —
+/// the composited text would be invisible (background/border only, as
+/// `CosmicTextRasterizer` documents). The preview path stays lenient (a
+/// preview can simply be re-run); this is export-only.
+fn ensure_text_export_fonts(
+    has_text_clips: bool,
+    rasterizer: &CosmicTextRasterizer,
+) -> Result<(), String> {
+    if has_text_clips && !rasterizer.has_fonts() {
+        return Err(
+            "cannot export: no system fonts found on this machine, text clips would render \
+             invisible"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -3457,5 +3638,177 @@ mod tests {
                 name: "lost.png".into()
             }]
         );
+    }
+
+    // MARK: - Post-encode output validation
+
+    /// Fabricate a probe as ffprobe would report it (stream codecs + a
+    /// container duration), so the pure validator is testable without ffprobe.
+    fn fabricated_probe(
+        video_codec: Option<&str>,
+        audio_codec: Option<&str>,
+        duration_secs: f64,
+    ) -> opentake_media::MediaProbe {
+        let mut streams: Vec<serde_json::Value> = Vec::new();
+        if let Some(codec) = video_codec {
+            streams.push(serde_json::json!({
+                "codec_type": "video",
+                "codec_name": codec,
+                "width": 1280, "height": 720,
+                "avg_frame_rate": "30/1",
+                "duration": format!("{duration_secs}"),
+            }));
+        }
+        if let Some(codec) = audio_codec {
+            streams.push(serde_json::json!({
+                "codec_type": "audio",
+                "codec_name": codec,
+                "channels": 2,
+            }));
+        }
+        opentake_media::parse_probe(&serde_json::json!({
+            "streams": streams,
+            "format": { "duration": format!("{duration_secs}") },
+        }))
+    }
+
+    fn h264_aac_expectations() -> ExportProbeExpectations {
+        ExportProbeExpectations {
+            video_codec: Some(ProbeVideoCodec::H264),
+            audio_codec: Some(ProbeAudioCodec::Aac),
+            expected_duration_secs: 2.0,
+            duration_tolerance_secs: 0.05,
+        }
+    }
+
+    #[test]
+    fn validate_export_probe_accepts_matching_output() {
+        let probe = fabricated_probe(Some("h264"), Some("aac"), 2.0);
+        assert!(validate_export_probe(&probe, &h264_aac_expectations()).is_ok());
+    }
+
+    #[test]
+    fn validate_export_probe_rejects_missing_video_stream() {
+        let probe = fabricated_probe(None, Some("aac"), 2.0);
+        let error = validate_export_probe(&probe, &h264_aac_expectations())
+            .expect_err("missing video stream must fail");
+        assert!(error.contains("no video stream"), "{error}");
+    }
+
+    #[test]
+    fn validate_export_probe_rejects_wrong_video_codec() {
+        let probe = fabricated_probe(Some("mpeg4"), Some("aac"), 2.0);
+        let error = validate_export_probe(&probe, &h264_aac_expectations())
+            .expect_err("wrong video codec must fail");
+        assert!(error.contains("mpeg4"), "{error}");
+        assert!(error.contains("does not match"), "{error}");
+    }
+
+    #[test]
+    fn validate_export_probe_accepts_hevc_family_name_for_h265() {
+        let probe = fabricated_probe(Some("hevc"), Some("aac"), 2.0);
+        let expectations = ExportProbeExpectations {
+            video_codec: Some(ProbeVideoCodec::H265),
+            ..h264_aac_expectations()
+        };
+        assert!(validate_export_probe(&probe, &expectations).is_ok());
+    }
+
+    #[test]
+    fn validate_export_probe_accepts_prores_family_name() {
+        let probe = fabricated_probe(Some("prores"), Some("pcm_s16le"), 2.0);
+        let expectations = ExportProbeExpectations {
+            video_codec: Some(ProbeVideoCodec::ProRes),
+            audio_codec: Some(ProbeAudioCodec::PcmS16Le),
+            ..h264_aac_expectations()
+        };
+        assert!(validate_export_probe(&probe, &expectations).is_ok());
+    }
+
+    #[test]
+    fn validate_export_probe_rejects_missing_audio_stream_when_expected() {
+        let probe = fabricated_probe(Some("h264"), None, 2.0);
+        let error = validate_export_probe(&probe, &h264_aac_expectations())
+            .expect_err("missing audio stream must fail");
+        assert!(error.contains("no audio stream"), "{error}");
+    }
+
+    #[test]
+    fn validate_export_probe_rejects_wrong_audio_codec() {
+        let probe = fabricated_probe(Some("h264"), Some("mp3"), 2.0);
+        let error = validate_export_probe(&probe, &h264_aac_expectations())
+            .expect_err("wrong audio codec must fail");
+        assert!(error.contains("mp3"), "{error}");
+        assert!(error.contains("does not match"), "{error}");
+    }
+
+    #[test]
+    fn validate_export_probe_rejects_duration_drift_beyond_tolerance() {
+        let probe = fabricated_probe(Some("h264"), Some("aac"), 1.0);
+        let error = validate_export_probe(&probe, &h264_aac_expectations())
+            .expect_err("duration drift must fail");
+        assert!(error.contains("duration"), "{error}");
+    }
+
+    #[test]
+    fn validate_export_probe_tolerates_small_duration_drift() {
+        let probe = fabricated_probe(Some("h264"), Some("aac"), 2.02);
+        assert!(validate_export_probe(&probe, &h264_aac_expectations()).is_ok());
+    }
+
+    #[test]
+    fn validate_export_probe_accepts_audio_only_wav_output() {
+        let probe = fabricated_probe(None, Some("pcm_s16le"), 0.5);
+        let expectations = ExportProbeExpectations {
+            video_codec: None,
+            audio_codec: Some(ProbeAudioCodec::PcmS16Le),
+            expected_duration_secs: 0.5,
+            duration_tolerance_secs: 0.05,
+        };
+        assert!(validate_export_probe(&probe, &expectations).is_ok());
+    }
+
+    #[test]
+    fn wav_export_probe_reads_real_written_file() {
+        if !opentake_media::ffmpeg_status::ffprobe_available() {
+            eprintln!("[skip] ffprobe unavailable");
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let out = tmp.path().join("out.wav");
+        std::fs::write(&out, b"").expect("create wav output");
+        write_wav_s16le(&[0.25; 480], 48_000, &out).expect("write wav");
+        let probe = opentake_media::probe(&out).expect("probe written wav");
+        assert!(probe.has_audio && !probe.has_video);
+        assert_eq!(probe.audio_codec.as_deref(), Some("pcm_s16le"));
+        assert!((probe.duration_secs - 0.01).abs() < 0.01);
+    }
+
+    // MARK: - Fail-closed text export font guard
+
+    #[test]
+    fn text_export_fails_closed_when_fonts_absent() {
+        let headless = CosmicTextRasterizer::without_system_fonts();
+        assert!(!headless.has_fonts());
+        let error = ensure_text_export_fonts(true, &headless)
+            .expect_err("text-bearing export without fonts must fail");
+        assert!(error.contains("no system fonts"), "{error}");
+        assert!(error.contains("invisible"), "{error}");
+    }
+
+    #[test]
+    fn text_export_allows_fontless_run_without_text_clips() {
+        let headless = CosmicTextRasterizer::without_system_fonts();
+        assert!(ensure_text_export_fonts(false, &headless).is_ok());
+    }
+
+    #[test]
+    fn text_export_allows_text_clips_when_fonts_available() {
+        let rasterizer = CosmicTextRasterizer::new();
+        if !rasterizer.has_fonts() {
+            eprintln!("[skip] no system fonts on this machine");
+            return;
+        }
+        assert!(ensure_text_export_fonts(true, &rasterizer).is_ok());
     }
 }

@@ -62,6 +62,8 @@ pub mod index_coordinator;
 pub mod library;
 pub mod ort_worker;
 pub mod probe;
+#[doc(hidden)]
+pub mod process_tree;
 pub mod proxy;
 pub mod search;
 pub mod thumbnail;
@@ -252,6 +254,17 @@ impl MediaEngine {
     /// Probe through an already-open regular-file handle.
     pub fn probe_file(&self, file: &std::fs::File) -> Result<MediaProbe> {
         probe::probe_file(file)
+    }
+
+    /// Probe a retained file while bounding and cancelling the ffprobe process
+    /// tree.
+    pub fn probe_file_cancellable(
+        &self,
+        file: &std::fs::File,
+        cancel: &MediaCancelToken,
+        timeout: std::time::Duration,
+    ) -> Result<MediaProbe> {
+        probe::probe_file_cancellable(file, cancel, timeout)
     }
 
     /// Decode the nearest source frame for preview/render materialization.

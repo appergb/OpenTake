@@ -34,7 +34,11 @@ body {
 /* HoverHighlight base (SPEC §9.7): faint background that fades in on hover. */
 .hover-area {
   border-radius: var(--radius-sm);
-  transition: background-color var(--anim-hover) var(--ease-out);
+  transition:
+    background-color var(--anim-hover) var(--ease-out),
+    color var(--anim-hover) var(--ease-out),
+    opacity var(--anim-hover) var(--ease-out),
+    transform var(--anim-hover) var(--ease-out);
 }
 .hover-area:not(:disabled):hover {
   background-color: rgba(255, 255, 255, var(--op-faint));
@@ -47,6 +51,63 @@ body {
 }
 .hover-area:disabled {
   background-color: transparent;
+}
+.hover-area:not(:disabled):active {
+  transform: scale(0.96);
+}
+
+@keyframes app-view-enter {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes dialog-backdrop-enter {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes dialog-surface-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes toast-enter {
+  from {
+    opacity: 0;
+    translate: 0 6px;
+  }
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
+
+.app-view-enter {
+  animation: app-view-enter var(--anim-transition) var(--ease-out) both;
+}
+
+.app-dialog-backdrop {
+  animation: dialog-backdrop-enter var(--anim-hover) var(--ease-out) both;
+}
+
+.app-dialog-surface {
+  animation: dialog-surface-enter var(--anim-transition) var(--ease-out) both;
+}
+
+.app-toast {
+  animation: toast-enter var(--anim-transition) var(--ease-out) both;
 }
 
 .home-project-card:hover {
@@ -109,9 +170,28 @@ button {
     box-shadow var(--anim-hover) var(--ease-out);
 }
 
-.split-pane-separator:hover,
-.split-pane-separator:focus-visible {
-  background: rgba(245, 239, 228, 0.16);
+.split-pane-separator[aria-orientation="vertical"][data-pointer-near="true"],
+.split-pane-separator[aria-orientation="vertical"][data-interaction-state="dragging"],
+.split-pane-separator[aria-orientation="vertical"]:focus-visible {
+  background: linear-gradient(
+    to right,
+    transparent calc(50% - 2px),
+    rgba(245, 239, 228, 0.22) calc(50% - 2px),
+    rgba(245, 239, 228, 0.22) calc(50% + 2px),
+    transparent calc(50% + 2px)
+  );
+}
+
+.split-pane-separator[aria-orientation="horizontal"][data-pointer-near="true"],
+.split-pane-separator[aria-orientation="horizontal"][data-interaction-state="dragging"],
+.split-pane-separator[aria-orientation="horizontal"]:focus-visible {
+  background: linear-gradient(
+    to bottom,
+    transparent calc(50% - 2px),
+    rgba(245, 239, 228, 0.22) calc(50% - 2px),
+    rgba(245, 239, 228, 0.22) calc(50% + 2px),
+    transparent calc(50% + 2px)
+  );
 }
 
 .split-pane-separator:focus-visible {
@@ -162,6 +242,12 @@ textarea {
   font-family: inherit;
 }
 
+/* Compact desktop controls retain their visual track/glyph sizes while the
+ * actual keyboard/pointer target remains usable. */
+input[type="range"] {
+  min-height: 24px;
+}
+
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
@@ -184,19 +270,28 @@ textarea {
 .zoom-slider {
   -webkit-appearance: none;
   appearance: none;
+  height: 24px;
+  background: transparent;
+}
+.zoom-slider::-webkit-slider-runnable-track {
   height: 3px;
   background: rgba(255, 255, 255, 0.16);
   border-radius: 2px;
-  outline: none;
 }
 .zoom-slider::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
   width: 10px;
   height: 10px;
+  margin-top: -3.5px;
   border-radius: 50%;
   background: var(--accent-primary);
   cursor: pointer;
+}
+.zoom-slider::-moz-range-track {
+  height: 3px;
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 2px;
 }
 .zoom-slider::-moz-range-thumb {
   width: 10px;

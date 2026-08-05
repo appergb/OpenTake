@@ -43,8 +43,9 @@ describe("AiEditTab", () => {
   it("generates_reviews_applies_rejects_and_undoes_one_command", async () => {
     const proposal: AiEditProposal = {
       id: "gentle-fade",
-      title: "柔和淡入淡出",
-      explanation: "在片段两端添加 8 帧淡化。",
+      titleKey: "inspector.aiEdit.proposal.gentleFade.title",
+      explanationKey: "inspector.aiEdit.proposal.gentleFade.explanation",
+      explanationParams: { frames: 8 },
       properties: { fadeInFrames: 8, fadeOutFrames: 8 },
     };
     const suggest = vi.fn().mockResolvedValue([proposal]);
@@ -98,6 +99,36 @@ describe("AiEditTab", () => {
         .dispatchEvent(new MouseEvent("click", { bubbles: true })),
     );
     expect(undo).toHaveBeenCalledOnce();
+    await act(async () => root.unmount());
+  });
+
+  it("shows the honest local-heuristic disclosure and interpolates proposal text", async () => {
+    const suggest = vi.fn().mockResolvedValue([
+      {
+        id: "pace-up",
+        titleKey: "inspector.aiEdit.proposal.paceUp.title",
+        explanationKey: "inspector.aiEdit.proposal.paceUp.explanation",
+        explanationParams: { from: "1.00", to: "1.25" },
+        properties: { speed: 1.25 },
+      },
+    ]);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () =>
+      root.render(<AiEditTab clip={clip()} fps={30} suggest={suggest} />),
+    );
+
+    // 诚实披露行始终可见（AI Edit 是本地启发式，不调用 AI 模型）
+    expect(container.textContent).toContain("本地启发式建议，不调用 AI 模型");
+
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>('[data-action="generate"]')!
+        .dispatchEvent(new MouseEvent("click", { bubbles: true })),
+    );
+    expect(container.textContent).toContain("节奏加快");
+    expect(container.textContent).toContain("将速度从 1.00x 调整为 1.25x");
     await act(async () => root.unmount());
   });
 

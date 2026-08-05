@@ -33,6 +33,7 @@ vi.mock("../../lib/api", () => ({
 
 import { useChatStore } from "../../store/chatStore";
 import { useProjectStore } from "../../store/projectStore";
+import { useSettingsStore } from "../../store/settingsStore";
 import { AgentPanel } from "./AgentPanel";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
@@ -43,6 +44,7 @@ let container: HTMLDivElement | null = null;
 
 beforeEach(() => {
   useProjectStore.setState({ projectEpoch: 41, projectPath: "/tmp/Current.opentake" });
+  useSettingsStore.setState({ byokProvider: "anthropic" });
   useChatStore.getState().reset("stale-session");
   apiMocks.doneHandler = undefined;
   apiMocks.chatHistory.mockReset();
@@ -88,6 +90,35 @@ afterEach(async () => {
 });
 
 describe("AgentPanel project sessions", () => {
+  it("routes Agent chat directly through the selected official Codex provider", async () => {
+    useSettingsStore.setState({ byokProvider: "codex" });
+    await act(async () => {
+      root?.render(<AgentPanel />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const textarea = container?.querySelector<HTMLTextAreaElement>("textarea")!;
+    await act(async () => {
+      const valueSetter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        "value",
+      )?.set;
+      valueSetter?.call(textarea, "用官方 Codex 调整时间线");
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(apiMocks.chatSend).toHaveBeenCalledWith(
+      "chat-restored",
+      "用官方 Codex 调整时间线",
+      "codex",
+      41,
+      "/tmp/Current.opentake",
+    );
+  });
+
   it("restores the current project and rejects stale-project events", async () => {
     await act(async () => {
       root?.render(<AgentPanel />);
@@ -429,5 +460,20 @@ describe("AgentPanel project sessions", () => {
     expect(replacementCall[1]).toBe(true);
     expect(replacementCall[0]).not.toBe(initialId);
     expect(useChatStore.getState().sessionId).toBe(replacementCall[0]);
+  });
+
+  it("keeps the session close-tab button on a 24px hit target", async () => {
+    await act(async () => {
+      root?.render(<AgentPanel />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const selected = container?.querySelector(
+      '[role="tab"][aria-selected="true"]',
+    ) as HTMLButtonElement | null;
+    const close = selected?.nextElementSibling as HTMLButtonElement | null;
+    expect(close).not.toBeNull();
+    expect(close?.style.width).toBe("24px");
+    expect(close?.style.height).toBe("24px");
   });
 });

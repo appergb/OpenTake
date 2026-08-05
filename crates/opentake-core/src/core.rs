@@ -27,6 +27,7 @@
 //! reached through the session.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
@@ -36,7 +37,7 @@ use opentake_domain::{
 };
 use opentake_ops::command::{ClipEntry, EditCommand, EditResult};
 use opentake_ops::IdGen;
-use opentake_project::{GenerationLog, ProjectCompatibility};
+use opentake_project::{GenerationLog, ProjectCompatibility, ProjectRootIdentity};
 use same_file::Handle;
 
 use crate::deps::CoreDeps;
@@ -111,6 +112,44 @@ pub struct ProjectRevision {
     pub project_epoch: u64,
     /// Monotonic edit version within the current project session.
     pub version: u64,
+}
+
+/// Retained bundle authority for project-local asset reads. Consumers must
+/// compare all fields again after any isolated I/O before exposing bytes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectAssetAuthority {
+    pub project_epoch: u64,
+    pub project_path: PathBuf,
+    pub root_identity: ProjectRootIdentity,
+}
+
+/// Outcome of an assistant-owned conditional undo. The project identity,
+/// document version, history transaction id, action label, and Undo application
+/// are checked under one session lock.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OwnedUndoResult {
+    Undone(EditResult),
+    NoHistory,
+    Conflict {
+        actual_action_name: Option<String>,
+        actual_transaction_version: Option<u64>,
+    },
+}
+
+/// One-lock snapshot of project revision plus the exact top undo transaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectUndoSnapshot {
+    pub revision: ProjectRevision,
+    pub project_path: Option<PathBuf>,
+    pub action_name: String,
+    pub transaction_version: u64,
+}
+
+#[derive(Clone, Copy)]
+struct EditExpectation<'a> {
+    revision: ProjectRevision,
+    project_path: Option<&'a Path>,
+    check_project_path: bool,
 }
 
 /// One-lock snapshot of the state consumed by runtime media operations.
@@ -235,6 +274,22 @@ struct CoreSessionSlot {
 pub struct PreparedProjectOpen {
     path: PathBuf,
     editor: EditorSession,
+}
+
+impl PreparedProjectOpen {
+    /// Confirm that the ambient bundle name still denotes the retained root
+    /// that was prepared. This closes the prepare→scope/commit replacement
+    /// window; asset reads additionally compare the retained root identity.
+    pub fn is_current_namespace(&self) -> Result<bool> {
+        self.editor.project_root_is_current_namespace()
+    }
+
+    pub fn project_asset_authority(&self) -> Option<(PathBuf, ProjectRootIdentity)> {
+        Some((
+            self.editor.project_dir()?.to_path_buf(),
+            self.editor.project_root_identity()?,
+        ))
+    }
 }
 
 impl CoreSessionSlot {
@@ -405,6 +460,33 @@ impl AppCore {
         }
     }
 
+    /// Snapshot the exact retained bundle authority under the same session
+    /// lock as its epoch/path. Isolated readers must compare this tuple again
+    /// before publishing bytes so a project switch or namespace rebind fails
+    /// closed.
+    pub fn project_asset_authority(&self) -> Option<ProjectAssetAuthority> {
+        let session = self.lock();
+        Some(ProjectAssetAuthority {
+            project_epoch: session.project_epoch,
+            project_path: session.editor.project_dir()?.to_path_buf(),
+            root_identity: session.editor.project_root_identity()?,
+        })
+    }
+
+    pub fn project_asset_authority_matches(&self, expected: &ProjectAssetAuthority) -> bool {
+        self.project_asset_authority().as_ref() == Some(expected)
+    }
+
+    /// Open a project-local asset through the retained no-follow bundle
+    /// authority, under the same session lock that snapshots the authority.
+    /// Callers that publish derived bytes should compare
+    /// [`Self::project_asset_authority`] again before exposing them so a
+    /// project switch or namespace rebind fails closed.
+    pub fn open_project_asset(&self, relative: &Path) -> Result<fs::File> {
+        let session = self.lock();
+        session.editor.open_asset_file(relative)
+    }
+
     /// Return a mutable-project runtime snapshot only when the caller's IPC
     /// identity still names the current project. This is the authorization gate
     /// for workflows that perform global I/O before their final project commit.
@@ -508,6 +590,87 @@ impl AppCore {
         self.lock().editor.can_undo()
     }
 
+    /// Label of the most recent undoable transaction, if any. Callers that act
+    /// on this value must still use a revision-bound apply for the final Undo;
+    /// the version comparison closes the check/commit race.
+    pub fn undo_action_name(&self) -> Option<String> {
+        self.lock().editor.undo_action_name().map(str::to_owned)
+    }
+
+    /// Stable version identity of the transaction currently at the top of the
+    /// undo stack.
+    pub fn undo_transaction_version(&self) -> Option<u64> {
+        self.lock().editor.undo_transaction_version()
+    }
+
+    /// Read the full undo ownership tuple under one session lock.
+    pub fn project_undo_snapshot(&self) -> Option<ProjectUndoSnapshot> {
+        let session = self.lock();
+        Some(ProjectUndoSnapshot {
+            revision: ProjectRevision {
+                project_epoch: session.project_epoch,
+                version: session.editor.version(),
+            },
+            project_path: session.editor.project_dir().map(PathBuf::from),
+            action_name: session.editor.undo_action_name()?.to_owned(),
+            transaction_version: session.editor.undo_transaction_version()?,
+        })
+    }
+
+    /// Undo only when the exact assistant-owned history transaction is still at
+    /// the top of the same project revision. Equal action labels are insufficient:
+    /// `expected_transaction_version` distinguishes a later user edit with the
+    /// same label. All comparisons and the Undo share one session lock.
+    pub fn undo_if_owned(
+        &self,
+        expected: ProjectRevision,
+        expected_project_path: Option<&Path>,
+        expected_action_name: &str,
+        expected_transaction_version: u64,
+    ) -> Result<OwnedUndoResult> {
+        let outcome = {
+            let mut session = self.lock();
+            if session.project_epoch != expected.project_epoch
+                || session.editor.version() != expected.version
+                || session.editor.project_dir() != expected_project_path
+            {
+                return Err(CoreError::StaleProject);
+            }
+            if !session.editor.can_undo() {
+                return Ok(OwnedUndoResult::NoHistory);
+            }
+            let actual_action_name = session.editor.undo_action_name().map(str::to_owned);
+            let actual_transaction_version = session.editor.undo_transaction_version();
+            if actual_action_name.as_deref() != Some(expected_action_name)
+                || actual_transaction_version != Some(expected_transaction_version)
+            {
+                return Ok(OwnedUndoResult::Conflict {
+                    actual_action_name,
+                    actual_transaction_version,
+                });
+            }
+            let edit = session.editor.apply(EditCommand::Undo, self.ids.as_ref())?;
+            let media_count = edit
+                .manifest_changed
+                .then(|| session.editor.media().entries.len());
+            (edit, session.project_epoch, media_count)
+        };
+        let (edit, project_epoch, media_count) = outcome;
+        if edit.changed {
+            self.events.emit(&CoreEvent::TimelineChanged {
+                project_epoch,
+                version: edit.timeline_version,
+            });
+        }
+        if let Some(count) = media_count {
+            self.events.emit(&CoreEvent::MediaChanged {
+                project_epoch,
+                count,
+            });
+        }
+        Ok(OwnedUndoResult::Undone(edit))
+    }
+
     /// Whether a redo is currently available.
     pub fn can_redo(&self) -> bool {
         self.lock().editor.can_redo()
@@ -539,7 +702,35 @@ impl AppCore {
         expected: ProjectRevision,
         command: EditCommand,
     ) -> Result<EditResult> {
-        self.apply_with_revision(command, Some(expected))
+        self.apply_with_revision(
+            command,
+            Some(EditExpectation {
+                revision: expected,
+                project_path: None,
+                check_project_path: false,
+            }),
+        )
+    }
+
+    /// Apply an IPC edit only when the project epoch, saved bundle path, and
+    /// timeline version all still match the read-only mirror that produced the
+    /// gesture. The complete identity check and edit transaction share the
+    /// same session lock, so a delayed request can never fall through to a
+    /// replacement project that happens to contain the same clip/media ids.
+    pub fn apply_at_project_revision(
+        &self,
+        expected: ProjectRevision,
+        expected_project_path: Option<&Path>,
+        command: EditCommand,
+    ) -> Result<EditResult> {
+        self.apply_with_revision(
+            command,
+            Some(EditExpectation {
+                revision: expected,
+                project_path: expected_project_path,
+                check_project_path: true,
+            }),
+        )
     }
 
     /// Apply one revision-bound edit and durably save the project under the
@@ -555,9 +746,7 @@ impl AppCore {
             if session.project_epoch != expected.project_epoch
                 || session.editor.version() != expected.version
             {
-                return Err(CoreError::Media(
-                    "project changed while preparing a deferred edit".to_string(),
-                ));
+                return Err(CoreError::StaleProject);
             }
             let before = session.editor.checkpoint_editor_state();
             let outcome = (|| {
@@ -600,17 +789,17 @@ impl AppCore {
     fn apply_with_revision(
         &self,
         command: EditCommand,
-        expected: Option<ProjectRevision>,
+        expected: Option<EditExpectation<'_>>,
     ) -> Result<EditResult> {
         let (result, project_epoch, media_count) = {
             let mut session = self.lock();
             if expected.is_some_and(|expected| {
-                session.project_epoch != expected.project_epoch
-                    || session.editor.version() != expected.version
+                session.project_epoch != expected.revision.project_epoch
+                    || session.editor.version() != expected.revision.version
+                    || (expected.check_project_path
+                        && session.editor.project_dir() != expected.project_path)
             }) {
-                return Err(CoreError::Media(
-                    "project changed while preparing a deferred edit".to_string(),
-                ));
+                return Err(CoreError::StaleProject);
             }
             let result = session.editor.apply(command, self.ids.as_ref())?;
             let media_count = result
@@ -723,6 +912,35 @@ impl AppCore {
         path: Option<PathBuf>,
         thumbnail: Option<Vec<u8>>,
     ) -> Result<PathBuf> {
+        self.save_project_with_thumbnail_at_identity(None, None, path, thumbnail)
+    }
+
+    /// Save only if the project session still has the caller's exact identity.
+    /// This binds deferred thumbnail generation and stale IPC requests to the
+    /// project that initiated them; a concurrently opened replacement can never
+    /// be written to the old request's Save As destination.
+    pub fn save_project_with_thumbnail_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_path: Option<&Path>,
+        path: Option<PathBuf>,
+        thumbnail: Option<Vec<u8>>,
+    ) -> Result<PathBuf> {
+        self.save_project_with_thumbnail_at_identity(
+            Some(expected_project_epoch),
+            expected_project_path,
+            path,
+            thumbnail,
+        )
+    }
+
+    fn save_project_with_thumbnail_at_identity(
+        &self,
+        expected_project_epoch: Option<u64>,
+        expected_project_path: Option<&Path>,
+        path: Option<PathBuf>,
+        thumbnail: Option<Vec<u8>>,
+    ) -> Result<PathBuf> {
         let changes_identity = path.is_some();
         if changes_identity {
             self.announce_project_identity_transition(true);
@@ -733,10 +951,17 @@ impl AppCore {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let result = {
             let mut session = self.lock();
-            session
-                .editor
-                .save_project_with_thumbnail(path, thumbnail)
-                .map(|written| (written, session.project_epoch))
+            if expected_project_epoch.is_some_and(|epoch| {
+                session.project_epoch != epoch
+                    || session.editor.project_dir() != expected_project_path
+            }) {
+                Err(CoreError::StaleProject)
+            } else {
+                session
+                    .editor
+                    .save_project_with_thumbnail(path, thumbnail)
+                    .map(|written| (written, session.project_epoch))
+            }
         };
         drop(_identity);
         if changes_identity {
@@ -947,6 +1172,22 @@ impl AppCore {
             count,
         });
         Ok(entry)
+    }
+
+    /// Prepare a local media manifest entry without registering it or emitting
+    /// any event. The returned entry carries a fresh id, but the authoritative
+    /// project remains byte-for-byte unchanged until a later edit command
+    /// commits it. This is the safe preparation half of deferred render edits.
+    pub fn prepare_media_file_entry(
+        &self,
+        path: impl AsRef<Path>,
+        name: impl Into<String>,
+        probe: &ProbedMedia,
+    ) -> Result<MediaManifestEntry> {
+        let id = self.ids.next_id();
+        self.lock()
+            .editor
+            .prepare_media_file_entry(path, id, name, probe)
     }
 
     /// Import media only if the expected project still owns the session lock.
@@ -1197,24 +1438,46 @@ impl AppCore {
             expected_project_epoch,
             expected_project_dir,
             plan,
+            || Ok(()),
             |editor| editor.save_media_manifest(),
         )
     }
 
-    fn import_media_batch_for_project_with_writer<F>(
+    /// Cancellable/project-bound batch import. `precondition` runs under the
+    /// session lock immediately before the first manifest/history mutation.
+    pub fn import_media_batch_for_project_persisted_checked(
         &self,
         expected_project_epoch: u64,
         expected_project_dir: &Path,
         plan: Vec<PreparedMediaImportOp>,
+        precondition: impl FnOnce() -> Result<()>,
+    ) -> Result<Vec<CommittedMediaImport>> {
+        self.import_media_batch_for_project_with_writer(
+            expected_project_epoch,
+            expected_project_dir,
+            plan,
+            precondition,
+            |editor| editor.save_media_manifest(),
+        )
+    }
+
+    fn import_media_batch_for_project_with_writer<P, F>(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_dir: &Path,
+        plan: Vec<PreparedMediaImportOp>,
+        precondition: P,
         persist: F,
     ) -> Result<Vec<CommittedMediaImport>>
     where
+        P: FnOnce() -> Result<()>,
         F: FnOnce(&mut EditorSession) -> Result<PathBuf>,
     {
         let (imports, count, initial_version, final_version, written) = {
             let mut session = self.lock();
             ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
             session.editor.ensure_mutable()?;
+            precondition()?;
             let before = session.editor.checkpoint_editor_state();
             let initial_version = session.editor.version();
             let result = (|| {
@@ -1901,7 +2164,7 @@ impl AppCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opentake_domain::{ClipType, MediaColorMetadata, MediaProxy, Timeline, Track};
+    use opentake_domain::{Clip, ClipType, MediaColorMetadata, MediaProxy, Timeline, Track};
     use opentake_ops::command::ClipEntry;
     use std::sync::Mutex;
 
@@ -2121,6 +2384,45 @@ mod tests {
         worker.join().unwrap();
     }
 
+    #[test]
+    fn identity_bound_save_never_writes_a_replacement_project_to_the_old_request_target() {
+        let first = project_bundle("save-identity-first");
+        let second = project_bundle("save-identity-second");
+        let destination = std::env::temp_dir().join(format!(
+            "opentake-core-stale-save-{}-{}.opentake",
+            std::process::id(),
+            first
+                .file_stem()
+                .and_then(std::ffi::OsStr::to_str)
+                .unwrap_or("fixture")
+        ));
+        let _ = std::fs::remove_dir_all(&destination);
+        let core = AppCore::new();
+        core.open_project(&first).unwrap();
+        let expected = core.runtime_snapshot();
+        core.open_project(&second).unwrap();
+
+        let error = core
+            .save_project_with_thumbnail_for_project(
+                expected.project_epoch,
+                expected.project_dir.as_deref(),
+                Some(destination.clone()),
+                Some(b"stale thumbnail".to_vec()),
+            )
+            .expect_err("replacement project must reject the stale save");
+
+        assert!(matches!(error, CoreError::StaleProject));
+        assert!(!destination.exists());
+        assert_eq!(
+            core.runtime_snapshot().project_dir.as_deref(),
+            Some(second.as_path())
+        );
+
+        let _ = std::fs::remove_dir_all(first);
+        let _ = std::fs::remove_dir_all(second);
+        let _ = std::fs::remove_dir_all(destination);
+    }
+
     fn project_bundle(label: &str) -> PathBuf {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let sequence = SEQ.fetch_add(1, Ordering::Relaxed);
@@ -2187,6 +2489,26 @@ mod tests {
                 add_linked_audio: false,
                 transform: None,
             }],
+        }
+    }
+
+    fn seed_same_video_clip(core: &AppCore, clip_id: &str) {
+        let mut slot = core.session.lock().unwrap();
+        let mut timeline = Timeline::new();
+        let mut track = Track::new("same-track", ClipType::Video);
+        track
+            .clips
+            .push(Clip::new(clip_id, "source-asset", 100, 60));
+        timeline.tracks.push(track);
+        slot.editor.seed_from_timeline(timeline);
+    }
+
+    fn registered_freeze(media: MediaManifestEntry, clip_id: &str) -> EditCommand {
+        EditCommand::RegisterMediaAndFreezeFrame {
+            media,
+            clip_id: clip_id.to_string(),
+            at_frame: 130,
+            duration_frames: 30,
         }
     }
 
@@ -2278,6 +2600,102 @@ mod tests {
         assert_eq!(after.version, before.version);
         assert_eq!(after.timeline, before.timeline);
         assert_eq!(after.media, before.media);
+    }
+
+    #[test]
+    fn ipc_edit_revision_rejects_save_as_path_drift_without_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first.opentake");
+        let second = temp.path().join("second.opentake");
+        let core = core_with_track();
+        core.save_project(Some(first.clone())).unwrap();
+        let expected = core.project_revision();
+
+        core.save_project(Some(second.clone())).unwrap();
+        assert_eq!(
+            core.project_revision(),
+            expected,
+            "Save As keeps the session revision"
+        );
+        let before = core.runtime_snapshot();
+        let error = core
+            .apply_at_project_revision(expected, Some(&first), add_one_clip())
+            .expect_err("an edit captured before Save As must not target the new bundle path");
+
+        assert!(matches!(error, CoreError::StaleProject));
+        let after = core.runtime_snapshot();
+        assert_eq!(after.project_dir.as_deref(), Some(second.as_path()));
+        assert_eq!(after.project_epoch, before.project_epoch);
+        assert_eq!(after.version, before.version);
+        assert_eq!(after.timeline, before.timeline);
+        assert_eq!(after.media, before.media);
+    }
+
+    #[test]
+    fn registered_freeze_rejects_version_drift_without_manifest_or_events() {
+        let core = core_with_track();
+        let added = core.apply(add_one_clip()).unwrap();
+        let clip_id = added.affected_clip_ids[0].clone();
+        let expected = core.project_revision();
+        let media = core
+            .prepare_media_file_entry(
+                std::env::temp_dir().join("freeze-version-drift.png"),
+                "Freeze",
+                &ProbedMedia::default(),
+            )
+            .unwrap();
+        core.apply(EditCommand::CreateFolder {
+            name: "version drift".into(),
+            parent_folder_id: None,
+        })
+        .unwrap();
+        let before = core.runtime_snapshot();
+        let seen: Arc<Mutex<Vec<CoreEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        core.subscribe(move |event| sink.lock().unwrap().push(event.clone()));
+
+        let error = core
+            .apply_at_project_revision(expected, None, registered_freeze(media, &clip_id))
+            .expect_err("a capture prepared before another edit must be rejected");
+
+        assert!(matches!(error, CoreError::StaleProject));
+        let after = core.runtime_snapshot();
+        assert_eq!(after.timeline, before.timeline);
+        assert_eq!(after.media, before.media);
+        assert_eq!(after.version, before.version);
+        assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn registered_freeze_rejects_project_drift_even_with_same_clip_id() {
+        let core = AppCore::new();
+        seed_same_video_clip(&core, "same-clip");
+        let expected = core.project_revision();
+        let media = core
+            .prepare_media_file_entry(
+                std::env::temp_dir().join("freeze-project-drift.png"),
+                "Freeze",
+                &ProbedMedia::default(),
+            )
+            .unwrap();
+
+        core.new_project();
+        seed_same_video_clip(&core, "same-clip");
+        let before = core.runtime_snapshot();
+        let seen: Arc<Mutex<Vec<CoreEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&seen);
+        core.subscribe(move |event| sink.lock().unwrap().push(event.clone()));
+
+        let error = core
+            .apply_at_project_revision(expected, None, registered_freeze(media, "same-clip"))
+            .expect_err("the replacement project must not accept an old capture");
+
+        assert!(matches!(error, CoreError::StaleProject));
+        let after = core.runtime_snapshot();
+        assert_eq!(after.timeline, before.timeline);
+        assert_eq!(after.media, before.media);
+        assert_eq!(after.version, before.version);
+        assert!(seen.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -2800,6 +3218,7 @@ mod tests {
                         folder: Some(PreparedMediaFolderRef::Planned(0)),
                     },
                 ],
+                || Ok(()),
                 |_| {
                     Err(CoreError::Media(
                         "injected manifest write failure".to_string(),

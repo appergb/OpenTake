@@ -1,5 +1,11 @@
 # OpenTake 分阶段实施路线图
 
+> **2026-08-03 状态裁决：**Phase 0–10 已全部走完并交付 Beta 1（`v1.0.0-beta.1`，
+> 2026-08-01 发布）。当前处于 **Beta 2 收尾与发布验证**阶段：范围与门槛见
+> `docs/releases/1.0.0-beta.2.md`，逐项执行证据见 `docs/audit/2026-08-02/beta-functional-verification.md`。
+> 下文各 Phase 的「进度」注记为历史里程碑，不再代表阻塞项；剩余工作集中在收尾
+> （未决 finding 清零、真机/Windows 验证、候选包验收），不涉及新的大功能开发。
+
 > 原则:先把「纯逻辑层」做扎实并与上游对拍,再攻媒体引擎 blocker,最后接 UI / Agent / 生成后端。
 > 每个阶段都有明确「交付物」与「验证标准」。详见 `docs/ARCHITECTURE.md`、`docs/MODULE-PORT-MAP.md`。
 > 对标剪映的进阶能力(特效/转场/调色/蒙版/AI/音频工程等)穿插在下列阶段中,完整规划见 `docs/ADVANCED-FEATURES.md`。

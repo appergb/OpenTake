@@ -11,9 +11,19 @@
  * exactly like Tauri where the mirror is only updated by the async event.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Clip, ClipType, MediaItem, Timeline, Track, Transform } from "../lib/types";
+import type {
+  Clip,
+  ClipType,
+  MediaItem,
+  ProjectEditIdentity,
+  Timeline,
+  Track,
+  Transform,
+} from "../lib/types";
 
 const srv = vi.hoisted(() => {
+  let blockedApply: Promise<void> | null = null;
+  let releaseBlockedApply: (() => void) | null = null;
   type SClip = {
     id: string;
     mediaRef: string;
@@ -33,6 +43,23 @@ const srv = vi.hoisted(() => {
     fps?: number;
     width?: number;
     height?: number;
+    settings?: { fps: number; width: number; height: number };
+    sequenceId?: string;
+    target?:
+      | { kind: "existingTrack"; trackId: string }
+      | { kind: "newTrack"; trackType: ClipType; at?: number };
+    entry?: {
+      mediaRef: string;
+      mediaType: ClipType;
+      sourceClipType: ClipType;
+      startFrame: number;
+      durationFrames: number;
+      trimStartFrame?: number;
+      trimEndFrame?: number;
+      hasAudio?: boolean;
+      addLinkedAudio?: boolean;
+      transform?: Transform;
+    };
     entries?: Array<{
       mediaRef?: string;
       mediaType?: ClipType;
@@ -43,6 +70,8 @@ const srv = vi.hoisted(() => {
       trimStartFrame?: number;
       trimEndFrame?: number;
       transform?: Transform;
+      clip?: Clip;
+      targetTrackId?: string;
     }>;
     trackIndex?: number;
     atFrame?: number;
@@ -58,6 +87,11 @@ const srv = vi.hoisted(() => {
     height: number;
     settingsConfigured: boolean;
     commands: SCommand[];
+    projectEpoch: number;
+    projectPath: string | null;
+    applyEntered: number;
+    noopNext: boolean;
+    errorNext: Error | null;
   } = {
     tracks: [],
     version: 0,
@@ -67,6 +101,11 @@ const srv = vi.hoisted(() => {
     height: 1080,
     settingsConfigured: true,
     commands: [],
+    projectEpoch: 1,
+    projectPath: null,
+    applyEntered: 0,
+    noopNext: false,
+    errorNext: null,
   };
   // Core overwrite-on-place: clear any clip overlapping [start, end) before placing.
   function clearRegion(track: STrack, start: number, end: number): void {
@@ -76,7 +115,31 @@ const srv = vi.hoisted(() => {
   }
   return {
     state,
+    blockNextApply(): () => void {
+      blockedApply = new Promise<void>((resolve) => {
+        releaseBlockedApply = resolve;
+      });
+      return () => {
+        releaseBlockedApply?.();
+        releaseBlockedApply = null;
+      };
+    },
+    async beforeApply(): Promise<void> {
+      state.applyEntered += 1;
+      const gate = blockedApply;
+      blockedApply = null;
+      if (gate) await gate;
+    },
+    noopNext(): void {
+      state.noopNext = true;
+    },
+    errorNext(error: Error): void {
+      state.errorNext = error;
+    },
     reset(): void {
+      releaseBlockedApply?.();
+      releaseBlockedApply = null;
+      blockedApply = null;
       state.tracks = [];
       state.version = 0;
       state.seq = 0;
@@ -85,9 +148,18 @@ const srv = vi.hoisted(() => {
       state.height = 1080;
       state.settingsConfigured = true;
       state.commands = [];
+      state.projectEpoch = 1;
+      state.projectPath = null;
+      state.applyEntered = 0;
+      state.noopNext = false;
+      state.errorNext = null;
     },
     apply(cmd: SCommand): { changed: boolean; affectedClipIds: string[] } {
       state.commands.push(cmd);
+      if (state.noopNext) {
+        state.noopNext = false;
+        return { changed: false, affectedClipIds: [] };
+      }
       if (
         cmd.type === "setTimelineSettings" &&
         cmd.fps !== undefined &&
@@ -100,6 +172,47 @@ const srv = vi.hoisted(() => {
         state.settingsConfigured = true;
         state.version += 1;
         return { changed: true, affectedClipIds: [] };
+      }
+      if (cmd.type === "placeMedia" && cmd.entry && cmd.target) {
+        if (cmd.settings) {
+          state.fps = cmd.settings.fps;
+          state.width = cmd.settings.width;
+          state.height = cmd.settings.height;
+          state.settingsConfigured = true;
+        }
+        let track: STrack | undefined;
+        if (cmd.target.kind === "existingTrack") {
+          const trackId = cmd.target.trackId;
+          track = state.tracks.find((candidate) => candidate.id === trackId);
+        } else {
+          const firstAudio = state.tracks.findIndex((candidate) => candidate.type === "audio");
+          const zone = firstAudio < 0 ? state.tracks.length : firstAudio;
+          const requested = Math.max(0, Math.min(state.tracks.length, cmd.target.at ?? state.tracks.length));
+          const at = cmd.target.trackType === "audio" ? Math.max(requested, zone) : Math.min(requested, zone);
+          track = {
+            id: `t${++state.seq}`,
+            type: cmd.target.trackType === "audio" ? "audio" : "video",
+            clips: [],
+          };
+          state.tracks.splice(at, 0, track);
+        }
+        if (!track) return { changed: false, affectedClipIds: [] };
+        const entry = cmd.entry;
+        clearRegion(track, entry.startFrame, entry.startFrame + entry.durationFrames);
+        const id = `c${++state.seq}`;
+        track.clips.push({
+          id,
+          mediaRef: entry.mediaRef,
+          mediaType: entry.mediaType,
+          sourceClipType: entry.sourceClipType,
+          startFrame: entry.startFrame,
+          durationFrames: entry.durationFrames,
+          trimStartFrame: entry.trimStartFrame ?? 0,
+          trimEndFrame: entry.trimEndFrame ?? 0,
+          transform: entry.transform,
+        });
+        state.version += 1;
+        return { changed: true, affectedClipIds: [id] };
       }
       if (cmd.type === "insertTrack") {
         const at = Math.max(0, Math.min(state.tracks.length, cmd.at ?? state.tracks.length));
@@ -131,6 +244,31 @@ const srv = vi.hoisted(() => {
           });
           affectedClipIds.push(id);
         }
+        state.version += 1;
+        return { changed: true, affectedClipIds };
+      }
+      if (cmd.type === "pasteClips" && cmd.entries) {
+        const affectedClipIds: string[] = [];
+        for (const entry of cmd.entries) {
+          if (!entry.clip || !entry.targetTrackId) continue;
+          const track = state.tracks.find((candidate) => candidate.id === entry.targetTrackId);
+          if (!track) continue;
+          clearRegion(track, entry.startFrame, entry.startFrame + entry.clip.durationFrames);
+          const id = `c${++state.seq}`;
+          track.clips.push({
+            id,
+            mediaRef: entry.clip.mediaRef,
+            mediaType: entry.clip.mediaType,
+            sourceClipType: entry.clip.sourceClipType,
+            startFrame: entry.startFrame,
+            durationFrames: entry.clip.durationFrames,
+            trimStartFrame: entry.clip.trimStartFrame,
+            trimEndFrame: entry.clip.trimEndFrame,
+            transform: structuredClone(entry.clip.transform),
+          });
+          affectedClipIds.push(id);
+        }
+        if (affectedClipIds.length === 0) return { changed: false, affectedClipIds };
         state.version += 1;
         return { changed: true, affectedClipIds };
       }
@@ -212,7 +350,22 @@ const srv = vi.hoisted(() => {
 
 vi.mock("../lib/api", () => ({
   isTauri: true,
-  editApply: async (command: { type: string }) => {
+  editApply: async (command: { type: string }, expected?: ProjectEditIdentity) => {
+    await srv.beforeApply();
+    if (
+      command.type === "placeMedia" &&
+      expected &&
+      (expected.projectEpoch !== srv.state.projectEpoch ||
+        expected.projectPath !== srv.state.projectPath ||
+        expected.timelineVersion !== srv.state.version)
+    ) {
+      throw new Error("stale project edit identity");
+    }
+    if (srv.state.errorNext) {
+      const error = srv.state.errorNext;
+      srv.state.errorNext = null;
+      throw error;
+    }
     const res = srv.apply(command as never);
     return {
       changed: res.changed,
@@ -263,9 +416,9 @@ vi.mock("../lib/api", () => ({
         })),
       })),
     },
-    projectEpoch: 1,
+    projectEpoch: srv.state.projectEpoch,
     version: srv.state.version,
-    projectPath: null,
+    projectPath: srv.state.projectPath,
     compatibilityReadOnly: false,
     compatibilityBlockers: [],
   }),
@@ -302,6 +455,9 @@ const EMPTY: Timeline = {
 };
 
 function setMirror(timeline: Timeline, version: number, projectEpoch: number): void {
+  srv.state.version = version;
+  srv.state.projectEpoch = projectEpoch;
+  srv.state.projectPath = null;
   useProjectStore.getState().clearProjectSnapshot();
   useProjectStore.getState().replaceProjectSnapshot({
     timeline,
@@ -357,6 +513,7 @@ describe("addMediaToTimeline", () => {
     srv.reset();
     setMirror(EMPTY, 0, 1);
     useClipboardStore.getState().clear();
+    useEditorUiStore.getState().exitNestedSequence();
     useEditorUiStore.setState({ activeFrame: 0, currentFrame: 0, selectedClipIds: new Set() });
   });
 
@@ -375,6 +532,131 @@ describe("addMediaToTimeline", () => {
     expect(visualClipStarts()).toEqual([0, 60]);
   });
 
+  it("retains the preferred track id when an earlier queued add shifts indexes", async () => {
+    const tracks: Track[] = [
+      { id: "track-a", type: "video", muted: false, hidden: false, syncLocked: true, clips: [] },
+      { id: "track-b", type: "video", muted: false, hidden: false, syncLocked: true, clips: [] },
+    ];
+    srv.state.tracks = tracks.map((track) => ({ id: track.id, type: track.type, clips: [] }));
+    setMirror({ ...EMPTY, tracks }, 0, 1);
+
+    const insertsBefore = addMediaToTimelineAt(video("first"), 0, null, 0);
+    const targetsTrackB = addMediaToTimelineAt(video("second"), 0, 1);
+    await Promise.all([insertsBefore, targetsTrackB]);
+
+    const timeline = useProjectStore.getState().timeline;
+    expect(timeline.tracks.find((track) => track.id === "track-b")?.clips).toEqual([
+      expect.objectContaining({ mediaRef: "second", startFrame: 0 }),
+    ]);
+    expect(timeline.tracks.find((track) => track.id === "track-a")?.clips).toEqual([]);
+  });
+
+  it("breaks an already queued chain when project A is replaced by project B", async () => {
+    const release = srv.blockNextApply();
+    const first = addMediaToTimeline(video("a"));
+    const second = addMediaToTimeline(video("b"));
+    await vi.waitFor(() => expect(srv.state.applyEntered).toBe(1));
+
+    srv.state.projectEpoch = 2;
+    srv.state.projectPath = "/project-b.opentake";
+    srv.state.version = 0;
+    srv.state.tracks = [];
+    useProjectStore.getState().replaceProjectSnapshot({
+      timeline: EMPTY,
+      projectEpoch: 2,
+      version: 0,
+      projectPath: "/project-b.opentake",
+      compatibilityReadOnly: false,
+      compatibilityBlockers: [],
+    });
+    release();
+
+    const settled = await Promise.allSettled([first, second]);
+    expect(settled.map((entry) => entry.status)).toEqual(["rejected", "rejected"]);
+    expect(srv.state.commands).toEqual([]);
+
+    await addMediaToTimeline(video("project-b-media"));
+    expect(useProjectStore.getState().timeline.tracks[0].clips[0].mediaRef).toBe("project-b-media");
+  });
+
+  it("breaks an already queued chain after an external version advance", async () => {
+    const release = srv.blockNextApply();
+    const first = addMediaToTimeline(video("a"));
+    const second = addMediaToTimeline(video("b"));
+    await vi.waitFor(() => expect(srv.state.applyEntered).toBe(1));
+
+    srv.state.version = 1;
+    useProjectStore.getState().replaceProjectSnapshot({
+      timeline: EMPTY,
+      projectEpoch: 1,
+      version: 1,
+      projectPath: null,
+      compatibilityReadOnly: false,
+      compatibilityBlockers: [],
+    });
+    release();
+
+    const settled = await Promise.allSettled([first, second]);
+    expect(settled.map((entry) => entry.status)).toEqual(["rejected", "rejected"]);
+    expect(srv.state.commands).toEqual([]);
+
+    await addMediaToTimeline(video("after-external-edit"));
+    expect(useProjectStore.getState().timelineVersion).toBe(2);
+  });
+
+  it("breaks an already queued chain when Save As changes the project path", async () => {
+    const release = srv.blockNextApply();
+    const first = addMediaToTimeline(video("a"));
+    const second = addMediaToTimeline(video("b"));
+    await vi.waitFor(() => expect(srv.state.applyEntered).toBe(1));
+
+    srv.state.projectPath = "/saved-as.opentake";
+    useProjectStore.getState().setProjectPath("/saved-as.opentake");
+    release();
+
+    const settled = await Promise.allSettled([first, second]);
+    expect(settled.map((entry) => entry.status)).toEqual(["rejected", "rejected"]);
+    expect(srv.state.commands).toEqual([]);
+
+    await addMediaToTimeline(video("after-save-as"));
+    expect(useProjectStore.getState().projectPath).toBe("/saved-as.opentake");
+  });
+
+  it("breaks queued placement before dispatch when the active sequence changes", async () => {
+    const mismatched = { ...video("mismatch", 3840, 2160), sourceFps: 24 };
+    const first = addMediaToTimeline(mismatched);
+    const second = addMediaToTimeline(video("queued"));
+    await vi.waitFor(() => expect(useEditorUiStore.getState().projectSettingsPrompt).not.toBeNull());
+
+    useEditorUiStore.getState().enterNestedSequence("another-sequence");
+    useEditorUiStore.getState().resolveProjectSettingsPrompt(false);
+    const settled = await Promise.allSettled([first, second]);
+
+    expect(settled.map((entry) => entry.status)).toEqual(["rejected", "rejected"]);
+    expect(srv.state.commands).toEqual([]);
+    useEditorUiStore.getState().exitNestedSequence();
+    await addMediaToTimeline(video("after-sequence-switch"));
+    expect(srv.state.commands).toHaveLength(1);
+  });
+
+  it.each(["no-op", "error"] as const)(
+    "breaks queued placement after a %s and lets a later queue recover",
+    async (failure) => {
+      if (failure === "no-op") srv.noopNext();
+      else srv.errorNext(new Error("injected placement failure"));
+      const first = addMediaToTimeline(video("a"));
+      const second = addMediaToTimeline(video("b"));
+
+      const settled = await Promise.allSettled([first, second]);
+      expect(settled.map((entry) => entry.status)).toEqual(["rejected", "rejected"]);
+      expect(srv.state.version).toBe(0);
+
+      await addMediaToTimeline(video("recovered"));
+      expect(useProjectStore.getState().timeline.tracks[0].clips[0].mediaRef).toBe("recovered");
+      expect(srv.state.version).toBe(1);
+    },
+  );
+
   it("applies first-video settings before placing the first clip", async () => {
     srv.state.settingsConfigured = false;
     setMirror({ ...EMPTY, settingsConfigured: false }, 0, 1);
@@ -384,18 +666,13 @@ describe("addMediaToTimeline", () => {
       sourceFps: 23.976,
     });
 
-    expect(srv.state.commands.map((command) => command.type)).toEqual([
-      "setTimelineSettings",
-      "insertTrack",
-      "addClips",
-    ]);
+    expect(srv.state.commands.map((command) => command.type)).toEqual(["placeMedia"]);
     expect(srv.state.commands[0]).toMatchObject({
-      type: "setTimelineSettings",
-      fps: 24,
-      width: 3840,
-      height: 2160,
+      type: "placeMedia",
+      settings: { fps: 24, width: 3840, height: 2160 },
+      target: { kind: "newTrack", trackType: "video" },
     });
-    expect(srv.state.commands[2].entries?.[0]).toMatchObject({
+    expect(srv.state.commands[0].entry).toMatchObject({
       mediaRef: "first",
       durationFrames: 48,
     });
@@ -413,8 +690,8 @@ describe("addMediaToTimeline", () => {
     await vi.waitFor(() => expect(useEditorUiStore.getState().projectSettingsPrompt).not.toBeNull());
     useEditorUiStore.getState().resolveProjectSettingsPrompt(false);
     await keep;
-    expect(srv.state.commands.some((command) => command.type === "setTimelineSettings")).toBe(false);
-    expect(srv.state.commands.at(-1)?.entries?.[0]).toMatchObject({ durationFrames: 60 });
+    expect(srv.state.commands[0].settings).toBeUndefined();
+    expect(srv.state.commands.at(-1)?.entry).toMatchObject({ durationFrames: 60 });
 
     srv.reset();
     setMirror(EMPTY, 0, 1);
@@ -422,12 +699,9 @@ describe("addMediaToTimeline", () => {
     await vi.waitFor(() => expect(useEditorUiStore.getState().projectSettingsPrompt).not.toBeNull());
     useEditorUiStore.getState().resolveProjectSettingsPrompt(true);
     await match;
-    expect(srv.state.commands.map((command) => command.type)).toEqual([
-      "setTimelineSettings",
-      "insertTrack",
-      "addClips",
-    ]);
-    expect(srv.state.commands.at(-1)?.entries?.[0]).toMatchObject({ durationFrames: 48 });
+    expect(srv.state.commands.map((command) => command.type)).toEqual(["placeMedia"]);
+    expect(srv.state.commands[0].settings).toEqual({ fps: 24, width: 3840, height: 2160 });
+    expect(srv.state.commands.at(-1)?.entry).toMatchObject({ durationFrames: 48 });
   });
 
   it("drops overlapping media onto a new top overlay track instead of overwriting", async () => {

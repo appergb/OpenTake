@@ -1,3 +1,5 @@
+// @vitest-environment happy-dom
+
 import { describe, expect, it } from "vitest";
 import {
   DOCUMENTED_SHORTCUT_ROWS,
@@ -30,6 +32,37 @@ describe("keyboard transport Space shortcut", () => {
 
   it("does not suppress modified Space keyup", () => {
     expect(shouldHandleTransportSpaceKey(event({ metaKey: true }), "editor")).toBe(false);
+  });
+
+  it("does not claim Space from native controls or media interaction surfaces", () => {
+    const button = document.createElement("button");
+    const buttonLabel = document.createElement("span");
+    button.append(buttonLabel);
+    const mediaCard = document.createElement("div");
+    mediaCard.dataset.mediaTile = "true";
+    const context = {
+      view: "editor" as const,
+      blocked: false,
+      focusedPanel: "timeline" as const,
+      compatibilityReadOnly: false,
+      cropEditingActive: false,
+    };
+
+    expect(shouldHandleTransportSpaceKey(event({ target: buttonLabel }), "editor")).toBe(false);
+    expect(shouldHandleTransportSpaceKey(event({ target: mediaCard }), "editor")).toBe(false);
+    expect(resolveDocumentedShortcut(event({ target: buttonLabel }), context)).toBeNull();
+    expect(
+      resolveDocumentedShortcut(event({ code: "Escape", target: buttonLabel }), context),
+    ).toEqual({ type: "escape" });
+    expect(
+      resolveDocumentedShortcut(event({ code: "Backquote", target: buttonLabel }), context),
+    ).toEqual({ type: "maximize" });
+    expect(
+      resolveDocumentedShortcut(
+        event({ code: "KeyS", metaKey: true, target: buttonLabel }),
+        context,
+      ),
+    ).toEqual({ type: "application", id: "save" });
   });
 
   it("toggles playback synchronously on Space keydown", () => {

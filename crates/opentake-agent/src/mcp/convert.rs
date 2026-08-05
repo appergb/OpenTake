@@ -144,6 +144,10 @@ fn safe_public_detail(kind: PublicErrorKind, private_detail: &str) -> Option<Str
             "{} cannot inspect this source in the current build or source state.",
             tool.as_str()
         )),
+        PublicErrorKind::PathAuthorityRequired(tool) => Some(format!(
+            "{} cannot use a model-supplied local path without user-granted file access.",
+            tool.as_str()
+        )),
         PublicErrorKind::AnalysisLowConfidence(tool) => Some(format!(
             "{} could not identify the selected subject reliably.",
             tool.as_str()

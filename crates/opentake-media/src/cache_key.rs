@@ -104,6 +104,14 @@ fn sha256_hex_prefix(seed: &str, prefix_chars: usize) -> String {
     hex
 }
 
+/// Parse a `ryu-js` explicit exponent (`e` suffix of the closest-shortest
+/// digits). `ryu-js` always emits a numeric exponent today; a future format
+/// change must not panic production code, so malformed input falls back to a
+/// zero exponent (cache keys only need to be stable within this binary).
+fn parse_exponent(exponent: &str) -> i32 {
+    exponent.parse().unwrap_or(0)
+}
+
 /// Render `v` using Swift `Double.description`'s closest-shortest digits and
 /// finishing policy. ECMAScript uses the same closest-shortest tie-breaking;
 /// `ryu-js` provides those digits, after which we apply Swift's exponential
@@ -131,10 +139,7 @@ fn swift_double(v: f64) -> String {
     let mut buffer = ryu_js::Buffer::new();
     let shortest = buffer.format(magnitude);
     let (mantissa, explicit_exponent) = match shortest.split_once('e') {
-        Some((mantissa, exponent)) => (
-            mantissa,
-            exponent.parse::<i32>().expect("ryu-js exponent is numeric"),
-        ),
+        Some((mantissa, exponent)) => (mantissa, parse_exponent(exponent)),
         None => (shortest, 0),
     };
     let fractional_digits = mantissa
@@ -195,6 +200,16 @@ fn swift_double(v: f64) -> String {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn malformed_exponent_falls_back_to_zero() {
+        assert_eq!(parse_exponent("7"), 7);
+        assert_eq!(parse_exponent("-3"), -3);
+        assert_eq!(parse_exponent("+2"), 2);
+        assert_eq!(parse_exponent(""), 0);
+        assert_eq!(parse_exponent("abc"), 0);
+        assert_eq!(parse_exponent("1e999"), 0);
+    }
 
     #[test]
     fn identity_hex_is_stable_and_lowercase() {

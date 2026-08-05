@@ -23,11 +23,17 @@
 //! lazily through `generate_thumbnail`.
 
 use std::collections::{BTreeSet, HashSet};
+use std::ffi::{OsStr, OsString};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
+use cap_fs_ext::{ambient_authority, DirExt, FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::fs::{Dir, OpenOptions};
 use image::ImageEncoder;
+use same_file::Handle as FileIdentity;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 
@@ -313,6 +319,22 @@ impl StabilizationAnalysisState {
     }
 }
 
+/// Project replacement invalidates every Inspector analysis result. Cancelling
+/// all three workers at the identity-transition boundary avoids wasting decode
+/// work; the front end additionally submits any late result with its original
+/// optimistic authority token, so it cannot be committed to the replacement
+/// project even if cancellation races with completion.
+pub(crate) fn cancel_project_bound_analyses(
+    stabilization: &StabilizationAnalysisState,
+    loudness: &LoudnessAnalysisState,
+    denoise: &DenoiseAnalysisState,
+) -> bool {
+    let stabilization_cancelled = stabilization.cancel();
+    let loudness_cancelled = loudness.cancel();
+    let denoise_cancelled = denoise.cancel();
+    stabilization_cancelled || loudness_cancelled || denoise_cancelled
+}
+
 impl MediaState {
     /// Wrap an engine for managed state.
     pub fn new(engine: MediaEngine) -> Self {
@@ -408,7 +430,8 @@ impl MediaItemDto {
         let resolved_proxy = entry
             .proxy
             .as_ref()
-            .and_then(|proxy| trusted_project_proxy_path(project_dir?, &proxy.relative_path));
+            .and_then(|proxy| trusted_project_proxy_path(project_dir?, &proxy.relative_path))
+            .filter(|path| crate::fs_availability::is_materialized_regular_file(path));
         let generation_input = entry.generation_input.as_ref();
         let generation_status = match generation_input.and_then(|input| input.status) {
             Some(GenerationJobStatus::Queued | GenerationJobStatus::Generating) => "generating",
@@ -429,17 +452,26 @@ impl MediaItemDto {
                     | GenerationJobStatus::Finalizing
             )
         );
-        // Missing = a finalized source can resolve and is absent. Pending
-        // placeholders intentionally have no file yet and are not "offline".
+        // Missing = a finalized source can resolve and is absent or still a
+        // cloud-only placeholder. Pending generation placeholders intentionally
+        // have no file yet and are not "offline".
         // An unresolvable (e.g. remote-only) source is not flagged missing.
-        let missing =
-            !generation_pending && resolved.as_ref().map(|p| !p.exists()).unwrap_or(false);
+        let missing = !generation_pending
+            && resolved
+                .as_ref()
+                .map(|path| !crate::fs_availability::is_materialized_regular_file(path))
+                .unwrap_or(false);
         let thumbnail = if missing {
             None
         } else {
-            resolved.as_deref().and_then(|path| {
-                cache_root.and_then(|root| cached_thumbnail_path_for_entry(root, entry, path))
-            })
+            resolved
+                .as_deref()
+                .and_then(|path| {
+                    cache_root.and_then(|root| cached_thumbnail_path_for_entry(root, entry, path))
+                })
+                .filter(|path| {
+                    crate::fs_availability::is_materialized_regular_file(Path::new(path))
+                })
         };
         // File size from the resolved source when it exists (upstream reads
         // FileManager attributes lazily). Skipped for missing/unresolvable sources.
@@ -981,17 +1013,21 @@ fn generate_thumbnail_for_entry(
 /// Probe `path` via the engine, mapping ffprobe facts to [`ProbedMedia`]. Probe
 /// failures (no ffprobe, unreadable file) degrade to defaults so a single bad
 /// file never sinks a batch import.
-fn probe_media(engine: &MediaEngine, path: &Path) -> ProbedMedia {
-    match engine.probe(path) {
-        Ok(p) => ProbedMedia {
-            duration_secs: p.duration_secs,
-            width: p.width.map(|w| w as i32),
-            height: p.height.map(|h| h as i32),
-            fps: p.fps,
-            has_audio: p.has_audio,
-            color: p.color,
-        },
-        Err(_) => ProbedMedia::default(),
+pub(crate) fn probe_media(engine: &MediaEngine, path: &Path) -> ProbedMedia {
+    engine
+        .probe(path)
+        .map(media_probe_to_core)
+        .unwrap_or_default()
+}
+
+fn media_probe_to_core(probe: opentake_media::MediaProbe) -> ProbedMedia {
+    ProbedMedia {
+        duration_secs: probe.duration_secs,
+        width: probe.width.map(|width| width as i32),
+        height: probe.height.map(|height| height as i32),
+        fps: probe.fps,
+        has_audio: probe.has_audio,
+        color: probe.color,
     }
 }
 
@@ -1053,7 +1089,7 @@ impl SavedMediaMetadata {
 
 /// Display name for an imported file: its stem, or the full file name when there
 /// is no stem (mirrors upstream `url.deletingPathExtension().lastPathComponent`).
-fn display_name(path: &Path) -> String {
+pub(crate) fn display_name(path: &Path) -> String {
     path.file_stem()
         .or_else(|| path.file_name())
         .map(|s| s.to_string_lossy().into_owned())
@@ -1113,19 +1149,34 @@ pub(crate) fn import_one(
     Ok(Some(entry))
 }
 
+fn import_cancel_checkpoint(
+    cancel: Option<&opentake_media::MediaCancelToken>,
+) -> Result<(), CoreError> {
+    if cancel.is_some_and(opentake_media::MediaCancelToken::checkpoint) {
+        Err(CoreError::Media("media import was cancelled".to_string()))
+    } else {
+        Ok(())
+    }
+}
+
 fn prepare_import_file(
     engine: &MediaEngine,
     path: &Path,
     folder: Option<PreparedMediaFolderRef>,
-) -> Option<PreparedMediaImportOp> {
-    importable_clip_type(path)?;
+    cancel: Option<&opentake_media::MediaCancelToken>,
+) -> Result<Option<PreparedMediaImportOp>, CoreError> {
+    import_cancel_checkpoint(cancel)?;
+    if importable_clip_type(path).is_none() {
+        return Ok(None);
+    }
     let probe = probe_media(engine, path);
-    Some(PreparedMediaImportOp::ImportFile {
+    import_cancel_checkpoint(cancel)?;
+    Ok(Some(PreparedMediaImportOp::ImportFile {
         path: path.to_path_buf(),
         name: display_name(path),
         probe,
         folder,
-    })
+    }))
 }
 
 /// Admit an imported asset's small grid poster to the project-scoped scheduler.
@@ -1364,36 +1415,39 @@ fn import_folder_impl(
         .as_ref()
         .ok_or_else(|| "no project open".to_string())?;
     let root = PathBuf::from(&path);
-    if !root.is_dir() {
-        return Err(format!("not a directory: {path}"));
-    }
-    let mut skipped = Vec::new();
-    let mut plan = Vec::new();
-    if recursive.unwrap_or(false) {
-        let mut next_folder_key = 0;
-        prepare_mirror_dir(
-            engine,
-            &root,
-            None,
-            &mut next_folder_key,
-            &mut skipped,
-            &mut plan,
-        )
-        .map_err(|e| e.to_string())?;
-    } else {
-        let (files, skipped_files) = list_top_level(&root);
-        for file in &files {
-            if let Some(operation) = prepare_import_file(engine, file, None) {
-                plan.push(operation);
-            }
-        }
-        skipped = skipped_files;
-    }
+    let recursive = recursive.unwrap_or(false);
+    let mut planning_checkpoint = |_| {};
+    let prepared = prepare_directory_import(
+        engine,
+        &root,
+        recursive,
+        None,
+        None,
+        DIRECTORY_IMPORT_LIMITS,
+        &mut planning_checkpoint,
+    )
+    .map_err(|error| CoreError::from(error).to_string())?;
+    let PreparedDirectoryImport {
+        root,
+        snapshot,
+        plan,
+        skipped,
+        recursive,
+        limits,
+    } = prepared;
     let committed = if plan.is_empty() {
         Vec::new()
     } else {
-        core.import_media_batch_for_project_persisted(project.project_epoch, project_dir, plan)
-            .map_err(|e| e.to_string())?
+        core.import_media_batch_for_project_persisted_checked(
+            project.project_epoch,
+            project_dir,
+            plan,
+            || {
+                root.verify_snapshot(&snapshot, recursive, None, limits)
+                    .map_err(CoreError::from)
+            },
+        )
+        .map_err(|e| e.to_string())?
     };
     let prewarm_results = schedule_committed_posters(core, engine, prewarm, &committed);
     Ok(MediaListDto::from_core_with_import_results(
@@ -1409,6 +1463,7 @@ fn import_folder_impl(
 /// recurse into subdirectories. Hidden entries (dot-prefixed) are skipped. Names
 /// of non-importable visible files are appended to `skipped` so the caller can
 /// toast them.
+#[allow(dead_code)]
 pub(crate) fn mirror_dir(
     core: &AppCore,
     engine: &MediaEngine,
@@ -1416,62 +1471,783 @@ pub(crate) fn mirror_dir(
     parent_folder_id: Option<String>,
     skipped: &mut Vec<String>,
 ) -> Result<(), CoreError> {
+    mirror_dir_cancellable(
+        core,
+        engine,
+        dir,
+        parent_folder_id,
+        skipped,
+        &opentake_media::MediaCancelToken::new(),
+    )
+}
+
+pub(crate) fn mirror_dir_cancellable(
+    core: &AppCore,
+    engine: &MediaEngine,
+    dir: &Path,
+    parent_folder_id: Option<String>,
+    skipped: &mut Vec<String>,
+    cancel: &opentake_media::MediaCancelToken,
+) -> Result<(), CoreError> {
+    mirror_dir_cancellable_with_hook(core, engine, dir, parent_folder_id, skipped, cancel, || {})
+}
+
+fn mirror_dir_cancellable_with_hook(
+    core: &AppCore,
+    engine: &MediaEngine,
+    dir: &Path,
+    parent_folder_id: Option<String>,
+    skipped: &mut Vec<String>,
+    cancel: &opentake_media::MediaCancelToken,
+    before_commit: impl FnOnce(),
+) -> Result<(), CoreError> {
+    let mut planning_checkpoint = |_| {};
+    mirror_dir_cancellable_with_hooks(
+        core,
+        engine,
+        dir,
+        parent_folder_id,
+        skipped,
+        cancel,
+        DIRECTORY_IMPORT_LIMITS,
+        &mut planning_checkpoint,
+        before_commit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn mirror_dir_cancellable_with_hooks(
+    core: &AppCore,
+    engine: &MediaEngine,
+    dir: &Path,
+    parent_folder_id: Option<String>,
+    skipped: &mut Vec<String>,
+    cancel: &opentake_media::MediaCancelToken,
+    limits: DirectoryImportLimits,
+    planning_checkpoint: &mut dyn FnMut(usize),
+    before_commit: impl FnOnce(),
+) -> Result<(), CoreError> {
+    import_cancel_checkpoint(Some(cancel))?;
     core.ensure_project_mutable()?;
     let project = core.runtime_snapshot();
     let project_dir = project.project_dir.ok_or(CoreError::NoProjectOpen)?;
-    let mut next_folder_key = 0;
-    let mut plan = Vec::new();
-    prepare_mirror_dir(
+    let prepared = prepare_directory_import(
         engine,
         dir,
+        true,
         parent_folder_id.map(PreparedMediaFolderRef::Existing),
-        &mut next_folder_key,
-        skipped,
-        &mut plan,
+        Some(cancel),
+        limits,
+        planning_checkpoint,
+    )
+    .map_err(CoreError::from)?;
+    let PreparedDirectoryImport {
+        root,
+        snapshot,
+        plan,
+        skipped: prepared_skipped,
+        recursive,
+        limits,
+    } = prepared;
+    before_commit();
+    import_cancel_checkpoint(Some(cancel))?;
+    core.import_media_batch_for_project_persisted_checked(
+        project.project_epoch,
+        &project_dir,
+        plan,
+        || {
+            import_cancel_checkpoint(Some(cancel))?;
+            root.verify_snapshot(&snapshot, recursive, Some(cancel), limits)
+                .map_err(CoreError::from)
+        },
     )?;
-    core.import_media_batch_for_project_persisted(project.project_epoch, &project_dir, plan)?;
+    skipped.extend(prepared_skipped);
     Ok(())
 }
 
-fn prepare_mirror_dir(
-    engine: &MediaEngine,
-    dir: &Path,
-    parent: Option<PreparedMediaFolderRef>,
-    next_folder_key: &mut u64,
-    skipped: &mut Vec<String>,
-    plan: &mut Vec<PreparedMediaImportOp>,
-) -> Result<(), CoreError> {
-    let folder_key = *next_folder_key;
-    *next_folder_key = next_folder_key.saturating_add(1);
-    plan.push(PreparedMediaImportOp::CreateFolder {
-        key: folder_key,
-        name: dir_name(dir),
-        parent,
-    });
-    let folder = PreparedMediaFolderRef::Planned(folder_key);
+/// Beta bounds for one selected directory import. They cap both scanner work
+/// and the all-at-once manifest transaction before any project state changes.
+pub(crate) const DIRECTORY_IMPORT_MAX_DEPTH: usize = 32;
+pub(crate) const DIRECTORY_IMPORT_MAX_ENTRIES: usize = 10_000;
+pub(crate) const DIRECTORY_IMPORT_MAX_FILES: usize = 5_000;
+pub(crate) const DIRECTORY_IMPORT_MAX_PLAN_OPERATIONS: usize = 7_500;
+pub(crate) const DIRECTORY_IMPORT_MAX_AGGREGATE_BYTES: u64 = 100 * 1024 * 1024 * 1024;
+const DIRECTORY_IMPORT_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
-    // Partition this directory's visible entries into media files + subdirs
-    // (both case-insensitive name order) plus the names of unsupported files.
-    let (files, subdirs, mut dir_skipped) = list_dir(dir);
-    skipped.append(&mut dir_skipped);
+#[derive(Clone, Copy, Debug)]
+struct DirectoryImportLimits {
+    max_depth: usize,
+    max_entries: usize,
+    max_files: usize,
+    max_plan_operations: usize,
+    max_aggregate_bytes: u64,
+}
 
-    for file in &files {
-        if let Some(operation) = prepare_import_file(engine, file, Some(folder.clone())) {
-            plan.push(operation);
+const DIRECTORY_IMPORT_LIMITS: DirectoryImportLimits = DirectoryImportLimits {
+    max_depth: DIRECTORY_IMPORT_MAX_DEPTH,
+    max_entries: DIRECTORY_IMPORT_MAX_ENTRIES,
+    max_files: DIRECTORY_IMPORT_MAX_FILES,
+    max_plan_operations: DIRECTORY_IMPORT_MAX_PLAN_OPERATIONS,
+    max_aggregate_bytes: DIRECTORY_IMPORT_MAX_AGGREGATE_BYTES,
+};
+
+#[derive(Debug)]
+enum DirectoryImportError {
+    Cancelled,
+    RootNotDirectory(PathBuf),
+    SymlinkOrReparse(PathBuf),
+    UnsupportedEntryType(PathBuf),
+    Cycle(PathBuf),
+    LimitExceeded {
+        resource: &'static str,
+        limit: u64,
+    },
+    NamespaceChanged,
+    Io {
+        action: &'static str,
+        path: PathBuf,
+        reason: String,
+    },
+}
+
+impl std::fmt::Display for DirectoryImportError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => formatter.write_str("media import was cancelled"),
+            Self::RootNotDirectory(path) => write!(
+                formatter,
+                "directory_import_root_not_directory: {}",
+                path.display()
+            ),
+            Self::SymlinkOrReparse(path) => write!(
+                formatter,
+                "directory_import_symlink_or_reparse_rejected: {}",
+                path.display()
+            ),
+            Self::UnsupportedEntryType(path) => write!(
+                formatter,
+                "directory_import_unsupported_entry_type: {}",
+                path.display()
+            ),
+            Self::Cycle(path) => write!(
+                formatter,
+                "directory_import_cycle_detected: {}",
+                path.display()
+            ),
+            Self::LimitExceeded { resource, limit } => write!(
+                formatter,
+                "directory_import_{resource}_limit_exceeded: maximum {limit}"
+            ),
+            Self::NamespaceChanged => {
+                formatter.write_str("directory_import_namespace_changed_before_commit")
+            }
+            Self::Io {
+                action,
+                path,
+                reason,
+            } => write!(
+                formatter,
+                "directory_import_{action}_failed: {}: {reason}",
+                path.display()
+            ),
+        }
+    }
+}
+
+impl From<DirectoryImportError> for CoreError {
+    fn from(error: DirectoryImportError) -> Self {
+        CoreError::Media(error.to_string())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum DirectorySnapshotKind {
+    RegularFile,
+    Directory,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct DirectorySnapshotEntry {
+    relative_path: PathBuf,
+    kind: DirectorySnapshotKind,
+    identity: u64,
+    bytes: u64,
+}
+
+struct DirectoryImportRoot {
+    path: PathBuf,
+    namespace_parent: Dir,
+    name: OsString,
+    dir: Dir,
+    identity: u64,
+}
+
+impl DirectoryImportRoot {
+    fn open(path: &Path) -> Result<Self, DirectoryImportError> {
+        let (parent_path, name) = match path.file_name() {
+            Some(name) => (
+                path.parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new(".")),
+                name.to_owned(),
+            ),
+            None if path.has_root() => (path, OsString::from(".")),
+            None => return Err(DirectoryImportError::RootNotDirectory(path.to_path_buf())),
+        };
+        let namespace_parent =
+            Dir::open_ambient_dir(parent_path, ambient_authority()).map_err(|error| {
+                DirectoryImportError::Io {
+                    action: "root_parent_open",
+                    path: parent_path.to_path_buf(),
+                    reason: error.to_string(),
+                }
+            })?;
+        let metadata =
+            namespace_parent
+                .symlink_metadata(&name)
+                .map_err(|error| DirectoryImportError::Io {
+                    action: "root_metadata",
+                    path: path.to_path_buf(),
+                    reason: error.to_string(),
+                })?;
+        if capability_metadata_is_symlink_or_reparse(&metadata) {
+            return Err(DirectoryImportError::SymlinkOrReparse(path.to_path_buf()));
+        }
+        if !metadata.is_dir() {
+            return Err(DirectoryImportError::RootNotDirectory(path.to_path_buf()));
+        }
+        let dir = namespace_parent.open_dir_nofollow(&name).map_err(|error| {
+            DirectoryImportError::Io {
+                action: "root_open_nofollow",
+                path: path.to_path_buf(),
+                reason: error.to_string(),
+            }
+        })?;
+        let retained_metadata = dir
+            .dir_metadata()
+            .map_err(|error| DirectoryImportError::Io {
+                action: "root_retained_metadata",
+                path: path.to_path_buf(),
+                reason: error.to_string(),
+            })?;
+        if capability_metadata_is_symlink_or_reparse(&retained_metadata)
+            || !retained_metadata.is_dir()
+        {
+            return Err(DirectoryImportError::SymlinkOrReparse(path.to_path_buf()));
+        }
+        let identity = directory_identity(&dir, path)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            namespace_parent,
+            name,
+            dir,
+            identity,
+        })
+    }
+
+    fn reopen_current(&self) -> Result<Dir, DirectoryImportError> {
+        let metadata = self
+            .namespace_parent
+            .symlink_metadata(&self.name)
+            .map_err(|error| DirectoryImportError::Io {
+                action: "root_revalidate_metadata",
+                path: self.path.clone(),
+                reason: error.to_string(),
+            })?;
+        if capability_metadata_is_symlink_or_reparse(&metadata) {
+            return Err(DirectoryImportError::SymlinkOrReparse(self.path.clone()));
+        }
+        if !metadata.is_dir() {
+            return Err(DirectoryImportError::NamespaceChanged);
+        }
+        let current = self
+            .namespace_parent
+            .open_dir_nofollow(&self.name)
+            .map_err(|_| DirectoryImportError::NamespaceChanged)?;
+        if directory_identity(&current, &self.path)? != self.identity {
+            return Err(DirectoryImportError::NamespaceChanged);
+        }
+        Ok(current)
+    }
+
+    fn verify_snapshot(
+        &self,
+        expected: &[DirectorySnapshotEntry],
+        recursive: bool,
+        cancel: Option<&opentake_media::MediaCancelToken>,
+        limits: DirectoryImportLimits,
+    ) -> Result<(), DirectoryImportError> {
+        import_cancel_checkpoint(cancel).map_err(|_| DirectoryImportError::Cancelled)?;
+        let current = self.reopen_current()?;
+        let mut noop = |_| {};
+        let mut planner = DirectoryImportPlanner::new(None, cancel, limits, false, &mut noop);
+        planner.visited.insert(self.identity);
+        planner.scan_dir(&current, &self.path, Path::new(""), None, 0, recursive)?;
+        planner.snapshot.sort();
+        if planner.snapshot != expected {
+            return Err(DirectoryImportError::NamespaceChanged);
+        }
+        Ok(())
+    }
+}
+
+struct PreparedDirectoryImport {
+    root: DirectoryImportRoot,
+    snapshot: Vec<DirectorySnapshotEntry>,
+    plan: Vec<PreparedMediaImportOp>,
+    skipped: Vec<String>,
+    recursive: bool,
+    limits: DirectoryImportLimits,
+}
+
+struct PendingDirectoryEntry {
+    name: OsString,
+    kind: DirectorySnapshotKind,
+}
+
+struct DirectoryImportPlanner<'a> {
+    engine: Option<&'a MediaEngine>,
+    cancel: Option<&'a opentake_media::MediaCancelToken>,
+    limits: DirectoryImportLimits,
+    build_plan: bool,
+    on_checkpoint: &'a mut dyn FnMut(usize),
+    checkpoints: usize,
+    entries: usize,
+    files: usize,
+    aggregate_bytes: u64,
+    operations: usize,
+    next_folder_key: u64,
+    visited: HashSet<u64>,
+    snapshot: Vec<DirectorySnapshotEntry>,
+    plan: Vec<PreparedMediaImportOp>,
+    skipped: Vec<String>,
+}
+
+impl<'a> DirectoryImportPlanner<'a> {
+    fn new(
+        engine: Option<&'a MediaEngine>,
+        cancel: Option<&'a opentake_media::MediaCancelToken>,
+        limits: DirectoryImportLimits,
+        build_plan: bool,
+        on_checkpoint: &'a mut dyn FnMut(usize),
+    ) -> Self {
+        Self {
+            engine,
+            cancel,
+            limits,
+            build_plan,
+            on_checkpoint,
+            checkpoints: 0,
+            entries: 0,
+            files: 0,
+            aggregate_bytes: 0,
+            operations: 0,
+            next_folder_key: 0,
+            visited: HashSet::new(),
+            snapshot: Vec::new(),
+            plan: Vec::new(),
+            skipped: Vec::new(),
         }
     }
 
-    for sub in subdirs {
-        prepare_mirror_dir(
-            engine,
-            &sub,
-            Some(folder.clone()),
-            next_folder_key,
-            skipped,
-            plan,
-        )?;
+    fn checkpoint(&mut self) -> Result<(), DirectoryImportError> {
+        self.checkpoints = self.checkpoints.saturating_add(1);
+        (self.on_checkpoint)(self.checkpoints);
+        import_cancel_checkpoint(self.cancel).map_err(|_| DirectoryImportError::Cancelled)
     }
-    Ok(())
+
+    fn bump_limit(
+        value: &mut usize,
+        limit: usize,
+        resource: &'static str,
+    ) -> Result<(), DirectoryImportError> {
+        *value = value.saturating_add(1);
+        if *value > limit {
+            return Err(DirectoryImportError::LimitExceeded {
+                resource,
+                limit: limit as u64,
+            });
+        }
+        Ok(())
+    }
+
+    fn bump_operation(&mut self) -> Result<(), DirectoryImportError> {
+        Self::bump_limit(
+            &mut self.operations,
+            self.limits.max_plan_operations,
+            "planned_operations",
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn scan_dir(
+        &mut self,
+        dir: &Dir,
+        absolute_path: &Path,
+        relative_path: &Path,
+        parent: Option<PreparedMediaFolderRef>,
+        depth: usize,
+        recursive: bool,
+    ) -> Result<(), DirectoryImportError> {
+        self.checkpoint()?;
+        if depth > self.limits.max_depth {
+            return Err(DirectoryImportError::LimitExceeded {
+                resource: "depth",
+                limit: self.limits.max_depth as u64,
+            });
+        }
+
+        let folder = if recursive {
+            self.bump_operation()?;
+            let key = self.next_folder_key;
+            self.next_folder_key = self.next_folder_key.saturating_add(1);
+            if self.build_plan {
+                self.plan.push(PreparedMediaImportOp::CreateFolder {
+                    key,
+                    name: dir_name(absolute_path),
+                    parent,
+                });
+            }
+            Some(PreparedMediaFolderRef::Planned(key))
+        } else {
+            None
+        };
+
+        let entries = dir.entries().map_err(|error| DirectoryImportError::Io {
+            action: "read_directory",
+            path: absolute_path.to_path_buf(),
+            reason: error.to_string(),
+        })?;
+        let mut files = Vec::new();
+        let mut directories = Vec::new();
+        for entry in entries {
+            self.checkpoint()?;
+            let entry = entry.map_err(|error| DirectoryImportError::Io {
+                action: "read_directory_entry",
+                path: absolute_path.to_path_buf(),
+                reason: error.to_string(),
+            })?;
+            let name = entry.file_name();
+            if !is_single_normal_component(&name) {
+                return Err(DirectoryImportError::UnsupportedEntryType(
+                    absolute_path.join(&name),
+                ));
+            }
+            let child_path = absolute_path.join(&name);
+            let metadata =
+                dir.symlink_metadata(&name)
+                    .map_err(|error| DirectoryImportError::Io {
+                        action: "entry_metadata_nofollow",
+                        path: child_path.clone(),
+                        reason: error.to_string(),
+                    })?;
+            if capability_metadata_is_symlink_or_reparse(&metadata) {
+                return Err(DirectoryImportError::SymlinkOrReparse(child_path));
+            }
+            let kind = if metadata.is_file() {
+                DirectorySnapshotKind::RegularFile
+            } else if metadata.is_dir() {
+                DirectorySnapshotKind::Directory
+            } else {
+                return Err(DirectoryImportError::UnsupportedEntryType(child_path));
+            };
+            Self::bump_limit(&mut self.entries, self.limits.max_entries, "entries")?;
+            let pending = PendingDirectoryEntry { name, kind };
+            match kind {
+                DirectorySnapshotKind::RegularFile => files.push(pending),
+                DirectorySnapshotKind::Directory => directories.push(pending),
+            }
+        }
+        files.sort_by(|left, right| directory_entry_name_cmp(&left.name, &right.name));
+        directories.sort_by(|left, right| directory_entry_name_cmp(&left.name, &right.name));
+
+        for entry in files {
+            self.checkpoint()?;
+            let child_path = absolute_path.join(&entry.name);
+            let relative_child = relative_path.join(&entry.name);
+            let (file, bytes) = open_regular_file_nofollow(dir, &entry.name, &child_path)?;
+            Self::bump_limit(&mut self.files, self.limits.max_files, "files")?;
+            self.aggregate_bytes = self.aggregate_bytes.checked_add(bytes).ok_or(
+                DirectoryImportError::LimitExceeded {
+                    resource: "aggregate_bytes",
+                    limit: self.limits.max_aggregate_bytes,
+                },
+            )?;
+            if self.aggregate_bytes > self.limits.max_aggregate_bytes {
+                return Err(DirectoryImportError::LimitExceeded {
+                    resource: "aggregate_bytes",
+                    limit: self.limits.max_aggregate_bytes,
+                });
+            }
+            self.snapshot.push(DirectorySnapshotEntry {
+                relative_path: relative_child,
+                kind: entry.kind,
+                identity: file_identity(&file, &child_path)?,
+                bytes,
+            });
+
+            if is_hidden_name(&entry.name) {
+                continue;
+            }
+            if importable_clip_type(&child_path).is_some() {
+                self.bump_operation()?;
+                if self.build_plan {
+                    self.checkpoint()?;
+                    let engine = self.engine.ok_or_else(|| DirectoryImportError::Io {
+                        action: "planner_invariant",
+                        path: child_path.clone(),
+                        reason: "missing media engine".to_string(),
+                    })?;
+                    let probe = probe_media_file(engine, &file, self.cancel);
+                    self.checkpoint()?;
+                    self.plan.push(PreparedMediaImportOp::ImportFile {
+                        path: child_path.clone(),
+                        name: display_name(&child_path),
+                        probe,
+                        folder: folder.clone(),
+                    });
+                }
+            } else if self.build_plan {
+                self.skipped.push(display_file_name(&child_path));
+            }
+        }
+
+        for entry in directories {
+            self.checkpoint()?;
+            let child_path = absolute_path.join(&entry.name);
+            let relative_child = relative_path.join(&entry.name);
+            let child = open_directory_nofollow(dir, &entry.name, &child_path)?;
+            let identity = directory_identity(&child, &child_path)?;
+            self.snapshot.push(DirectorySnapshotEntry {
+                relative_path: relative_child.clone(),
+                kind: entry.kind,
+                identity,
+                bytes: 0,
+            });
+            if recursive && !is_hidden_name(&entry.name) {
+                if !self.visited.insert(identity) {
+                    return Err(DirectoryImportError::Cycle(child_path));
+                }
+                self.scan_dir(
+                    &child,
+                    &child_path,
+                    &relative_child,
+                    folder.clone(),
+                    depth.saturating_add(1),
+                    true,
+                )?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn prepare_directory_import(
+    engine: &MediaEngine,
+    path: &Path,
+    recursive: bool,
+    parent: Option<PreparedMediaFolderRef>,
+    cancel: Option<&opentake_media::MediaCancelToken>,
+    limits: DirectoryImportLimits,
+    planning_checkpoint: &mut dyn FnMut(usize),
+) -> Result<PreparedDirectoryImport, DirectoryImportError> {
+    let root = DirectoryImportRoot::open(path)?;
+    let mut planner =
+        DirectoryImportPlanner::new(Some(engine), cancel, limits, true, planning_checkpoint);
+    planner.visited.insert(root.identity);
+    planner.scan_dir(&root.dir, path, Path::new(""), parent, 0, recursive)?;
+    planner.snapshot.sort();
+    Ok(PreparedDirectoryImport {
+        root,
+        snapshot: planner.snapshot,
+        plan: planner.plan,
+        skipped: planner.skipped,
+        recursive,
+        limits,
+    })
+}
+
+pub(crate) fn capability_metadata_is_symlink_or_reparse(metadata: &cap_std::fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use cap_std::fs::MetadataExt;
+        windows_file_attributes_are_reparse(metadata.file_attributes())
+    }
+    #[cfg(not(windows))]
+    false
+}
+
+#[cfg(windows)]
+pub(crate) fn windows_file_attributes_are_reparse(attributes: u32) -> bool {
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+fn directory_identity(dir: &Dir, path: &Path) -> Result<u64, DirectoryImportError> {
+    let file = dir
+        .try_clone()
+        .map_err(|error| DirectoryImportError::Io {
+            action: "directory_identity_clone",
+            path: path.to_path_buf(),
+            reason: error.to_string(),
+        })?
+        .into_std_file();
+    file_identity(&file, path)
+}
+
+fn file_identity(file: &std::fs::File, path: &Path) -> Result<u64, DirectoryImportError> {
+    let retained = file.try_clone().map_err(|error| DirectoryImportError::Io {
+        action: "entry_identity_clone",
+        path: path.to_path_buf(),
+        reason: error.to_string(),
+    })?;
+    let identity = FileIdentity::from_file(retained).map_err(|error| DirectoryImportError::Io {
+        action: "entry_identity",
+        path: path.to_path_buf(),
+        reason: error.to_string(),
+    })?;
+    // `same-file` hashes the stable device/inode (Unix) or volume/file-index
+    // key (Windows). A theoretical hash collision only causes a fail-closed
+    // false cycle/snapshot mismatch; it cannot admit a repeated identity.
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    identity.hash(&mut hasher);
+    Ok(hasher.finish())
+}
+
+fn open_directory_nofollow(
+    parent: &Dir,
+    name: &OsStr,
+    path: &Path,
+) -> Result<Dir, DirectoryImportError> {
+    let metadata = parent
+        .symlink_metadata(name)
+        .map_err(|error| DirectoryImportError::Io {
+            action: "directory_metadata_nofollow",
+            path: path.to_path_buf(),
+            reason: error.to_string(),
+        })?;
+    if capability_metadata_is_symlink_or_reparse(&metadata) {
+        return Err(DirectoryImportError::SymlinkOrReparse(path.to_path_buf()));
+    }
+    if !metadata.is_dir() {
+        return Err(DirectoryImportError::NamespaceChanged);
+    }
+    let child = parent
+        .open_dir_nofollow(name)
+        .map_err(|error| DirectoryImportError::Io {
+            action: "directory_open_nofollow",
+            path: path.to_path_buf(),
+            reason: error.to_string(),
+        })?;
+    let retained = child
+        .dir_metadata()
+        .map_err(|error| DirectoryImportError::Io {
+            action: "directory_retained_metadata",
+            path: path.to_path_buf(),
+            reason: error.to_string(),
+        })?;
+    if capability_metadata_is_symlink_or_reparse(&retained) || !retained.is_dir() {
+        return Err(DirectoryImportError::NamespaceChanged);
+    }
+    Ok(child)
+}
+
+fn open_regular_file_nofollow(
+    parent: &Dir,
+    name: &OsStr,
+    path: &Path,
+) -> Result<(std::fs::File, u64), DirectoryImportError> {
+    let metadata = parent
+        .symlink_metadata(name)
+        .map_err(|error| DirectoryImportError::Io {
+            action: "file_metadata_nofollow",
+            path: path.to_path_buf(),
+            reason: error.to_string(),
+        })?;
+    if capability_metadata_is_symlink_or_reparse(&metadata) {
+        return Err(DirectoryImportError::SymlinkOrReparse(path.to_path_buf()));
+    }
+    if !metadata.is_file() {
+        return Err(DirectoryImportError::UnsupportedEntryType(
+            path.to_path_buf(),
+        ));
+    }
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    }
+    let file = parent
+        .open_with(name, &options)
+        .map_err(|error| DirectoryImportError::Io {
+            action: "file_open_nofollow",
+            path: path.to_path_buf(),
+            reason: error.to_string(),
+        })?;
+    let retained = file.metadata().map_err(|error| DirectoryImportError::Io {
+        action: "file_retained_metadata",
+        path: path.to_path_buf(),
+        reason: error.to_string(),
+    })?;
+    if capability_metadata_is_symlink_or_reparse(&retained) {
+        return Err(DirectoryImportError::SymlinkOrReparse(path.to_path_buf()));
+    }
+    if !retained.is_file() {
+        return Err(DirectoryImportError::UnsupportedEntryType(
+            path.to_path_buf(),
+        ));
+    }
+    let bytes = retained.len();
+    Ok((file.into_std(), bytes))
+}
+
+fn probe_media_file(
+    engine: &MediaEngine,
+    file: &std::fs::File,
+    cancel: Option<&opentake_media::MediaCancelToken>,
+) -> ProbedMedia {
+    let local_cancel = opentake_media::MediaCancelToken::new();
+    engine
+        .probe_file_cancellable(
+            file,
+            cancel.unwrap_or(&local_cancel),
+            DIRECTORY_IMPORT_PROBE_TIMEOUT,
+        )
+        .map(media_probe_to_core)
+        .unwrap_or_default()
+}
+
+fn is_single_normal_component(name: &OsStr) -> bool {
+    matches!(
+        Path::new(name).components().collect::<Vec<_>>().as_slice(),
+        [std::path::Component::Normal(_)]
+    )
+}
+
+fn is_hidden_name(name: &OsStr) -> bool {
+    name.to_str()
+        .map(|name| name.starts_with('.'))
+        .unwrap_or(false)
+}
+
+fn directory_entry_name_cmp(left: &OsStr, right: &OsStr) -> std::cmp::Ordering {
+    left.to_string_lossy()
+        .to_lowercase()
+        .cmp(&right.to_string_lossy().to_lowercase())
+        .then_with(|| left.to_string_lossy().cmp(&right.to_string_lossy()))
 }
 
 fn schedule_committed_posters(
@@ -1500,6 +2276,7 @@ fn dir_name(dir: &Path) -> String {
 /// case-insensitive name), plus the names of visible non-importable files.
 /// Dot-prefixed (hidden) entries are ignored entirely — an unsupported *type* is
 /// a skip the user should hear about; a hidden dotfile is not.
+#[cfg(test)]
 fn list_dir(dir: &Path) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<String>) {
     let mut files = Vec::new();
     let mut subdirs = Vec::new();
@@ -1539,6 +2316,7 @@ fn list_dir(dir: &Path) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<String>) {
 /// The top-level importable media files + the names of unsupported files in
 /// `dir`, for a flat (non-recursive) folder import. Subdirectories are ignored
 /// (as before); their contents are neither imported nor reported skipped.
+#[cfg(test)]
 fn list_top_level(dir: &Path) -> (Vec<PathBuf>, Vec<String>) {
     let (files, _subdirs, skipped) = list_dir(dir);
     (files, skipped)
@@ -1586,7 +2364,9 @@ fn import_media_impl(
             skipped.push(display_file_name(&path));
             continue;
         }
-        if let Some(operation) = prepare_import_file(engine, &path, None) {
+        if let Some(operation) =
+            prepare_import_file(engine, &path, None, None).map_err(|e| e.to_string())?
+        {
             plan.push(operation);
         }
     }
@@ -3594,6 +4374,9 @@ fn grant_proxy_asset_file<R: Runtime>(app: &AppHandle<R>, path: &Path) -> Result
     if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
         return Err("media_proxy_scope_regular_file_required".to_string());
     }
+    if !crate::fs_availability::is_materialized_regular_file(path) {
+        return Err("media_proxy_scope_materialized_file_required".to_string());
+    }
     app.asset_protocol_scope()
         .allow_file(path)
         .map_err(|error| format!("media_proxy_scope_grant_failed:{error}"))
@@ -5497,6 +6280,44 @@ mod tests {
         assert_eq!(dto.file_size, Some(10));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn dto_treats_a_fifo_source_as_offline_without_opening_it() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("blocking-source.mov");
+        let source_c = CString::new(source.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `source_c` is a valid, NUL-terminated path owned for the call.
+        assert_eq!(unsafe { libc::mkfifo(source_c.as_ptr(), 0o600) }, 0);
+        let entry = MediaManifestEntry {
+            id: "fifo".into(),
+            name: "blocking-source".into(),
+            kind: ClipType::Video,
+            source: MediaSource::External {
+                absolute_path: source.to_string_lossy().into_owned(),
+            },
+            duration: 1.0,
+            generation_input: None,
+            source_width: Some(1920),
+            source_height: Some(1080),
+            source_fps: Some(30.0),
+            has_audio: Some(false),
+            color: None,
+            proxy: None,
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        };
+
+        let dto = MediaItemDto::from_entry(&entry, None, None, false);
+
+        assert!(dto.missing);
+        assert_eq!(dto.file_size, None);
+        assert_eq!(dto.thumbnail, None);
+    }
+
     #[test]
     fn media_item_dto_serializes_camel_case() {
         let dto = MediaItemDto {
@@ -5767,6 +6588,492 @@ mod tests {
         assert_eq!(b.folder_id.as_deref(), Some(day1f.id.as_str()));
         // The unsupported note.txt is reported skipped, not dropped silently.
         assert_eq!(skipped, vec!["note.txt"]);
+    }
+
+    #[test]
+    fn cancelled_recursive_mirror_before_commit_changes_neither_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("CancelledTrip");
+        fs::create_dir(&root).unwrap();
+        touch(&root.join("a.mp4"));
+        let nested = root.join("Day1");
+        fs::create_dir(&nested).unwrap();
+        touch(&nested.join("b.mov"));
+
+        let bundle = tmp.path().join("CancelledMirror.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone()))
+            .expect("save project");
+        let engine = engine_for(tmp.path());
+        let before_live = core.media();
+        let manifest_path = bundle.join("media.json");
+        let before_disk = fs::read(&manifest_path).expect("read persisted manifest");
+        let cancel = opentake_media::MediaCancelToken::new();
+        let mut skipped = Vec::new();
+
+        let result = mirror_dir_cancellable_with_hook(
+            &core,
+            &engine,
+            &root,
+            None,
+            &mut skipped,
+            &cancel,
+            || cancel.cancel(),
+        );
+
+        let error = result.expect_err("cancelled mirror must not commit its prepared batch");
+        assert!(error.to_string().contains("cancel"), "{error}");
+        assert_eq!(core.media(), before_live, "live manifest changed");
+        assert_eq!(
+            fs::read(&manifest_path).expect("reread persisted manifest"),
+            before_disk,
+            "persisted media.json changed"
+        );
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).expect("reopen project");
+        assert_eq!(reopened.media(), before_live, "reopened manifest changed");
+    }
+
+    #[test]
+    fn directory_import_beta_limits_are_fixed() {
+        assert_eq!(DIRECTORY_IMPORT_MAX_DEPTH, 32);
+        assert_eq!(DIRECTORY_IMPORT_MAX_ENTRIES, 10_000);
+        assert_eq!(DIRECTORY_IMPORT_MAX_FILES, 5_000);
+        assert_eq!(DIRECTORY_IMPORT_MAX_PLAN_OPERATIONS, 7_500);
+        assert_eq!(
+            DIRECTORY_IMPORT_MAX_AGGREGATE_BYTES,
+            100 * 1024 * 1024 * 1024
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recursive_mirror_rejects_self_loop_symlink_without_publication() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("LoopRoot");
+        fs::create_dir(&root).unwrap();
+        symlink(".", root.join("self")).expect("create self-loop symlink");
+        let bundle = tmp.path().join("LoopMirror.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone())).unwrap();
+        let before = core.media();
+        let engine = engine_for(tmp.path());
+        let mut skipped = Vec::new();
+
+        let error = mirror_dir(&core, &engine, &root, None, &mut skipped)
+            .expect_err("self-loop symlink must fail closed");
+
+        assert!(error.to_string().contains("symlink_or_reparse"), "{error}");
+        assert_eq!(core.media(), before);
+        assert!(skipped.is_empty());
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).unwrap();
+        assert_eq!(reopened.media(), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recursive_mirror_rejects_external_directory_symlink_and_preserves_canary() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Selected");
+        let outside = tmp.path().join("Outside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let canary = outside.join("canary.mp4");
+        fs::write(&canary, b"outside-canary").unwrap();
+        symlink(&outside, root.join("escape")).expect("create external directory symlink");
+        let core = AppCore::new();
+        core.save_project(Some(tmp.path().join("EscapeMirror.opentake")))
+            .unwrap();
+        let before = core.media();
+        let engine = engine_for(tmp.path());
+        let mut skipped = Vec::new();
+
+        let error = mirror_dir(&core, &engine, &root, None, &mut skipped)
+            .expect_err("external symlink must fail closed");
+
+        assert!(error.to_string().contains("symlink_or_reparse"), "{error}");
+        assert_eq!(fs::read(canary).unwrap(), b"outside-canary");
+        assert_eq!(core.media(), before);
+        assert!(skipped.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recursive_mirror_rejects_fifo_without_blocking_or_publication() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("SpecialRoot");
+        fs::create_dir(&root).unwrap();
+        let fifo = root.join("named-pipe.mp4");
+        let fifo_name = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `fifo_name` is a valid NUL-terminated pathname and mode is ordinary rw-------.
+        let status = unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) };
+        assert_eq!(
+            status,
+            0,
+            "mkfifo failed: {}",
+            std::io::Error::last_os_error()
+        );
+        let core = AppCore::new();
+        core.save_project(Some(tmp.path().join("SpecialMirror.opentake")))
+            .unwrap();
+        let before = core.media();
+        let engine = engine_for(tmp.path());
+        let mut skipped = Vec::new();
+
+        let error = mirror_dir(&core, &engine, &root, None, &mut skipped)
+            .expect_err("FIFO must be rejected from directory import");
+
+        assert!(
+            error.to_string().contains("unsupported_entry_type"),
+            "{error}"
+        );
+        assert_eq!(core.media(), before);
+        assert!(skipped.is_empty());
+    }
+
+    #[test]
+    fn recursive_mirror_rejects_tree_deeper_than_beta_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("DeepRoot");
+        fs::create_dir(&root).unwrap();
+        let mut cursor = root.clone();
+        for depth in 0..=DIRECTORY_IMPORT_MAX_DEPTH {
+            cursor = cursor.join(format!("d{depth}"));
+            fs::create_dir(&cursor).unwrap();
+        }
+        let core = AppCore::new();
+        core.save_project(Some(tmp.path().join("DeepMirror.opentake")))
+            .unwrap();
+        let before = core.media();
+        let engine = engine_for(tmp.path());
+        let mut skipped = Vec::new();
+
+        let error = mirror_dir(&core, &engine, &root, None, &mut skipped)
+            .expect_err("over-depth tree must fail closed");
+
+        assert!(
+            error.to_string().contains("depth_limit_exceeded"),
+            "{error}"
+        );
+        assert_eq!(core.media(), before);
+        assert!(skipped.is_empty());
+    }
+
+    #[test]
+    fn recursive_mirror_enforces_entry_file_operation_and_aggregate_byte_limits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let engine = engine_for(tmp.path());
+
+        let entry_root = tmp.path().join("EntryLimit");
+        fs::create_dir(&entry_root).unwrap();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            touch(&entry_root.join(name));
+        }
+        let entry_core = AppCore::new();
+        entry_core
+            .save_project(Some(tmp.path().join("EntryLimit.opentake")))
+            .unwrap();
+        let entry_before = entry_core.media();
+        let entry_cancel = opentake_media::MediaCancelToken::new();
+        let mut entry_skipped = Vec::new();
+        let mut noop = |_| {};
+        let error = mirror_dir_cancellable_with_hooks(
+            &entry_core,
+            &engine,
+            &entry_root,
+            None,
+            &mut entry_skipped,
+            &entry_cancel,
+            DirectoryImportLimits {
+                max_entries: 2,
+                ..DIRECTORY_IMPORT_LIMITS
+            },
+            &mut noop,
+            || {},
+        )
+        .expect_err("entry limit must fail closed");
+        assert!(
+            error.to_string().contains("entries_limit_exceeded"),
+            "{error}"
+        );
+        assert_eq!(entry_core.media(), entry_before);
+        assert!(entry_skipped.is_empty());
+
+        let file_root = tmp.path().join("FileLimit");
+        fs::create_dir(&file_root).unwrap();
+        touch(&file_root.join("a.txt"));
+        touch(&file_root.join("b.txt"));
+        let file_core = AppCore::new();
+        file_core
+            .save_project(Some(tmp.path().join("FileLimit.opentake")))
+            .unwrap();
+        let file_before = file_core.media();
+        let file_cancel = opentake_media::MediaCancelToken::new();
+        let mut file_skipped = Vec::new();
+        let mut noop = |_| {};
+        let error = mirror_dir_cancellable_with_hooks(
+            &file_core,
+            &engine,
+            &file_root,
+            None,
+            &mut file_skipped,
+            &file_cancel,
+            DirectoryImportLimits {
+                max_files: 1,
+                ..DIRECTORY_IMPORT_LIMITS
+            },
+            &mut noop,
+            || {},
+        )
+        .expect_err("file limit must fail closed");
+        assert!(
+            error.to_string().contains("files_limit_exceeded"),
+            "{error}"
+        );
+        assert_eq!(file_core.media(), file_before);
+        assert!(file_skipped.is_empty());
+
+        let operation_root = tmp.path().join("OperationLimit");
+        fs::create_dir(&operation_root).unwrap();
+        touch(&operation_root.join("supported.mp4"));
+        let operation_core = AppCore::new();
+        operation_core
+            .save_project(Some(tmp.path().join("OperationLimit.opentake")))
+            .unwrap();
+        let operation_before = operation_core.media();
+        let operation_cancel = opentake_media::MediaCancelToken::new();
+        let mut operation_skipped = Vec::new();
+        let mut noop = |_| {};
+        let error = mirror_dir_cancellable_with_hooks(
+            &operation_core,
+            &engine,
+            &operation_root,
+            None,
+            &mut operation_skipped,
+            &operation_cancel,
+            DirectoryImportLimits {
+                max_plan_operations: 1,
+                ..DIRECTORY_IMPORT_LIMITS
+            },
+            &mut noop,
+            || {},
+        )
+        .expect_err("planned-operation limit must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains("planned_operations_limit_exceeded"),
+            "{error}"
+        );
+        assert_eq!(operation_core.media(), operation_before);
+        assert!(operation_skipped.is_empty());
+
+        let byte_root = tmp.path().join("ByteLimit");
+        fs::create_dir(&byte_root).unwrap();
+        fs::write(byte_root.join("large.mp4"), b"123456789").unwrap();
+        let byte_core = AppCore::new();
+        byte_core
+            .save_project(Some(tmp.path().join("ByteLimit.opentake")))
+            .unwrap();
+        let byte_before = byte_core.media();
+        let byte_cancel = opentake_media::MediaCancelToken::new();
+        let mut byte_skipped = Vec::new();
+        let mut noop = |_| {};
+        let error = mirror_dir_cancellable_with_hooks(
+            &byte_core,
+            &engine,
+            &byte_root,
+            None,
+            &mut byte_skipped,
+            &byte_cancel,
+            DirectoryImportLimits {
+                max_aggregate_bytes: 8,
+                ..DIRECTORY_IMPORT_LIMITS
+            },
+            &mut noop,
+            || {},
+        )
+        .expect_err("aggregate byte limit must fail closed");
+        assert!(
+            error.to_string().contains("aggregate_bytes_limit_exceeded"),
+            "{error}"
+        );
+        assert_eq!(byte_core.media(), byte_before);
+        assert!(byte_skipped.is_empty());
+    }
+
+    #[test]
+    fn cancellation_mid_directory_plan_publishes_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("MidPlanCancel");
+        fs::create_dir(&root).unwrap();
+        touch(&root.join("a.mp4"));
+        touch(&root.join("b.mp4"));
+        let bundle = tmp.path().join("MidPlanCancel.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone())).unwrap();
+        let before_live = core.media();
+        let manifest_path = bundle.join("media.json");
+        let before_disk = fs::read(&manifest_path).unwrap();
+        let engine = engine_for(tmp.path());
+        let cancel = opentake_media::MediaCancelToken::new();
+        let mut skipped = Vec::new();
+        let mut reached = 0;
+        let mut cancel_during_plan = |checkpoint| {
+            reached = checkpoint;
+            if checkpoint == 4 {
+                cancel.cancel();
+            }
+        };
+
+        let error = mirror_dir_cancellable_with_hooks(
+            &core,
+            &engine,
+            &root,
+            None,
+            &mut skipped,
+            &cancel,
+            DIRECTORY_IMPORT_LIMITS,
+            &mut cancel_during_plan,
+            || {},
+        )
+        .expect_err("mid-plan cancellation must fail closed");
+
+        assert!(error.to_string().contains("cancel"), "{error}");
+        assert!(reached >= 4);
+        assert!(skipped.is_empty());
+        assert_eq!(core.media(), before_live);
+        assert_eq!(fs::read(manifest_path).unwrap(), before_disk);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recursive_mirror_root_swap_before_commit_is_rejected_atomically() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("SwapRoot");
+        let moved = tmp.path().join("SwapRootMoved");
+        let outside = tmp.path().join("SwapOutside");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+        touch(&root.join("inside.mp4"));
+        let canary = outside.join("canary.mp4");
+        fs::write(&canary, b"outside-swap-canary").unwrap();
+        let bundle = tmp.path().join("SwapRoot.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone())).unwrap();
+        let before_live = core.media();
+        let before_disk = fs::read(bundle.join("media.json")).unwrap();
+        let engine = engine_for(tmp.path());
+        let cancel = opentake_media::MediaCancelToken::new();
+        let mut skipped = Vec::new();
+
+        let error = mirror_dir_cancellable_with_hook(
+            &core,
+            &engine,
+            &root,
+            None,
+            &mut skipped,
+            &cancel,
+            || {
+                fs::rename(&root, &moved).unwrap();
+                symlink(&outside, &root).unwrap();
+            },
+        )
+        .expect_err("root namespace swap must fail before commit");
+
+        assert!(
+            error.to_string().contains("symlink_or_reparse")
+                || error.to_string().contains("namespace_changed"),
+            "{error}"
+        );
+        assert_eq!(core.media(), before_live);
+        assert_eq!(fs::read(bundle.join("media.json")).unwrap(), before_disk);
+        assert_eq!(fs::read(canary).unwrap(), b"outside-swap-canary");
+        assert!(skipped.is_empty());
+    }
+
+    #[test]
+    fn recursive_mirror_normal_nested_tree_preserves_exact_sources_and_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("ExactTree");
+        let nested = root.join("Nested");
+        fs::create_dir_all(&nested).unwrap();
+        let first = root.join("first.mp4");
+        let second = nested.join("second.wav");
+        fs::write(&first, b"first-exact-bytes").unwrap();
+        fs::write(&second, b"second-exact-bytes").unwrap();
+        let core = AppCore::new();
+        core.save_project(Some(tmp.path().join("ExactTree.opentake")))
+            .unwrap();
+        let engine = engine_for(tmp.path());
+        let mut skipped = Vec::new();
+
+        mirror_dir(&core, &engine, &root, None, &mut skipped).unwrap();
+
+        let manifest = core.media();
+        assert_eq!(manifest.entries.len(), 2);
+        let imported_paths = manifest
+            .entries
+            .iter()
+            .map(|entry| match &entry.source {
+                MediaSource::External { absolute_path } => PathBuf::from(absolute_path),
+                MediaSource::Project { .. } => panic!("directory import must retain exact sources"),
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            imported_paths,
+            HashSet::from([first.clone(), second.clone()])
+        );
+        assert_eq!(fs::read(first).unwrap(), b"first-exact-bytes");
+        assert_eq!(fs::read(second).unwrap(), b"second-exact-bytes");
+        assert!(skipped.is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn recursive_mirror_rejects_windows_directory_junction() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("Selected");
+        let outside = tmp.path().join("Outside");
+        let junction = root.join("junction");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let canary = outside.join("canary.mp4");
+        fs::write(&canary, b"junction-canary").unwrap();
+        let status = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&outside)
+            .status()
+            .expect("create junction");
+        assert!(
+            status.success(),
+            "mklink /J must create the junction fixture"
+        );
+        let core = AppCore::new();
+        core.save_project(Some(tmp.path().join("JunctionMirror.opentake")))
+            .unwrap();
+        let before = core.media();
+        let engine = engine_for(tmp.path());
+        let mut skipped = Vec::new();
+
+        let error = mirror_dir(&core, &engine, &root, None, &mut skipped)
+            .expect_err("junction must fail closed");
+
+        assert!(error.to_string().contains("symlink_or_reparse"), "{error}");
+        assert_eq!(fs::read(canary).unwrap(), b"junction-canary");
+        assert_eq!(core.media(), before);
+        assert!(skipped.is_empty());
     }
 
     #[test]
@@ -6287,6 +7594,25 @@ mod tests {
         let second = state.begin().expect("the slot can be reused after finish");
         assert!(!second.is_cancelled());
         state.finish(&second);
+    }
+
+    #[test]
+    fn project_identity_transition_cancels_every_inspector_analysis() {
+        let stabilization = StabilizationAnalysisState::default();
+        let loudness = LoudnessAnalysisState::default();
+        let denoise = DenoiseAnalysisState::default();
+        let stabilization_token = stabilization.begin().expect("stabilization token");
+        let loudness_token = loudness.begin().expect("loudness token");
+        let denoise_token = denoise.begin().expect("denoise token");
+
+        assert!(cancel_project_bound_analyses(
+            &stabilization,
+            &loudness,
+            &denoise,
+        ));
+        assert!(stabilization_token.is_cancelled());
+        assert!(loudness_token.is_cancelled());
+        assert!(denoise_token.is_cancelled());
     }
 
     #[test]

@@ -5,11 +5,15 @@ import type { Timeline } from "../lib/types";
 
 const mocks = vi.hoisted(() => ({
   projectSave: vi.fn(async () => "/tmp/Metadata.opentake"),
+  homeProjectsSync: vi.fn(async (legacy: unknown) => legacy),
+  homeProjectRegister: vi.fn(async () => undefined),
 }));
 
 vi.mock("../lib/api", () => ({
   isTauri: false,
   projectSave: mocks.projectSave,
+  homeProjectsSync: mocks.homeProjectsSync,
+  homeProjectRegister: mocks.homeProjectRegister,
 }));
 
 vi.mock("../components/preview/nativePlaybackSession", () => ({
@@ -23,7 +27,9 @@ vi.mock("../lib/dialog", () => ({
 
 import { saveCurrentProject } from "./projectActions";
 import { useProjectStore } from "./projectStore";
-import { useRecentStore } from "./recentStore";
+import { decodeRecentProjects, projectThumbnailPath, useRecentStore } from "./recentStore";
+
+const defaultValidateRecents = useRecentStore.getState().validateRecents;
 
 const TIMELINE: Timeline = {
   fps: 30,
@@ -34,8 +40,12 @@ const TIMELINE: Timeline = {
 };
 
 beforeEach(() => {
+  delete (window as Window & { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__;
   localStorage.clear();
   mocks.projectSave.mockClear();
+  mocks.homeProjectsSync.mockReset();
+  mocks.homeProjectsSync.mockImplementation(async (legacy: unknown) => legacy);
+  mocks.homeProjectRegister.mockClear();
   useProjectStore.setState({
     snapshotMutationRevision: 1,
     projectEpoch: 7,
@@ -53,6 +63,8 @@ beforeEach(() => {
       modifiedAt: 750,
       thumbnailPath: null,
     }],
+    mutationRevision: 0,
+    validateRecents: defaultValidateRecents,
   });
 });
 
@@ -60,7 +72,11 @@ it("autosave_and_home_metadata_have_separate_owners", async () => {
   vi.setSystemTime(6_000);
   await saveCurrentProject();
 
-  expect(mocks.projectSave).toHaveBeenCalledWith(null);
+  expect(mocks.projectSave).toHaveBeenCalledWith(
+    null,
+    7,
+    "/tmp/Metadata.opentake",
+  );
   expect(useRecentStore.getState().recents[0]).toMatchObject({
     openedAt: 1_000,
     modifiedAt: 6_000,
@@ -78,4 +94,90 @@ it("autosave_and_home_metadata_have_separate_owners", async () => {
     modifiedAt: 6_000,
     thumbnailPath: "/tmp/Metadata.opentake/thumbnail.jpg",
   });
+});
+
+it("bounds_deduplicates_and_sanitizes_the_untrusted_startup_cache", () => {
+  const entries = Array.from({ length: 40 }, (_, index) => ({
+    path: `/tmp/Project ${index}.opentake`,
+    name: "attacker-controlled-name",
+    openedAt: index,
+    thumbnailPath: index === 0
+      ? "/dev/zero"
+      : projectThumbnailPath(`/tmp/Project ${index}.opentake`),
+  }));
+  entries.splice(1, 0, { ...entries[0] });
+  entries.splice(2, 0, {
+    ...entries[0],
+    path: `${"x".repeat(32_769)}.opentake`,
+  });
+
+  const decoded = decodeRecentProjects(JSON.stringify(entries));
+
+  expect(decoded).toHaveLength(12);
+  expect(new Set(decoded.map((entry) => entry.path)).size).toBe(12);
+  expect(decoded[0]).toMatchObject({
+    path: "/tmp/Project 0.opentake",
+    name: "Project 0",
+    thumbnailPath: null,
+  });
+  expect(decoded[1]?.thumbnailPath).toBe("/tmp/Project 1.opentake/thumbnail.jpg");
+});
+
+it("coalesces_concurrent_recent_validation_into_one_native_sync", async () => {
+  (window as Window & { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+  let resolveSync!: (value: unknown) => void;
+  const response = new Promise<unknown>((resolve) => {
+    resolveSync = resolve;
+  });
+  mocks.homeProjectsSync.mockImplementationOnce(async () => response);
+
+  const first = useRecentStore.getState().validateRecents();
+  const second = useRecentStore.getState().validateRecents();
+
+  expect(second).toBe(first);
+  await vi.waitFor(() => expect(mocks.homeProjectsSync).toHaveBeenCalledTimes(1));
+  resolveSync([{
+    path: "/tmp/Metadata.opentake",
+    name: "Metadata",
+    createdAt: 500,
+    openedAt: 1_000,
+    modifiedAt: 750,
+    thumbnailPath: null,
+    missing: false,
+    offline: false,
+  }]);
+  await Promise.all([first, second]);
+
+  expect(mocks.homeProjectsSync).toHaveBeenCalledTimes(1);
+});
+
+it("retries_native_sync_instead_of_overwriting_a_concurrent_local_mutation", async () => {
+  (window as Window & { __TAURI_INTERNALS__?: object }).__TAURI_INTERNALS__ = {};
+  let resolveFirst!: (value: unknown) => void;
+  const firstResponse = new Promise<unknown>((resolve) => {
+    resolveFirst = resolve;
+  });
+  mocks.homeProjectsSync
+    .mockImplementationOnce(async () => firstResponse)
+    .mockImplementationOnce(async (legacy: unknown) => legacy);
+
+  const validation = useRecentStore.getState().validateRecents();
+  await vi.waitFor(() => expect(mocks.homeProjectsSync).toHaveBeenCalledTimes(1));
+
+  useRecentStore.getState().add("/tmp/Added-During-Sync.opentake");
+  resolveFirst([{
+    path: "/tmp/Metadata.opentake",
+    name: "Metadata",
+    openedAt: 1_000,
+  }]);
+
+  await validation;
+
+  expect(mocks.homeProjectsSync).toHaveBeenCalledTimes(2);
+  expect(mocks.homeProjectsSync.mock.calls[1]?.[0]).toEqual(expect.arrayContaining([
+    expect.objectContaining({ path: "/tmp/Added-During-Sync.opentake" }),
+  ]));
+  expect(useRecentStore.getState().recents.map(({ path }) => path)).toContain(
+    "/tmp/Added-During-Sync.opentake",
+  );
 });

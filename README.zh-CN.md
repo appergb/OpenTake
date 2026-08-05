@@ -82,17 +82,22 @@ Agent 操作时间线时，每次工具返回附带 `context_signal`：
 
 📖 [Context Signal 设计文档](docs/modules/opentake-agent/AGENT-CONTEXT-SIGNAL.md)
 
-### 🔌 MCP Server — 31 个工具
+### 🔌 Agent 工具面
 
-完整的 MCP server (`127.0.0.1:19789`)，Agent 可直接操控时间线：
+OpenTake 提供 45 个兼容 Agent 工具，并按当前媒体、生成能力和 provider 授权动态发布；
+未就绪能力会 fail closed，不会被虚假宣传为可执行：
 
-| Group 分组 | Count | 代表工具 |
-|:--|:--:|:--|
-| Read / Introspect 读 / 内省 | 7 | `get_timeline`, `get_media`, `inspect_media`, `search_media` |
-| Timeline Edit 时间线编辑 | 11 | `add_clips`, `split_clip`, `set_clip_properties`, `set_keyframes`, `ripple_delete_ranges` |
-| Generate / Import 生成 / 导入 | 5 | `generate_video`, `generate_image`, `generate_audio`, `import_media` |
-| Library 库组织 | 7 | `create_folder`, `move_to_folder`, `rename_media` |
-| Resources | 2 | `models/video`, `models/image` |
+| 分组 | 代表工具 |
+|:--|:--|
+| 读 / 内省 | `get_timeline`, `get_media`, `inspect_media`, `search_media` |
+| 时间线编辑 | `add_clips`, `split_clip`, `set_clip_properties`, `set_keyframes`, `ripple_delete_ranges` |
+| 生成 / 导入 | `generate_video`, `generate_image`, `generate_audio`, `import_media` |
+| 素材库组织 | `create_folder`, `move_to_folder`, `rename_media` |
+| 资源 | `models/video`, `models/image` |
+
+官方 Codex / ChatGPT 每轮使用独立的随机回环端口、256-bit Bearer 和当前工程身份，
+轮次结束即销毁。Beta 2 已关闭旧的未认证固定 `127.0.0.1:19789` 入口；Claude、
+Cursor 等外部客户端将在后续带认证、显式配对流程完成后重新开放。
 
 内置 Agent chat panel，与 MCP 共享工具定义和系统提示词。
 
@@ -176,7 +181,7 @@ plugins/
 │  opentake-core      Session / DI / Events             │
 │                                                      │
 │         ▲                          │                 │
-│   MCP Server (:19789)     调用     ▼                 │
+│   逐轮认证 MCP           调用     ▼                 │
 │   In-app Agent Chat   FFmpeg + wgpu + cpal + whisper │
 └──────────────────────────────────────────────────────┘
 ```
@@ -258,9 +263,9 @@ cd web && pnpm install && pnpm build
 cd .. && cargo tauri dev
 ```
 
-> **当前状态**：`1.0.0-beta.1` 候选版。本地剪辑、预览、持久化、导出、Agent、
+> **当前状态**：`1.0.0-beta.2` 候选版。本地剪辑、预览、持久化、导出、Agent、
 > Motion Canvas 与可审阅 AI 工作流竖切均已实现。验证范围及平台/provider 限制见
-> [Beta 发布说明](docs/releases/1.0.0-beta.1.md)。
+> [Beta 发布说明](docs/releases/1.0.0-beta.2.md)。
 
 ---
 
@@ -270,9 +275,7 @@ cd .. && cargo tauri dev
 |:--|:--|:--|
 | `0.1.0-dev` | 2026-06 | Phase 0+1: Cargo workspace + Domain models + Edit ops + Tauri scaffold |
 | `1.0.0-beta.1` | 2026-08-01 | 首个可安装 Beta：本地编辑闭环、Agent、Motion 与可审阅 AI 工作流 |
-| *(planned)* `0.2.0` | TBD | Phase 2: Persistence + Media import + Thumbnails + Waveform |
-| *(planned)* `0.3.0` | TBD | Phase 3: Timeline UI + Preview + MCP Server |
-| *(planned)* `0.4.0` | TBD | Phase 4: GPU Compositor (wgpu) + Text rasterization |
+| `1.0.0-beta.2` | 2026-08-03 | 官方 Codex 登录、原子时间线手势、安全 MCP 与交互加固 |
 | *(planned)* `1.0.0` | TBD | Phase 10: 全功能发布 — 对标剪映 + Agent 深度集成 |
 
 📖 [完整路线图](docs/architecture/ROADMAP.md)

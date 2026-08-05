@@ -17,6 +17,7 @@ mod commands;
 // target. The Tauri command itself is registered below like the other modules.
 pub mod export;
 pub mod feedback;
+mod fs_availability;
 mod generation;
 mod haptic;
 mod home;
@@ -28,9 +29,11 @@ pub mod motion;
 // Public for the same reason as `export`: integration acceptance drives the
 // standalone compositing path against a generated project snapshot.
 pub mod render;
+mod safe_asset_protocol;
 mod samples;
 mod search;
 mod secret;
+mod storage;
 pub mod telemetry;
 mod transcribe;
 
@@ -77,6 +80,12 @@ impl IdGen for UuidIdGen {
 /// keeps running in the background. Dock-reopen ([`RunEvent::Reopen`]) shows it
 /// again. `Cmd+Q` still exits (it raises `ExitRequested`, not prevented here).
 pub fn run() {
+    // File Provider placeholders must never trigger an implicit network
+    // hydration from Tauri's main-thread asset protocol. Callers see them as
+    // offline and can ask the user to download/relink instead of freezing UI.
+    fs_availability::disable_implicit_dataless_materialization()
+        .expect("refusing to start without fail-closed dataless-file I/O policy");
+
     // Telemetry is a strict opt-in at the configuration boundary: without an
     // explicit packaged/environment DSN this creates no SDK client or network.
     let _telemetry = telemetry::init_telemetry();
@@ -84,7 +93,32 @@ pub fn run() {
     // Pin ffmpeg/ffprobe before anything decodes (see `resolve_media_tools`).
     resolve_media_tools();
 
+    let safe_asset_protocol = safe_asset_protocol::SafeAssetProtocol::default();
+    let legacy_asset_protocol = safe_asset_protocol.clone();
     tauri::Builder::default()
+        // Register the legacy scheme ourselves as well. This makes Tauri skip
+        // its built-in synchronous `asset` handler, so an old persisted URL or
+        // an accidental one-argument `convertFileSrc` call cannot reintroduce
+        // main-thread File Provider I/O.
+        .register_asynchronous_uri_scheme_protocol("asset", move |context, request, responder| {
+            legacy_asset_protocol.respond(
+                context.app_handle().clone(),
+                context.app_handle().asset_protocol_scope(),
+                request,
+                responder,
+            );
+        })
+        .register_asynchronous_uri_scheme_protocol(
+            "opentake-asset",
+            move |context, request, responder| {
+                safe_asset_protocol.respond(
+                    context.app_handle().clone(),
+                    context.app_handle().asset_protocol_scope(),
+                    request,
+                    responder,
+                );
+            },
+        )
         .plugin(tauri_plugin_dialog::init())
         // Native dialog selections expand Tauri's runtime scopes. Persist the
         // resulting file + asset grants for Recents, while keeping the static
@@ -165,15 +199,6 @@ pub fn run() {
                 cache_root.clone(),
                 models_dir.clone(),
             ));
-            mcp::spawn(
-                core.clone(),
-                workflows_dir.clone(),
-                cache_root.clone(),
-                models_dir.clone(),
-                generation_bridge.clone(),
-                motion_bridge.clone(),
-                advanced_bridge.clone(),
-            );
             let chat_state = chat::ChatState::new_with_capabilities(
                 core.clone(),
                 workflows_dir,
@@ -183,6 +208,9 @@ pub fn run() {
                 motion_bridge.clone(),
                 advanced_bridge.clone(),
             );
+            // The fixed-port external MCP endpoint is disabled for Beta until
+            // the product has an authenticated pairing UX. Official Codex
+            // turns bind their own authenticated per-turn endpoint.
 
             // A global favorite must never silently become a temporary file.
             // Keep the editor usable if app-data resolution fails, but make all
@@ -225,6 +253,18 @@ pub fn run() {
             app.manage(media::StabilizationAnalysisState::default());
             app.manage(media::LoudnessAnalysisState::default());
             app.manage(media::DenoiseAnalysisState::default());
+            let analysis_transition_handle = app.handle().clone();
+            app.state::<AppCore>()
+                .subscribe_project_identity_transition(move |pending| {
+                    if pending {
+                        media::cancel_project_bound_analyses(
+                            &analysis_transition_handle
+                                .state::<media::StabilizationAnalysisState>(),
+                            &analysis_transition_handle.state::<media::LoudnessAnalysisState>(),
+                            &analysis_transition_handle.state::<media::DenoiseAnalysisState>(),
+                        );
+                    }
+                });
             app.manage(media::StemSeparationState::default());
             app.manage(media::MediaProxyState::default());
             let proxy_transition_handle = app.handle().clone();
@@ -263,6 +303,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_timeline,
+            commands::generation_log,
             commands::edit_apply,
             commands::undo,
             commands::redo,
@@ -375,6 +416,8 @@ pub fn run() {
             library::library_rename,
             library::library_delete,
             library::library_import_to_project,
+            storage::storage_usage,
+            storage::storage_clear,
             #[cfg(feature = "playback-engine")]
             playback::commands::playback_start,
             #[cfg(feature = "playback-engine")]
@@ -406,6 +449,12 @@ pub fn run() {
                 }
             }
         });
+}
+
+/// Dispatch the authenticated internal asset helper before constructing Tauri.
+#[doc(hidden)]
+pub fn run_safe_asset_helper_if_requested() -> bool {
+    safe_asset_protocol::run_helper_if_requested()
 }
 
 /// Pin `OPENTAKE_FFMPEG` / `OPENTAKE_FFPROBE` before any media initialization.

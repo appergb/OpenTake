@@ -1,5 +1,9 @@
 # 剪辑引擎实现现状与规划(EDITING-ENGINE-PLAN)
 
+> **2026-08-03 状态注记：**本文是剪辑引擎的测绘文档。剪辑「算法核」（`ops/*` + `engines/*`）
+> 已 1:1 写通并随 Beta 1 交付；本文所述「前端接线层缺口」已收口（时间线手势单事务、原子分割 /
+> Transform、撤销/重做）。Beta 2 范围与发布门槛见 `docs/releases/1.0.0-beta.2.md`。
+
 > 目标:把剪辑(片段增删改移 + 链接音频 + 吸附 + 右键/快捷键)按上游 `palmier-pro` **1:1 写通**。
 > 本文是「现状测绘 + 1:1 差距 + 收口计划」,与 [PORT-1TO1-GAP.md](PORT-1TO1-GAP.md)、[ROADMAP.md](ROADMAP.md) 配套。
 > 渲染/播放管线另见 issue [#142](https://github.com/appergb/OpenTake/issues/142) 与 `memory/opentake-render-pipeline-rewrite`。

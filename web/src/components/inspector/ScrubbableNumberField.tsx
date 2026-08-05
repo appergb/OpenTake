@@ -110,6 +110,10 @@ export function ScrubbableNumberField(p: Props) {
       } catch {
         // Capture may already be gone when the browser ends the gesture.
       }
+      if (p.disabled) {
+        provisionalRef.current = null;
+        return;
+      }
       if (d.moved && provisionalRef.current !== null) {
         p.onCommit(provisionalRef.current);
         provisionalRef.current = null;
@@ -135,6 +139,22 @@ export function ScrubbableNumberField(p: Props) {
     d.captureTarget.focus();
   }, []);
 
+  useEffect(() => {
+    if (!p.disabled) return;
+    const d = dragRef.current;
+    dragRef.current = null;
+    provisionalRef.current = null;
+    restoreDisplayFocusRef.current = false;
+    if (d) {
+      try {
+        d.captureTarget.releasePointerCapture(d.pointerId);
+      } catch {
+        // The browser may already have released capture while disabling.
+      }
+    }
+    setEditing(false);
+  }, [p.disabled]);
+
   const finishEditing = useCallback((restoreFocus: boolean) => {
     restoreDisplayFocusRef.current = restoreFocus;
     setEditing(false);
@@ -143,7 +163,7 @@ export function ScrubbableNumberField(p: Props) {
   const commitEdit = useCallback((restoreFocus: boolean) => {
     const cleaned = draft.replace(p.suffix ?? "", "").replace(",", ".").trim();
     const parsed = Number(cleaned);
-    if (Number.isFinite(parsed)) p.onCommit(clamp(parsed));
+    if (!p.disabled && Number.isFinite(parsed)) p.onCommit(clamp(parsed));
     finishEditing(restoreFocus);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft, p, finishEditing]);
@@ -159,6 +179,7 @@ export function ScrubbableNumberField(p: Props) {
       <input
         ref={inputRef}
         aria-label={p.ariaLabel ?? "Value"}
+        disabled={p.disabled}
         value={draft}
         onChange={(e) => setDraft(e.target.value)}
         onBlur={() => commitEdit(false)}

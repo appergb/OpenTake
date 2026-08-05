@@ -139,6 +139,25 @@ pub fn video_thumbnails(
 /// Port of `makeImageThumbnail` (`:152-163`).
 pub fn image_thumbnail(path: &Path, max_pixel: u32) -> Result<RgbaFrame> {
     let img = image::open(path).map_err(|e| MediaError::Decode(format!("image open: {e}")))?;
+    image_thumbnail_from_image(img, max_pixel)
+}
+
+/// Decode a single image from an arbitrary reader to the same scaled RGBA
+/// thumbnail as [`image_thumbnail`]. Used by retained no-follow asset reads
+/// where the caller holds an authority-opened file instead of a pathname.
+pub fn image_thumbnail_reader<R>(reader: R, max_pixel: u32) -> Result<RgbaFrame>
+where
+    R: std::io::BufRead + std::io::Seek,
+{
+    let img = image::ImageReader::new(reader)
+        .with_guessed_format()
+        .map_err(|e| MediaError::Decode(format!("image format guess: {e}")))?
+        .decode()
+        .map_err(|e| MediaError::Decode(format!("image decode: {e}")))?;
+    image_thumbnail_from_image(img, max_pixel)
+}
+
+fn image_thumbnail_from_image(img: image::DynamicImage, max_pixel: u32) -> Result<RgbaFrame> {
     let rgba = img.to_rgba8();
     let (w, h) = (rgba.width(), rgba.height());
     let (nw, nh) = fit_within(w, h, (max_pixel, max_pixel));

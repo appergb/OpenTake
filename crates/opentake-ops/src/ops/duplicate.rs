@@ -13,12 +13,23 @@
 
 use std::collections::HashMap;
 
-use opentake_domain::{Clip, Timeline};
+use opentake_domain::{Clip, ClipType, Timeline};
 
 use crate::id::IdGen;
 use crate::ops::clear_region::clear_region;
 use crate::ops::place::sort_clips;
 use crate::ops::tracks::prune_empty_tracks;
+
+/// Fully checked duplicate work item. Command-level preflight resolves every
+/// frame sum and stable destination before a transaction can mint an id or
+/// mutate a track; the mutation helper only consumes those validated values.
+#[derive(Clone)]
+pub(crate) struct DuplicateClipPlan {
+    pub clip: Clip,
+    pub to_track_id: String,
+    pub to_frame: i32,
+    pub to_end_frame: i32,
+}
 
 /// Deep-copy each clip in `clip_ids` to a new position: `start_frame` shifted
 /// by `offset_frames`, placed on `target_track_indexes[i]` (one target per
@@ -44,15 +55,18 @@ pub fn duplicate_clips(
     if clip_ids.is_empty() {
         return Vec::new();
     }
+    if timeline
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .any(|clip| !clip_arithmetic_is_safe(clip))
+    {
+        return Vec::new();
+    }
 
     // Resolve each source clip + validate its target track. Collect up front so
     // the mutation phase can pin tracks by id (pruning could shift indices).
-    struct Plan {
-        clone: Clip,
-        to_track_id: String,
-        to_frame: i32,
-    }
-    let mut plans: Vec<Plan> = Vec::new();
+    let mut plans: Vec<DuplicateClipPlan> = Vec::new();
     for (i, id) in clip_ids.iter().enumerate() {
         let Some((ti, ci)) = find(timeline, id) else {
             continue;
@@ -68,14 +82,36 @@ pub fn duplicate_clips(
         if !dest_type.is_compatible(src_type) {
             continue;
         }
-        let clone = timeline.tracks[ti].clips[ci].clone();
-        let to_frame = (clone.start_frame + offset_frames).max(0);
-        plans.push(Plan {
-            clone,
+        let clip = timeline.tracks[ti].clips[ci].clone();
+        debug_assert!(clip_arithmetic_is_safe(&clip));
+        let Some(shifted) = clip.start_frame.checked_add(offset_frames) else {
+            return Vec::new();
+        };
+        let to_frame = shifted.max(0);
+        let Some(to_end_frame) = to_frame.checked_add(clip.duration_frames) else {
+            return Vec::new();
+        };
+        plans.push(DuplicateClipPlan {
+            clip,
             to_track_id: timeline.tracks[to_track].id.clone(),
             to_frame,
+            to_end_frame,
         });
     }
+    if plans.is_empty() {
+        return Vec::new();
+    }
+
+    duplicate_clips_from_plans(timeline, plans, ids)
+}
+
+/// Apply prevalidated duplicate plans. All fallible input/frame validation must
+/// happen before this function is called so id allocation is mutation-only.
+pub(crate) fn duplicate_clips_from_plans(
+    timeline: &mut Timeline,
+    plans: Vec<DuplicateClipPlan>,
+    ids: &dyn IdGen,
+) -> Vec<String> {
     if plans.is_empty() {
         return Vec::new();
     }
@@ -88,14 +124,7 @@ pub fn duplicate_clips(
             .iter()
             .position(|t| t.id == plan.to_track_id)
         {
-            clear_region(
-                timeline,
-                idx,
-                plan.to_frame,
-                plan.to_frame + plan.clone.duration_frames,
-                false,
-                ids,
-            );
+            clear_region(timeline, idx, plan.to_frame, plan.to_end_frame, false, ids);
         }
     }
 
@@ -107,7 +136,7 @@ pub fn duplicate_clips(
     let mut group_counts: HashMap<Option<String>, usize> = HashMap::new();
     for plan in &plans {
         *group_counts
-            .entry(plan.clone.link_group_id.clone())
+            .entry(plan.clip.link_group_id.clone())
             .or_insert(0) += 1;
     }
     let mut group_remap: HashMap<Option<String>, Option<String>> = HashMap::new();
@@ -120,21 +149,38 @@ pub fn duplicate_clips(
         group_remap.insert(group_id.clone(), new_id);
     }
 
+    let new_ids: Vec<String> = plans.iter().map(|_| ids.next_id()).collect();
+    let id_map: HashMap<String, String> = plans
+        .iter()
+        .zip(&new_ids)
+        .map(|(plan, new_id)| (plan.clip.id.clone(), new_id.clone()))
+        .collect();
+
     // Drop each deep copy at its target frame with a fresh id + remapped link.
     let mut created = Vec::new();
-    for plan in plans {
+    for (plan, new_id) in plans.into_iter().zip(new_ids) {
         if let Some(idx) = timeline
             .tracks
             .iter()
             .position(|t| t.id == plan.to_track_id)
         {
-            let mut clip = plan.clone;
-            clip.id = ids.next_id();
+            let mut clip = plan.clip;
+            let old_id = clip.id.clone();
+            clip.id = new_id;
             clip.start_frame = plan.to_frame;
             // Remap the link group: multi-clip groups get the fresh shared id,
             // single-clip groups (and None) clear to None.
             let remapped = group_remap.get(&clip.link_group_id).cloned().flatten();
             clip.link_group_id = remapped;
+            clip.transition_out = clip.transition_out.take().and_then(|mut transition| {
+                let to_id = id_map.get(&transition.to_clip_id)?.clone();
+                if !transition.from_clip_id.is_empty() && transition.from_clip_id != old_id {
+                    return None;
+                }
+                transition.from_clip_id = clip.id.clone();
+                transition.to_clip_id = to_id;
+                Some(transition)
+            });
             created.push(clip.id.clone());
             timeline.tracks[idx].clips.push(clip);
             sort_clips(&mut timeline.tracks[idx]);
@@ -142,6 +188,36 @@ pub fn duplicate_clips(
     }
     prune_empty_tracks(timeline);
     created
+}
+
+fn clip_arithmetic_is_safe(clip: &Clip) -> bool {
+    if clip.start_frame < 0
+        || clip.duration_frames < 1
+        || (!matches!(clip.media_type, ClipType::Image | ClipType::Text)
+            && (clip.trim_start_frame < 0 || clip.trim_end_frame < 0))
+        || !clip.speed.is_finite()
+        || clip.speed <= 0.0
+        || clip.start_frame.checked_add(clip.duration_frames).is_none()
+        || clip
+            .duration_frames
+            .checked_add(clip.trim_start_frame)
+            .and_then(|value| value.checked_add(clip.trim_end_frame))
+            .is_none()
+    {
+        return false;
+    }
+    let consumed = (clip.duration_frames as f64 * clip.speed).round();
+    if !(0.0..=i32::MAX as f64).contains(&consumed) {
+        return false;
+    }
+    let consumed = consumed as i32;
+    clip.trim_start_frame.checked_add(consumed).is_some()
+        && clip.trim_end_frame.checked_add(consumed).is_some()
+        && clip
+            .trim_start_frame
+            .checked_add(consumed)
+            .and_then(|value| value.checked_add(clip.trim_end_frame))
+            .is_some()
 }
 
 fn find(timeline: &Timeline, clip_id: &str) -> Option<(usize, usize)> {

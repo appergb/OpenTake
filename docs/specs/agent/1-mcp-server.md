@@ -1,4 +1,9 @@
-# rmcp MCP server：`127.0.0.1:19789` + loopback/Origin 校验（tower layer）
+# rmcp MCP server：历史固定端口基线与 Beta 2 逐轮认证裁决
+
+> **Beta 2 supersession（2026-08-03）：**以下固定 `127.0.0.1:19789` 内容记录上游
+> 设计基线，不是当前产品入口。Beta 2 不启动未认证固定 listener；官方 Codex / ChatGPT
+> 每轮使用随机 loopback 端口、随机 256-bit Bearer、当前工程 identity，并在完成、取消、
+> deadline 或切工程时销毁。Claude/Cursor 等外部连接需等待带认证的显式配对 UX。
 
 ## 1.1 上游真相
 

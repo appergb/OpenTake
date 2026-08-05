@@ -220,7 +220,7 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   return (
     <div
       style={{
-        height: 22,
+        minHeight: 24,
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
@@ -293,19 +293,20 @@ function KeyframeRowControls({
   t: TFunction;
 }) {
   const setActiveFrame = useEditorUiStore((s) => s.setActiveFrame);
-  const inRange = clipContainsFrame(clip, activeFrame);
-  const onKeyframe = hasKeyframeAt(clip, property, activeFrame);
-  const prev = previousKeyframeFrame(clip, property, activeFrame);
-  const next = nextKeyframeFrame(clip, property, activeFrame);
+  const editFrame = Math.round(activeFrame);
+  const inRange = clipContainsFrame(clip, editFrame);
+  const onKeyframe = hasKeyframeAt(clip, property, editFrame);
+  const prev = previousKeyframeFrame(clip, property, editFrame);
+  const next = nextKeyframeFrame(clip, property, editFrame);
 
   const toggle = () => {
     if (!inRange) return;
     if (onKeyframe) {
-      void edit.removeKeyframe(clip.id, property, activeFrame);
+      void edit.removeKeyframe(clip.id, property, editFrame);
     } else {
       // Stamp the clip's current sampled value at the playhead (upstream's
       // `stampKeyframe`, which samples the property at `frame`).
-      void edit.stampKeyframe(clip.id, property, activeFrame);
+      void edit.stampKeyframe(clip.id, property, editFrame);
     }
   };
 
@@ -321,11 +322,11 @@ function KeyframeRowControls({
         title={t("inspector.keyframe.prev")}
         disabled={prev === null}
         onClick={() => prev !== null && setActiveFrame(prev)}
-        size={18}
+        size={24}
       >
         <Icon icon={ChevronLeft} size={12} />
       </HoverButton>
-      <HoverButton title={diamondTitle} disabled={!inRange} onClick={toggle} size={18}>
+      <HoverButton title={diamondTitle} disabled={!inRange} onClick={toggle} size={24}>
         {/* currentColor drives both stroke and (when set) fill; filled = a
             keyframe sits at the playhead, in the timecode accent (upstream
             `diamond.fill` + `timecodeColor`). */}
@@ -342,7 +343,7 @@ function KeyframeRowControls({
         title={t("inspector.keyframe.next")}
         disabled={next === null}
         onClick={() => next !== null && setActiveFrame(next)}
-        size={18}
+        size={24}
       >
         <Icon icon={ChevronRight} size={12} />
       </HoverButton>
@@ -360,14 +361,17 @@ const INTERPOLATION_KEYS: Record<Interpolation, string> = {
 function InterpolationSelect({
   value,
   onChange,
+  ariaLabel,
   t,
 }: {
   value: Interpolation;
   onChange: (v: Interpolation) => void;
+  ariaLabel: string;
   t: TFunction;
 }) {
   return (
     <select
+      aria-label={ariaLabel}
       value={value}
       onChange={(e) => onChange(e.target.value as Interpolation)}
       style={{
@@ -413,6 +417,7 @@ function ClipInspector({
   // Live sampling: read the current playhead frame so every numeric field shows
   // the value at the playhead (upstream `InspectorView.livePreview`).
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
+  const editFrame = Math.round(activeFrame);
   const rootTimeline = useProjectStore((s) => s.timeline);
   const activeNestedSequenceId = useEditorUiStore((s) => s.activeNestedSequenceId);
   const timeline =
@@ -458,6 +463,7 @@ function ClipInspector({
   const scaleAnimated = !!clip.scaleTrack && clip.scaleTrack.keyframes.length > 0;
   const positionAnimated = !!clip.positionTrack && clip.positionTrack.keyframes.length > 0;
   const cropAnimated = !!clip.cropTrack && clip.cropTrack.keyframes.length > 0;
+  const playheadInClip = clipContainsFrame(clip, editFrame);
 
   // Sampled values at the playhead.
   const sampledOpacity = rawOpacityAt(clip, activeFrame);
@@ -524,6 +530,8 @@ function ClipInspector({
             <SectionHeader label={t("inspector.section.levels")} />
             <Row label={t("inspector.field.volume")}>
               <ScrubbableNumberField
+                ariaLabel={t("inspector.field.volume")}
+                disabled={volumeAnimated && !playheadInClip}
                 value={volumeAnimated ? sampledVolume : clip.volume}
                 min={0}
                 max={4}
@@ -534,12 +542,12 @@ function ClipInspector({
                 displayTextOverride={(v) => (v <= 0 ? "-∞ dB" : null)}
                 onCommit={(v) =>
                   volumeAnimated
-                    ? edit.upsertKeyframe(clip.id, "volume", activeFrame, volumeKeyframeValue(v))
+                    ? edit.upsertKeyframe(clip.id, "volume", editFrame, volumeKeyframeValue(v))
                     : commit({ volume: v })
                 }
               />
               {volumeAnimated && <AnimatedHint t={t} />}
-              <KeyframeRowControls clip={clip} property="volume" activeFrame={activeFrame} t={t} />
+              <KeyframeRowControls clip={clip} property="volume" activeFrame={editFrame} t={t} />
             </Row>
             <FadeSection clip={clip} commit={commit} t={t} />
             <LoudnessSection clip={clip} t={t} />
@@ -554,13 +562,15 @@ function ClipInspector({
                 <HoverButton
                   title={t("inspector.action.resetTransform")}
                   onClick={() => edit.resetTransform([clip.id])}
-                  size={18}
+                  size={24}
                 >
                   <Icon icon={RotateCcw} size={12} />
                 </HoverButton>
               </div>
               <Row label={t("inspector.field.scale")}>
                 <ScrubbableNumberField
+                  ariaLabel={t("inspector.field.scale")}
+                  disabled={scaleAnimated && !playheadInClip}
                   value={sampledScale}
                   min={0.01}
                   max={10}
@@ -573,7 +583,7 @@ function ClipInspector({
                       ? edit.upsertKeyframe(
                           clip.id,
                           "scale",
-                          activeFrame,
+                          editFrame,
                           scaleKeyframeValue(clip.transform, v, aspect),
                         )
                       : commit({
@@ -582,10 +592,12 @@ function ClipInspector({
                   }
                 />
                 {scaleAnimated && <AnimatedHint t={t} />}
-                <KeyframeRowControls clip={clip} property="scale" activeFrame={activeFrame} t={t} />
+                <KeyframeRowControls clip={clip} property="scale" activeFrame={editFrame} t={t} />
               </Row>
               <Row label={t("inspector.field.rotation")}>
                 <ScrubbableNumberField
+                  ariaLabel={t("inspector.field.rotation")}
+                  disabled={rotationAnimated && !playheadInClip}
                   value={sampledRotation}
                   min={-3600}
                   max={3600}
@@ -595,15 +607,17 @@ function ClipInspector({
                   width={56}
                   onCommit={(v) =>
                     rotationAnimated
-                      ? edit.upsertKeyframe(clip.id, "rotation", activeFrame, rotationKeyframeValue(v))
+                      ? edit.upsertKeyframe(clip.id, "rotation", editFrame, rotationKeyframeValue(v))
                       : commit({ transform: { ...clip.transform, rotation: v } })
                   }
                 />
                 {rotationAnimated && <AnimatedHint t={t} />}
-                <KeyframeRowControls clip={clip} property="rotation" activeFrame={activeFrame} t={t} />
+                <KeyframeRowControls clip={clip} property="rotation" activeFrame={editFrame} t={t} />
               </Row>
               <Row label={t("inspector.field.opacity")}>
                 <ScrubbableNumberField
+                  ariaLabel={t("inspector.field.opacity")}
+                  disabled={opacityAnimated && !playheadInClip}
                   value={opacityAnimated ? sampledOpacity : clip.opacity}
                   min={0}
                   max={1}
@@ -616,14 +630,14 @@ function ClipInspector({
                       ? edit.upsertKeyframe(
                           clip.id,
                           "opacity",
-                          activeFrame,
+                          editFrame,
                           opacityKeyframeValue(v * 100),
                         )
                       : commit({ opacity: v })
                   }
                 />
                 {opacityAnimated && <AnimatedHint t={t} />}
-                <KeyframeRowControls clip={clip} property="opacity" activeFrame={activeFrame} t={t} />
+                <KeyframeRowControls clip={clip} property="opacity" activeFrame={editFrame} t={t} />
               </Row>
             </section>
 
@@ -631,7 +645,8 @@ function ClipInspector({
               clip={clip}
               sampledTopLeft={sampledTopLeft}
               animated={positionAnimated}
-              activeFrame={activeFrame}
+              activeFrame={editFrame}
+              playheadInClip={playheadInClip}
               commit={commit}
               t={t}
             />
@@ -640,7 +655,8 @@ function ClipInspector({
               clip={clip}
               sampledCrop={sampledCrop}
               animated={cropAnimated}
-              activeFrame={activeFrame}
+              activeFrame={editFrame}
+              playheadInClip={playheadInClip}
               commit={commit}
               sourcePixelAspect={sourcePixelAspect}
               t={t}
@@ -662,6 +678,7 @@ function ClipInspector({
               <SectionHeader label={t("inspector.section.playback")} />
               <Row label={t("inspector.field.speed")}>
                 <ScrubbableNumberField
+                  ariaLabel={t("inspector.field.speed")}
                   value={clip.speed}
                   min={0.25}
                   max={4}
@@ -715,6 +732,7 @@ function PositionSection({
   sampledTopLeft,
   animated,
   activeFrame,
+  playheadInClip,
   commit,
   t,
 }: {
@@ -722,17 +740,21 @@ function PositionSection({
   sampledTopLeft: { x: number; y: number };
   animated: boolean;
   activeFrame: number;
+  playheadInClip: boolean;
   commit: (props: Parameters<typeof edit.setClipProperties>[1]) => void;
   t: TFunction;
 }) {
   // Editing top-left x/y writes back through `transform.centerX/centerY`. The
   // size is preserved from the current transform (scale track writes via scale).
+  const editFrame = Math.round(activeFrame);
   const [w, h] = [clip.transform.width, clip.transform.height];
   return (
     <section>
       <SectionHeader label={t("inspector.section.position")} />
       <Row label={t("inspector.field.positionX")}>
         <ScrubbableNumberField
+          ariaLabel={t("inspector.field.positionX")}
+          disabled={animated && !playheadInClip}
           value={sampledTopLeft.x}
           min={-2}
           max={2}
@@ -744,17 +766,19 @@ function PositionSection({
               ? edit.upsertKeyframe(
                   clip.id,
                   "position",
-                  activeFrame,
+                  editFrame,
                   positionXKeyframeValue(v, sampledTopLeft.y),
                 )
               : commit({ transform: { ...clip.transform, centerX: v + w / 2 } })
           }
         />
         {animated && <AnimatedHint t={t} />}
-        <KeyframeRowControls clip={clip} property="position" activeFrame={activeFrame} t={t} />
+        <KeyframeRowControls clip={clip} property="position" activeFrame={editFrame} t={t} />
       </Row>
       <Row label={t("inspector.field.positionY")}>
         <ScrubbableNumberField
+          ariaLabel={t("inspector.field.positionY")}
+          disabled={animated && !playheadInClip}
           value={sampledTopLeft.y}
           min={-2}
           max={2}
@@ -766,7 +790,7 @@ function PositionSection({
               ? edit.upsertKeyframe(
                   clip.id,
                   "position",
-                  activeFrame,
+                  editFrame,
                   positionYKeyframeValue(sampledTopLeft.x, v),
                 )
               : commit({ transform: { ...clip.transform, centerY: v + h / 2 } })
@@ -796,6 +820,7 @@ function CropSection({
   sampledCrop,
   animated,
   activeFrame,
+  playheadInClip,
   commit,
   sourcePixelAspect,
   t,
@@ -804,10 +829,12 @@ function CropSection({
   sampledCrop: Crop;
   animated: boolean;
   activeFrame: number;
+  playheadInClip: boolean;
   commit: (props: Parameters<typeof edit.setClipProperties>[1]) => void;
   sourcePixelAspect: number | null;
   t: TFunction;
 }) {
+  const editFrame = Math.round(activeFrame);
   const cropEditingActive = useEditorUiStore((s) => s.cropEditingActive);
   const toggleCropEditingActive = useEditorUiStore((s) => s.toggleCropEditingActive);
   const cropAspectLock = useEditorUiStore((s) => s.cropAspectLock);
@@ -822,7 +849,7 @@ function CropSection({
     const next = cropForPreset(preset, sourcePixelAspect);
     if (next === null) return;
     if (animated) {
-      void edit.upsertKeyframe(clip.id, "crop", activeFrame, { kind: "crop", value: next });
+      void edit.upsertKeyframe(clip.id, "crop", editFrame, { kind: "crop", value: next });
     } else {
       commit({ crop: next });
     }
@@ -835,6 +862,8 @@ function CropSection({
   const renderEdge = (label: string, edge: keyof Crop, value: number) => (
     <Row label={label}>
       <ScrubbableNumberField
+        ariaLabel={label}
+        disabled={animated && !playheadInClip}
         value={value}
         min={0}
         max={1}
@@ -846,7 +875,7 @@ function CropSection({
             ? edit.upsertKeyframe(
                 clip.id,
                 "crop",
-                activeFrame,
+                editFrame,
                 cropEdgeKeyframeValue(sampledCrop, edge, v),
               )
             : commitEdge(edge, v)
@@ -864,12 +893,15 @@ function CropSection({
             cropEditingActive ? "inspector.action.cropEditStop" : "inspector.action.cropEditStart",
           )}
           active={cropEditingActive}
+          disabled={animated && !playheadInClip && !cropEditingActive}
           onClick={toggleCropEditingActive}
-          size={20}
+          size={24}
         >
           <Icon icon={CropIcon} size={13} />
         </HoverButton>
         <select
+          aria-label={t("inspector.field.cropAspect")}
+          disabled={animated && !playheadInClip}
           value={cropAspectLock}
           onChange={(e) => applyCropPreset(e.target.value as CropAspectLock)}
           title={t("inspector.field.cropAspect")}
@@ -888,7 +920,7 @@ function CropSection({
             </option>
           ))}
         </select>
-        <KeyframeRowControls clip={clip} property="crop" activeFrame={activeFrame} t={t} />
+        <KeyframeRowControls clip={clip} property="crop" activeFrame={editFrame} t={t} />
       </Row>
       {renderEdge(t("inspector.field.cropLeft"), "left", sampledCrop.left)}
       {renderEdge(t("inspector.field.cropTop"), "top", sampledCrop.top)}
@@ -918,6 +950,7 @@ function FlipSection({
       <SectionHeader label={t("inspector.section.flip")} />
       <Row label={t("inspector.field.flipHorizontal")}>
         <input
+          aria-label={t("inspector.field.flipHorizontal")}
           type="checkbox"
           checked={clip.transform.flipHorizontal}
           style={checkboxStyle}
@@ -926,6 +959,7 @@ function FlipSection({
       </Row>
       <Row label={t("inspector.field.flipVertical")}>
         <input
+          aria-label={t("inspector.field.flipVertical")}
           type="checkbox"
           checked={clip.transform.flipVertical}
           style={checkboxStyle}
@@ -952,6 +986,7 @@ function FadeSection({
       <SectionHeader label={t("inspector.section.fade")} />
       <Row label={t("inspector.field.fadeInFrames")}>
         <ScrubbableNumberField
+          ariaLabel={t("inspector.field.fadeInFrames")}
           value={clip.fadeInFrames}
           min={0}
           max={clip.durationFrames}
@@ -963,6 +998,7 @@ function FadeSection({
       </Row>
       <Row label={t("inspector.field.fadeInInterpolation")}>
         <InterpolationSelect
+          ariaLabel={t("inspector.field.fadeInInterpolation")}
           value={clip.fadeInInterpolation}
           onChange={(v) => commit({ fadeInInterpolation: v })}
           t={t}
@@ -970,6 +1006,7 @@ function FadeSection({
       </Row>
       <Row label={t("inspector.field.fadeOutFrames")}>
         <ScrubbableNumberField
+          ariaLabel={t("inspector.field.fadeOutFrames")}
           value={clip.fadeOutFrames}
           min={0}
           max={clip.durationFrames}
@@ -981,6 +1018,7 @@ function FadeSection({
       </Row>
       <Row label={t("inspector.field.fadeOutInterpolation")}>
         <InterpolationSelect
+          ariaLabel={t("inspector.field.fadeOutInterpolation")}
           value={clip.fadeOutInterpolation}
           onChange={(v) => commit({ fadeOutInterpolation: v })}
           t={t}
@@ -1162,6 +1200,7 @@ function LoudnessSection({ clip, t }: { clip: Clip; t: TFunction }) {
       <SectionHeader label={t("inspector.section.loudness")} />
       <Row label={t("inspector.loudness.target")}>
         <ScrubbableNumberField
+          ariaLabel={t("inspector.loudness.target")}
           value={target}
           min={-36}
           max={-5}
@@ -1174,6 +1213,7 @@ function LoudnessSection({ clip, t }: { clip: Clip; t: TFunction }) {
       </Row>
       <Row label={t("inspector.loudness.ceiling")}>
         <ScrubbableNumberField
+          ariaLabel={t("inspector.loudness.ceiling")}
           value={ceiling}
           min={-12}
           max={0}
@@ -1409,7 +1449,7 @@ function StemSeparationSection({
       await api.importStemsToTracks(
         result.vocalsAssetId,
         result.accompanimentAssetId,
-        Math.max(0, activeFrame),
+        Math.max(0, Math.round(activeFrame)),
       );
       setImported(true);
     } catch (reason) {
@@ -1558,6 +1598,7 @@ function StabilizationSection({ clip, t }: { clip: Clip; t: TFunction }) {
         <>
           <Row label={t("inspector.stabilization.strength")}>
             <ScrubbableNumberField
+              ariaLabel={t("inspector.stabilization.strength")}
               value={solution.strength * 100}
               min={0}
               max={100}
@@ -1572,6 +1613,7 @@ function StabilizationSection({ clip, t }: { clip: Clip; t: TFunction }) {
           </Row>
           <Row label={t("inspector.stabilization.cropMargin")}>
             <ScrubbableNumberField
+              ariaLabel={t("inspector.stabilization.cropMargin")}
               value={solution.cropMargin * 100}
               min={0}
               max={50}
@@ -1800,13 +1842,14 @@ function ColorGradeSection({ clip, t }: { clip: Clip; t: TFunction }) {
           title={t("inspector.action.resetHslSecondary")}
           disabled={!draft.hslSecondary}
           onClick={() => commitGrade({ ...draft, hslSecondary: undefined })}
-          size={18}
+          size={24}
         >
           <Icon icon={RotateCcw} size={12} />
         </HoverButton>
       </div>
       <Row label={t("inspector.field.enabled")}>
         <input
+          aria-label={`${t("inspector.section.hslSecondary")} ${t("inspector.field.enabled")}`}
           type="checkbox"
           checked={draft.hslSecondary != null}
           style={checkboxStyle}
@@ -1876,6 +1919,7 @@ function ChromaKeySection({ clip, t }: { clip: Clip; t: TFunction }) {
       <SectionHeader label={t("inspector.section.chromaKey")} icon={Pipette} />
       <Row label={t("inspector.field.enabled")}>
         <input
+          aria-label={`${t("inspector.section.chromaKey")} ${t("inspector.field.enabled")}`}
           type="checkbox"
           checked={enabled}
           style={checkboxStyle}
@@ -1972,6 +2016,7 @@ function MaskSection({ clip, t }: { clip: Clip; t: TFunction }) {
       <SectionHeader label={t("inspector.section.mask")} icon={CircleDashed} />
       <Row label={t("inspector.field.enabled")}>
         <input
+          aria-label={`${t("inspector.section.mask")} ${t("inspector.field.enabled")}`}
           type="checkbox"
           checked={enabled}
           style={checkboxStyle}
@@ -1982,6 +2027,7 @@ function MaskSection({ clip, t }: { clip: Clip; t: TFunction }) {
         <>
           <Row label={t("inspector.field.maskType")}>
             <select
+              aria-label={t("inspector.field.maskType")}
               value={draft.shape.kind}
               onChange={(e) => {
                 const kind = e.target.value;
@@ -2038,6 +2084,7 @@ function MaskSection({ clip, t }: { clip: Clip; t: TFunction }) {
           />
           <Row label={t("inspector.field.invert")}>
             <input
+              aria-label={t("inspector.field.invert")}
               type="checkbox"
               checked={draft.invert}
               style={checkboxStyle}
@@ -2284,6 +2331,7 @@ function EffectNumberRow({
   return (
     <Row label={label}>
       <ScrubbableNumberField
+        ariaLabel={label}
         value={value}
         min={min}
         max={max}

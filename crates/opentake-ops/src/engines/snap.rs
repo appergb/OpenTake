@@ -243,6 +243,31 @@ mod tests {
     }
 
     #[test]
+    fn find_snap_re_sticks_after_release_within_drag() {
+        let targets = vec![SnapTarget {
+            frame: 130,
+            kind: SnapKind::ClipEdge,
+        }];
+        let mut state = SnapState::new();
+        // 1) fresh snap via the end probe: position 105, probes [0,30] -> 135 vs 130.
+        let r = SnapEngine::find_snap(105, &[0, 30], &targets, &mut state, 8.0, 1.0).unwrap();
+        assert_eq!((r.frame, r.probe_offset), (130, 30));
+        assert_eq!(state.current_probe_offset, 30);
+        // 2) drift past the 1.5x hold threshold -> release resets the whole state,
+        //    including current_probe_offset, so the next search is a fresh snap.
+        assert!(SnapEngine::find_snap(113, &[0, 30], &targets, &mut state, 8.0, 1.0).is_none());
+        assert_eq!(state.currently_snapped_to, None);
+        assert_eq!(state.current_probe_offset, 0);
+        // 3) come back inside the base threshold -> re-sticks via the start probe.
+        let r2 = SnapEngine::find_snap(126, &[0, 30], &targets, &mut state, 8.0, 1.0).unwrap();
+        assert_eq!((r2.frame, r2.probe_offset), (130, 0));
+        assert_eq!(state.currently_snapped_to, Some(130));
+        // 4) sticky hold applies again after re-sticking.
+        let r3 = SnapEngine::find_snap(133, &[0, 30], &targets, &mut state, 8.0, 1.0).unwrap();
+        assert_eq!((r3.frame, r3.probe_offset), (130, 0));
+    }
+
+    #[test]
     fn find_snap_playhead_has_wider_threshold() {
         // playhead at 100 with 1.5x threshold (12). probe 110 dist 10 -> snaps to playhead.
         let targets = vec![SnapTarget {

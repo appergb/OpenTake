@@ -48,11 +48,9 @@ import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useMediaStore } from "../../store/mediaStore";
 import * as edit from "../../store/editActions";
-import { forceRefresh } from "../../store/sync";
 import {
   generateThumbnail,
   getWaveform,
-  isTauri,
   preloadMedia,
   requestTimelineSprite,
   setTimelineSpriteInteractive,
@@ -94,7 +92,13 @@ type DragState =
     }
   | { kind: "trimLeft" | "trimRight"; hit: ClipHit; startTrim: number; deltaFrames: number }
   | { kind: "marquee"; startDocX: number; startDocY: number; curDocX: number; curDocY: number }
-  | { kind: "audioVolumeKf"; clipId: string; fromFrame: number; ghostFrame: number }
+  | {
+      kind: "audioVolumeKf";
+      clipId: string;
+      fromFrame: number;
+      ghostFrame: number;
+      editContext: edit.ProjectEditContext;
+    }
   | {
       kind: "fadeKnee";
       clipId: string;
@@ -198,6 +202,41 @@ export function volumeKeyframeMenuItems({
       action: () => onSetInterpolation(value),
     })),
   ];
+}
+
+/** Convert the timeline canvas' clip-relative volume-envelope coordinate to
+ *  the absolute frame expected by every keyframe edit command. */
+export function volumeKeyframeAbsoluteFrame(
+  clip: Pick<Clip, "startFrame" | "durationFrames">,
+  relativeFrame: number,
+): number {
+  return clip.startFrame + Math.round(relativeFrame);
+}
+
+/** Clamp a newly stamped or moved-to keyframe to the writable half-open span.
+ *  Existing split-boundary keyframes may legitimately live at offset=duration,
+ *  so reads/removes/move-sources use `volumeKeyframeAbsoluteFrame` instead. */
+export function writableVolumeKeyframeAbsoluteFrame(
+  clip: Pick<Clip, "startFrame" | "durationFrames">,
+  relativeFrame: number,
+): number {
+  const lastRelativeFrame = Math.max(0, clip.durationFrames - 1);
+  const clampedRelative = Math.max(
+    0,
+    Math.min(lastRelativeFrame, Math.round(relativeFrame)),
+  );
+  return clip.startFrame + clampedRelative;
+}
+
+/** Razor splits are valid only strictly inside a half-open clip span. */
+export function strictSplitFrameForClip(
+  clip: Pick<Clip, "startFrame" | "durationFrames">,
+  candidateFrame: number,
+): number | null {
+  const frame = Math.round(candidateFrame);
+  return frame > clip.startFrame && frame < clip.startFrame + clip.durationFrames
+    ? frame
+    : null;
 }
 
 /** New-track kind for a dragged clip: audio clips → "audio", everything else
@@ -641,6 +680,7 @@ export function TimelineContainer() {
   const selectedTimelineRange = useEditorUiStore((s) => s.selectedTimelineRange);
   const selectedGap = useEditorUiStore((s) => s.selectedGap);
   const selectGap = useEditorUiStore((s) => s.selectGap);
+  const pushToast = useEditorUiStore((s) => s.pushToast);
   const trackHeights = useEditorUiStore((s) => s.trackDisplayHeights);
   const mediaItems = useMediaStore((s) => s.items);
   const [canvasCursor, setCanvasCursor] = useState("default");
@@ -1397,7 +1437,13 @@ export function TimelineContainer() {
         const raw = frameAt(docX, zoomScale);
         const targets = collectTargets(timeline, new Set(), activeFrame, true);
         const snap = findSnap(raw, targets, zoomScale, null);
-        void edit.splitClip(hit.clip.id, snap ? snap.frame : raw);
+        const cutFrame = strictSplitFrameForClip(hit.clip, snap ? snap.frame : raw);
+        if (cutFrame !== null) {
+          void edit.splitClip(hit.clip.id, cutFrame).catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            pushToast(t("timeline.splitFailed", { error: message }));
+          });
+        }
         dragRef.current = null;
         return;
       }
@@ -1414,6 +1460,7 @@ export function TimelineContainer() {
             clipId: kfHit.clipId,
             fromFrame: kfHit.frame,
             ghostFrame: kfHit.frame,
+            editContext: edit.captureProjectEditContext(),
           };
           return;
         }
@@ -1425,11 +1472,14 @@ export function TimelineContainer() {
       if (e.metaKey && hit && hit.clip.mediaType === "audio") {
         const onDot = audioVolumeKfHit(timeline, docX, docY, zoomScale, trackHeights) !== null;
         if (!onDot) {
-          const clipFrame = Math.max(
-            0,
-            Math.min(hit.clip.durationFrames, frameAt(docX, zoomScale) - hit.clip.startFrame),
+          const absoluteFrame = writableVolumeKeyframeAbsoluteFrame(
+            hit.clip,
+            frameAt(docX, zoomScale) - hit.clip.startFrame,
           );
-          void edit.stampKeyframe(hit.clip.id, "volume", clipFrame);
+          void edit.stampKeyframe(hit.clip.id, "volume", absoluteFrame).catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            pushToast(t("inspector.keyframes.stampFailed", { error: message }));
+          });
         }
         selectClips(new Set([hit.clip.id]));
         dragRef.current = null;
@@ -1517,6 +1567,8 @@ export function TimelineContainer() {
       docWidth,
       docHeight,
       compatibilityReadOnly,
+      pushToast,
+      t,
     ],
   );
 
@@ -1643,7 +1695,7 @@ export function TimelineContainer() {
         } else {
           setSnapFrame(null);
         }
-        ghostFrame = Math.max(0, Math.min(clip.durationFrames, ghostFrame));
+        ghostFrame = Math.max(0, Math.min(Math.max(0, clip.durationFrames - 1), ghostFrame));
         dragRef.current = { ...d, ghostFrame };
         forceTick((n) => n + 1);
         return;
@@ -1763,53 +1815,16 @@ export function TimelineContainer() {
 
         // Drop on an insert zone → create a new track first, then move/dup.
         if (d.dropTarget.kind === "newTrack") {
-          const trackType = d.dropTarget.trackType;
-          const dropIndex = d.dropTarget.index;
-          const isDup = d.isDuplicate;
-          const participantSnapshot = participants.map((p) => ({
-            id: p.id,
-            trackIndex: p.trackIndex,
-            startFrame: p.startFrame,
-            clip: p.clip,
-          }));
-          void (async () => {
-            const insertResult = await edit.insertTrack(trackType, dropIndex);
-            // Ensure the mirror reflects the new track before computing the
-            // target index (Tauri's timeline_changed is async; browser mode
-            // already refreshed inside applyAndRefresh).
-            if (isTauri) await forceRefresh();
-            const tl = useProjectStore.getState().timeline;
-            const insertedTrackId = insertResult?.affectedClipIds[0];
-            const insertedIndex = insertedTrackId
-              ? tl.tracks.findIndex((track) => track.id === insertedTrackId)
-              : -1;
-            const newTrackIndex =
-              insertedIndex >= 0
-                ? insertedIndex
-                : Math.max(0, Math.min(dropIndex, tl.tracks.length - 1));
-            const resolved = resolveNewTrackMove(
-              timeline,
-              participantSnapshot,
-              d.hit.clip.id,
-              newTrackIndex,
-              frameDelta,
-            );
-            if (isDup) {
-              await edit.duplicateClips(
-                resolved.targets.map((target) => target.clipId),
-                frameDelta,
-                resolved.targets.map((target) => target.toTrack),
-              );
-            } else {
-              await edit.moveClips(
-                resolved.targets.map((target) => ({
-                  clipId: target.clipId,
-                  toTrack: target.toTrack,
-                  toFrame: target.toFrame,
-                })),
-              );
-            }
-          })();
+          void edit.moveOrDuplicateClipsToNewTrack(
+            participants.map((participant) => participant.id),
+            d.hit.clip.id,
+            frameDelta,
+            d.dropTarget.index,
+            d.isDuplicate ? "duplicate" : "move",
+          ).catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            pushToast(t("timeline.moveFailed", { error: message }));
+          });
           return;
         }
 
@@ -1877,7 +1892,21 @@ export function TimelineContainer() {
         // for fromFrame === toFrame, but skipping the round-trip avoids an
         // unnecessary history entry.
         if (d.ghostFrame !== d.fromFrame) {
-          void edit.moveKeyframe(d.clipId, "volume", d.fromFrame, d.ghostFrame);
+          const loc = findClipLoc(timeline, d.clipId);
+          if (!loc) return;
+          const clip = timeline.tracks[loc[0]].clips[loc[1]];
+          const fromFrame = volumeKeyframeAbsoluteFrame(clip, d.fromFrame);
+          const toFrame = writableVolumeKeyframeAbsoluteFrame(clip, d.ghostFrame);
+          void edit.moveKeyframe(
+            d.clipId,
+            "volume",
+            fromFrame,
+            toFrame,
+            d.editContext,
+          ).catch((error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            pushToast(t("inspector.keyframes.moveFailed", { error: message }));
+          });
         }
         return;
       }
@@ -1912,7 +1941,7 @@ export function TimelineContainer() {
         void edit.trimClips(edits);
       }
     },
-    [timeline, setScrubbing, toDoc, updateRulerScrubFrame],
+    [timeline, setScrubbing, toDoc, updateRulerScrubFrame, pushToast, t],
   );
 
   // Ghost preview offsets for the active drag (read from dragRef during render).
@@ -1930,10 +1959,13 @@ export function TimelineContainer() {
       if (keyframeHit) {
         e.preventDefault();
         selectClips(new Set([keyframeHit.clipId]));
+        const loc = findClipLoc(timeline, keyframeHit.clipId);
+        if (!loc) return;
+        const clip = timeline.tracks[loc[0]].clips[loc[1]];
         setMenu({
           kind: "audioVolumeKeyframe",
           clipId: keyframeHit.clipId,
-          frame: keyframeHit.frame,
+          frame: volumeKeyframeAbsoluteFrame(clip, keyframeHit.frame),
           x: e.clientX,
           y: e.clientY,
         });
@@ -2171,9 +2203,11 @@ export function TimelineContainer() {
             preferredTrackIndex,
             momentRange,
             insertTrackAt,
-          );
+          ).catch(edit.reportMediaPlacementFailure);
         } else {
-          void edit.addMediaToTimelineAt(item, plan.startFrame, preferredTrackIndex, insertTrackAt);
+          void edit
+            .addMediaToTimelineAt(item, plan.startFrame, preferredTrackIndex, insertTrackAt)
+            .catch(edit.reportMediaPlacementFailure);
         }
         return;
       }
@@ -2184,9 +2218,19 @@ export function TimelineContainer() {
       const preferredTrackIndex = target.kind === "existing" ? target.trackIndex : null;
       const insertTrackAt = target.kind === "newTrack" ? target.index : undefined;
       if (momentRange) {
-        void edit.addMomentToTimelineAt(item, startFrame, preferredTrackIndex, momentRange, insertTrackAt);
+        void edit
+          .addMomentToTimelineAt(
+            item,
+            startFrame,
+            preferredTrackIndex,
+            momentRange,
+            insertTrackAt,
+          )
+          .catch(edit.reportMediaPlacementFailure);
       } else {
-        void edit.addMediaToTimelineAt(item, startFrame, preferredTrackIndex, insertTrackAt);
+        void edit
+          .addMediaToTimelineAt(item, startFrame, preferredTrackIndex, insertTrackAt)
+          .catch(edit.reportMediaPlacementFailure);
       }
     },
     [toDoc, zoomScale, timeline, trackHeights, clearMediaGhost],
@@ -2369,6 +2413,7 @@ function AudioVolumeKeyframeContextMenu({
   onClose: () => void;
 }) {
   const t = useT();
+  const pushToast = useEditorUiStore((s) => s.pushToast);
   const rootTimeline = useProjectStore((s) => s.timeline);
   const activeNestedSequenceId = useEditorUiStore((s) => s.activeNestedSequenceId);
   const timeline =
@@ -2415,10 +2460,16 @@ function AudioVolumeKeyframeContextMenu({
       hold: t("inspector.keyframes.interpolation.hold"),
     },
     onDelete: () => {
-      void edit.removeKeyframe(clipId, "volume", frame);
+      void edit.removeKeyframe(clipId, "volume", frame).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        pushToast(t("inspector.keyframes.deleteFailed", { error: message }));
+      });
     },
     onSetInterpolation: (interpolation) => {
-      void edit.setKeyframeInterpolation(clipId, "volume", frame, interpolation);
+      void edit.setKeyframeInterpolation(clipId, "volume", frame, interpolation).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        pushToast(t("inspector.keyframes.interpolationFailed", { error: message }));
+      });
     },
   });
 
@@ -2475,14 +2526,16 @@ function AudioVolumeKeyframeContextMenu({
   );
 }
 
-function findVolumeKeyframeInterpolation(
+export function findVolumeKeyframeInterpolation(
   timeline: Timeline,
   clipId: string,
   frame: number,
 ): Interpolation | undefined {
   for (const track of timeline.tracks) {
     const clip = track.clips.find((c) => c.id === clipId);
-    const keyframe = clip?.volumeTrack?.keyframes.find((kf) => kf.frame === frame);
+    const keyframe = clip?.volumeTrack?.keyframes.find(
+      (kf) => kf.frame === frame - (clip?.startFrame ?? 0),
+    );
     if (keyframe) return keyframe.interpolationOut;
   }
   return undefined;

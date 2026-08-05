@@ -47,6 +47,13 @@ pub enum CoreError {
     /// unchanged. Maps to the `validation` error class.
     #[error("{0}")]
     Media(String),
+
+    /// A caller tried to commit an edit against a project identity or timeline
+    /// revision that is no longer current. This is distinct from ordinary
+    /// command validation so IPC clients can refresh instead of retrying the
+    /// same stale mutation against a replacement project.
+    #[error("project changed while preparing a deferred edit")]
+    StaleProject,
 }
 
 /// Convenience alias for fallible assembly-layer operations.
@@ -58,6 +65,7 @@ impl CoreError {
     pub fn code(&self) -> &'static str {
         match self {
             CoreError::Edit(_) | CoreError::Media(_) => "validation",
+            CoreError::StaleProject => "staleProject",
             CoreError::Project(ProjectError::CompatibilityReadOnly { .. }) => "validation",
             CoreError::Project(_) | CoreError::NoProjectOpen | CoreError::Unsupported(_) => {
                 "internal"

@@ -265,6 +265,7 @@ export function CaptionsTab() {
         <Section title={t("captions.source")}>
           <Row label={t("captions.source")} help={t("captions.sourceHelp")}>
             <select
+              aria-label={t("captions.source")}
               value={trackId ?? "__auto__"}
               onChange={(e) => setTrackId(e.target.value === "__auto__" ? null : e.target.value)}
               style={selectStyle}
@@ -679,7 +680,7 @@ function hexToRgb(hex: string): { r: number; g: number; b: number } {
 }
 
 const inputStyle: React.CSSProperties = {
-  height: 22,
+  height: 24,
   background: "var(--bg-raised)",
   border: "var(--bw-thin) solid var(--border-primary)",
   borderRadius: RADIUS.sm,

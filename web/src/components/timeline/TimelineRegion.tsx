@@ -16,7 +16,10 @@ import { MEDIA_DND_TYPE } from "../media/MediaPanel";
 import { useMediaStore } from "../../store/mediaStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useProjectStore } from "../../store/projectStore";
-import { addMediaToTimeline } from "../../store/editActions";
+import {
+  addMediaToTimeline,
+  reportMediaPlacementFailure,
+} from "../../store/editActions";
 import { useT } from "../../i18n";
 
 export function TimelineRegion() {
@@ -57,7 +60,7 @@ export function TimelineRegion() {
     setDragOver(false);
     const id = e.dataTransfer.getData(MEDIA_DND_TYPE);
     const item = useMediaStore.getState().items.find((m) => m.id === id);
-    if (item) void addMediaToTimeline(item);
+    if (item) void addMediaToTimeline(item).catch(reportMediaPlacementFailure);
   };
 
   return (

@@ -268,6 +268,33 @@ def validate_workflow(workflow: str) -> list[str]:
     ):
         errors.append("pinned FFmpeg cancellation lifecycle")
 
+    process_tree = _named_step(
+        security_steps, "Race-free helper process-tree containment"
+    )
+    process_tree_fragments = (
+        "cargo test -p opentake-media --lib",
+        "process_tree::tests::windows_suspended_job_contains_fast_exit_descendant",
+        "-- --exact --nocapture --test-threads=1",
+    )
+    if process_tree is None or not all(
+        fragment in _active(process_tree) for fragment in process_tree_fragments
+    ):
+        errors.append("race-free Windows process-tree containment")
+
+    reparse_safety = _named_step(
+        security_steps, "Reserved output identity and reparse safety"
+    )
+    reparse_fragments = (
+        "windows_project_media_junction_is_rejected_without_writing_target",
+        "windows_directory_handoff_blocks_junction_replacement_before_child_create",
+        "windows_retained_output_handle_blocks_final_name_replacement",
+        "retained_external_source_rejects_windows_reparse_contract",
+    )
+    if reparse_safety is None or not all(
+        fragment in _active(reparse_safety) for fragment in reparse_fragments
+    ):
+        errors.append("complete Windows retained-path reparse safety")
+
     return errors
 
 

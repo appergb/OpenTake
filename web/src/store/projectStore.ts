@@ -39,6 +39,11 @@ interface ProjectState {
   /** Document version last persisted to disk; `timelineVersion` ahead of this
    *  means there are unsaved edits (drives autosave / the dirty state). */
   lastSavedVersion: number;
+  /** Wall-clock time (ms) of the last completed bundle write — set by the
+   *  explicit save promises and by the `project_saved` event (which also fires
+   *  for core-internal saves like the media manifest). `null` until the first
+   *  save of the current session. */
+  lastSavedAt: number | null;
   canUndo: boolean;
   canRedo: boolean;
   /** Replace the whole authoritative snapshot. Same-project versions and
@@ -50,6 +55,10 @@ interface ProjectState {
   /** Mark the current version as persisted (called after a successful save / on
    *  open, so a freshly opened project is not considered dirty). */
   markSaved: (version?: number) => void;
+  /** Record a bundle write observed via the `project_saved` event. The event
+   *  carries no document version, so unlike `markSaved` this never touches the
+   *  dirty-state version — only the last-saved timestamp. */
+  recordSaveCompleted: () => void;
 }
 
 export const useProjectStore = create<ProjectState>((set) => ({
@@ -61,6 +70,7 @@ export const useProjectStore = create<ProjectState>((set) => ({
   compatibilityReadOnly: false,
   compatibilityBlockers: [],
   lastSavedVersion: 0,
+  lastSavedAt: null,
   canUndo: false,
   canRedo: false,
   replaceProjectSnapshot: (snapshot) =>
@@ -83,6 +93,7 @@ export const useProjectStore = create<ProjectState>((set) => ({
         ...(projectChanged
           ? {
               lastSavedVersion: snapshot.version,
+              lastSavedAt: null,
               canUndo: false,
               canRedo: false,
             }
@@ -99,6 +110,7 @@ export const useProjectStore = create<ProjectState>((set) => ({
       compatibilityReadOnly: false,
       compatibilityBlockers: [],
       lastSavedVersion: 0,
+      lastSavedAt: null,
       canUndo: false,
       canRedo: false,
     })),
@@ -109,5 +121,9 @@ export const useProjectStore = create<ProjectState>((set) => ({
     })),
   setHistory: (canUndo, canRedo) => set({ canUndo, canRedo }),
   markSaved: (version) =>
-    set((state) => ({ lastSavedVersion: version ?? state.timelineVersion })),
+    set((state) => ({
+      lastSavedVersion: version ?? state.timelineVersion,
+      lastSavedAt: Date.now(),
+    })),
+  recordSaveCompleted: () => set({ lastSavedAt: Date.now() }),
 }));

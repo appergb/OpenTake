@@ -14,8 +14,8 @@ use std::path::Path;
 use std::process::Command;
 
 use opentake_domain::{
-    Clip, ClipType, MediaColorMetadata, MediaManifest, MediaManifestEntry, MediaSource, Timeline,
-    Track,
+    Clip, ClipType, MediaColorMetadata, MediaManifest, MediaManifestEntry, MediaSource, TextStyle,
+    Timeline, Track,
 };
 
 /// True when both ffmpeg and ffprobe are on PATH.
@@ -577,4 +577,57 @@ fn export_with_audio_clip_mux_aac_stream() {
     let leftover_pcm = dir.path().join("out_audio.mp4.pcm.tmp");
     assert!(!leftover_video.exists(), "video temp should be removed");
     assert!(!leftover_pcm.exists(), "pcm temp should be removed");
+}
+
+/// A text-bearing timeline must export end-to-end when system fonts exist and
+/// be rejected up front when they do not (the fail-closed font guard added for
+/// the "invisible text" audit finding). Auto-skips when ffmpeg/ffprobe, the
+/// GPU, or fonts are unavailable, matching the other export tests.
+#[test]
+fn export_with_text_clip_respects_font_availability() {
+    if !ffmpeg_ready() {
+        eprintln!("skip: ffmpeg/ffprobe not available");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("src_text.mp4");
+    let out = dir.path().join("out_text.mp4");
+
+    let (sw, sh, sfps, frames) = (320, 240, 10, 6);
+    if !make_video(&src, sw, sh, sfps, frames) {
+        eprintln!("skip: could not generate fixture media");
+        return;
+    }
+
+    let mut timeline = build_timeline(frames as i32, sw as i32, sh as i32, sfps as f64);
+    let mut text_track = Track::new("t-text", ClipType::Video);
+    let mut text = Clip::new("clip-text", "", 0, frames as i32);
+    text.media_type = ClipType::Text;
+    text.source_clip_type = ClipType::Text;
+    text.text_content = Some("integration probe text".to_string());
+    text.text_style = Some(TextStyle::default());
+    text_track.clips.push(text);
+    timeline.tracks.push(text_track);
+    let manifest = build_manifest(&src, sw as i32, sh as i32, sfps as f64);
+
+    let req = ExportRequest {
+        out_path: out.to_string_lossy().into_owned(),
+        codec: Default::default(), // H.264
+        quality: ExportQuality::P720,
+    };
+    match run_export(&timeline, &manifest, &None, &req) {
+        Ok(summary) => {
+            assert!(out.exists(), "output file should exist");
+            assert_eq!(summary.frame_count, frames as i32);
+            assert_summary_matches_real_probe(&summary, &out);
+        }
+        Err(error) if error.contains("no GPU device") || error.contains("no system fonts") => {
+            // No GPU adapter or a fontless headless runner: the font guard
+            // rejected the export by design — same auto-skip semantics as the
+            // ffmpeg/GPU guards above.
+            eprintln!("skip: {error}");
+        }
+        Err(error) => panic!("text export failed: {error}"),
+    }
 }

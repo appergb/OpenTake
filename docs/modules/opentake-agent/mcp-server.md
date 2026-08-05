@@ -63,7 +63,7 @@ MCP 客户端 → http://127.0.0.1:19789/mcp
 ## 完成状态
 
 - 已实现：`McpServer`（`get_info`/`list_tools`/`call_tool`/`call`）、`build_router`、`serve`、回环守卫、OAuth well-known。已被 `src-tauri/src/mcp.rs` 集成（`build_registry` + `server::serve`）。
-- 测试覆盖：列 44 工具、`get_info` 带提示与能力、`get_timeline` 成功、未知工具报错、回环守卫接受本地/拒绝远端。
+- 测试覆盖：`list_tools` 列全部可发布工具（默认无媒体桥主机 = `ToolName::ALL` 38 − 7 媒体桥门控 = 31，能力门控后按能力发布）、`get_info` 带提示与能力、`get_timeline` 成功、未知工具报错、回环守卫接受本地/拒绝远端。
 - 计划中：无独立缺口（依赖的工具 stub 见 [dispatch-tools.md](dispatch-tools.md)）。
 
 ---

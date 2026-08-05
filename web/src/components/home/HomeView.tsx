@@ -8,10 +8,13 @@ import {
   Library,
   MoreHorizontal,
   Sparkles,
+  Cpu,
 } from "lucide-react";
 import { Icon } from "../ui/Icon";
 import { useT, type TFunction } from "../../i18n";
 import { assetUrl } from "../../lib/asset";
+import * as api from "../../lib/api";
+import type { GenerationLog } from "../../lib/types";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useRecentStore, type RecentProject } from "../../store/recentStore";
 import {
@@ -40,6 +43,147 @@ export function formatProjectRelativeTime(
   if (days < 7) return t("home.relative.daysAgo", { count: days });
   if (days < 35) return t("home.relative.weeksAgo", { count: Math.floor(days / 7) });
   return t("home.relative.monthsAgo", { count: Math.max(1, Math.floor(days / 30)) });
+}
+
+/** `createdAt` rows are Apple-reference-date seconds (upstream Swift `Date`
+ *  encoding) — the 2001-01-01 epoch. Convert to Unix ms for display. */
+export function appleReferenceSecondsToMs(seconds: number): number {
+  return (seconds + 978_307_200) * 1000;
+}
+
+type GenerationActivityState =
+  | { status: "loading" }
+  | { status: "error" }
+  | { status: "ready"; log: GenerationLog };
+
+/** Read-only AI generation audit for the current session: newest rows first
+ *  (timestamp · model · credits) plus total spend. Mirrors `generation_log`;
+ *  the UI never mutates the log — the core's generation lifecycle is the only
+ *  writer. Loads whenever Home becomes active; outside Tauri it resolves to the
+ *  honest empty log. */
+function GenerationActivity({ active }: { active: boolean }) {
+  const t = useT();
+  const [state, setState] = useState<GenerationActivityState>({ status: "loading" });
+
+  useEffect(() => {
+    if (!active) return;
+    let disposed = false;
+    setState({ status: "loading" });
+    api
+      .generationLog()
+      .then((log) => {
+        if (!disposed) setState({ status: "ready", log });
+      })
+      .catch(() => {
+        if (!disposed) setState({ status: "error" });
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [active]);
+
+  const totalCredits =
+    state.status === "ready"
+      ? state.log.entries.reduce((sum, entry) => sum + (entry.costCredits ?? 0), 0)
+      : 0;
+
+  return (
+    <section
+      aria-labelledby="home-generation-heading"
+      style={{
+        padding: "var(--space-md) var(--space-xl-xxl) var(--space-xl-xxl)",
+        borderTop: "1px solid var(--home-border)",
+        color: "var(--home-muted-foreground)",
+        fontSize: "var(--fs-xs)",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "var(--space-md)",
+          marginBottom: "var(--space-sm)",
+        }}
+      >
+        <h2
+          id="home-generation-heading"
+          style={{
+            margin: 0,
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "var(--space-xs)",
+            fontSize: "var(--fs-xs)",
+            fontWeight: 500,
+          }}
+        >
+          <Icon icon={Cpu} size={13} />
+          {t("home.generationActivity")}
+        </h2>
+        {state.status === "ready" && state.log.entries.length > 0 && (
+          <span className="tabular">
+            {t("home.generationActivityTotal", {
+              count: state.log.entries.length,
+              credits: totalCredits,
+            })}
+          </span>
+        )}
+      </div>
+      {state.status === "loading" && <div role="status">{t("home.generationActivityLoading")}</div>}
+      {state.status === "error" && (
+        <div role="alert">{t("home.generationActivityFailed")}</div>
+      )}
+      {state.status === "ready" && state.log.entries.length === 0 && (
+        <div>{t("home.generationActivityEmpty")}</div>
+      )}
+      {state.status === "ready" && state.log.entries.length > 0 && (
+        <ul
+          style={{
+            listStyle: "none",
+            margin: 0,
+            padding: 0,
+            maxHeight: 132,
+            overflowY: "auto",
+            display: "grid",
+            gap: "var(--space-xxs)",
+          }}
+        >
+          {[...state.log.entries].reverse().map((entry) => {
+            const when = entry.createdAt
+              ? formatProjectRelativeTime(t, appleReferenceSecondsToMs(entry.createdAt))
+              : undefined;
+            return (
+              <li
+                key={entry.id}
+                title={
+                  entry.createdAt
+                    ? new Date(appleReferenceSecondsToMs(entry.createdAt)).toLocaleString()
+                    : undefined
+                }
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "var(--space-sm)",
+                  minWidth: 0,
+                }}
+              >
+                <span style={{ flex: "0 0 auto" }}>{when ?? "—"}</span>
+                <span style={{ flex: "0 0 auto", color: "var(--home-foreground)" }}>
+                  {entry.model}
+                </span>
+                <span style={{ flex: 1, minWidth: 0 }} />
+                <span className="tabular" style={{ flex: "0 0 auto" }}>
+                  {entry.costCredits !== undefined
+                    ? `${entry.costCredits} ${t("home.generationActivityCreditsUnit")}`
+                    : t("home.generationActivityCostUnknown")}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </section>
+  );
 }
 
 const homeShellStyle: CSSProperties = {
@@ -80,6 +224,17 @@ const homeWorkspaceStyle: CSSProperties = {
 
 const subtleTransition = "background-color var(--anim-hover) var(--ease-out), border-color var(--anim-hover) var(--ease-out), color var(--anim-hover) var(--ease-out)";
 
+const projectMenuButtonStyle: CSSProperties = {
+  minHeight: 28,
+  padding: "0 var(--space-sm)",
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "flex-start",
+  gap: "var(--space-xs)",
+  borderRadius: "var(--radius-sm)",
+  color: "var(--home-muted-foreground)",
+};
+
 type ProjectAction = "new" | "open" | "sample" | null;
 
 export const HOME_NOTICE_STORAGE_KEY = "opentake.home.lastSeenVersion";
@@ -114,6 +269,7 @@ function persistHomeNoticeSeen() {
 
 export function HomeView() {
   const recents = useRecentStore((s) => s.recents);
+  const active = useEditorUiStore((s) => s.view === "home");
   const [projectAction, setProjectAction] = useState<ProjectAction>(null);
   const [homeNotice, setHomeNotice] = useState<HomeNotice>(() =>
     loadHomeNotice(recents.length > 0),
@@ -143,10 +299,18 @@ export function HomeView() {
     }
   };
 
-  // Validate recent projects on mount to filter out folders deleted on disk
+  // Home is kept alive while the editor is open. Revalidate when it becomes
+  // active or the window regains focus so a File Provider download completed
+  // in Finder becomes usable without requiring an application restart.
   useEffect(() => {
-    void useRecentStore.getState().validateRecents();
-  }, []);
+    if (!active) return;
+    const validate = () => {
+      void useRecentStore.getState().validateRecents();
+    };
+    validate();
+    window.addEventListener("focus", validate);
+    return () => window.removeEventListener("focus", validate);
+  }, [active]);
 
   return (
     <div style={homeShellStyle}>
@@ -171,6 +335,7 @@ export function HomeView() {
             />
           ) : (
             <ProjectLauncher
+              active={active}
               recents={recents}
               projectAction={projectAction}
               onNew={() => void runProjectAction("new", newProjectAndEnter)}
@@ -180,17 +345,22 @@ export function HomeView() {
               }
             />
           )}
+          <GenerationActivity active={active} />
         </section>
       </main>
-      {homeNotice && <HomeNoticeDialog kind={homeNotice} onDismiss={dismissHomeNotice} />}
+      {homeNotice && (
+        <HomeNoticeDialog active={active} kind={homeNotice} onDismiss={dismissHomeNotice} />
+      )}
     </div>
   );
 }
 
 function HomeNoticeDialog({
+  active,
   kind,
   onDismiss,
 }: {
+  active: boolean;
   kind: Exclude<HomeNotice, null>;
   onDismiss: () => void;
 }) {
@@ -198,6 +368,7 @@ function HomeNoticeDialog({
   const buttonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
+    if (!active) return;
     buttonRef.current?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
@@ -206,12 +377,13 @@ function HomeNoticeDialog({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onDismiss]);
+  }, [active, onDismiss]);
 
   const isWelcome = kind === "welcome";
   return (
     <div
       data-testid="home-notice-backdrop"
+      className="app-dialog-backdrop"
       style={{
         position: "fixed",
         inset: 0,
@@ -227,6 +399,7 @@ function HomeNoticeDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby="home-notice-title"
+        className="app-dialog-surface"
         style={{
           width: "min(520px, 100%)",
           padding: "var(--space-xl-xxl)",
@@ -555,12 +728,14 @@ function LauncherButton({
 }
 
 function ProjectLauncher({
+  active,
   recents,
   projectAction,
   onNew,
   onOpen,
   onOpenPath,
 }: {
+  active: boolean;
   recents: RecentProject[];
   projectAction: ProjectAction;
   onNew: () => void;
@@ -573,6 +748,7 @@ function ProjectLauncher({
 
   // Listen to KeyDown to open project when selected + Enter is pressed
   useEffect(() => {
+    if (!active) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Enter" && selectedPath && !busy) {
         const target = e.target instanceof Element ? e.target : null;
@@ -585,13 +761,13 @@ function ProjectLauncher({
           onNew();
         } else {
           const selected = recents.find((entry) => entry.path === selectedPath);
-          if (!selected?.missing) onOpenPath(selectedPath);
+          if (!selected?.missing && !selected?.offline) onOpenPath(selectedPath);
         }
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [busy, onNew, onOpenPath, recents, selectedPath]);
+  }, [active, busy, onNew, onOpenPath, recents, selectedPath]);
 
   return (
     <div
@@ -618,7 +794,7 @@ function ProjectLauncher({
         }}
       >
         <span>{t("home.myProjects")}</span>
-        <span className="tabular">{recents.length} recent</span>
+        <span className="tabular">{t("home.recentCount", { count: recents.length })}</span>
       </div>
       <div
         style={{
@@ -640,7 +816,7 @@ function ProjectLauncher({
             disabled={busy}
             onSelect={() => setSelectedPath(entry.path)}
             onDoubleClick={() => {
-              if (!entry.missing) onOpenPath(entry.path);
+              if (!entry.missing && !entry.offline) onOpenPath(entry.path);
             }}
           />
         ))}
@@ -745,6 +921,7 @@ function ProjectGridCard({
   const remove = useRecentStore((s) => s.remove);
   const reveal = useRecentStore((s) => s.reveal);
   const trash = useRecentStore((s) => s.trash);
+  const thumbnailPathsValidated = useRecentStore((s) => s.thumbnailPathsValidated);
   const [hovered, setHovered] = useState(false);
   const [actionsOpen, setActionsOpen] = useState(false);
   const [confirmTrash, setConfirmTrash] = useState(false);
@@ -753,12 +930,16 @@ function ProjectGridCard({
   const [thumbnailFailed, setThumbnailFailed] = useState(false);
 
   const actionsVisible = hovered || actionsOpen || confirmTrash || actionError !== null;
-  const coverUrl = entry.missing || thumbnailFailed ? null : assetUrl(entry.thumbnailPath);
+  const unavailable = Boolean(entry.missing || entry.offline);
+  const unavailableLabel = entry.missing ? t("home.fileMissing") : t("home.fileOffline");
+  const coverUrl = unavailable || thumbnailFailed || !thumbnailPathsValidated
+    ? null
+    : assetUrl(entry.thumbnailPath);
   const modifiedLabel = formatProjectRelativeTime(t, entry.modifiedAt ?? entry.openedAt);
 
   useEffect(
     () => setThumbnailFailed(false),
-    [entry.missing, entry.modifiedAt, entry.thumbnailPath],
+    [entry.missing, entry.offline, entry.modifiedAt, entry.thumbnailPath, thumbnailPathsValidated],
   );
 
   const runReveal = async () => {
@@ -824,9 +1005,9 @@ function ProjectGridCard({
       <button
         type="button"
         disabled={disabled}
-        aria-label={entry.missing ? `${entry.name} · ${t("home.fileMissing")}` : entry.name}
+        aria-label={unavailable ? `${entry.name} · ${unavailableLabel}` : entry.name}
         aria-pressed={selected}
-        aria-describedby={entry.missing ? `missing-${entry.path}` : undefined}
+        aria-describedby={unavailable ? `unavailable-${entry.path}` : undefined}
         onClick={(event) => {
           event.stopPropagation();
           onSelect();
@@ -906,13 +1087,13 @@ function ProjectGridCard({
                 whiteSpace: "nowrap",
               }}
             >
-              {entry.missing ? (
-                <span id={`missing-${entry.path}`} style={{ color: "var(--status-error)" }}>
-                  {t("home.fileMissing")}
+              {unavailable ? (
+                <span id={`unavailable-${entry.path}`} style={{ color: "var(--status-error)" }}>
+                  {unavailableLabel}
                 </span>
               ) : modifiedLabel}
             </div>
-            {entry.missing && (
+            {unavailable && (
               <div
                 className="tabular"
                 style={{
@@ -993,6 +1174,7 @@ function ProjectGridCard({
         <div
           role="dialog"
           aria-label={confirmTrash ? t("home.confirmTrashTitle") : t("home.projectActions")}
+          className="app-dialog-surface"
           onClick={(event) => event.stopPropagation()}
           style={{
             position: "absolute",
@@ -1017,13 +1199,14 @@ function ProjectGridCard({
                   type="button"
                   disabled={pending !== null}
                   onClick={() => void runTrash()}
-                  style={{ color: "var(--status-error)" }}
+                  style={{ ...projectMenuButtonStyle, color: "var(--status-error)" }}
                 >
                   <Icon icon={Trash2} size={13} /> {pending === "trash" ? t("home.trashing") : t("home.moveToTrash")}
                 </button>
                 <button
                   type="button"
                   disabled={pending !== null}
+                  style={projectMenuButtonStyle}
                   onClick={() => {
                     setConfirmTrash(false);
                     setActionError(null);
@@ -1035,12 +1218,18 @@ function ProjectGridCard({
             </>
           ) : (
             <div style={{ display: "grid", gap: "var(--space-xs)" }}>
-              <button type="button" disabled={pending !== null} onClick={() => void runReveal()}>
+              <button
+                type="button"
+                disabled={pending !== null}
+                style={{ ...projectMenuButtonStyle, width: "100%" }}
+                onClick={() => void runReveal()}
+              >
                 <Icon icon={FolderOpen} size={13} /> {pending === "reveal" ? t("home.revealing") : t("home.revealInFinder")}
               </button>
               <button
                 type="button"
                 disabled={pending !== null}
+                style={{ ...projectMenuButtonStyle, width: "100%" }}
                 onClick={() => void runRemove()}
               >
                 {pending === "remove" ? t("home.removing") : t("home.removeFromRecents")}
@@ -1049,7 +1238,11 @@ function ProjectGridCard({
                 type="button"
                 disabled={pending !== null}
                 onClick={() => setConfirmTrash(true)}
-                style={{ color: "var(--status-error)" }}
+                style={{
+                  ...projectMenuButtonStyle,
+                  width: "100%",
+                  color: "var(--status-error)",
+                }}
               >
                 <Icon icon={Trash2} size={13} /> {t("home.moveToTrash")}
               </button>

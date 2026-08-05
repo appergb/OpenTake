@@ -9,11 +9,16 @@ vi.mock("../../i18n", () => ({
   t: (key: string) => key,
   useI18nStore: { subscribe: () => () => {} },
 }));
+vi.mock("../../store/editActions", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../store/editActions")>();
+  return { ...actual, deleteFolder: vi.fn(), deleteMedia: vi.fn() };
+});
 
 import { useEditorUiStore } from "../../store/uiStore";
 import { useProjectStore } from "../../store/projectStore";
 import { useClipboardStore } from "../../store/clipboardStore";
 import { useMediaStore } from "../../store/mediaStore";
+import * as editActions from "../../store/editActions";
 import { handleViewShortcutKeyDown } from "../../hooks/useKeyboardShortcuts";
 import {
   APPLICATION_MENU_SPEC,
@@ -27,6 +32,14 @@ import {
 
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
 
 function menuItems(): HTMLButtonElement[] {
   return [...(container?.querySelectorAll<HTMLButtonElement>('[role="menu"] button') ?? [])];
@@ -57,7 +70,11 @@ beforeEach(async () => {
     mediaPanelVisible: true,
     inspectorPanelVisible: true,
     fullscreen: false,
+    selectedMediaAssetIds: new Set(),
+    selectedFolderIds: new Set(),
+    previewMediaId: null,
   });
+  useProjectStore.setState({ projectEpoch: 0, projectPath: null, timelineVersion: 0 });
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -69,10 +86,147 @@ afterEach(async () => {
   container?.remove();
   root = null;
   container = null;
+  vi.clearAllMocks();
   vi.restoreAllMocks();
 });
 
 describe("ViewMenu aggregate command contract", () => {
+  it("routes application-menu media Delete through the shared pending transaction", async () => {
+    const pending = deferred<void>();
+    vi.mocked(editActions.deleteMedia).mockReturnValue(pending.promise);
+    await act(async () => {
+      useProjectStore.setState({ projectEpoch: 9, projectPath: "/menu-delete.opentake" });
+      useEditorUiStore.setState({
+        focusedPanel: "media",
+        selectedMediaAssetIds: new Set(["media-1"]),
+        previewMediaId: "media-1",
+      });
+      runApplicationMenuCommand("delete");
+      runApplicationMenuCommand("delete");
+      await Promise.resolve();
+    });
+    await act(async () => {
+      pending.resolve(undefined);
+      await pending.promise;
+      await Promise.resolve();
+    });
+    const calls = vi.mocked(editActions.deleteMedia).mock.calls;
+    const ui = useEditorUiStore.getState();
+
+    expect(calls).toEqual([
+      [
+        ["media-1"],
+        {
+          projectEpoch: 9,
+          projectPath: "/menu-delete.opentake",
+          timelineVersion: 0,
+        },
+      ],
+    ]);
+    expect([...ui.selectedMediaAssetIds]).toEqual([]);
+    expect(ui.previewMediaId).toBeNull();
+  });
+
+  it("enables and prioritizes folder Delete through the same application-menu boundary", async () => {
+    vi.mocked(editActions.deleteFolder).mockResolvedValue(undefined);
+    await act(async () => {
+      useProjectStore.setState({ projectEpoch: 10, projectPath: "/folder-delete.opentake" });
+      useEditorUiStore.setState({
+        view: "editor",
+        focusedPanel: "media",
+        selectedFolderIds: new Set(["folder-1"]),
+        selectedMediaAssetIds: new Set(),
+      });
+    });
+    const enabled = applicationMenuStateSnapshot().enabled.delete;
+
+    await act(async () => {
+      useEditorUiStore.setState({ selectedMediaAssetIds: new Set(["stale-media"]) });
+      runApplicationMenuCommand("delete");
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(enabled).toBe(true);
+    expect(editActions.deleteFolder).toHaveBeenCalledOnce();
+    expect(editActions.deleteFolder).toHaveBeenCalledWith(["folder-1"], expect.any(Object));
+    expect(editActions.deleteMedia).not.toHaveBeenCalled();
+    expect([...useEditorUiStore.getState().selectedFolderIds]).toEqual([]);
+  });
+
+  it("clears a folder selection when media Select All runs so Delete removes assets", async () => {
+    vi.mocked(editActions.deleteMedia).mockResolvedValue(undefined);
+    await act(async () => {
+      useProjectStore.setState({ projectEpoch: 12, projectPath: "/select-all.opentake" });
+      useMediaStore.setState({
+        items: [
+          {
+            id: "media-1",
+            name: "Media 1",
+            type: "video",
+            duration: 1,
+            hasAudio: false,
+            path: "/tmp/media-1.mp4",
+          },
+          {
+            id: "media-2",
+            name: "Media 2",
+            type: "image",
+            duration: 0,
+            hasAudio: false,
+            path: "/tmp/media-2.png",
+          },
+        ],
+      });
+      useEditorUiStore.setState({
+        focusedPanel: "media",
+        selectedFolderIds: new Set(["folder-1"]),
+        selectedMediaAssetIds: new Set(),
+      });
+      runApplicationMenuCommand("selectAll");
+    });
+
+    expect([...useEditorUiStore.getState().selectedMediaAssetIds]).toEqual([
+      "media-1",
+      "media-2",
+    ]);
+    expect([...useEditorUiStore.getState().selectedFolderIds]).toEqual([]);
+
+    await act(async () => {
+      runApplicationMenuCommand("delete");
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(editActions.deleteFolder).not.toHaveBeenCalled();
+    expect(editActions.deleteMedia).toHaveBeenCalledOnce();
+    expect(editActions.deleteMedia).toHaveBeenCalledWith(
+      ["media-1", "media-2"],
+      expect.any(Object),
+    );
+  });
+
+  it("surfaces an application-menu media Delete rejection", async () => {
+    vi.mocked(editActions.deleteMedia).mockRejectedValue(new Error("delete rejected"));
+    await act(async () => {
+      useProjectStore.setState({ projectEpoch: 11, projectPath: "/delete-error.opentake" });
+      useEditorUiStore.setState({
+        view: "editor",
+        focusedPanel: "media",
+        selectedFolderIds: new Set(),
+        selectedMediaAssetIds: new Set(["media-1"]),
+        toast: null,
+      });
+      runApplicationMenuCommand("delete");
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await vi.waitFor(() =>
+      expect(useEditorUiStore.getState().toast?.message).toContain("delete rejected"),
+    );
+  });
+
   it("commands_shortcuts_checked_state_and_disabled_rules", async () => {
     expect(
       APPLICATION_MENU_SPEC.map(({ group, id, accelerator, kind }) => [

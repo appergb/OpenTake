@@ -35,6 +35,14 @@ const MOV_EXT = "mov";
 /** Extension of a self-contained project bundle (matches the Rust
  *  `BUNDLE_EXTENSION` and how projects are named/opened today). */
 const BUNDLE_EXT = "opentake";
+const FOCUSABLE =
+  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+function focusableElements(container: HTMLElement): HTMLElement[] {
+  return [...container.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(
+    (element) => element.tabIndex >= 0 && !element.hidden,
+  );
+}
 
 /** Top-level export target: a rendered video, or a self-contained project
  *  bundle (upstream `ExportMode.video` / `.palmierProject`). */
@@ -135,6 +143,9 @@ export function ExportDialog() {
   // (belt-and-suspenders; only one export runs at a time in practice).
   const progressUnlisten = useRef<(() => void) | null>(null);
   const activeOperationId = useRef<string | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
 
   // Re-seed the resolution default from the timeline each time the dialog opens.
   useEffect(() => {
@@ -155,16 +166,48 @@ export function ExportDialog() {
     };
   }, []);
 
-  // Close on Escape (ignored while an export is in flight so the run isn't
-  // abandoned mid-encode from the user's point of view).
+  // Move focus into the modal, contain keyboard navigation, and restore the
+  // control that opened it. Escape is ignored while an export is in flight.
   useEffect(() => {
     if (!open) return;
+    const previousFocus =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const dialog = dialogRef.current;
+    const initialFocus = dialog ? focusableElements(dialog)[0] : null;
+    (initialFocus ?? dialog)?.focus();
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !busy) setOpen(false);
+      if (e.defaultPrevented) return;
+      if (e.key === "Escape") {
+        if (!busyRef.current) {
+          e.preventDefault();
+          setOpen(false);
+        }
+        return;
+      }
+      if (e.key !== "Tab" || !dialog) return;
+      const focusables = focusableElements(dialog);
+      if (focusables.length === 0) {
+        e.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusables[0]!;
+      const last = focusables[focusables.length - 1]!;
+      const active = document.activeElement;
+      if (e.shiftKey && (active === first || !dialog.contains(active))) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && (active === last || !dialog.contains(active))) {
+        e.preventDefault();
+        first.focus();
+      }
     };
     document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [open, busy, setOpen]);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      if (previousFocus?.isConnected) previousFocus.focus();
+    };
+  }, [open, setOpen]);
 
   const codecOptions = useMemo(
     () => [
@@ -365,6 +408,7 @@ export function ExportDialog() {
 
   return (
     <div
+      className="app-dialog-backdrop"
       style={{
         position: "fixed",
         inset: 0,
@@ -379,9 +423,12 @@ export function ExportDialog() {
       }}
     >
       <div
+        ref={dialogRef}
         role="dialog"
+        tabIndex={-1}
         aria-modal="true"
         aria-label={t("export.title")}
+        className="app-dialog-surface"
         style={{
           width: 360,
           display: "flex",

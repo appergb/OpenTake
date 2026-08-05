@@ -113,6 +113,9 @@ jobs:
           python3 -B scripts/check_windows_product_ci.py
           python3 -B -m unittest discover -s scripts -p 'test_check_windows_product_ci.py'
 
+      - name: Provisioner unit tests (scripts/tests)
+        run: python3 -B -m unittest discover -s scripts/tests -p 'test_*.py'
+
       - name: cargo fmt
         run: cargo fmt --all --check
 
@@ -127,7 +130,7 @@ jobs:
       - name: cargo test
         env:
           OPENTAKE_MOTION_TRACE: '1'
-        run: cargo test --workspace
+        run: cargo test --workspace -- --test-threads=1
 
       - name: live playback transport integration (fail closed)
         run: |
@@ -359,6 +362,13 @@ jobs:
           cargo test -p opentake-media --lib windows_cancelling_running_pcm_child_reaps_both_pipe_readers
           cargo test -p opentake-media --lib windows_cancelling_mux_wait_reaps_child
 
+      - name: Race-free helper process-tree containment
+        shell: pwsh
+        run: >-
+          cargo test -p opentake-media --lib
+          process_tree::tests::windows_suspended_job_contains_fast_exit_descendant
+          -- --exact --nocapture --test-threads=1
+
       - name: Verify portable Tauri test image imports
         shell: pwsh
         run: |
@@ -452,6 +462,7 @@ jobs:
           cargo test -p opentake-tauri --lib windows_project_media_junction_is_rejected_without_writing_target
           cargo test -p opentake-tauri --lib windows_directory_handoff_blocks_junction_replacement_before_child_create
           cargo test -p opentake-tauri --lib windows_retained_output_handle_blocks_final_name_replacement
+          cargo test -p opentake-tauri --lib retained_external_source_rejects_windows_reparse_contract
 
       - name: Upload Tauri test image imports
         if: always()
@@ -484,7 +495,7 @@ jobs:
           cache-dependency-path: web/pnpm-lock.yaml
 
       - name: pnpm install
-        run: pnpm -C web install
+        run: pnpm -C web install --frozen-lockfile
 
       - name: pnpm build
         run: pnpm -C web build

@@ -15,7 +15,7 @@ import type { TrackDropTarget } from "../lib/geometry";
 import { validRange, type TimelineRange } from "../lib/timelineRange";
 import { planNudge } from "../lib/timelineNudge";
 import { buildInsertPlan, type InsertPlan } from "../lib/timelineInsert";
-import { checkProjectSettings, type ProjectSettingsTarget } from "../lib/projectSettings";
+import { checkProjectSettings } from "../lib/projectSettings";
 import { expandLinkGroup } from "../components/timeline/hitTest";
 import { useClipboardStore } from "./clipboardStore";
 import { t } from "../i18n";
@@ -32,6 +32,7 @@ import type {
   ColorGradeInput,
   Crop,
   EffectInput,
+  EditResult,
   EditRequest,
   FrameRangeReq,
   Interpolation,
@@ -43,6 +44,10 @@ import type {
   LoudnessNormalization,
   DenoiseMode,
   MediaItem,
+  PasteClipEntryReq,
+  PlaceMediaTargetReq,
+  ProjectTimelineSettingsReq,
+  ProjectEditIdentity,
   StabilizationTrack,
   RenameEntryReq,
   TextEntryReq,
@@ -52,6 +57,7 @@ import type {
   Transform,
   TransitionKind,
   TrimEditReq,
+  UnplacedClipEntryReq,
 } from "../lib/types";
 
 /**
@@ -64,15 +70,20 @@ export const EDIT_GESTURE_COMMAND_MATRIX = [
   { gesture: "edit inside compound", action: "editNestedSequence", requestType: "editNestedSequence", backend: "EditNestedSequence" },
   { gesture: "rename compound", action: "renameNestedSequence", requestType: "renameNestedSequence", backend: "RenameNestedSequence" },
   { gesture: "dissolve compound", action: "dissolveNestedSequence", requestType: "dissolveNestedSequence", backend: "DissolveNestedSequence" },
+  { gesture: "atomic media placement", action: "placeMedia", requestType: "placeMedia", backend: "PlaceMedia" },
   { gesture: "media overwrite drop", action: "addClips", requestType: "addClips", backend: "AddClips" },
   { gesture: "media ripple insert", action: "insertClips", requestType: "insertClips", backend: "InsertClips" },
   { gesture: "clip drag commit", action: "moveClips", requestType: "moveClips", backend: "MoveClips" },
   { gesture: "option drag copy", action: "duplicateClips", requestType: "duplicateClips", backend: "DuplicateClips" },
+  { gesture: "new-track move or copy", action: "moveOrDuplicateClipsToNewTrack", requestType: "moveOrDuplicateClipsToNewTrack", backend: "MoveOrDuplicateClipsToNewTrack" },
+  { gesture: "clipboard deep paste", action: "pasteClipsAtPlayhead", requestType: "pasteClips", backend: "PasteClips" },
   { gesture: "delete selection", action: "removeClips", requestType: "removeClips", backend: "RemoveClips" },
-  { gesture: "razor or command-k", action: "splitClip", requestType: "splitClip", backend: "SplitClip" },
+  { gesture: "single razor split", action: "splitClip", requestType: "splitClip", backend: "SplitClip" },
+  { gesture: "playhead multi-split", action: "splitAtPlayhead", requestType: "splitClips", backend: "SplitClips" },
   { gesture: "freeze frame", action: "freezeFrame", requestType: "freezeFrame", backend: "FreezeFrame" },
   { gesture: "trim handle commit", action: "trimClips", requestType: "trimClips", backend: "TrimClips" },
   { gesture: "inspector property commit", action: "setClipProperties", requestType: "setClipProperties", backend: "SetClipProperties" },
+  { gesture: "canvas transform commit", action: "setTransformAtFrame", requestType: "setTransformAtFrame", backend: "SetTransformAtFrame" },
   { gesture: "replace keyframe lane", action: "setKeyframes", requestType: "setKeyframes", backend: "SetKeyframes" },
   { gesture: "stamp keyframe", action: "stampKeyframe", requestType: "stampKeyframe", backend: "StampKeyframe" },
   { gesture: "write animated value", action: "upsertKeyframe", requestType: "upsertKeyframe", backend: "UpsertKeyframe" },
@@ -145,6 +156,7 @@ const ROOT_SCOPED_EDIT_REQUEST_TYPES = new Set<EditRequest["type"]>([
   "editNestedSequence",
   "renameNestedSequence",
   "dissolveNestedSequence",
+  "placeMedia",
   "createFolder",
   "moveToFolder",
   "renameMedia",
@@ -156,19 +168,49 @@ const ROOT_SCOPED_EDIT_REQUEST_TYPES = new Set<EditRequest["type"]>([
 
 async function applyAndRefresh(
   cmd: Parameters<typeof api.editApply>[0],
-  options: { root?: boolean } = {},
+  options: {
+    root?: boolean;
+    expected?: ProjectEditIdentity;
+    sequenceId?: string | null;
+  } = {},
 ) {
-  const sequenceId = useEditorUiStore.getState().activeNestedSequenceId;
+  const expected = options.expected ?? captureProjectEditIdentity();
+  const sequenceId =
+    options.sequenceId === undefined
+      ? useEditorUiStore.getState().activeNestedSequenceId
+      : options.sequenceId;
   const targetsRoot = options.root || ROOT_SCOPED_EDIT_REQUEST_TYPES.has(cmd.type);
   const request =
     sequenceId && !targetsRoot
       ? ({ type: "editNestedSequence", sequenceId, command: cmd } as const)
       : cmd;
-  const res = await api.editApply(request);
+  const res = await api.editApply(request, expected);
   // Tauri pushes timeline_changed -> sync re-fetches. The browser fallback has
   // no event channel, so refresh explicitly there.
   if (!isTauri && res.changed) await forceRefresh();
   return res;
+}
+
+/** Capture the complete authority token at gesture time. Rust rechecks all
+ * three fields under the same lock as the edit transaction. */
+export function captureProjectEditIdentity(): ProjectEditIdentity {
+  const { projectEpoch, projectPath, timelineVersion } = useProjectStore.getState();
+  return { projectEpoch, projectPath, timelineVersion };
+}
+
+/** Long-running preparation must retain both backend authority and the editor
+ * scope selected when the gesture began. Project identity alone cannot prevent
+ * a late result from being redirected to another nested sequence. */
+export interface ProjectEditContext {
+  expected: ProjectEditIdentity;
+  sequenceId: string | null;
+}
+
+export function captureProjectEditContext(): ProjectEditContext {
+  return {
+    expected: captureProjectEditIdentity(),
+    sequenceId: useEditorUiStore.getState().activeNestedSequenceId,
+  };
 }
 
 export async function createNestedSequence(name = "Compound clip") {
@@ -191,6 +233,19 @@ export async function editNestedSequence(sequenceId: string, command: EditReques
 
 export async function dissolveNestedSequence(clipId: string) {
   return applyAndRefresh({ type: "dissolveNestedSequence", clipId }, { root: true });
+}
+
+/** Root-scoped atomic media placement. `sequenceId` is carried inside the
+ * command because optional project settings always apply to the root while the
+ * clip itself may target a nested timeline. */
+export async function placeMedia(
+  request: Omit<Extract<EditRequest, { type: "placeMedia" }>, "type">,
+  expected?: ProjectEditIdentity,
+) {
+  return applyAndRefresh(
+    { type: "placeMedia", ...request },
+    { root: true, expected, sequenceId: null },
+  );
 }
 
 export async function addClips(entries: ClipEntryReq[]) {
@@ -280,6 +335,31 @@ export async function duplicateClips(
   });
 }
 
+export async function moveOrDuplicateClipsToNewTrack(
+  clipIds: string[],
+  leadClipId: string,
+  requestedFrameDelta: number,
+  insertAt: number,
+  mode: "move" | "duplicate",
+) {
+  if (clipIds.length === 0) return;
+  return applyAndRefresh({
+    type: "moveOrDuplicateClipsToNewTrack",
+    clipIds,
+    leadClipId,
+    requestedFrameDelta,
+    insertAt,
+    mode,
+  });
+}
+
+/** Deep-paste complete clipboard snapshots as one command. The caller plans
+ * stable destination track ids before crossing the command boundary. */
+export async function pasteClips(entries: PasteClipEntryReq[]) {
+  if (entries.length === 0) return;
+  return applyAndRefresh({ type: "pasteClips", entries });
+}
+
 export async function removeClips(clipIds: string[]) {
   if (clipIds.length === 0) return;
   await applyAndRefresh({ type: "removeClips", clipIds });
@@ -287,6 +367,12 @@ export async function removeClips(clipIds: string[]) {
 
 export async function splitClip(clipId: string, atFrame: number) {
   await applyAndRefresh({ type: "splitClip", clipId, atFrame });
+}
+
+/** Split every requested target in one backend transaction and one Undo step. */
+export async function splitClips(clipIds: string[], atFrame: number) {
+  if (clipIds.length === 0) return;
+  await applyAndRefresh({ type: "splitClips", clipIds, atFrame });
 }
 
 export const DEFAULT_FREEZE_FRAMES = 30;
@@ -314,9 +400,25 @@ export async function trimClips(edits: TrimEditReq[]) {
   await applyAndRefresh({ type: "trimClips", edits });
 }
 
-export async function setClipProperties(clipIds: string[], properties: ClipPropertiesReq) {
+export async function setClipProperties(
+  clipIds: string[],
+  properties: ClipPropertiesReq,
+  context?: ProjectEditContext,
+) {
   if (clipIds.length === 0) return;
-  await applyAndRefresh({ type: "setClipProperties", clipIds, properties });
+  await applyAndRefresh({ type: "setClipProperties", clipIds, properties }, context);
+}
+
+/** Commit one on-canvas transform gesture at an absolute timeline frame.
+ *  The backend chooses keyframed versus static storage per transform component
+ *  and applies the whole gesture atomically. */
+export async function setTransformAtFrame(
+  clipId: string,
+  frame: number,
+  transform: Transform,
+  context?: ProjectEditContext,
+) {
+  await applyAndRefresh({ type: "setTransformAtFrame", clipId, frame, transform }, context);
 }
 
 export async function setColorGrade(clipIds: string[], grade: ColorGradeInput | null) {
@@ -356,8 +458,12 @@ export async function analyzeAndApplyLoudness(
   targetLufs: number,
   truePeakCeilingDbtp: number,
 ) {
+  const context = captureProjectEditContext();
   const normalization = await api.analyzeLoudness(clipId, targetLufs, truePeakCeilingDbtp);
-  await setLoudnessNormalization(clipId, normalization);
+  await applyAndRefresh(
+    { type: "setLoudnessNormalization", clipId, normalization },
+    context,
+  );
   return normalization;
 }
 
@@ -375,8 +481,9 @@ export async function prepareAndApplyAudioDenoise(
   strength: number,
   previewEnabled: boolean,
 ) {
+  const context = captureProjectEditContext();
   const denoise = await api.prepareDenoise(clipId, mode, strength, previewEnabled);
-  await setAudioDenoise(clipId, denoise);
+  await applyAndRefresh({ type: "setAudioDenoise", clipId, denoise }, context);
   return denoise;
 }
 
@@ -389,8 +496,9 @@ export async function applyStabilization(clipId: string, solution: Stabilization
 }
 
 export async function analyzeAndApplyStabilization(clipId: string) {
+  const context = captureProjectEditContext();
   const solution = await api.analyzeStabilization(clipId);
-  await applyStabilization(clipId, solution);
+  await applyAndRefresh({ type: "applyStabilization", clipId, solution }, context);
   return solution;
 }
 
@@ -501,8 +609,9 @@ export async function upsertKeyframe(
   property: KeyframeProperty,
   frame: number,
   value: KeyframeValueReq,
+  context?: ProjectEditContext,
 ) {
-  await applyAndRefresh({ type: "upsertKeyframe", clipId, property, frame, value });
+  await applyAndRefresh({ type: "upsertKeyframe", clipId, property, frame, value }, context);
 }
 
 /** Remove the keyframe at `frame`. */
@@ -520,8 +629,9 @@ export async function moveKeyframe(
   property: KeyframeProperty,
   fromFrame: number,
   toFrame: number,
+  context?: ProjectEditContext,
 ) {
-  await applyAndRefresh({ type: "moveKeyframe", clipId, property, fromFrame, toFrame });
+  await applyAndRefresh({ type: "moveKeyframe", clipId, property, fromFrame, toFrame }, context);
 }
 
 /** Change the interpolation mode of the keyframe at `frame`. */
@@ -567,14 +677,14 @@ export async function renameFolder(entries: RenameEntryReq[]) {
   await applyAndRefresh({ type: "renameFolder", entries });
 }
 
-export async function deleteMedia(assetIds: string[]) {
+export async function deleteMedia(assetIds: string[], expected?: ProjectEditIdentity) {
   if (assetIds.length === 0) return;
-  await applyAndRefresh({ type: "deleteMedia", assetIds });
+  return applyAndRefresh({ type: "deleteMedia", assetIds }, { expected });
 }
 
-export async function deleteFolder(folderIds: string[]) {
+export async function deleteFolder(folderIds: string[], expected?: ProjectEditIdentity) {
   if (folderIds.length === 0) return;
-  await applyAndRefresh({ type: "deleteFolder", folderIds });
+  return applyAndRefresh({ type: "deleteFolder", folderIds }, { expected });
 }
 
 /** Replace a clip's media source in place, preserving all editing attributes.
@@ -613,12 +723,12 @@ export async function tightenSilenceRanges(trackIndex: number, ranges: FrameRang
 }
 
 export async function undo() {
-  await api.undo();
+  await api.undo(captureProjectEditIdentity());
   if (!isTauri) await forceRefresh();
 }
 
 export async function redo() {
-  await api.redo();
+  await api.redo(captureProjectEditIdentity());
   if (!isTauri) await forceRefresh();
 }
 
@@ -629,21 +739,8 @@ export async function redo() {
 export async function splitAtPlayhead() {
   const ui = useEditorUiStore.getState();
   const frame = Math.round(ui.activeFrame);
-  const selected = [...ui.selectedClipIds];
-  let ids = selected;
-  if (ids.length === 0) {
-    // No selection: target every clip the playhead currently intersects.
-    const timeline = currentTimeline();
-    ids = [];
-    for (const track of timeline.tracks) {
-      for (const c of track.clips) {
-        if (frame > c.startFrame && frame < c.startFrame + c.durationFrames) ids.push(c.id);
-      }
-    }
-  }
-  for (const id of ids) {
-    await splitClip(id, frame);
-  }
+  const ids = clipsUnderPlayhead().map((clip) => clip.id);
+  await splitClips(ids, frame);
 }
 
 /** Clips the playhead is strictly inside, restricted to the selection when one
@@ -992,53 +1089,6 @@ export function firstOpenCompatibleTrackIndex(
   return null;
 }
 
-/** Build the clip entry for a media item dropped on the timeline, or null when
- *  no compatible track exists. */
-function entryForMedia(timeline: Timeline, item: MediaItem): ClipEntryReq | null {
-  const trackIndex = firstCompatibleTrackIndex(timeline, item.type);
-  if (trackIndex === null) return null;
-  const durationFrames = mediaDurationFrames(item, timeline.fps);
-  return {
-    mediaRef: item.id,
-    mediaType: item.type,
-    sourceClipType: item.type,
-    trackIndex,
-    startFrame: appendStartFrame(timeline, trackIndex),
-    durationFrames,
-    hasAudio: item.hasAudio,
-    addLinkedAudio: item.type === "video" && item.hasAudio,
-    transform: fitTransformForMedia(item.width, item.height, timeline.width, timeline.height),
-  };
-}
-
-function entryForMediaAt(
-  timeline: Timeline,
-  item: MediaItem,
-  startFrame: number,
-  preferredTrackIndex: number | null,
-): ClipEntryReq | null {
-  const durationFrames = mediaDurationFrames(item, timeline.fps);
-  const trackIndex = firstOpenCompatibleTrackIndex(
-    timeline,
-    item.type,
-    startFrame,
-    durationFrames,
-    preferredTrackIndex,
-  );
-  if (trackIndex === null) return null;
-  return {
-    mediaRef: item.id,
-    mediaType: item.type,
-    sourceClipType: item.type,
-    trackIndex,
-    startFrame: Math.max(0, startFrame),
-    durationFrames,
-    hasAudio: item.hasAudio,
-    addLinkedAudio: item.type === "video" && item.hasAudio,
-    transform: fitTransformForMedia(item.width, item.height, timeline.width, timeline.height),
-  };
-}
-
 /** Where a media item dropped at `startFrame` over `dropTarget` will actually
  *  land — the truthful target for the drop-ghost preview. Pure mirror of
  *  [`addMediaToTimelineAtInner`]'s resolution: an insert-zone hover makes a new
@@ -1068,36 +1118,155 @@ export function resolveMediaDropTrack(
   return { trackIndex: null, newTrack: { index: dropTarget.trackIndex, type: newType } };
 }
 
-/** Serialized tail for media -> timeline adds. Both call sites fire-and-forget
- *  (`void addMediaToTimeline(...)`), so this chains adds to keep them from
- *  racing on the shared mirror. See [`addMediaToTimeline`]. */
-let mediaAddQueue: Promise<void> = Promise.resolve();
-
-function enqueueMediaAdd(run: () => Promise<void>): Promise<void> {
-  const result = mediaAddQueue.then(run, run);
-  // Keep the queue alive even if an individual add rejects.
-  mediaAddQueue = result.catch(() => {});
-  return result;
+interface MediaGestureContext {
+  expected: ProjectEditIdentity;
+  sequenceId: string | null;
 }
 
-async function applyProjectSettings(settings: ProjectSettingsTarget): Promise<void> {
-  const result = await setTimelineSettings(settings.fps, settings.width, settings.height);
-  if (isTauri && result.changed) await forceRefresh();
+interface MediaQueueOutcome {
+  generation: number;
+  ok: boolean;
+  anchor: MediaGestureContext;
+  next?: MediaGestureContext;
 }
 
-async function reconcileProjectSettings(item: MediaItem): Promise<void> {
-  const timeline = currentTimeline();
-  const decision = checkProjectSettings(timeline, [item]);
-  if (decision.kind === "proceed") return;
-  if (decision.kind === "apply") {
-    await applyProjectSettings(decision.settings);
-    return;
+interface MediaQueueRunContext extends MediaGestureContext {
+  timeline: Timeline;
+}
+
+let mediaQueueGeneration = 0;
+let mediaQueuePending = 0;
+let mediaAddQueue: Promise<MediaQueueOutcome | null> = Promise.resolve(null);
+
+function sameProjectIdentity(left: ProjectEditIdentity, right: ProjectEditIdentity): boolean {
+  return left.projectEpoch === right.projectEpoch
+    && left.projectPath === right.projectPath
+    && left.timelineVersion === right.timelineVersion;
+}
+
+function sameMediaContext(left: MediaGestureContext, right: MediaGestureContext): boolean {
+  return sameProjectIdentity(left.expected, right.expected) && left.sequenceId === right.sequenceId;
+}
+
+function currentMediaContext(): MediaGestureContext {
+  return {
+    expected: captureProjectEditIdentity(),
+    sequenceId: useEditorUiStore.getState().activeNestedSequenceId,
+  };
+}
+
+function assertMediaContext(expected: MediaGestureContext, stage: string): void {
+  const current = currentMediaContext();
+  if (!sameMediaContext(current, expected)) {
+    throw new Error(`media placement authority changed ${stage}`);
   }
+}
+
+/** Serialize media-placement gestures while retaining the authority captured at
+ * enqueue time. A clean predecessor may advance a rapid-click chain by exactly
+ * one committed revision; every other version/path/epoch/sequence change
+ * breaks all already-queued gestures in that generation. */
+function enqueueMediaAdd(
+  run: (context: MediaQueueRunContext) => Promise<EditResult>,
+): Promise<void> {
+  const captured = currentMediaContext();
+  if (mediaQueuePending === 0) {
+    mediaQueueGeneration += 1;
+    mediaAddQueue = Promise.resolve(null);
+  }
+  const generation = mediaQueueGeneration;
+  mediaQueuePending += 1;
+  const previous = mediaAddQueue;
+  let anchor = captured;
+
+  const execution = previous.then(async (outcome): Promise<MediaQueueOutcome> => {
+    if (outcome?.generation === generation) {
+      anchor = outcome.anchor;
+      if (!outcome.ok || !outcome.next) {
+        throw new Error("an earlier queued media placement did not commit cleanly");
+      }
+      if (!sameMediaContext(captured, outcome.anchor)) {
+        throw new Error("queued media placement was captured from another authority");
+      }
+      assertMediaContext(outcome.next, "before the next queued plan");
+    } else {
+      assertMediaContext(captured, "before planning");
+    }
+
+    const context = outcome?.generation === generation && outcome.next
+      ? outcome.next
+      : captured;
+    const result = await run({ ...context, timeline: currentTimeline() });
+    if (!result.changed || result.timelineVersion !== context.expected.timelineVersion + 1) {
+      throw new Error("media placement did not produce exactly one committed revision");
+    }
+    if (isTauri) await forceRefresh();
+    const next: MediaGestureContext = {
+      expected: {
+        projectEpoch: context.expected.projectEpoch,
+        projectPath: context.expected.projectPath,
+        timelineVersion: result.timelineVersion,
+      },
+      sequenceId: context.sequenceId,
+    };
+    assertMediaContext(next, "after authoritative refresh");
+    return { generation, ok: true, anchor, next };
+  });
+
+  mediaAddQueue = execution.then(
+    (outcome) => outcome,
+    () => ({ generation, ok: false, anchor }),
+  );
+  return execution.then(() => undefined).finally(() => {
+    mediaQueuePending -= 1;
+  });
+}
+
+async function chooseProjectSettings(
+  item: MediaItem,
+  timeline: Timeline,
+): Promise<ProjectTimelineSettingsReq | undefined> {
+  const decision = checkProjectSettings(timeline, [item]);
+  if (decision.kind === "proceed") return undefined;
+  if (decision.kind === "apply") return decision.settings;
   const applySuggested = await useEditorUiStore.getState().requestProjectSettingsPrompt({
     current: { fps: timeline.fps, width: timeline.width, height: timeline.height },
     suggested: decision.settings,
   });
-  if (applySuggested) await applyProjectSettings(decision.settings);
+  return applySuggested ? decision.settings : undefined;
+}
+
+/** Placement-only projection of the root settings transaction. The backend is
+ * authoritative, but planning must use the post-settings fps/canvas and clip
+ * ranges before that single compound command is sent. */
+function timelineAfterSettings(
+  timeline: Timeline,
+  settings: ProjectTimelineSettingsReq | undefined,
+): Timeline {
+  if (!settings) return timeline;
+  const scale = timeline.fps > 0 ? settings.fps / timeline.fps : 1;
+  const tracks = timeline.tracks.map((track) => {
+    let previousEnd: number | undefined;
+    const clips = [...track.clips]
+      .sort((left, right) => left.startFrame - right.startFrame)
+      .map((clip) => {
+        const scaledStart = Math.round(clip.startFrame * scale);
+        const scaledEnd = Math.round((clip.startFrame + clip.durationFrames) * scale);
+        const startFrame = Math.max(scaledStart, previousEnd ?? scaledStart);
+        const durationFrames = Math.max(1, scaledEnd - startFrame);
+        previousEnd = startFrame + durationFrames;
+        return { ...structuredClone(clip), startFrame, durationFrames };
+      });
+    return { ...track, clips };
+  });
+  return {
+    ...timeline,
+    fps: settings.fps,
+    width: settings.width,
+    height: settings.height,
+    settingsConfigured: true,
+    tracks,
+  };
 }
 
 /** Add a media-library item to the timeline (drag-drop / double-click from the
@@ -1111,7 +1280,14 @@ async function reconcileProjectSettings(item: MediaItem): Promise<void> {
  *  compute `startFrame` 0 again, and have the core's overwrite-on-place drop the
  *  first clip. The queue makes each add observe the previous one's result. */
 export function addMediaToTimeline(item: MediaItem): Promise<void> {
-  return enqueueMediaAdd(() => addMediaToTimelineInner(item));
+  return enqueueMediaAdd((context) => addMediaToTimelineInner(item, context));
+}
+
+/** Consume a media-placement rejection at a user-event boundary while keeping
+ * the placement action itself rejectable for callers that await it. */
+export function reportMediaPlacementFailure(error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  useEditorUiStore.getState().pushToast(t("media.placeFailed", { error: message }));
 }
 
 export function addMediaToTimelineAt(
@@ -1120,7 +1296,19 @@ export function addMediaToTimelineAt(
   preferredTrackIndex: number | null,
   insertTrackAt?: number,
 ): Promise<void> {
-  return enqueueMediaAdd(() => addMediaToTimelineAtInner(item, startFrame, preferredTrackIndex, insertTrackAt));
+  const preferredTrackId = preferredTrackIndex === null
+    ? null
+    : currentTimeline().tracks[preferredTrackIndex]?.id ?? null;
+  return enqueueMediaAdd((context) =>
+    addMediaToTimelineAtInner(
+      item,
+      startFrame,
+      preferredTrackId,
+      preferredTrackIndex,
+      insertTrackAt,
+      context,
+    ),
+  );
 }
 
 /** A source-media sub-range (seconds) to place from a search "Moments"/"Spoken"
@@ -1149,177 +1337,208 @@ export function addMomentToTimelineAt(
   range: SourceRange,
   insertTrackAt?: number,
 ): Promise<void> {
-  return enqueueMediaAdd(() =>
-    addMomentToTimelineAtInner(item, startFrame, preferredTrackIndex, range, insertTrackAt),
+  const preferredTrackId = preferredTrackIndex === null
+    ? null
+    : currentTimeline().tracks[preferredTrackIndex]?.id ?? null;
+  return enqueueMediaAdd((context) =>
+    addMomentToTimelineAtInner(
+      item,
+      startFrame,
+      preferredTrackId,
+      preferredTrackIndex,
+      range,
+      insertTrackAt,
+      context,
+    ),
   );
 }
 
-async function addMediaToTimelineInner(item: MediaItem): Promise<void> {
-  await reconcileProjectSettings(item);
-  let timeline = currentTimeline();
-  if (firstCompatibleTrackIndex(timeline, item.type) === null) {
-    await insertTrack(item.type === "audio" ? "audio" : "video");
-    // Ensure the mirror reflects the new track before computing the entry
-    // (Tauri's timeline_changed refresh is async; force it synchronously here).
-    await forceRefresh();
-    timeline = currentTimeline();
-  }
-  const entry = entryForMedia(timeline, item);
-  if (!entry) return;
-  const res = await addClips([entry]);
-  // Tauri refreshes the mirror via the async `timeline_changed` event, which may
-  // not have fired yet; refresh now so both the next queued add and the preview
-  // see a timeline that already includes this clip. (Browser mode already
-  // refreshed inside `applyAndRefresh` — guard to avoid a double fetch.)
-  if (isTauri) await forceRefresh();
-  if (res && res.affectedClipIds.length > 0) {
-    const ui = useEditorUiStore.getState();
-    ui.selectClips(new Set(res.affectedClipIds));
-    ui.setPreviewMedia(null);
-    ui.setCurrentFrame(entry.startFrame);
-  }
-}
-
-async function addMediaToTimelineAtInner(
-  item: MediaItem,
-  startFrame: number,
-  preferredTrackIndex: number | null,
-  insertTrackAt?: number,
-): Promise<void> {
-  await reconcileProjectSettings(item);
-  let timeline = currentTimeline();
-  if (insertTrackAt !== undefined) {
-    const res = await insertTrack(item.type === "audio" ? "audio" : "video", insertTrackAt);
-    await forceRefresh();
-    timeline = currentTimeline();
-    const insertedTrackId = res?.affectedClipIds[0];
-    const insertedIndex = insertedTrackId
-      ? timeline.tracks.findIndex((track) => track.id === insertedTrackId)
-      : -1;
-    if (insertedIndex >= 0) preferredTrackIndex = insertedIndex;
-  }
-  let entry = entryForMediaAt(timeline, item, Math.max(0, startFrame), preferredTrackIndex);
-  if (!entry) {
-    const fallbackInsertAt = preferredTrackIndex ?? undefined;
-    const res = await insertTrack(item.type === "audio" ? "audio" : "video", fallbackInsertAt);
-    await forceRefresh();
-    timeline = currentTimeline();
-    const insertedTrackId = res?.affectedClipIds[0];
-    const insertedIndex = insertedTrackId
-      ? timeline.tracks.findIndex((track) => track.id === insertedTrackId)
-      : -1;
-    if (insertedIndex >= 0) {
-      preferredTrackIndex = insertedIndex;
-    } else if (fallbackInsertAt !== undefined) {
-      preferredTrackIndex = Math.max(0, Math.min(fallbackInsertAt, timeline.tracks.length - 1));
-    }
-    entry = entryForMediaAt(timeline, item, Math.max(0, startFrame), preferredTrackIndex);
-  }
-  if (!entry) return;
-  const res = await addClips([entry]);
-  if (isTauri) await forceRefresh();
-  if (res && res.affectedClipIds.length > 0) {
-    const ui = useEditorUiStore.getState();
-    ui.selectClips(new Set(res.affectedClipIds));
-    ui.setPreviewMedia(null);
-    ui.setCurrentFrame(entry.startFrame);
-  }
-}
-
-/** Build the trimmed clip entry for a source `[startSec,endSec)` moment range on
- *  `item`, resolving the target track like a full-asset drop. Returns null when
- *  no compatible track exists (the caller then inserts one and retries). */
-function entryForMomentAt(
+function unplacedForMedia(
   timeline: Timeline,
   item: MediaItem,
   startFrame: number,
-  preferredTrackIndex: number | null,
-  range: SourceRange,
-): ClipEntryReq | null {
-  const fps = timeline.fps;
-  const totalSource = mediaDurationFrames(item, fps);
-  const trimStartFrame = Math.max(
-    0,
-    Math.min(totalSource, offsetSecondsToFrames(range.startSec, fps)),
-  );
-  const rangeFrames = momentDurationFrames(range, fps);
-  // Clamp the visible span so trimStart + duration never exceed the source.
-  const durationFrames = Math.max(1, Math.min(rangeFrames, totalSource - trimStartFrame));
-  const trimEndFrame = Math.max(0, totalSource - trimStartFrame - durationFrames);
-  const trackIndex = firstOpenCompatibleTrackIndex(
-    timeline,
-    item.type,
-    startFrame,
-    durationFrames,
-    preferredTrackIndex,
-  );
-  if (trackIndex === null) return null;
+): UnplacedClipEntryReq {
   return {
     mediaRef: item.id,
     mediaType: item.type,
     sourceClipType: item.type,
-    trackIndex,
     startFrame: Math.max(0, startFrame),
-    durationFrames,
-    trimStartFrame,
-    trimEndFrame,
+    durationFrames: mediaDurationFrames(item, timeline.fps),
     hasAudio: item.hasAudio,
     addLinkedAudio: item.type === "video" && item.hasAudio,
     transform: fitTransformForMedia(item.width, item.height, timeline.width, timeline.height),
   };
 }
 
+async function commitMediaPlacement(
+  item: MediaItem,
+  context: MediaQueueRunContext,
+  plan: (timeline: Timeline) => { target: PlaceMediaTargetReq; entry: UnplacedClipEntryReq },
+): Promise<EditResult> {
+  const settings = await chooseProjectSettings(item, context.timeline);
+  assertMediaContext(context, "after project-settings choice");
+  const placement = plan(timelineAfterSettings(context.timeline, settings));
+  const result = await placeMedia(
+    {
+      sequenceId: context.sequenceId ?? undefined,
+      settings,
+      target: placement.target,
+      entry: placement.entry,
+    },
+    context.expected,
+  );
+  if (result.affectedClipIds.length > 0) {
+    const ui = useEditorUiStore.getState();
+    ui.selectClips(new Set(result.affectedClipIds));
+    ui.setPreviewMedia(null);
+    ui.setCurrentFrame(placement.entry.startFrame);
+  }
+  return result;
+}
+
+async function addMediaToTimelineInner(
+  item: MediaItem,
+  context: MediaQueueRunContext,
+): Promise<EditResult> {
+  return commitMediaPlacement(item, context, (timeline) => {
+    const trackIndex = firstCompatibleTrackIndex(timeline, item.type);
+    const startFrame = trackIndex === null ? 0 : appendStartFrame(timeline, trackIndex);
+    return {
+      target: trackIndex === null
+        ? {
+            kind: "newTrack",
+            trackType: item.type === "audio" ? "audio" : "video",
+            at: timeline.tracks.length,
+          }
+        : { kind: "existingTrack", trackId: timeline.tracks[trackIndex].id },
+      entry: unplacedForMedia(timeline, item, startFrame),
+    };
+  });
+}
+
+async function addMediaToTimelineAtInner(
+  item: MediaItem,
+  startFrame: number,
+  preferredTrackId: string | null,
+  preferredTrackIndexAtGesture: number | null,
+  insertTrackAt: number | undefined,
+  context: MediaQueueRunContext,
+): Promise<EditResult> {
+  return commitMediaPlacement(item, context, (timeline) => {
+    const preferredTrackIndex = preferredTrackId === null
+      ? null
+      : timeline.tracks.findIndex((track) => track.id === preferredTrackId);
+    const normalizedPreferred = preferredTrackIndex !== null && preferredTrackIndex >= 0
+      ? preferredTrackIndex
+      : null;
+    const entry = unplacedForMedia(timeline, item, startFrame);
+    if (insertTrackAt !== undefined) {
+      return {
+        target: {
+          kind: "newTrack",
+          trackType: item.type === "audio" ? "audio" : "video",
+          at: insertTrackAt,
+        },
+        entry,
+      };
+    }
+    const existing = firstOpenCompatibleTrackIndex(
+      timeline,
+      item.type,
+      entry.startFrame,
+      entry.durationFrames,
+      normalizedPreferred,
+    );
+    return existing === null
+      ? {
+          target: {
+            kind: "newTrack",
+            trackType: item.type === "audio" ? "audio" : "video",
+            at: normalizedPreferred ?? preferredTrackIndexAtGesture ?? timeline.tracks.length,
+          },
+          entry,
+        }
+      : {
+          target: { kind: "existingTrack", trackId: timeline.tracks[existing].id },
+          entry,
+        };
+  });
+}
+
 async function addMomentToTimelineAtInner(
   item: MediaItem,
   startFrame: number,
-  preferredTrackIndex: number | null,
+  preferredTrackId: string | null,
+  preferredTrackIndexAtGesture: number | null,
   range: SourceRange,
-  insertTrackAt?: number,
-): Promise<void> {
+  insertTrackAt: number | undefined,
+  context: MediaQueueRunContext,
+): Promise<EditResult> {
   // Stills (or a degenerate range) have no meaningful sub-range → full asset.
   const spanSec = range.endSec - range.startSec;
   if (item.type === "image" || spanSec <= 0 || item.duration <= 0) {
-    return addMediaToTimelineAtInner(item, startFrame, preferredTrackIndex, insertTrackAt);
+    return addMediaToTimelineAtInner(
+      item,
+      startFrame,
+      preferredTrackId,
+      preferredTrackIndexAtGesture,
+      insertTrackAt,
+      context,
+    );
   }
-
-  await reconcileProjectSettings(item);
-  let timeline = currentTimeline();
-  if (insertTrackAt !== undefined) {
-    const res = await insertTrack(item.type === "audio" ? "audio" : "video", insertTrackAt);
-    await forceRefresh();
-    timeline = currentTimeline();
-    const insertedTrackId = res?.affectedClipIds[0];
-    const insertedIndex = insertedTrackId
-      ? timeline.tracks.findIndex((track) => track.id === insertedTrackId)
-      : -1;
-    if (insertedIndex >= 0) preferredTrackIndex = insertedIndex;
-  }
-  let entry = entryForMomentAt(timeline, item, Math.max(0, startFrame), preferredTrackIndex, range);
-  if (!entry) {
-    const fallbackInsertAt = preferredTrackIndex ?? undefined;
-    const res = await insertTrack(item.type === "audio" ? "audio" : "video", fallbackInsertAt);
-    await forceRefresh();
-    timeline = currentTimeline();
-    const insertedTrackId = res?.affectedClipIds[0];
-    const insertedIndex = insertedTrackId
-      ? timeline.tracks.findIndex((track) => track.id === insertedTrackId)
-      : -1;
-    if (insertedIndex >= 0) {
-      preferredTrackIndex = insertedIndex;
-    } else if (fallbackInsertAt !== undefined) {
-      preferredTrackIndex = Math.max(0, Math.min(fallbackInsertAt, timeline.tracks.length - 1));
+  return commitMediaPlacement(item, context, (timeline) => {
+    const preferredTrackIndex = preferredTrackId === null
+      ? null
+      : timeline.tracks.findIndex((track) => track.id === preferredTrackId);
+    const normalizedPreferred = preferredTrackIndex !== null && preferredTrackIndex >= 0
+      ? preferredTrackIndex
+      : null;
+    const totalSource = mediaDurationFrames(item, timeline.fps);
+    const trimStartFrame = Math.max(
+      0,
+      Math.min(totalSource, offsetSecondsToFrames(range.startSec, timeline.fps)),
+    );
+    const durationFrames = Math.max(
+      1,
+      Math.min(momentDurationFrames(range, timeline.fps), totalSource - trimStartFrame),
+    );
+    const entry: UnplacedClipEntryReq = {
+      ...unplacedForMedia(timeline, item, startFrame),
+      durationFrames,
+      trimStartFrame,
+      trimEndFrame: Math.max(0, totalSource - trimStartFrame - durationFrames),
+    };
+    if (insertTrackAt !== undefined) {
+      return {
+        target: {
+          kind: "newTrack",
+          trackType: item.type === "audio" ? "audio" : "video",
+          at: insertTrackAt,
+        },
+        entry,
+      };
     }
-    entry = entryForMomentAt(timeline, item, Math.max(0, startFrame), preferredTrackIndex, range);
-  }
-  if (!entry) return;
-  const res = await addClips([entry]);
-  if (isTauri) await forceRefresh();
-  if (res && res.affectedClipIds.length > 0) {
-    const ui = useEditorUiStore.getState();
-    ui.selectClips(new Set(res.affectedClipIds));
-    ui.setPreviewMedia(null);
-    ui.setCurrentFrame(entry.startFrame);
-  }
+    const existing = firstOpenCompatibleTrackIndex(
+      timeline,
+      item.type,
+      entry.startFrame,
+      entry.durationFrames,
+      normalizedPreferred,
+    );
+    return existing === null
+      ? {
+          target: {
+            kind: "newTrack",
+            trackType: item.type === "audio" ? "audio" : "video",
+            at: normalizedPreferred ?? preferredTrackIndexAtGesture ?? timeline.tracks.length,
+          },
+          entry,
+        }
+      : {
+          target: { kind: "existingTrack", trackId: timeline.tracks[existing].id },
+          entry,
+        };
+  });
 }
 
 // MARK: - Text tool (Toolbar "T" button, SPEC §4)
@@ -1481,49 +1700,19 @@ export async function pasteClipsAtPlayhead() {
   const ui = useEditorUiStore.getState();
   const tl = currentTimeline();
   const offset = ui.activeFrame - cb.sourceFirstFrame;
-  const entries: ClipEntryReq[] = [];
-  const sourceLinkGroups: (string | undefined)[] = [];
+  const entries: PasteClipEntryReq[] = [];
   for (const e of cb.entries) {
     if (e.sourceTrackIndex >= tl.tracks.length) continue;
-    const startFrame = Math.max(0, e.clip.startFrame + offset);
     entries.push({
-      mediaRef: e.clip.mediaRef,
-      mediaType: e.clip.mediaType,
-      sourceClipType: e.clip.sourceClipType,
-      trackIndex: e.sourceTrackIndex,
-      startFrame,
-      durationFrames: e.clip.durationFrames,
-      trimStartFrame: e.clip.trimStartFrame,
-      trimEndFrame: e.clip.trimEndFrame,
-      hasAudio: e.clip.mediaType === "audio" || e.clip.mediaType === "video",
-      transform: e.clip.transform,
-      // Don't auto-create a linked audio: the linked audio clip is already in
-      // the clipboard (copyClips expands link groups) and will be pasted as
-      // its own entry; addLinkedAudio=true would create a duplicate.
-      addLinkedAudio: false,
+      clip: structuredClone(e.clip),
+      targetTrackId: tl.tracks[e.sourceTrackIndex].id,
+      startFrame: Math.max(0, e.clip.startFrame + offset),
     });
-    sourceLinkGroups.push(e.clip.linkGroupId);
   }
   if (entries.length === 0) return;
   try {
-    const res = await addClips(entries);
+    const res = await pasteClips(entries);
     if (!res || res.affectedClipIds.length === 0) return;
-
-    // Re-establish link groups: map each old linkGroupId to the set of newly
-    // created clip ids, then call linkClips for each group.
-    const newGroupMap = new Map<string, string[]>();
-    for (let i = 0; i < res.affectedClipIds.length && i < sourceLinkGroups.length; i++) {
-      const oldGroup = sourceLinkGroups[i];
-      if (!oldGroup) continue;
-      const newId = res.affectedClipIds[i];
-      const arr = newGroupMap.get(oldGroup);
-      if (arr) arr.push(newId);
-      else newGroupMap.set(oldGroup, [newId]);
-    }
-    for (const ids of newGroupMap.values()) {
-      if (ids.length >= 2) await linkClips(ids);
-    }
-
     // Select the freshly pasted clips so the user can immediately move/trim them.
     ui.selectClips(new Set(res.affectedClipIds));
     if (isTauri) await forceRefresh();

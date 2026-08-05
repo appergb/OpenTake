@@ -53,6 +53,7 @@ pub(crate) enum PublicErrorKind {
     InvalidArguments(ToolName),
     ResourceNotFound(ToolName),
     CapabilityUnavailable(ToolName),
+    PathAuthorityRequired(ToolName),
     AnalysisLowConfidence(ToolName),
 }
 
@@ -63,6 +64,7 @@ impl PublicErrorKind {
             Self::InvalidArguments(_) => "MCP_INVALID_ARGUMENTS",
             Self::ResourceNotFound(_) => "MCP_RESOURCE_NOT_FOUND",
             Self::CapabilityUnavailable(_) => "MCP_CAPABILITY_UNAVAILABLE",
+            Self::PathAuthorityRequired(_) => "MCP_PATH_AUTHORITY_REQUIRED",
             Self::AnalysisLowConfidence(_) => "MCP_ANALYSIS_LOW_CONFIDENCE",
         }
     }
@@ -74,6 +76,9 @@ impl PublicErrorKind {
             Self::ResourceNotFound(_) => "The referenced project resource was not found.",
             Self::CapabilityUnavailable(_) => {
                 "This capability is unavailable for the referenced media."
+            }
+            Self::PathAuthorityRequired(_) => {
+                "Local file paths require access granted by the user in OpenTake."
             }
             Self::AnalysisLowConfidence(_) => {
                 "The analysis could not identify the requested subject reliably."
@@ -90,6 +95,9 @@ impl PublicErrorKind {
             }
             Self::CapabilityUnavailable(_) => {
                 "Use a supported source type or restore the source media, then retry."
+            }
+            Self::PathAuthorityRequired(_) => {
+                "Import the file with OpenTake's native file picker, then reference its project media ID."
             }
             Self::AnalysisLowConfidence(_) => {
                 "Choose a tighter, higher-contrast subject region and retry."

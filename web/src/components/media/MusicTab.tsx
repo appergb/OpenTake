@@ -297,7 +297,7 @@ const secondaryButtonStyle = {
   display: "inline-flex",
   alignItems: "center",
   gap: 4,
-  minHeight: 23,
+  minHeight: 24,
   padding: "1px var(--space-sm)",
   borderRadius: "var(--radius-sm)",
   border: "var(--bw-thin) solid var(--border-primary)",

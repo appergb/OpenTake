@@ -67,6 +67,8 @@ async function exerciseTrackAction(
   );
   expect(button?.type).toBe("button");
   expect(button?.getAttribute("aria-pressed")).not.toBeNull();
+  expect(button?.style.width).toBe("24px");
+  expect(button?.style.height).toBe("24px");
   button?.focus();
   await act(async () => button?.click());
   expect(document.activeElement).toBe(button);
@@ -105,6 +107,9 @@ it("control-9f9173ff2ee37464 resize track display height", async () => {
   expect(grip.getAttribute("aria-valuenow")).toBe("50");
   expect(grip.getAttribute("aria-label")).toContain("A1");
   expect(grip.tabIndex).toBe(0);
+  expect(grip.style.height).toBe("24px");
+  expect(grip.style.right).toBe("56px");
+  expect(grip.style.zIndex).toBe("3");
 
   await act(async () => {
     grip.dispatchEvent(new PointerEvent("pointerdown", {

@@ -24,10 +24,38 @@ import { runApplicationMenuCommand } from "../components/shell/ViewMenu";
 const ZOOM_KEY_STEP = 1.3;
 
 function isTextEntry(target: EventTarget | null): boolean {
-  if (typeof HTMLElement === "undefined") return false;
-  if (!(target instanceof HTMLElement)) return false;
-  const tag = target.tagName;
-  return tag === "INPUT" || tag === "TEXTAREA" || target.isContentEditable;
+  if (typeof Element === "undefined" || !(target instanceof Element)) return false;
+  const editable = target.closest<HTMLElement>(
+    'input, textarea, [contenteditable="true"], [contenteditable=""]',
+  );
+  return Boolean(editable?.isContentEditable || editable?.matches("input, textarea"));
+}
+
+function isNativeInteractionControl(target: EventTarget | null): boolean {
+  if (typeof Element === "undefined" || !(target instanceof Element)) return false;
+  return Boolean(
+    target.closest(
+      'button, a[href], select, option, summary, [role="button"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="checkbox"], [role="radio"], [role="switch"], [role="slider"], [role="spinbutton"], [role="combobox"], [role="listbox"]',
+    ),
+  );
+}
+
+function isMediaInteractionSurface(target: EventTarget | null): boolean {
+  if (typeof Element === "undefined" || !(target instanceof Element)) return false;
+  return Boolean(target.closest('[data-media-tile="true"]'));
+}
+
+function nativeControlOwnsUnmodifiedKey(e: KeyboardEvent): boolean {
+  if (!isNativeInteractionControl(e.target)) return false;
+  return [
+    "Space",
+    "Enter",
+    "NumpadEnter",
+    "ArrowLeft",
+    "ArrowRight",
+    "ArrowUp",
+    "ArrowDown",
+  ].includes(e.code);
 }
 
 export const DOCUMENTED_SHORTCUT_ROWS = [
@@ -121,7 +149,9 @@ export function resolveDocumentedShortcut(
   e: KeyboardEvent,
   context: DocumentedShortcutContext,
 ): ResolvedShortcut | null {
-  if (context.view !== "editor" || context.blocked || isTextEntry(e.target)) return null;
+  if (context.view !== "editor" || context.blocked || isTextEntry(e.target)) {
+    return null;
+  }
   const mod = e.metaKey || e.ctrlKey;
   let command: ResolvedShortcut | null = null;
 
@@ -188,10 +218,12 @@ export function resolveDocumentedShortcut(
           break;
       }
     }
-  } else if (!e.altKey) {
+  } else if (!e.altKey && !nativeControlOwnsUnmodifiedKey(e)) {
     switch (e.code) {
       case "Space":
-        if (!e.shiftKey) command = { type: "transport" };
+        if (!e.shiftKey && !isMediaInteractionSurface(e.target)) {
+          command = { type: "transport" };
+        }
         break;
       case "ArrowLeft":
       case "ArrowRight":
@@ -273,7 +305,9 @@ export function shouldHandleTransportSpaceKey(e: KeyboardEvent, view: AppView): 
     !e.ctrlKey &&
     !e.altKey &&
     !e.shiftKey &&
-    !isTextEntry(e.target)
+    !isTextEntry(e.target) &&
+    !isNativeInteractionControl(e.target) &&
+    !isMediaInteractionSurface(e.target)
   );
 }
 
@@ -412,13 +446,63 @@ export function useKeyboardShortcuts() {
 
     const moveMediaSelection = (delta: number) => {
       const ui = useEditorUiStore.getState();
+      const renderedTiles =
+        typeof document === "undefined"
+          ? []
+          : [
+              ...document.querySelectorAll<HTMLElement>(
+                '[data-media-tile="true"]',
+              ),
+            ];
+      if (renderedTiles.length > 0) {
+        const activeTile =
+          document.activeElement instanceof Element
+            ? document.activeElement.closest<HTMLElement>('[data-media-tile="true"]')
+            : null;
+        let current = activeTile ? renderedTiles.indexOf(activeTile) : -1;
+        if (current < 0) {
+          current = renderedTiles.findIndex((tile) =>
+            tile.dataset.mediaFolderId
+              ? ui.selectedFolderIds.has(tile.dataset.mediaFolderId)
+              : Boolean(
+                  tile.dataset.mediaAssetId &&
+                    ui.selectedMediaAssetIds.has(tile.dataset.mediaAssetId),
+                ),
+          );
+        }
+        const origin = current >= 0 ? current : delta < 0 ? renderedTiles.length : -1;
+        const nextIndex = Math.max(
+          0,
+          Math.min(renderedTiles.length - 1, origin + delta),
+        );
+        const next = renderedTiles[nextIndex]!;
+        ui.focusPanel("media");
+        if (next.dataset.mediaFolderId) {
+          ui.selectMediaAssets(new Set());
+          useEditorUiStore.setState({
+            selectedFolderIds: new Set([next.dataset.mediaFolderId]),
+            previewMediaId: null,
+          });
+        } else if (next.dataset.mediaAssetId) {
+          ui.selectMediaAssets(new Set([next.dataset.mediaAssetId]));
+          useEditorUiStore.setState({ selectedFolderIds: new Set() });
+          ui.setPreviewMedia(next.dataset.mediaAssetId);
+        }
+        next.focus();
+        next.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+        return;
+      }
       const items = useMediaStore.getState().items;
       if (items.length === 0) return;
       const selected = [...ui.selectedMediaAssetIds][0];
       const found = items.findIndex((item) => item.id === selected);
       const current = found >= 0 ? found : delta < 0 ? items.length : -1;
       const next = Math.max(0, Math.min(items.length - 1, current + delta));
-      ui.selectMediaAssets(new Set([items[next]!.id]));
+      const mediaId = items[next]!.id;
+      ui.focusPanel("media");
+      ui.selectMediaAssets(new Set([mediaId]));
+      useEditorUiStore.setState({ selectedFolderIds: new Set() });
+      ui.setPreviewMedia(mediaId);
     };
 
     const handler = (e: KeyboardEvent) => {
@@ -530,7 +614,10 @@ export function useKeyboardShortcuts() {
             }
             return;
           case "split":
-            void edit.splitAtPlayhead();
+            void edit.splitAtPlayhead().catch((error: unknown) => {
+              const message = error instanceof Error ? error.message : String(error);
+              ui.pushToast(`${t("toolbar.split")}: ${message}`);
+            });
             return;
           case "application":
             runApplicationMenuCommand(command.id);
@@ -540,7 +627,14 @@ export function useKeyboardShortcuts() {
 
       // OpenTake extensions outside the pinned upstream table. These use the
       // same modal/editable/view boundary but stay visibly separate in code.
-      if (context().view !== "editor" || context().blocked || isTextEntry(e.target)) return;
+      if (
+        context().view !== "editor" ||
+        context().blocked ||
+        isTextEntry(e.target) ||
+        (!mod && isNativeInteractionControl(e.target))
+      ) {
+        return;
+      }
       if (mod && !e.altKey && !e.shiftKey) {
         if (e.code === "Equal" || e.code === "NumpadAdd") {
           e.preventDefault();

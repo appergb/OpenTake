@@ -6,7 +6,7 @@
 //! frame (overwrite-style). Tracks are pinned by id across the clears because
 //! pruning could otherwise shift indices.
 
-use opentake_domain::{Clip, Timeline};
+use opentake_domain::{Clip, ClipType, Timeline};
 
 use crate::id::IdGen;
 use crate::ops::clear_region::clear_region;
@@ -22,6 +22,16 @@ pub struct ClipMove {
     pub to_frame: i32,
 }
 
+/// Fully checked move work item. It pins the source snapshot and destination
+/// range so mutation never repeats overflow-prone frame arithmetic.
+#[derive(Clone)]
+pub(crate) struct MoveClipPlan {
+    pub clip: Clip,
+    pub to_track_id: String,
+    pub to_frame: i32,
+    pub to_end_frame: i32,
+}
+
 /// Move clips to their targets. Incompatible-destination or missing-clip moves
 /// are silently dropped (mirrors upstream's `guard ... continue`). Returns the
 /// number of clips actually moved.
@@ -29,14 +39,17 @@ pub fn move_clips(timeline: &mut Timeline, moves: &[ClipMove], ids: &dyn IdGen) 
     if moves.is_empty() {
         return 0;
     }
+    if timeline
+        .tracks
+        .iter()
+        .flat_map(|track| &track.clips)
+        .any(|clip| !clip_arithmetic_is_safe(clip))
+    {
+        return 0;
+    }
 
     // Collect current state + validate track-type compatibility.
-    struct Info {
-        clip: Clip,
-        to_track_id: String,
-        to_frame: i32,
-    }
-    let mut infos: Vec<Info> = Vec::new();
+    let mut infos: Vec<MoveClipPlan> = Vec::new();
     for m in moves {
         let Some((ti, ci)) = find(timeline, &m.clip_id) else {
             continue;
@@ -49,44 +62,58 @@ pub fn move_clips(timeline: &mut Timeline, moves: &[ClipMove], ids: &dyn IdGen) 
         if !dest_type.is_compatible(src_type) {
             continue;
         }
-        infos.push(Info {
-            clip: timeline.tracks[ti].clips[ci].clone(),
+        let clip = timeline.tracks[ti].clips[ci].clone();
+        debug_assert!(clip_arithmetic_is_safe(&clip));
+        let to_frame = m.to_frame.max(0);
+        let Some(to_end_frame) = to_frame.checked_add(clip.duration_frames) else {
+            return 0;
+        };
+        infos.push(MoveClipPlan {
+            clip,
             to_track_id: timeline.tracks[m.to_track].id.clone(),
-            to_frame: m.to_frame.max(0),
+            to_frame,
+            to_end_frame,
         });
     }
     if infos.is_empty() {
         return 0;
     }
 
+    move_clips_from_plans(timeline, &infos, ids)
+}
+
+/// Apply prevalidated move plans. All input/frame errors must be rejected by
+/// the caller before invoking this mutation-only phase.
+pub(crate) fn move_clips_from_plans(
+    timeline: &mut Timeline,
+    infos: &[MoveClipPlan],
+    ids: &dyn IdGen,
+) -> usize {
+    if infos.is_empty() {
+        return 0;
+    }
+
     // Pull moved clips off their source tracks first.
-    for info in &infos {
+    for info in infos {
         if let Some((ti, ci)) = find(timeline, &info.clip.id) {
             timeline.tracks[ti].clips.remove(ci);
         }
     }
 
     // Trim / remove non-moved clips blocking each destination range (pin by id).
-    for info in &infos {
+    for info in infos {
         if let Some(idx) = timeline
             .tracks
             .iter()
             .position(|t| t.id == info.to_track_id)
         {
-            clear_region(
-                timeline,
-                idx,
-                info.to_frame,
-                info.to_frame + info.clip.duration_frames,
-                false,
-                ids,
-            );
+            clear_region(timeline, idx, info.to_frame, info.to_end_frame, false, ids);
         }
     }
 
     // Drop each clip at its exact target frame.
     let mut moved = 0;
-    for info in &infos {
+    for info in infos {
         if let Some(idx) = timeline
             .tracks
             .iter()
@@ -103,6 +130,36 @@ pub fn move_clips(timeline: &mut Timeline, moves: &[ClipMove], ids: &dyn IdGen) 
     }
     prune_empty_tracks(timeline);
     moved
+}
+
+fn clip_arithmetic_is_safe(clip: &Clip) -> bool {
+    if clip.start_frame < 0
+        || clip.duration_frames < 1
+        || (!matches!(clip.media_type, ClipType::Image | ClipType::Text)
+            && (clip.trim_start_frame < 0 || clip.trim_end_frame < 0))
+        || !clip.speed.is_finite()
+        || clip.speed <= 0.0
+        || clip.start_frame.checked_add(clip.duration_frames).is_none()
+        || clip
+            .duration_frames
+            .checked_add(clip.trim_start_frame)
+            .and_then(|value| value.checked_add(clip.trim_end_frame))
+            .is_none()
+    {
+        return false;
+    }
+    let consumed = (clip.duration_frames as f64 * clip.speed).round();
+    if !(0.0..=i32::MAX as f64).contains(&consumed) {
+        return false;
+    }
+    let consumed = consumed as i32;
+    clip.trim_start_frame.checked_add(consumed).is_some()
+        && clip.trim_end_frame.checked_add(consumed).is_some()
+        && clip
+            .trim_start_frame
+            .checked_add(consumed)
+            .and_then(|value| value.checked_add(clip.trim_end_frame))
+            .is_some()
 }
 
 fn find(timeline: &Timeline, clip_id: &str) -> Option<(usize, usize)> {

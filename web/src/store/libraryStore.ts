@@ -15,6 +15,9 @@ import { t } from "../i18n";
 import { refreshMedia } from "./mediaStore";
 import { useEditorUiStore } from "./uiStore";
 
+let lifecycleGeneration = 0;
+let refreshRequestToken = 0;
+
 /** 内置分类(与素材类型/音效一一对应);自建分类从条目的 `category` 聚合而来。
  *  `all` 是聚合视图(跨所有子库可见全部收藏)。`sound` 为音效库(独立于 audio)。 */
 export type BuiltinCategory =
@@ -57,7 +60,94 @@ interface LibraryState {
   importToProject: (id: string) => Promise<LibraryImport | null>;
 }
 
-export const useLibraryStore = create<LibraryState>((set, get) => ({
+type LibraryMutation =
+  | "unfavorite"
+  | "categorize"
+  | "renameCategory"
+  | "remove"
+  | "importToProject";
+
+const mutationRequestTokens: Record<LibraryMutation, number> = {
+  unfavorite: 0,
+  categorize: 0,
+  renameCategory: 0,
+  remove: 0,
+  importToProject: 0,
+};
+
+function beginMutation(mutation: LibraryMutation): () => boolean {
+  const generation = lifecycleGeneration;
+  const requestToken = ++mutationRequestTokens[mutation];
+  return () =>
+    generation === lifecycleGeneration &&
+    requestToken === mutationRequestTokens[mutation];
+}
+
+type LibraryStateSetter = (state: Partial<LibraryState>) => void;
+
+async function refreshLibraryState(
+  set: LibraryStateSetter,
+  operationCurrent: () => boolean = () => true,
+): Promise<void> {
+  const generation = lifecycleGeneration;
+  const requestToken = ++refreshRequestToken;
+  const requestCurrent = () =>
+    generation === lifecycleGeneration &&
+    requestToken === refreshRequestToken;
+  const commitIfCurrent = (state: Partial<LibraryState>) => {
+    if (requestCurrent() && operationCurrent()) set(state);
+  };
+
+  commitIfCurrent({ loading: true, error: null });
+  try {
+    const entries = await lib.libraryList();
+    commitIfCurrent({ entries, loading: false });
+  } catch (error: unknown) {
+    commitIfCurrent({ error: getErrorMessage(error), loading: false });
+  } finally {
+    // A newer invocation of the same mutation may supersede this post-write
+    // reload before it settles. Release only this request's loading lease.
+    if (requestCurrent() && !operationCurrent()) set({ loading: false });
+  }
+}
+
+/** Reconcile the catalog after a native mutation has already committed.
+ *
+ * This reload is intentionally independent from the initiating gesture's
+ * stale UI token: an older request may commit after a newer request already
+ * refreshed. Every later-started reload is authoritative and therefore
+ * contains all earlier local commits. Lifecycle changes retry against the new
+ * owner, while a still-newer refresh safely supersedes this one. Existing
+ * errors/warnings are preserved so a stale success cannot erase newer UI
+ * feedback. */
+async function reconcileCommittedLibraryMutation(
+  set: LibraryStateSetter,
+  operationCurrent: () => boolean,
+): Promise<void> {
+  for (;;) {
+    const generation = lifecycleGeneration;
+    const requestToken = ++refreshRequestToken;
+    try {
+      const entries = await lib.libraryList();
+      if (generation !== lifecycleGeneration) continue;
+      if (requestToken === refreshRequestToken) {
+        set({ entries, loading: false });
+      }
+      return;
+    } catch (error: unknown) {
+      if (generation === lifecycleGeneration && requestToken === refreshRequestToken) {
+        set(
+          operationCurrent()
+            ? { error: getErrorMessage(error), loading: false }
+            : { loading: false },
+        );
+      }
+      return;
+    }
+  }
+}
+
+export const useLibraryStore = create<LibraryState>((set) => ({
   entries: [],
   loading: false,
   error: null,
@@ -73,62 +163,66 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
 
   // 总是拉全量(不带 category 过滤),分类/搜索/排序在前端派生,这样切分类无需重拉,
   // 且「跨视图聚合」(收藏在所有子库视图都可见)天然成立。
-  refresh: async () => {
-    set({ loading: true, error: null });
-    try {
-      const entries = await lib.libraryList();
-      set({ entries, loading: false });
-    } catch (error: unknown) {
-      set({ error: getErrorMessage(error), loading: false });
-    }
-  },
+  refresh: () => refreshLibraryState(set),
 
   unfavorite: async (id) => {
+    const mutationCurrent = beginMutation("unfavorite");
     try {
       await lib.libraryUnfavorite(id);
-      await get().refresh();
+      if (mutationCurrent()) set({ error: null });
+      await reconcileCommittedLibraryMutation(set, mutationCurrent);
     } catch (error: unknown) {
-      set({ error: getErrorMessage(error) });
+      if (mutationCurrent()) set({ error: getErrorMessage(error) });
     }
   },
 
   categorize: async (id, category) => {
+    const mutationCurrent = beginMutation("categorize");
     try {
       await lib.libraryCategorize(id, category);
-      await get().refresh();
+      if (mutationCurrent()) set({ error: null });
+      await reconcileCommittedLibraryMutation(set, mutationCurrent);
     } catch (error: unknown) {
-      set({ error: getErrorMessage(error) });
+      if (mutationCurrent()) set({ error: getErrorMessage(error) });
     }
   },
 
   renameCategory: async (from, to) => {
+    const mutationCurrent = beginMutation("renameCategory");
     try {
       await lib.libraryRename(from, to);
-      await get().refresh();
+      if (mutationCurrent()) set({ error: null });
+      await reconcileCommittedLibraryMutation(set, mutationCurrent);
     } catch (error: unknown) {
-      set({ error: getErrorMessage(error) });
+      if (mutationCurrent()) set({ error: getErrorMessage(error) });
     }
   },
 
   remove: async (id) => {
+    const mutationCurrent = beginMutation("remove");
     try {
       await lib.libraryDelete(id);
-      await get().refresh();
+      if (mutationCurrent()) set({ error: null });
+      await reconcileCommittedLibraryMutation(set, mutationCurrent);
     } catch (error: unknown) {
-      set({ error: getErrorMessage(error) });
+      if (mutationCurrent()) set({ error: getErrorMessage(error) });
     }
   },
 
   // 库与项目媒体是两套数据:导入后用 #55 命令在项目 manifest 里造新 asset,再调
   // mediaStore 的 refreshMedia 拉项目全量目录(库本身不变,无需 refresh 本 store)。
   importToProject: async (id) => {
+    const mutationCurrent = beginMutation("importToProject");
     let imported: lib.LibraryImport;
     try {
       imported = await lib.libraryImportToProject(id);
     } catch (error: unknown) {
-      set({ error: getErrorMessage(error), lastImportWarning: null });
+      if (mutationCurrent()) {
+        set({ error: getErrorMessage(error), lastImportWarning: null });
+      }
       return null;
     }
+    if (!mutationCurrent()) return imported;
     set({ error: null, lastImportWarning: imported.warning ?? null });
     if (imported.warning?.kind === "postconditionRollbackFailed") {
       useEditorUiStore.getState().pushToast(t("library.importCommittedWarning"));
@@ -138,7 +232,7 @@ export const useLibraryStore = create<LibraryState>((set, get) => ({
     } catch (error: unknown) {
       // The Rust transaction is already committed. A mirror refresh failure
       // must not turn that success into null or encourage an unsafe retry.
-      set({ error: getErrorMessage(error) });
+      if (mutationCurrent()) set({ error: getErrorMessage(error) });
     }
     return imported;
   },
@@ -247,5 +341,20 @@ let started = false;
 export async function startLibrarySync(): Promise<void> {
   if (started) return;
   started = true;
+  const generation = ++lifecycleGeneration;
   await useLibraryStore.getState().refresh();
+  if (generation !== lifecycleGeneration) return;
+  // `refresh` intentionally reports failures through store state instead of
+  // rejecting. Keep that UI-facing contract while reopening bootstrap so the
+  // next automatic entry can retry a failed first load.
+  if (useLibraryStore.getState().error) started = false;
+}
+
+/** Release the module-local startup lease. Primarily used when an owning view or
+ * test lifecycle is torn down so the next mount performs a fresh authoritative load. */
+export function stopLibrarySync(): void {
+  lifecycleGeneration += 1;
+  refreshRequestToken += 1;
+  started = false;
+  useLibraryStore.setState({ loading: false });
 }

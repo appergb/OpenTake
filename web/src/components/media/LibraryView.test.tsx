@@ -3,7 +3,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import type { LibraryEntry } from "../../lib/libraryApi";
-import { LibraryEntryGrid, libraryEntryPreviewSource } from "./LibraryView";
+import {
+  LibraryEntryGrid,
+  LibrarySearchBox,
+  libraryEntryPreviewSource,
+} from "./LibraryView";
 
 const entry: LibraryEntry = {
   id: "content-hash",
@@ -15,6 +19,17 @@ const entry: LibraryEntry = {
 };
 
 describe("LibraryEntryGrid", () => {
+  it("gives the library search input a real target and accessible search semantics", () => {
+    const html = renderToStaticMarkup(
+      <LibrarySearchBox value="" onChange={() => {}} placeholder="Search assets" />,
+    );
+
+    expect(html).toContain('type="search"');
+    expect(html).toContain('aria-label="Search assets"');
+    expect(html).toContain("height:100%");
+    expect(html).toContain("min-height:24px");
+  });
+
   it("renders global-library entries in the reusable Mine grid", () => {
     const html = renderToStaticMarkup(
       <LibraryEntryGrid entries={[entry]} loading={false} totalEmpty={false} />,

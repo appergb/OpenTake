@@ -55,17 +55,15 @@ pub fn swap_clip_positions(timeline: &mut Timeline, id_a: &str, id_b: &str) -> b
     // Both clips vacate their slots, so they never block each other; only OTHER
     // clips on each destination track can refuse the swap.
     let exclude = [id_a, id_b];
-    if !range_free(
-        &timeline.tracks[tb],
-        b_start,
-        b_start + clip_a.duration_frames,
-        &exclude,
-    ) || !range_free(
-        &timeline.tracks[ta],
-        a_start,
-        a_start + clip_b.duration_frames,
-        &exclude,
-    ) {
+    let Some(a_destination_end) = b_start.checked_add(clip_a.duration_frames) else {
+        return false;
+    };
+    let Some(b_destination_end) = a_start.checked_add(clip_b.duration_frames) else {
+        return false;
+    };
+    if !range_free(&timeline.tracks[tb], b_start, a_destination_end, &exclude)
+        || !range_free(&timeline.tracks[ta], a_start, b_destination_end, &exclude)
+    {
         return false;
     }
     remove_clip(timeline, id_a);
@@ -95,10 +93,12 @@ fn find(timeline: &Timeline, clip_id: &str) -> Option<(usize, usize)> {
 /// True when `[start, end)` is free of any clip on `track` whose id isn't in
 /// `exclude` (half-open overlap test, matching the timeline's no-overlap rule).
 fn range_free(track: &opentake_domain::Track, start: i32, end: i32, exclude: &[&str]) -> bool {
-    !track
-        .clips
-        .iter()
-        .any(|c| !exclude.contains(&c.id.as_str()) && c.start_frame < end && c.end_frame() > start)
+    !track.clips.iter().any(|clip| {
+        let clip_end = clip.start_frame.checked_add(clip.duration_frames);
+        !exclude.contains(&clip.id.as_str())
+            && (clip_end.is_none()
+                || (clip.start_frame < end && clip_end.is_some_and(|value| value > start)))
+    })
 }
 
 #[cfg(test)]

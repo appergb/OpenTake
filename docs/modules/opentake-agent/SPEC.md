@@ -1,6 +1,13 @@
 # opentake-agent 实现就绪规格（Issue #9）
 
-> 范围：`crates/opentake-agent` —— rmcp MCP server（`127.0.0.1:19789`）+ 31 个工具 + 短 ID 系统 + 统一执行壳 + 面向 LLM 的精确路径错误 + 应用内 chat（reqwest→Anthropic，BYOK + prompt cache）+ **Agent Context Signal 注入** + **Workflow Plugin 系统**。
+> **Beta 2 安全裁决（2026-08-03）：**本文保留上游固定端口方案作为设计来源与测试合同，
+> 但其“默认启动、未认证 `127.0.0.1:19789`、外部客户端直连”不再是产品运行合同。
+> 当前产品仅由官方 Codex / ChatGPT 每轮创建随机 loopback 端口、256-bit Bearer、工程绑定的
+> 临时 MCP；外部 Claude/Cursor 连接等待后续带认证的显式配对流程。
+>
+> 范围：`crates/opentake-agent` —— rmcp MCP transport + 45 个兼容工具（按能力动态发布）+
+> 短 ID 系统 + 统一执行壳 + 面向 LLM 的精确路径错误 + 应用内 chat +
+> **Agent Context Signal 注入** + **Workflow Plugin 系统**。
 >
 > 设计来源（已逐行核读）：上游 `palmier-pro-upstream/Sources/PalmierPro/Agent/`（29 文件），以及 OpenTake `docs/AGENT-CONTEXT-SIGNAL.md`、`docs/WORKFLOW-PLUGIN-SYSTEM.md`、`docs/ARCHITECTURE.md §7/§9`、`docs/MODULE-PORT-MAP.md`「Agent」、`docs/_analysis/04-MCP与Agent工具.md`、`docs/ROADMAP.md` Phase 7/S/W。
 >

@@ -27,6 +27,10 @@ import { useClipboardStore } from "../../store/clipboardStore";
 import { useMediaStore } from "../../store/mediaStore";
 import * as edit from "../../store/editActions";
 import {
+  deleteSelectedFolders,
+  deleteSelectedMediaAssets,
+} from "../../store/mediaDeleteActions";
+import {
   newProjectAndEnter,
   openProjectViaDialog,
   saveCurrentProject,
@@ -95,6 +99,13 @@ function ignoreRejected(operation: Promise<unknown>): void {
   });
 }
 
+function reportMediaDeleteFailure(operation: Promise<void>): void {
+  void operation.catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    useEditorUiStore.getState().pushToast(message);
+  });
+}
+
 /** Route native-menu activation through the same actions as the visible UI and
  *  global shortcut layer. Exported so the command boundary remains directly
  *  testable without requiring an OS menu server. */
@@ -140,6 +151,7 @@ export function runApplicationMenuCommand(id: string): void {
     case "selectAll": {
       if (ui.focusedPanel === "media") {
         ui.selectMediaAssets(new Set(useMediaStore.getState().items.map((item) => item.id)));
+        useEditorUiStore.setState({ selectedFolderIds: new Set() });
       } else {
         const ids = useProjectStore
           .getState()
@@ -159,7 +171,11 @@ export function runApplicationMenuCommand(id: string): void {
       return;
     case "delete":
       if (ui.focusedPanel === "media") {
-        ignoreRejected(edit.deleteMedia([...ui.selectedMediaAssetIds]));
+        reportMediaDeleteFailure(
+          ui.selectedFolderIds.size > 0
+            ? deleteSelectedFolders()
+            : deleteSelectedMediaAssets(),
+        );
       } else {
         ignoreRejected(edit.deleteSelectedClips());
       }
@@ -233,7 +249,10 @@ export function applicationMenuStateSnapshot(): ApplicationMenuStateSnapshot {
   const hasClips = project.timeline.tracks.some((track) => track.clips.length > 0);
   const clipSelection = ui.selectedClipIds.size > 0;
   const mediaSelection = ui.selectedMediaAssetIds.size > 0;
+  const folderSelection = ui.selectedFolderIds.size > 0;
   const selection = ui.focusedPanel === "media" ? mediaSelection : clipSelection;
+  const deleteSelection =
+    ui.focusedPanel === "media" ? mediaSelection || folderSelection : clipSelection;
   const anySelectable = ui.focusedPanel === "media" ? media.items.length > 0 : hasClips;
   const mutableProject = editor && Boolean(project.projectPath) && !project.compatibilityReadOnly;
 
@@ -252,7 +271,7 @@ export function applicationMenuStateSnapshot(): ApplicationMenuStateSnapshot {
     split: editor && hasClips,
     trimStart: editor && clipSelection,
     trimEnd: editor && clipSelection,
-    delete: editor && selection,
+    delete: editor && deleteSelection,
     mediaPanel: editor,
     inspector: editor,
     agentPanel: editor,

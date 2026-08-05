@@ -43,8 +43,8 @@
       "domain": "ci",
       "kind": "yml",
       "material": true,
-      "bytes": 22326,
-      "sha256": "5c9003d210ff8321bba02312f560261b13310f37458f4ecd1513360caab48200"
+      "bytes": 24661,
+      "sha256": "ec2be395bd82f1532c8397885e54eb9d4c1835ab88f575fd0ce81cb00a80a7d0"
     },
     {
       "id": "file-bc37d034bad56458",
@@ -52,8 +52,8 @@
       "domain": "repository",
       "kind": "configuration",
       "material": true,
-      "bytes": 279,
-      "sha256": "b93f80050368a0d8158210f81acfc92e892ad27de6d8e4361f6fc378f061bf86"
+      "bytes": 336,
+      "sha256": "0396ee111027cef07b6544b7038d8e017b3f605201f0348b8e5ecede1ccaf811"
     },
     {
       "id": "file-794550be5bbee1a7",
@@ -151,8 +151,8 @@
       "domain": "repository",
       "kind": "lock",
       "material": true,
-      "bytes": 179474,
-      "sha256": "724fff40f782431628eec2370b3ad2fa6f3ee0e7b18cf1b00e364cd6aacad131"
+      "bytes": 180091,
+      "sha256": "23d08e64dfd5b07aec0f498d8a377ef6b9a87ee6f122bb1d424b0498ce96968d"
     },
     {
       "id": "file-2e9d962a08321605",
@@ -619,8 +619,8 @@
       "domain": "opentake-agent",
       "kind": "rust-source",
       "material": true,
-      "bytes": 12791,
-      "sha256": "f7735761c8dacd4ec16cdff57d7699e427e0f2862bafab275d35f6747c4730ff"
+      "bytes": 12777,
+      "sha256": "842cd37e71a2867542515ab11d0edfd8b075db3980f357f76f97df3d2fa735fe"
     },
     {
       "id": "file-af1a277a729753c5",
@@ -745,8 +745,8 @@
       "domain": "opentake-domain",
       "kind": "rust-source",
       "material": true,
-      "bytes": 42157,
-      "sha256": "e76b31712271b881325d7b6f091af31c50ca3d3afb04c9e99b565811b4506c51"
+      "bytes": 43428,
+      "sha256": "fe6d5f5fe0e689404a2dd89a482f7f924e0ad8b1d933daa453c14f77031effe8"
     },
     {
       "id": "file-e350e7272c332edd",
@@ -790,8 +790,8 @@
       "domain": "opentake-domain",
       "kind": "rust-source",
       "material": true,
-      "bytes": 2665,
-      "sha256": "33e87730c123776d09da54ce8efb2503d409085331a25d1c3762c976d4408923"
+      "bytes": 2735,
+      "sha256": "4af870ab4bdb731b784583b45dcd310a9ac39815f265ad730f128a09a5579688"
     },
     {
       "id": "file-770e89ffe24a8b60",
@@ -866,13 +866,22 @@
       "sha256": "3aafa07091ba9a3dc5629c677d7c530bc6ff26cf4e5bd60a8caba150fdb62fd3"
     },
     {
+      "id": "file-add99be3d239236b",
+      "path": "crates/opentake-domain/src/transition.rs",
+      "domain": "opentake-domain",
+      "kind": "rust-source",
+      "material": true,
+      "bytes": 782,
+      "sha256": "8bb3bc021a8b6860daa46f1d36a40732b458e6382a4892a7a6345f22a97eda0c"
+    },
+    {
       "id": "file-3047b992dcbf3bcc",
       "path": "crates/opentake-domain/tests/wire_schema.rs",
       "domain": "opentake-domain",
       "kind": "rust-source",
       "material": true,
-      "bytes": 4970,
-      "sha256": "b0e1db4fc838d94d0f03961e169f932ba7faaa1e4dbf7cc27ceae2d99d0c6761"
+      "bytes": 5166,
+      "sha256": "10b99d7e00a93686bbe1981832fefe1d1ca8db31ccc1dfa476f4070f3bbe87b2"
     },
     {
       "id": "file-10ad5e3746bf7f6b",
@@ -1051,8 +1060,8 @@
       "domain": "opentake-media",
       "kind": "toml",
       "material": true,
-      "bytes": 3689,
-      "sha256": "c26d29d1d090bcc7ae6e9d48103f54b30606c0eef771d3a9a8ca697fb48370eb"
+      "bytes": 3744,
+      "sha256": "3291ae66783cd3f33acee5474fc3ce7551e07333056ba262151936e7d8decc73"
     },
     {
       "id": "file-7b9f07dc6f209aec",
@@ -1195,8 +1204,8 @@
       "domain": "opentake-media",
       "kind": "rust-source",
       "material": true,
-      "bytes": 4558,
-      "sha256": "6401275cd3fb6088e5cab84cab43a8dc1504768c2917a31f189c81ee54260eba"
+      "bytes": 7280,
+      "sha256": "e86bb51ce35dc186d032844ad18b8c223fa4a5de87bb0afac39b452529bef138"
     },
     {
       "id": "file-2d8453bed877e1e2",
@@ -1222,8 +1231,8 @@
       "domain": "opentake-media",
       "kind": "rust-source",
       "material": true,
-      "bytes": 20540,
-      "sha256": "ae9edfbc7b263b171ad78d0da05774da1635203a6a8ad04d029f4e71ccdff70a"
+      "bytes": 20662,
+      "sha256": "3fb7a45bdb7fae5430841034e53a99e17ec0c6aa35421fb4f3e8304d55e6f511"
     },
     {
       "id": "file-5cfee53910ab5ac2",
@@ -1609,8 +1618,8 @@
       "domain": "opentake-ops",
       "kind": "rust-source",
       "material": true,
-      "bytes": 161690,
-      "sha256": "355c0888b01bfff86a3afcd5ff7f19a9b6295153a9dee5c3a3f8f53ae9a7a21a"
+      "bytes": 167815,
+      "sha256": "def452ad008fe7dbdbef0067df7bc333eb120ea44fb43d7920a83348d0526102"
     },
     {
       "id": "file-dd2047dc3a0d231f",
@@ -1762,8 +1771,8 @@
       "domain": "opentake-ops",
       "kind": "rust-source",
       "material": true,
-      "bytes": 9047,
-      "sha256": "abc9c8c8e5623a7222dd1c5a657d11a8d366c0f547e4d41c57dc78dae563f54d"
+      "bytes": 9981,
+      "sha256": "55dbb926df0fdfbe678eb6801c67324f91be1466b51159d03ed0cf99c5c24d06"
     },
     {
       "id": "file-90546560cb3950a0",
@@ -1807,8 +1816,8 @@
       "domain": "opentake-ops",
       "kind": "rust-source",
       "material": true,
-      "bytes": 51742,
-      "sha256": "f1b9118c7790c89c2ce88325cd972f6db3a55cec8d9882918a38451051ef93c1"
+      "bytes": 54338,
+      "sha256": "9c23c9c092d169d03c423894dd49143694c01a4eeb64eea367baed102bab6718"
     },
     {
       "id": "file-61effa008dc46e6a",
@@ -2203,8 +2212,8 @@
       "domain": "opentake-render",
       "kind": "rust-source",
       "material": true,
-      "bytes": 13840,
-      "sha256": "745c6f06552c7c49c2c2d13493fb13acd15ee7e3e52a2ae25b9b907a52f606ef"
+      "bytes": 16818,
+      "sha256": "53cab0c008bde316ec1337164f4abfb3d6e8592ff242788379966b2d08aa0682"
     },
     {
       "id": "file-d6d5b63cac3456d6",
@@ -2221,8 +2230,8 @@
       "domain": "opentake-render",
       "kind": "rust-source",
       "material": true,
-      "bytes": 18464,
-      "sha256": "e74948c9fb7302b4768b8a0cd0f723d040a4f5a8adb09663499c4899fa450910"
+      "bytes": 19506,
+      "sha256": "4ad7cf91c16e4d829c999af7af3c2264d63581eee1ca7ecb0c9b316929bafbfc"
     },
     {
       "id": "file-4d7f1a6e9efe131b",
@@ -2392,8 +2401,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 378018,
-      "sha256": "652b5a6cf7ac2b3dece7b4a0a8ec44867e10e505a9a616caeb40746a8ed99202"
+      "bytes": 378121,
+      "sha256": "53c8c350b220ba794de9477a3c92041f8c706e28e26d29c7676cac6373b3eb95"
     },
     {
       "id": "file-8fb895ecdd8c9390",
@@ -2653,8 +2662,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 112807,
-      "sha256": "a19ac04e79ecb88d48cbf33f5d8a9f4116a2b23b512e2e7c4a24b4c4e369bd93"
+      "bytes": 115182,
+      "sha256": "87f36634d34417f9b329b84e00b66cc58905620254aec887868c4d9cd1e0cdb2"
     },
     {
       "id": "file-3f35eb757d5d95ba",
@@ -2689,8 +2698,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 165678,
-      "sha256": "1c1bb246f8aa342a50f3620755ba0b678d071c0501bd91450f167a693e1ebd13"
+      "bytes": 167451,
+      "sha256": "334c706b804d7f0783ca99b260dab1b25c682f8ea7a4dba4a8f918787ec380fc"
     },
     {
       "id": "file-55b6b718c705afb7",
@@ -2812,6 +2821,96 @@
       "sha256": "32a9bfa25bc5381d12a70c0dedd6bbe4daab5188d0d3f32be75620e7a9fe3e21"
     },
     {
+      "id": "file-ad76438ac441b869",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/data-safety-cache-identity-real-device-2026-07-31.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 2339,
+      "sha256": "785a84d611961894cc9c945f37be81c44a5e05183573997d174905d92152016b"
+    },
+    {
+      "id": "file-b8ed1396f2e51031",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/data-safety-cross-cutting-security-partial-2026-07-31.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 3796,
+      "sha256": "6ec8fb94e7f571e54270242590c60d8fed0d105afcf5cc108525ce695ae344b4"
+    },
+    {
+      "id": "file-aed530d612192460",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/data-safety-generation-seed-real-device-2026-07-31.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 3029,
+      "sha256": "9083fd852001e32c7d816241994189163f49def983f91a4c0dcbafd847846d3e"
+    },
+    {
+      "id": "file-42b8c3a5c15ec3cc",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/data-safety-legacy-default-matrix-real-device-2026-07-31.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 3768,
+      "sha256": "227776bb9f990b7915b0c98045c1864b52241bff622c5668c1027d1ba7ebb874"
+    },
+    {
+      "id": "file-1bc7d8222664f7fe",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/data-safety-manifest-corruption-real-device-2026-07-31.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 3515,
+      "sha256": "351ca614028d0bcec927fec2507db47c5f97bd3d4a4fb3972fc0192a09dfa2c0"
+    },
+    {
+      "id": "file-39762481351a763f",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/data-safety-mcp-redaction-real-device-2026-07-31.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 2385,
+      "sha256": "db70774b38cd2b4eeb8fafbb5e46622ccfd50febd853ed99c63ff8a6b77da508"
+    },
+    {
+      "id": "file-b6e43611dcc292c0",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/data-safety-mcp-tool-import-real-device-2026-07-31.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 3365,
+      "sha256": "6d424679f0a9e859fb88185d676ee7a6f3e0b96c8ae9a2856080bfd0e7437362"
+    },
+    {
+      "id": "file-977846919b675f62",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/data-safety-mcp-transport-real-device-2026-07-31.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 2560,
+      "sha256": "7f72dc36c3410939120254cc38fe4addf0be391296b42cbc8a6b3c12fb5f9cda"
+    },
+    {
+      "id": "file-05a49524c1b831a8",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/data-safety-project-open-composite-real-device-2026-07-31.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 4179,
+      "sha256": "13ae5bd5dae925b7db7c178d213591f7ab30de942cd54523697b748ae35f99e1"
+    },
+    {
+      "id": "file-96f36aa200c87f57",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/data-safety-shared-core-command-real-device-2026-07-31.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 2814,
+      "sha256": "84053ece518f8d920fd338c982a8e1fcdeb3a515d74d261bd3f525fc3deef5ba"
+    },
+    {
       "id": "file-e3db0e79bd7445ac",
       "path": "docs/audit/2026-07-14/runtime-artifacts/automated/five-panel-layout-real-device-2026-07-31.md",
       "domain": "docs",
@@ -2846,6 +2945,15 @@
       "material": true,
       "bytes": 4241,
       "sha256": "5591ddc815e1f3462721e20a27225aee75472e3eef3c1d223b65ca232a3c35ec"
+    },
+    {
+      "id": "file-63d9575de7b05c20",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/home-component-mapping-real-device-2026-07-31.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 5367,
+      "sha256": "1191d4ba63e2fe38b1188d23919db331b2bc042f7b7151b7ed6fd269e14813a9"
     },
     {
       "id": "file-5100a64989c60b5b",
@@ -2893,6 +3001,15 @@
       "sha256": "7938f27967d81e83764d70d27d8d3ed4a629de285617d2e6086328402fe36a2d"
     },
     {
+      "id": "file-e4fba43f259c6d49",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/home-upstream-composite-real-device-2026-07-31.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 4361,
+      "sha256": "5f3b4043aeb873c091a74e87a1f4b4d8ec82c8eba1a248c09acc2b68491959c6"
+    },
+    {
       "id": "file-eb894f034460bde2",
       "path": "docs/audit/2026-07-14/runtime-artifacts/automated/interchange-export-real-device-2026-07-30.md",
       "domain": "docs",
@@ -2900,6 +3017,15 @@
       "material": true,
       "bytes": 5455,
       "sha256": "7c4970ae750655ac15c6c04f51d507ed64a84112fc24322cb046b452f50ac67d"
+    },
+    {
+      "id": "file-3c40cca6c471f31f",
+      "path": "docs/audit/2026-07-14/runtime-artifacts/automated/media-render-packaged-ffmpeg-real-device-2026-07-31.md",
+      "domain": "docs",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 6559,
+      "sha256": "29288fc71aeff2afa528c63dd29946479498e2f2978e75f8d079737275785fd2"
     },
     {
       "id": "file-969b5b9ef06a22dc",
@@ -4599,8 +4725,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 6088,
-      "sha256": "41ea87d051268fb9dd45fc581a830f047a0f83496d01efe9def0803f07a40748"
+      "bytes": 8267,
+      "sha256": "78bf26847ac2c4bb639aad6621063c06d62c306bb962a7ed619964632f37c914"
     },
     {
       "id": "file-35747fb472fe0e58",
@@ -4698,8 +4824,8 @@
       "domain": "docs",
       "kind": "markdown",
       "material": true,
-      "bytes": 7520,
-      "sha256": "f3ba0cd11fa042427fda7e8225ea57285a620f0f0ba85d0938ec1e5fba8c3bcf"
+      "bytes": 8825,
+      "sha256": "0fc65b9e67b94b37f4d31e25c04f0c04c5b0026b470da8043841e9355b5d9fcc"
     },
     {
       "id": "file-12ed6f818f14ff81",
@@ -5035,6 +5161,24 @@
       "sha256": "2be095bf7c896fa8345e8eb59e4db1317bd14b50c56ef001a0284305a660d574"
     },
     {
+      "id": "file-6c3ede1b6dc05f8a",
+      "path": "scripts/ffmpeg-sidecars.lock.json",
+      "domain": "repository",
+      "kind": "json",
+      "material": true,
+      "bytes": 1728,
+      "sha256": "c27e2934365952cf7ef7b5d24227b99e418d4f831f7cc617283bbc9951a9f141"
+    },
+    {
+      "id": "file-e93a076f3ff35274",
+      "path": "scripts/provision_ffmpeg_sidecars.py",
+      "domain": "repository",
+      "kind": "py",
+      "material": true,
+      "bytes": 5045,
+      "sha256": "8fc7a2ad2d89641d654e2131f3f0caa58d82907a30e04a2fbe13119b30b399a9"
+    },
+    {
       "id": "file-b507e76382a66cfa",
       "path": "scripts/run-c1b-windows-red.ps1",
       "domain": "repository",
@@ -5051,6 +5195,15 @@
       "material": true,
       "bytes": 4198,
       "sha256": "13e0c7a6703244fc068e997fa4ba5b05b161165cb714cd0b3f8c2b4dbb33d225"
+    },
+    {
+      "id": "file-3cf66ed3ec1da8d5",
+      "path": "scripts/tests/packaged-sidecars-test.rb",
+      "domain": "repository",
+      "kind": "rb",
+      "material": true,
+      "bytes": 6313,
+      "sha256": "1ec6e4acf8e7cfc1f63dcbdd444e455b6d0f3ed943d2bca3d5e2357688ed73e9"
     },
     {
       "id": "file-83e5630c0e7aaafc",
@@ -5094,8 +5247,8 @@
       "domain": "src-tauri",
       "kind": "toml",
       "material": true,
-      "bytes": 5146,
-      "sha256": "abe446f5c3242b1c7ca85e96e3dbe0b6670febef0c77f1dcdf3ea5280c7e7241"
+      "bytes": 5477,
+      "sha256": "36d32fb1df2cafc00e93e7de018c00dff8202738fb99aa00cfd325b3f1a1effd"
     },
     {
       "id": "file-f18b5d0480de73d6",
@@ -5611,6 +5764,15 @@
       "sha256": "5d5d05b28e5158b7d31958393f27cf232a49820fa90f8b5f7668c295c8907df2"
     },
     {
+      "id": "file-33220c83f87dedb1",
+      "path": "src-tauri/resources/ffmpeg/SOURCE.md",
+      "domain": "src-tauri",
+      "kind": "markdown",
+      "material": true,
+      "bytes": 764,
+      "sha256": "3376bc2261e9363ed3b994cc1cec479172eb4cb82508d180569d5800d23ef58f"
+    },
+    {
       "id": "file-d255f2ce76ebbf70",
       "path": "src-tauri/src/account.rs",
       "domain": "src-tauri",
@@ -5643,8 +5805,8 @@
       "domain": "src-tauri",
       "kind": "rust-source",
       "material": true,
-      "bytes": 81358,
-      "sha256": "425db6ec1ba7b20d2d783de93dcc970128fdcf4381883d0cb70260085d8ae357"
+      "bytes": 82764,
+      "sha256": "d3cddb2e089c23063383cf52359b88d29ecadeb391cb9272837a709463bb4e00"
     },
     {
       "id": "file-2217a1d7692b2f2b",
@@ -5688,8 +5850,8 @@
       "domain": "src-tauri",
       "kind": "rust-source",
       "material": true,
-      "bytes": 17020,
-      "sha256": "186981a01290cdf114541d1409c70ba938899f3e0e05a82eb74d289825a5e931"
+      "bytes": 17973,
+      "sha256": "6dbb0c63db54c657229ca74b8da78b550314a705e95d988ceea45b71b3c71687"
     },
     {
       "id": "file-18c6c092770d0fbe",
@@ -5859,8 +6021,26 @@
       "domain": "src-tauri",
       "kind": "json",
       "material": true,
-      "bytes": 1242,
-      "sha256": "89f1428d2ef298adb9666f15915e4bc6dc6e16c682d6e7659bad41b399432088"
+      "bytes": 2584,
+      "sha256": "52702cef2028bca07201ca14567499922d88020ce610a0d6ec485bd8419cff63"
+    },
+    {
+      "id": "file-95eab2aa2d281ed9",
+      "path": "src-tauri/tauri.macos.conf.json",
+      "domain": "src-tauri",
+      "kind": "json",
+      "material": true,
+      "bytes": 99,
+      "sha256": "00bd4ff49f5b2b4842502c20d54e209400ed8db3059c6d0a94166dab0c0c0401"
+    },
+    {
+      "id": "file-7a5194f01045763e",
+      "path": "src-tauri/tauri.windows.conf.json",
+      "domain": "src-tauri",
+      "kind": "json",
+      "material": true,
+      "bytes": 220,
+      "sha256": "044e0eb7fe483d5cb7deeeac974b30ec59e01ab35960751c538e4044a688c5dd"
     },
     {
       "id": "file-c0ae4406ea250661",
@@ -5933,6 +6113,15 @@
       "material": true,
       "bytes": 3678,
       "sha256": "715ab380a28d558da9f99cc4907e3e45bc85b1f1cf9464979f51e7bc288b6221"
+    },
+    {
+      "id": "file-a9ea0bda9366065f",
+      "path": "src-tauri/tests/security_config.rs",
+      "domain": "src-tauri",
+      "kind": "rust-source",
+      "material": true,
+      "bytes": 5691,
+      "sha256": "c9e978cb7947749b5e38cc4508677b3cee4dfad564cdd37395f054f806953d8b"
     },
     {
       "id": "file-f134f174d6014a06",
@@ -6039,8 +6228,8 @@
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 22518,
-      "sha256": "9810cac091fbb3920aba774f26b05e7eba66bc8e5f58bb9837474663edc300ef"
+      "bytes": 22823,
+      "sha256": "7f42c17f75c256f8acfd4bb4d735a8dee6abde9078ab47cbe49baaad890dc78b"
     },
     {
       "id": "file-71317cb158cfdd21",
@@ -6048,8 +6237,8 @@
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 13333,
-      "sha256": "7fe21609498c0cbf8d0a7cb559f3ef698bc9563063bfacc62270367a48d1d223"
+      "bytes": 13456,
+      "sha256": "76ca69e64822aaa44d2152836c024a75204581643d8d636fa96c8bd8eede8daf"
     },
     {
       "id": "file-20d0262d3bce9fa1",
@@ -6057,8 +6246,8 @@
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 6540,
-      "sha256": "4f3ee3397b95e265446cb1783d0e6f36d451f787cf579f647c977d07a1d78134"
+      "bytes": 10286,
+      "sha256": "ae3e1b641ceee367cbbcc0e8f7275a1fd73366ce585aff285fdce5237eba86c5"
     },
     {
       "id": "file-0bae1db2d44e11b0",
@@ -6066,8 +6255,8 @@
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 28213,
-      "sha256": "0ecdad5e4718c809dad1be9e6a59a82a06f142343806ee9ebf0411531876bf19"
+      "bytes": 31945,
+      "sha256": "904b195ef1de1b2aba20e91cd93b3fafc7d518c0e6589ecfb363b73574c480f2"
     },
     {
       "id": "file-0d2496801df2e6df",
@@ -6079,13 +6268,40 @@
       "sha256": "055d17ec5adfbfc3d025981930d50fcd81fed45e38e9c996fe95db6738e0d6bc"
     },
     {
+      "id": "file-d808504759f5960a",
+      "path": "web/src/components/inspector/AiEditTab.test.tsx",
+      "domain": "web",
+      "kind": "tsx-source",
+      "material": true,
+      "bytes": 5426,
+      "sha256": "556fa69ea802dbe9e3b259ac4400fb1d49e7ac3752d84dd1e703e58a0c4a0666"
+    },
+    {
+      "id": "file-1eb7fa0bb326f539",
+      "path": "web/src/components/inspector/AiEditTab.tsx",
+      "domain": "web",
+      "kind": "tsx-source",
+      "material": true,
+      "bytes": 12235,
+      "sha256": "b70d9c2de8740d8a06db613489f1cfe68b5b4e00527f32569704d5305f5ee44f"
+    },
+    {
+      "id": "file-4c99bc1c92c2ae63",
+      "path": "web/src/components/inspector/Inspector.test.tsx",
+      "domain": "web",
+      "kind": "tsx-source",
+      "material": true,
+      "bytes": 3914,
+      "sha256": "1f13e4fae7da55ed7e9e73fe53ee4a1ea239dd433f369d9b13edefd5d8b2b527"
+    },
+    {
       "id": "file-675291e4c2699421",
       "path": "web/src/components/inspector/Inspector.tsx",
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 55551,
-      "sha256": "74b95586764a50b50879694a9bfb33de91bf048157dc9410a3ae9017d606ffad"
+      "bytes": 56666,
+      "sha256": "ae3a0953826b8a627dfaa44275f73215ba62eafbdfa02235caab5526b28a11e4"
     },
     {
       "id": "file-85fd6e55cc553b74",
@@ -6183,8 +6399,8 @@
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 46761,
-      "sha256": "f82ebd35324ed6af647042f49197593ff171296da3c96fac1fd62cafc457a5d7"
+      "bytes": 46981,
+      "sha256": "a09918fccd090417d435db4125d49eb05451e656c43864619c4b023c3d8fa15f"
     },
     {
       "id": "file-e90b04dae96268a8",
@@ -6201,8 +6417,26 @@
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 5938,
-      "sha256": "57147948e84caae714ea4fbbf3589c20a1446af7118c58c051d8042f45730e63"
+      "bytes": 6018,
+      "sha256": "7a32cbc82650053df30173acf5be3d1a80162ca095d5ba2857f45f0830022096"
+    },
+    {
+      "id": "file-5ad97148f47525f1",
+      "path": "web/src/components/media/MusicTab.test.tsx",
+      "domain": "web",
+      "kind": "tsx-source",
+      "material": true,
+      "bytes": 3982,
+      "sha256": "720a3603cbe109d19db4d472804c70bb9e3d0ece3d549a6eb6151f94f2fc0e8f"
+    },
+    {
+      "id": "file-22b051b2f0a8fc02",
+      "path": "web/src/components/media/MusicTab.tsx",
+      "domain": "web",
+      "kind": "tsx-source",
+      "material": true,
+      "bytes": 9546,
+      "sha256": "9124992fcf1ab15d4f4309072bfc505c285aeb685d8dbf7701c0b266c99c5851"
     },
     {
       "id": "file-26c10bb912126d39",
@@ -6210,8 +6444,26 @@
       "domain": "web",
       "kind": "tsx-source",
       "material": true,
-      "bytes": 4308,
-      "sha256": "79a95809921511c6703f3dd58158df2db424fa4c9cd04bf0ca6cb363e7455541"
+      "bytes": 4379,
+      "sha256": "91496e956c41f315084cab7721c89e87cefcfd1bc68ccce9a9e4f3ac36abdc73"
+    },
+    {
+      "id": "file-548e84d4c7481863",
+      "path": "web/src/components/media/TransitionTab.test.tsx",
+      "domain": "web",
+      "kind": "tsx-source",
+      "material": true,
+      "bytes": 7101,
+      "sha256": "df01b7c97e86bf81b33fffdcee22a573c00a14e916ceb773b51e9bbd0770def9"
+    },
+    {
+      "id": "file-0635887fc0d7cb3d",
+      "path": "web/src/components/media/TransitionTab.tsx",
+      "domain": "web",
+      "kind": "tsx-source",
+      "material": true,
+      "bytes": 8148,
+      "sha256": "d88008d36038bba0a6a1ea2c2f4dd014aa96ecc6d69e088fc6182f488e7fade8"
     },
     {
       "id": "file-b834e0a1ed863cfe",
@@ -6592,6 +6844,15 @@
       "sha256": "d7cdbca38f6b079233eceada5f9fb3d0689c0e03bcce28c6e355bb4df6c53ee6"
     },
     {
+      "id": "file-d08bf01dd15e4abc",
+      "path": "web/src/components/shell/ShellComponentMapping.test.tsx",
+      "domain": "web",
+      "kind": "tsx-source",
+      "material": true,
+      "bytes": 3064,
+      "sha256": "75d9cee3bda04735476d9daf1af6dd65b50eafeef46d96a7cb239258d0308e76"
+    },
+    {
       "id": "file-6b3b8c6ef21c08f8",
       "path": "web/src/components/shell/SplitPane.tsx",
       "domain": "web",
@@ -6804,8 +7065,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 16558,
-      "sha256": "b934a9d22145b765a2c28ba38b0cfc49d6876ae18d212ac56dad187560b9f48a"
+      "bytes": 17590,
+      "sha256": "0fdb76b6cf648efb0d77ba5f7a24450819c6755a74589cd9fb2b77c327fef4f4"
     },
     {
       "id": "file-62445fc9c3b24134",
@@ -6813,8 +7074,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 7788,
-      "sha256": "4b0401afdd62d993976455bec3210a41499cb1aef1702f17c0747ffb56fde1c2"
+      "bytes": 8364,
+      "sha256": "e5e0e05e01823fd209445f6482db58af8f6609d9412d99033aaeb3a78c52a54e"
     },
     {
       "id": "file-650d4950ca665282",
@@ -6912,8 +7173,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 62000,
-      "sha256": "b79dc2b6b8035f0a128c4b721b81f147d905f427a8e1813b97c85e82e4a37575"
+      "bytes": 67015,
+      "sha256": "be402166f4dec3eaafbf33a56e18620f28528b1d4b09e9642d9f3437af3515d3"
     },
     {
       "id": "file-4965754bcf377f58",
@@ -6975,8 +7236,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 21362,
-      "sha256": "faca029b9738470dc8291be076ebb6f454093028b618b10c6f7dc160e60a295a"
+      "bytes": 22276,
+      "sha256": "a778f36192087e44479ca657f97a6104751c8d0c227526fef244283997133dea"
     },
     {
       "id": "file-75f3d7ef4167b919",
@@ -6984,8 +7245,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 32105,
-      "sha256": "7139a15a8d3d2d0a387ebcc6e0b4c47252b7b066992cfcbdfbe7f0c3b722ba62"
+      "bytes": 33317,
+      "sha256": "9ab4fa120c57855b27373f46dce49a6e0a3ec5d8dff1c8605ef315e94a175e70"
     },
     {
       "id": "file-1761c08dde5f5547",
@@ -7020,8 +7281,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 11368,
-      "sha256": "cff33eb6ce2ccd0cfd4e1369c986ee66d128c8f80e2e69ab05376b2a175200a6"
+      "bytes": 13682,
+      "sha256": "fd94c9c2b80a6b3afc789fb3f87352c2a20db119751469f1b4438853f4900e9e"
     },
     {
       "id": "file-0ec6e1299efa4645",
@@ -7029,8 +7290,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 23207,
-      "sha256": "c0f9d3ac53c8c270d8b3b56f204839ce7e4ecbcd0013fd94572d6766b2eeaf90"
+      "bytes": 25331,
+      "sha256": "94274a45caa8b3528e6ed421117e57b5735ecadb24436bb21e98d03d9921535a"
     },
     {
       "id": "file-0fe9809ddf4f271b",
@@ -7353,8 +7614,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 21610,
-      "sha256": "388929947a5874c923087587657a8fd9ba033b3fac140c05658075f2cdf298a7"
+      "bytes": 21946,
+      "sha256": "73700fd5eabd9adac8357747efefc6b541c8ced6eb70ebfa55bfd43b965476ac"
     },
     {
       "id": "file-3de9c2f92acb8585",
@@ -7398,8 +7659,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 4085,
-      "sha256": "e3877dde3d80cc3ae486595399a3c0d40ac5db54105f373327d133f4d77c05bd"
+      "bytes": 4422,
+      "sha256": "19912afa61feb8fe8c675b201fdeb4e03dc65f08bc2ebf796975a62f853ac0dc"
     },
     {
       "id": "file-eb034552744995ae",
@@ -7443,8 +7704,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 48406,
-      "sha256": "e21e1e0a2dbaaca7ce827a344b7d929c4374b6c14385ff37c5301c151325d174"
+      "bytes": 48686,
+      "sha256": "06a612688edfa984ca8fd67972c7f3c6df76543f37dc63d500659be9b89a83f9"
     },
     {
       "id": "file-903803ae7a765e50",
@@ -7452,8 +7713,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 3036,
-      "sha256": "2998cc32503b9854c3ce3ea13b64cd3a184a6e49318ae16f5aa996b710349104"
+      "bytes": 3139,
+      "sha256": "130b1b13b67f8dd0be14b54b0826d370563fc5aac62112564bda66f1c3c4ddf6"
     },
     {
       "id": "file-44ed6aea208dbf05",
@@ -7470,8 +7731,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 8505,
-      "sha256": "b16366885cc51fe4838c941f2e9e1b41f31fa63ade6eafee5b72cce1330efcbf"
+      "bytes": 8525,
+      "sha256": "1850fba933204a645d3781b75310835b66042c61a9acc8f242b96ebe7304285f"
     },
     {
       "id": "file-6699b4f37461d13e",
@@ -7623,8 +7884,8 @@
       "domain": "web",
       "kind": "typescript-source",
       "material": true,
-      "bytes": 23155,
-      "sha256": "99779767edc0d59c6636fd0973f2f86b7b94f424526150a1b35b46f2e8fdc0ac"
+      "bytes": 23086,
+      "sha256": "7345932cec4987dc09321b45991f0b40f67564d94dc4b2bac0434b5cddfada6c"
     },
     {
       "id": "file-962ac4047b1046f3",

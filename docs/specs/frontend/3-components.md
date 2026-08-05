@@ -61,7 +61,7 @@ AppShell (Tauri window chrome)
 | AI Edit 建议与审阅 | `AiEditTab` → `web/src/components/inspector/AiEditTab.tsx` | `edit.setClipProperties` / `edit.undo`；AbortSignal 取消不提交命令 | `AiEditTab.test.tsx`、`Inspector.test.tsx` |
 | 音乐浏览、导入与放置 | `MusicTab` → `web/src/components/media/MusicTab.tsx` | `addMediaToTimeline`、`libraryStore.importToProject`、`chatStore.composerDraft` | `MusicTab.test.tsx` |
 | 转场选择与应用 | `TransitionTab` → `web/src/components/media/TransitionTab.tsx` | `setTransition` → Tauri `edit_apply` → Rust `EditCommand::SetTransition` | `TransitionTab.test.tsx`、`timelineOverlays.test.ts` |
-| 画布变换覆盖层 | `TransformOverlay` → `web/src/components/preview/TransformOverlay.tsx` | `edit.setClipProperties`（一次指针提交对应一次撤销项） | `TransformOverlay.test.tsx` |
+| 画布变换覆盖层 | `TransformOverlay` → `web/src/components/preview/TransformOverlay.tsx` | `edit.setTransformAtFrame`（有动画轨时写当前帧；一次指针提交对应一次撤销项） | `TransformOverlay.test.tsx`、`TransformOverlay.interaction.test.tsx` |
 | 画布裁剪覆盖层 | `CropOverlay` → `web/src/components/preview/CropOverlay.tsx` | 静态裁剪用 `edit.setClipProperties`；动画裁剪用 `edit.upsertKeyframe` | `cropOverlay.test.ts`、`Preview.test.tsx` |
 
 转场模型由 `crates/opentake-domain/src/transition.rs` 持久化；命令验证、相邻关系清理与撤销由 `crates/opentake-ops/src/command.rs` 所有；交叉溶解的预览/导出帧计划由 `crates/opentake-render/src/plan/build.rs` 所有。这样 UI 标记、保存重开、预览和导出不会各自形成不一致的旁路。

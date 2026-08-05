@@ -206,6 +206,45 @@ pub trait ChatTurnGate: Send + Sync {
         name: &str,
         args: serde_json::Value,
     ) -> Option<ToolResult>;
+
+    /// Dispatch with the transport request's cancellation token. Turn-bound
+    /// hosts normally cancel their own token from [`Self::request_cancel`];
+    /// long-lived MCP authorities can instead forward this request-local token
+    /// without coupling unrelated sessions.
+    fn dispatch_cancellable(
+        &self,
+        dispatcher: &Dispatcher,
+        name: &str,
+        args: serde_json::Value,
+        _request_cancel: &opentake_media::MediaCancelToken,
+    ) -> Option<ToolResult> {
+        self.dispatch(dispatcher, name, args)
+    }
+
+    /// Dispatch under a transport-supplied undo owner. Long-lived MCP gates use
+    /// this to isolate rmcp sessions; project-turn gates may ignore it and retain
+    /// their stable OpenTake ChatSession owner.
+    fn dispatch_cancellable_scoped(
+        &self,
+        dispatcher: &Dispatcher,
+        name: &str,
+        args: serde_json::Value,
+        _undo_scope: &str,
+        request_cancel: &opentake_media::MediaCancelToken,
+    ) -> Option<ToolResult> {
+        self.dispatch_cancellable(dispatcher, name, args, request_cancel)
+    }
+
+    /// Request cancellation of the whole turn. Standalone callers have no
+    /// project-bound cancellation state, so their default remains a no-op.
+    fn request_cancel(&self) {}
+
+    /// Stop in-flight dispatcher work while cleaning up an internally failed
+    /// provider turn. Project hosts may keep this distinct from a user-requested
+    /// whole-turn cancellation so the terminal failure can still be persisted.
+    fn request_dispatch_cancel(&self) {
+        self.request_cancel();
+    }
 }
 
 struct DirectChatTurnGate;
@@ -250,7 +289,7 @@ impl ChatLoop {
     }
 
     /// The tool catalog in the OpenAI function-calling shape. Built fresh per
-    /// turn (cheap; currently 39 base live tools) so the model always sees the
+    /// turn (cheap; currently 38 base live tools) so the model always sees the
     /// current fail-closed catalog.
     ///
     /// When the dispatcher lacks a media bridge, hide the bridge-dependent

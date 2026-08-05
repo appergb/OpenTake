@@ -30,6 +30,7 @@ export type SettingsPaneId =
   | "mcp"
   | "shortcuts"
   | "account"
+  | "storage"
   | "about";
 /** 剪映式顶部素材面板主标签（英文标识符，中文文案在 dict）。 */
 export type MediaTabId =

@@ -82,7 +82,9 @@ pub fn partner_moves(timeline: &Timeline, clip_id: &str, to_frame: i32) -> Vec<(
     let Some(lead) = find_clip_start(timeline, clip_id) else {
         return Vec::new();
     };
-    let delta = to_frame - lead;
+    let Some(delta) = to_frame.checked_sub(lead) else {
+        return Vec::new();
+    };
     if delta == 0 {
         return Vec::new();
     }
@@ -90,7 +92,7 @@ pub fn partner_moves(timeline: &Timeline, clip_id: &str, to_frame: i32) -> Vec<(
         .into_iter()
         .filter_map(|pid| {
             let start = find_clip_start(timeline, &pid)?;
-            Some((pid, (start + delta).max(0)))
+            Some((pid, start.checked_add(delta)?.max(0)))
         })
         .collect()
 }

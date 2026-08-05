@@ -14,7 +14,10 @@ vi.mock("../../i18n", () => ({
   useT: () => (key: string) => key,
 }));
 
-vi.mock("../../lib/api", () => ({ isTauri: false }));
+vi.mock("../../lib/api", () => ({
+  isTauri: false,
+  generationLog: async () => ({ version: 1, entries: [] }),
+}));
 
 vi.mock("../../store/projectActions", () => ({
   newProjectAndEnter: mocks.newProjectAndEnter,
@@ -60,6 +63,7 @@ beforeEach(() => {
   localStorage.setItem(HOME_NOTICE_STORAGE_KEY, HOME_NOTICE_VERSION);
   useRecentStore.setState({
     recents: [{ path: PROJECT_PATH, name: "Recent Demo", openedAt: 1 }],
+    thumbnailPathsValidated: true,
   });
   useEditorUiStore.setState({ view: "home", settingsOpen: false });
   container = document.createElement("div");

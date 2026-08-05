@@ -1,0 +1,338 @@
+use super::*;
+
+fn local_tempdir() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("safe-asset-")
+        .tempdir_in(std::env::current_dir().unwrap())
+        .unwrap()
+}
+
+#[test]
+fn serves_only_a_bounded_single_range_from_the_retained_file() {
+    let directory = local_tempdir();
+    let path = directory.path().join("clip.mp4");
+    std::fs::write(&path, b"0123456789").unwrap();
+    let range = tauri::http::HeaderValue::from_static("bytes=2-5");
+
+    let response = serve_open_file(&path, None, false, Some(&range)).unwrap();
+
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(response.headers()[CONTENT_RANGE], "bytes 2-5/10");
+    assert!(response.headers().contains_key(ETAG));
+    assert_eq!(response.body(), b"2345");
+}
+
+#[test]
+fn stale_if_range_never_splices_bytes_from_a_different_identity() {
+    let directory = local_tempdir();
+    let path = directory.path().join("clip.mp4");
+    std::fs::write(&path, b"0123456789").unwrap();
+    let range = tauri::http::HeaderValue::from_static("bytes=2-5");
+    let stale_identity = tauri::http::HeaderValue::from_static("\"stale-file\"");
+    let (file, final_path) = open_retained_regular_file(&path).unwrap();
+
+    let response = serve_opened_file(
+        file,
+        &final_path,
+        false,
+        Some(&range),
+        Some(&stale_identity),
+    )
+    .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.body(), b"0123456789");
+}
+
+#[cfg(unix)]
+#[test]
+fn nofollow_nonblocking_open_rejects_fifo_and_symlink() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::symlink;
+
+    let directory = local_tempdir();
+    let regular = directory.path().join("regular.jpg");
+    let link = directory.path().join("link.jpg");
+    let fifo = directory.path().join("pipe.jpg");
+    std::fs::write(&regular, b"jpeg").unwrap();
+    symlink(&regular, &link).unwrap();
+    let fifo_c = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    // SAFETY: fifo_c is a live NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+
+    assert!(open_retained_regular_file(&regular).is_ok());
+    assert!(open_retained_regular_file(&link).is_err());
+    assert!(open_retained_regular_file(&fifo).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn final_handle_path_authorization_rejects_a_symlinked_ancestor_escape() {
+    use std::os::unix::fs::symlink;
+    use tauri::Manager;
+
+    let directory = local_tempdir();
+    let outside = local_tempdir();
+    std::fs::write(outside.path().join("outside.jpg"), b"outside").unwrap();
+    let alias = directory.path().join("alias");
+    symlink(outside.path(), &alias).unwrap();
+    let requested = alias.join("outside.jpg");
+
+    let (_, final_path) = open_retained_regular_file(&requested).unwrap();
+    assert_eq!(final_path, outside.path().join("outside.jpg"));
+
+    let app = tauri::test::mock_app();
+    let scope = app.handle().asset_protocol_scope();
+    scope.allow_file(&requested).unwrap();
+    scope.forbid_file(&final_path).unwrap();
+    assert!(scope_allows_lexical_path(&scope, &requested));
+    assert!(!scope_allows_lexical_path(&scope, &final_path));
+    assert_eq!(
+        serve_open_file(&requested, Some(&scope), false, None)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+}
+
+#[test]
+fn rejects_multi_range_and_oversized_full_body() {
+    let directory = local_tempdir();
+    let path = directory.path().join("clip.bin");
+    let file = File::create(&path).unwrap();
+    file.set_len(MAX_FULL_BODY_BYTES + 1).unwrap();
+    let multi = tauri::http::HeaderValue::from_static("bytes=0-1,4-5");
+
+    assert_eq!(
+        serve_open_file(&path, None, false, Some(&multi))
+            .unwrap()
+            .status(),
+        StatusCode::RANGE_NOT_SATISFIABLE
+    );
+    assert_eq!(
+        serve_open_file(&path, None, false, None).unwrap().status(),
+        StatusCode::PAYLOAD_TOO_LARGE
+    );
+    assert_eq!(
+        serve_open_file(&path, None, true, None).unwrap().status(),
+        StatusCode::OK
+    );
+    assert_eq!(
+        serve_open_file(&path, None, true, None).unwrap().body(),
+        &Vec::<u8>::new()
+    );
+}
+
+#[test]
+fn response_headers_are_origin_bound_and_inert() {
+    let directory = local_tempdir();
+    let path = directory.path().join("frame.jpg");
+    std::fs::write(&path, b"jpeg").unwrap();
+
+    let response = serve_open_file(&path, None, false, None).unwrap();
+
+    assert_eq!(
+        response.headers()[ACCESS_CONTROL_ALLOW_ORIGIN],
+        asset_origin()
+    );
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(
+        response.headers()["content-security-policy"],
+        "default-src 'none'; sandbox"
+    );
+}
+
+#[test]
+fn project_helper_rejects_an_ambient_bundle_replacement() {
+    let directory = local_tempdir();
+    let selected = directory.path().join("Selected.opentake");
+    std::fs::create_dir_all(selected.join("media")).unwrap();
+    std::fs::write(selected.join("media/clip.mp4"), b"project-a").unwrap();
+    let retained = ProjectRoot::open(&selected).unwrap();
+    let expected_identity = retained.stable_identity();
+
+    std::fs::rename(&selected, directory.path().join("Retained-A.opentake")).unwrap();
+    std::fs::create_dir_all(selected.join("media")).unwrap();
+    std::fs::write(selected.join("media/clip.mp4"), b"project-b").unwrap();
+
+    let request = HelperRequest {
+        token: "test-token".to_owned(),
+        parent_pid: std::process::id(),
+        path: selected
+            .join("media/clip.mp4")
+            .to_string_lossy()
+            .into_owned(),
+        head_only: false,
+        range: None,
+        if_range: None,
+        project: Some(HelperProjectAuthority {
+            project_epoch: 7,
+            project_path: selected.to_string_lossy().into_owned(),
+            root_identity: expected_identity,
+        }),
+    };
+
+    let response = helper_response(&request);
+    assert!(matches!(
+        response.metadata.error_kind,
+        Some(WireIoErrorKind::PermissionDenied)
+    ));
+    assert!(response.body.is_empty());
+}
+
+#[test]
+fn current_project_authority_allows_nested_media_without_recursive_scope() {
+    use tauri::Manager;
+
+    let directory = local_tempdir();
+    let bundle = directory.path().join("ExactRootGrant.opentake");
+    let core = AppCore::new();
+    core.save_project(Some(bundle.clone())).unwrap();
+    std::fs::create_dir_all(bundle.join("media")).unwrap();
+    let media = bundle.join("media/clip.mp4");
+    std::fs::write(&media, b"project-media").unwrap();
+    let app = tauri::test::mock_app();
+    let scope = app.handle().asset_protocol_scope();
+    scope.allow_file(&bundle).unwrap();
+    assert!(!scope_allows_lexical_path(&scope, &media));
+
+    let authority = project_request_authority(&core, &scope, &media)
+        .unwrap()
+        .expect("current retained project is nested-media authority");
+    let request = HelperRequest {
+        token: "test-token".to_owned(),
+        parent_pid: std::process::id(),
+        path: media.to_string_lossy().into_owned(),
+        head_only: false,
+        range: None,
+        if_range: None,
+        project: HelperProjectAuthority::from_core(&authority),
+    };
+    let response = helper_response(&request);
+    assert_eq!(response.metadata.status, StatusCode::OK.as_u16());
+    assert_eq!(response.body, b"project-media");
+}
+
+#[test]
+fn home_thumbnail_exception_requires_an_exact_file_grant() {
+    use tauri::Manager;
+
+    let directory = local_tempdir();
+    let bundle = directory.path().join("Recent.opentake");
+    std::fs::create_dir_all(&bundle).unwrap();
+    let thumbnail = bundle.join("thumbnail.jpg");
+    std::fs::write(&thumbnail, b"jpeg").unwrap();
+    let app = tauri::test::mock_app();
+    let scope = app.handle().asset_protocol_scope();
+
+    scope.allow_directory(&bundle, true).unwrap();
+    assert!(!is_home_thumbnail_exception(&scope, &thumbnail, &bundle));
+    scope.allow_file(&thumbnail).unwrap();
+    assert!(is_home_thumbnail_exception(&scope, &thumbnail, &bundle));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn helper_rejects_a_parent_that_is_not_the_same_executable() {
+    // The Rust test harness is launched by Cargo, so its live parent is a
+    // different executable. A self-issued token/PID pair is insufficient.
+    let parent_pid = actual_parent_process_id().unwrap();
+    assert!(!parent_is_same_executable(parent_pid).unwrap());
+}
+
+#[cfg(unix)]
+#[test]
+fn timed_out_isolated_workers_are_killed_reaped_and_capacity_recovers() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let permits = Arc::new(Semaphore::new(MAX_CONCURRENT_READS));
+        let process_slots = Arc::new(Semaphore::new(MAX_CONCURRENT_READS));
+        let mut workers = Vec::new();
+        for _ in 0..MAX_CONCURRENT_READS {
+            let permits = permits.clone();
+            let process_slots = process_slots.clone();
+            workers.push(tokio::spawn(async move {
+                let _permit = permits.acquire_owned().await.unwrap();
+                let process_slot = process_slots.try_acquire_owned().unwrap();
+                let mut child = Command::new("/bin/sleep")
+                    .arg("30")
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .kill_on_drop(true)
+                    .spawn()
+                    .unwrap();
+                let process_id = child.id().unwrap();
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(100), child.wait())
+                        .await
+                        .is_err()
+                );
+                terminate_or_quarantine(child, process_slot).await;
+                process_id
+            }));
+        }
+        let mut process_ids = Vec::new();
+        for worker in workers {
+            process_ids.push(worker.await.unwrap());
+        }
+        assert_eq!(permits.available_permits(), MAX_CONCURRENT_READS);
+        assert_eq!(process_slots.available_permits(), MAX_CONCURRENT_READS);
+
+        for process_id in process_ids {
+            // SAFETY: signal 0 only probes whether the already-reaped PID exists.
+            assert_eq!(unsafe { libc::kill(process_id as i32, 0) }, -1);
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
+        }
+
+        let _permit = tokio::time::timeout(Duration::from_secs(1), permits.acquire())
+            .await
+            .expect("worker capacity recovers")
+            .unwrap();
+        let directory = local_tempdir();
+        let path = directory.path().join("normal.jpg");
+        std::fs::write(&path, b"normal").unwrap();
+        let response = serve_open_file(&path, None, false, None).unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.body(), b"normal");
+    });
+}
+
+#[test]
+fn unreapable_wait_is_bounded_and_four_quarantines_fail_the_fifth_fast() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let started = std::time::Instant::now();
+        assert!(
+            !bounded_reap(
+                std::future::pending::<std::io::Result<std::process::ExitStatus>>(),
+                Duration::from_millis(25),
+            )
+            .await
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let slots = Arc::new(Semaphore::new(MAX_CONCURRENT_READS));
+        let quarantined = (0..MAX_CONCURRENT_READS)
+            .map(|_| slots.clone().try_acquire_owned().unwrap())
+            .collect::<Vec<_>>();
+        let spawned = std::sync::atomic::AtomicUsize::new(0);
+        if slots.clone().try_acquire_owned().is_ok() {
+            spawned.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        assert_eq!(spawned.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(slots.available_permits(), 0);
+        drop(quarantined);
+        assert_eq!(slots.available_permits(), MAX_CONCURRENT_READS);
+    });
+}

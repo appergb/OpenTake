@@ -3,7 +3,10 @@
 //! resulting `Timeline` / `MediaManifest`, undo/redo behavior, versioning, and
 //! the refusal path — the behaviors the port must match upstream.
 
-use opentake_domain::{AnimPair, Interpolation, Keyframe, KeyframeTrack, TransitionKind};
+use opentake_domain::{
+    AnimPair, Crop, Interpolation, Keyframe, KeyframeTrack, NestedSequence, Transition,
+    TransitionKind,
+};
 use opentake_domain::{
     ChromaKey, ColorGrade, Effect, HslSecondary, LiftGammaGain, LutReference, Mask, MaskShape,
     Point2, Rgb,
@@ -11,9 +14,12 @@ use opentake_domain::{
 use opentake_domain::{
     Clip, ClipType, MediaManifest, MediaManifestEntry, MediaSource, Timeline, Track, Transform,
 };
+use opentake_ops::command::{
+    NewTrackClipMode, PasteClipEntry, PlaceMediaTarget, ProjectTimelineSettings, UnplacedClipEntry,
+};
 use opentake_ops::{
-    apply, ClipEntry, ClipMove, ClipProperties, EditCommand, EditError, EditorState, FrameRange,
-    KeyframePayload, KeyframeProperty, SeqIdGen, TextEntry,
+    apply, ClipEntry, ClipMove, ClipProperties, ClipPropertyAssignment, EditCommand, EditError,
+    EditorState, FrameRange, KeyframePayload, KeyframeProperty, SeqIdGen, TextEntry,
 };
 
 // ---- builders -------------------------------------------------------------
@@ -56,6 +62,62 @@ fn entry(track_index: usize, media_type: ClipType, start: i32, dur: i32) -> Clip
         add_linked_audio: false,
         transform: None,
     }
+}
+
+#[test]
+fn per_clip_properties_commit_once_and_one_undo_restores_every_transform() {
+    let first = clip("first", 0, 30);
+    let second = clip("second", 40, 30);
+    let original_first = first.transform;
+    let original_second = second.transform;
+    let mut state = state(vec![video_track("video", true, vec![first, second])]);
+    let ids = SeqIdGen::new("property-");
+
+    let changed = apply(
+        &mut state,
+        EditCommand::SetClipPropertiesPerClip {
+            assignments: vec![
+                ClipPropertyAssignment {
+                    clip_id: "first".into(),
+                    properties: ClipProperties {
+                        transform: Some(Transform {
+                            width: 0.4,
+                            height: 0.2,
+                            ..Transform::default()
+                        }),
+                        ..Default::default()
+                    },
+                },
+                ClipPropertyAssignment {
+                    clip_id: "second".into(),
+                    properties: ClipProperties {
+                        transform: Some(Transform {
+                            center_x: 0.7,
+                            center_y: 0.3,
+                            width: 0.2,
+                            height: 0.4,
+                            ..Transform::default()
+                        }),
+                        ..Default::default()
+                    },
+                },
+            ],
+        },
+        &ids,
+    )
+    .unwrap();
+
+    assert!(changed.changed);
+    assert_eq!(state.undo_depth(), 1);
+    assert_eq!(state.version(), 1);
+    assert_eq!(state.timeline.tracks[0].clips[0].transform.width, 0.4);
+    assert_eq!(state.timeline.tracks[0].clips[1].transform.center_x, 0.7);
+
+    let undone = apply(&mut state, EditCommand::Undo, &ids).unwrap();
+    assert!(undone.changed);
+    assert_eq!(state.timeline.tracks[0].clips[0].transform, original_first);
+    assert_eq!(state.timeline.tracks[0].clips[1].transform, original_second);
+    assert_eq!(state.version(), 2);
 }
 
 #[test]
@@ -756,6 +818,77 @@ fn split_linked_pair_splits_partner_and_regroups() {
 }
 
 #[test]
+fn split_clips_deduplicates_linked_targets_and_undoes_the_whole_batch_once() {
+    let mut st = linked_av_state();
+    st.timeline
+        .tracks
+        .push(video_track("overlay", true, vec![clip("solo", 90, 80)]));
+    let before = st.timeline.clone();
+    let g = SeqIdGen::new("batch-split-");
+
+    let res = apply(
+        &mut st,
+        EditCommand::SplitClips {
+            clip_ids: vec!["v1".into(), "a1".into(), "v1".into(), "solo".into()],
+            at_frame: 130,
+        },
+        &g,
+    )
+    .unwrap();
+
+    assert!(res.changed);
+    assert_eq!(res.action_name, "Split Clips");
+    assert_eq!(res.affected_clip_ids.len(), 3);
+    assert_eq!(st.undo_depth(), 1);
+    assert_eq!(st.version(), 1);
+    assert_eq!(st.timeline.tracks[0].clips.len(), 2);
+    assert_eq!(st.timeline.tracks[1].clips.len(), 2);
+    assert_eq!(st.timeline.tracks[2].clips.len(), 2);
+
+    let undo = apply(&mut st, EditCommand::Undo, &g).unwrap();
+    assert!(undo.changed);
+    assert_eq!(st.timeline, before);
+    assert_eq!(st.undo_depth(), 0);
+}
+
+#[test]
+fn split_clips_preflights_every_target_before_ids_history_or_timeline_change() {
+    let mut st = linked_av_state();
+    let before = st.timeline.clone();
+    let g = SeqIdGen::new("rejected-split-");
+
+    let missing = apply(
+        &mut st,
+        EditCommand::SplitClips {
+            clip_ids: vec!["v1".into(), "missing".into()],
+            at_frame: 130,
+        },
+        &g,
+    )
+    .unwrap_err();
+    assert!(matches!(missing, EditError::Invalid(_)));
+    assert_eq!(st.timeline, before);
+    assert_eq!(st.undo_depth(), 0);
+    assert_eq!(st.version(), 0);
+    assert_eq!(g.count(), 0);
+
+    let boundary = apply(
+        &mut st,
+        EditCommand::SplitClips {
+            clip_ids: vec!["v1".into(), "a1".into()],
+            at_frame: 100,
+        },
+        &g,
+    )
+    .unwrap_err();
+    assert!(matches!(boundary, EditError::Invalid(_)));
+    assert_eq!(st.timeline, before);
+    assert_eq!(st.undo_depth(), 0);
+    assert_eq!(st.version(), 0);
+    assert_eq!(g.count(), 0);
+}
+
+#[test]
 fn duplicate_linked_pair_keeps_copies_linked() {
     // Option/Alt-drag duplicating an A/V linked pair must keep the copies linked
     // to each other under a fresh group id (groupCounts/groupRemap semantics).
@@ -1193,6 +1326,174 @@ fn set_clip_properties_flip_writes_to_transform() {
     let c = &st.timeline.tracks[0].clips[0];
     assert!(c.transform.flip_horizontal);
     assert!(c.transform.flip_vertical);
+}
+
+#[test]
+fn set_transform_at_frame_updates_active_tracks_and_static_fields_atomically() {
+    let mut animated = clip("animated", 100, 60);
+    animated.transform = Transform {
+        center_x: 0.25,
+        center_y: 0.35,
+        width: 0.8,
+        height: 0.6,
+        rotation: 5.0,
+        flip_horizontal: false,
+        flip_vertical: true,
+    };
+    animated.position_track = Some(KeyframeTrack::from_keyframes(vec![Keyframe::new(
+        0,
+        AnimPair::new(0.0, 0.05),
+    )]));
+    animated.rotation_track = Some(KeyframeTrack::from_keyframes(vec![Keyframe::new(0, 10.0)]));
+    let before_clip = animated.clone();
+    let mut st = state(vec![video_track("v", true, vec![animated])]);
+    let g = SeqIdGen::new("transform-");
+    let target = Transform {
+        center_x: 0.7,
+        center_y: 0.6,
+        width: 0.4,
+        height: 0.25,
+        rotation: 33.0,
+        flip_horizontal: true,
+        flip_vertical: false,
+    };
+
+    let res = apply(
+        &mut st,
+        EditCommand::SetTransformAtFrame {
+            clip_id: "animated".into(),
+            frame: 130,
+            transform: target,
+        },
+        &g,
+    )
+    .unwrap();
+
+    assert!(res.changed);
+    assert_eq!(res.action_name, "Change Transform");
+    assert_eq!(st.undo_depth(), 1);
+    assert_eq!(st.version(), 1);
+    let changed = &st.timeline.tracks[0].clips[0];
+    let position = changed.position_track.as_ref().unwrap();
+    assert_eq!(position.keyframes.len(), 2);
+    assert_eq!(position.keyframes[1].frame, 30);
+    assert!((position.keyframes[1].value.a - 0.5).abs() < 1e-9);
+    assert!((position.keyframes[1].value.b - 0.475).abs() < 1e-9);
+    let rotation = changed.rotation_track.as_ref().unwrap();
+    assert_eq!(rotation.keyframes.len(), 2);
+    assert_eq!(rotation.keyframes[1].frame, 30);
+    assert!((rotation.keyframes[1].value - 33.0).abs() < 1e-9);
+    assert_eq!(
+        (changed.transform.width, changed.transform.height),
+        (0.4, 0.25)
+    );
+    assert_eq!(
+        (changed.transform.center_x, changed.transform.center_y),
+        (0.25, 0.35)
+    );
+    assert_eq!(changed.transform.rotation, 5.0);
+    assert!(changed.transform.flip_horizontal);
+    assert!(!changed.transform.flip_vertical);
+
+    apply(&mut st, EditCommand::Undo, &g).unwrap();
+    assert_eq!(st.timeline.tracks[0].clips[0], before_clip);
+    assert_eq!(st.undo_depth(), 0);
+}
+
+#[test]
+fn set_transform_at_frame_writes_a_fully_static_transform() {
+    let original = clip("static", 20, 40);
+    let mut st = state(vec![video_track("v", true, vec![original])]);
+    let g = SeqIdGen::default();
+    let target = Transform {
+        center_x: 0.2,
+        center_y: 0.8,
+        width: 0.3,
+        height: 0.45,
+        rotation: -20.0,
+        flip_horizontal: true,
+        flip_vertical: true,
+    };
+
+    apply(
+        &mut st,
+        EditCommand::SetTransformAtFrame {
+            clip_id: "static".into(),
+            frame: 25,
+            transform: target,
+        },
+        &g,
+    )
+    .unwrap();
+
+    assert_eq!(st.timeline.tracks[0].clips[0].transform, target);
+    assert_eq!(st.undo_depth(), 1);
+}
+
+#[test]
+fn set_transform_at_frame_rejects_outside_animation_frame_and_nan_atomically() {
+    let mut animated = clip("animated", 100, 60);
+    animated.position_track = Some(KeyframeTrack::from_keyframes(vec![Keyframe::new(
+        0,
+        AnimPair::new(0.0, 0.0),
+    )]));
+    let mut st = state(vec![video_track("v", true, vec![animated])]);
+    let before = st.timeline.clone();
+    let g = SeqIdGen::default();
+
+    let outside = apply(
+        &mut st,
+        EditCommand::SetTransformAtFrame {
+            clip_id: "animated".into(),
+            frame: 160,
+            transform: Transform::default(),
+        },
+        &g,
+    )
+    .unwrap_err();
+    assert!(matches!(outside, EditError::Invalid(_)));
+    assert_eq!(st.timeline, before);
+    assert_eq!(st.undo_depth(), 0);
+    assert_eq!(st.version(), 0);
+
+    let invalid = Transform {
+        center_x: f64::NAN,
+        ..Transform::default()
+    };
+    let nan = apply(
+        &mut st,
+        EditCommand::SetTransformAtFrame {
+            clip_id: "animated".into(),
+            frame: 130,
+            transform: invalid,
+        },
+        &g,
+    )
+    .unwrap_err();
+    assert!(matches!(nan, EditError::Invalid(_)));
+    assert_eq!(st.timeline, before);
+    assert_eq!(st.undo_depth(), 0);
+    assert_eq!(st.version(), 0);
+
+    let derived_overflow = Transform {
+        center_x: -f64::MAX,
+        width: f64::MAX,
+        ..Transform::default()
+    };
+    let overflow = apply(
+        &mut st,
+        EditCommand::SetTransformAtFrame {
+            clip_id: "animated".into(),
+            frame: 130,
+            transform: derived_overflow,
+        },
+        &g,
+    )
+    .unwrap_err();
+    assert!(matches!(overflow, EditError::Invalid(_)));
+    assert_eq!(st.timeline, before);
+    assert_eq!(st.undo_depth(), 0);
+    assert_eq!(st.version(), 0);
 }
 
 #[test]
@@ -2423,6 +2724,985 @@ fn swap_media_does_not_cascade_to_link_group_with_different_ref() {
         .unwrap();
     assert_eq!(v_clip.media_ref, "new_v");
     assert_eq!(a_clip.media_ref, "other"); // untouched
+}
+
+// ---- atomic timeline gestures --------------------------------------------
+
+fn unplaced_media(
+    media_ref: &str,
+    media_type: ClipType,
+    start_frame: i32,
+    duration_frames: i32,
+) -> UnplacedClipEntry {
+    UnplacedClipEntry {
+        media_ref: media_ref.into(),
+        media_type,
+        source_clip_type: media_type,
+        start_frame,
+        duration_frames,
+        trim_start_frame: None,
+        trim_end_frame: None,
+        has_audio: false,
+        add_linked_audio: false,
+        transform: None,
+    }
+}
+
+fn document_snapshot(state: &EditorState) -> (Timeline, MediaManifest) {
+    (state.timeline.clone(), state.manifest.clone())
+}
+
+fn assert_arithmetic_rejection_is_atomic(mut state: EditorState, command: EditCommand) {
+    let before = document_snapshot(&state);
+    let before_version = state.version();
+    let before_undo_depth = state.undo_depth();
+    let before_can_redo = state.can_redo();
+    let ids = SeqIdGen::new("rejected-frame-");
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        apply(&mut state, command, &ids)
+    }));
+
+    assert!(outcome.is_ok(), "invalid frame arithmetic must never panic");
+    assert!(
+        outcome.unwrap().is_err(),
+        "invalid frame arithmetic must return Err"
+    );
+    assert_eq!(document_snapshot(&state), before);
+    assert_eq!(state.version(), before_version);
+    assert_eq!(state.undo_depth(), before_undo_depth);
+    assert_eq!(state.can_redo(), before_can_redo);
+    assert_eq!(ids.count(), 0, "preflight rejection must not consume ids");
+}
+
+#[test]
+fn atomic_commands_reject_overflow_and_extreme_loaded_frames_without_side_effects() {
+    let place_state = || {
+        state_with_media(
+            vec![video_track("target", true, vec![])],
+            vec![media_entry("known", ClipType::Video, 1.0)],
+        )
+    };
+    assert_arithmetic_rejection_is_atomic(
+        place_state(),
+        EditCommand::PlaceMedia {
+            sequence_id: None,
+            settings: None,
+            target: PlaceMediaTarget::NewTrack {
+                kind: ClipType::Video,
+                at: Some(0),
+            },
+            entry: unplaced_media("known", ClipType::Video, i32::MAX, 1),
+        },
+    );
+    let mut extreme_place = unplaced_media("known", ClipType::Video, 0, 1);
+    extreme_place.trim_start_frame = Some(i32::MAX);
+    assert_arithmetic_rejection_is_atomic(
+        place_state(),
+        EditCommand::PlaceMedia {
+            sequence_id: None,
+            settings: None,
+            target: PlaceMediaTarget::ExistingTrack {
+                track_id: "target".into(),
+            },
+            entry: extreme_place,
+        },
+    );
+
+    let paste_state = || {
+        state_with_media(
+            vec![video_track("target", true, vec![])],
+            vec![media_entry("known", ClipType::Video, 1.0)],
+        )
+    };
+    assert_arithmetic_rejection_is_atomic(
+        paste_state(),
+        EditCommand::PasteClips {
+            entries: vec![PasteClipEntry {
+                clip: Clip::new("clipboard", "known", 0, 1),
+                target_track_id: "target".into(),
+                start_frame: i32::MAX,
+            }],
+        },
+    );
+    let mut extreme_paste = Clip::new("clipboard", "known", 0, 1);
+    extreme_paste.trim_end_frame = i32::MAX;
+    assert_arithmetic_rejection_is_atomic(
+        paste_state(),
+        EditCommand::PasteClips {
+            entries: vec![PasteClipEntry {
+                clip: extreme_paste,
+                target_track_id: "target".into(),
+                start_frame: 0,
+            }],
+        },
+    );
+
+    assert_arithmetic_rejection_is_atomic(
+        state(vec![video_track(
+            "target",
+            true,
+            vec![Clip::new("source", "asset", 0, 1)],
+        )]),
+        EditCommand::MoveClips {
+            moves: vec![ClipMove {
+                clip_id: "source".into(),
+                to_track: 0,
+                to_frame: i32::MAX,
+            }],
+        },
+    );
+
+    for mode in [NewTrackClipMode::Move, NewTrackClipMode::Duplicate] {
+        assert_arithmetic_rejection_is_atomic(
+            state(vec![video_track(
+                "source-track",
+                true,
+                vec![Clip::new("source", "asset", i32::MAX - 1, 1)],
+            )]),
+            EditCommand::MoveOrDuplicateClipsToNewTrack {
+                clip_ids: vec!["source".into()],
+                lead_clip_id: "source".into(),
+                requested_frame_delta: 1,
+                insert_at: 0,
+                mode,
+            },
+        );
+    }
+    assert_arithmetic_rejection_is_atomic(
+        state(vec![video_track(
+            "source-track",
+            true,
+            vec![Clip::new("source", "asset", i32::MAX - 1, 1)],
+        )]),
+        EditCommand::DuplicateClips {
+            clip_ids: vec!["source".into()],
+            offset_frames: 1,
+            target_track_indexes: vec![0],
+        },
+    );
+    assert_arithmetic_rejection_is_atomic(
+        state(vec![video_track(
+            "source-track",
+            true,
+            vec![Clip::new("source", "asset", i32::MIN, 1)],
+        )]),
+        EditCommand::MoveOrDuplicateClipsToNewTrack {
+            clip_ids: vec!["source".into()],
+            lead_clip_id: "source".into(),
+            requested_frame_delta: 0,
+            insert_at: 0,
+            mode: NewTrackClipMode::Move,
+        },
+    );
+}
+
+#[test]
+fn atomic_preflight_rejects_unrelated_root_and_nested_malformed_clips() {
+    let valid_command = || EditCommand::DuplicateClips {
+        clip_ids: vec!["source".into()],
+        offset_frames: 10,
+        target_track_indexes: vec![0],
+    };
+
+    let mut invalid_root = state(vec![
+        video_track(
+            "source-track",
+            true,
+            vec![Clip::new("source", "asset", 0, 10)],
+        ),
+        video_track(
+            "unrelated",
+            true,
+            vec![Clip::new("malformed", "asset", i32::MAX, 1)],
+        ),
+    ]);
+    invalid_root.timeline.nested_sequences = vec![];
+    assert_arithmetic_rejection_is_atomic(invalid_root, valid_command());
+
+    let mut nested = Timeline::new();
+    nested.tracks = vec![video_track(
+        "nested-track",
+        true,
+        vec![Clip::new("nested-malformed", "asset", i32::MIN, 1)],
+    )];
+    let mut invalid_nested = state(vec![video_track(
+        "source-track",
+        true,
+        vec![Clip::new("source", "asset", 0, 10)],
+    )]);
+    invalid_nested
+        .timeline
+        .nested_sequences
+        .push(NestedSequence::new(
+            "malformed-sequence",
+            "Malformed",
+            nested,
+        ));
+    assert_arithmetic_rejection_is_atomic(invalid_nested, valid_command());
+}
+
+#[test]
+fn negative_image_and_text_trims_remain_editable_but_per_edge_overflow_is_rejected() {
+    for media_type in [ClipType::Image, ClipType::Text] {
+        let mut extended = Clip::new("extended", "asset", 0, 30);
+        extended.media_type = media_type;
+        extended.source_clip_type = media_type;
+        extended.trim_start_frame = -10;
+        extended.trim_end_frame = -5;
+        let mut st = state(vec![video_track("visual", true, vec![extended])]);
+        let ids = SeqIdGen::new("negative-trim-");
+
+        let result = apply(
+            &mut st,
+            EditCommand::DuplicateClips {
+                clip_ids: vec!["extended".into()],
+                offset_frames: 40,
+                target_track_indexes: vec![0],
+            },
+            &ids,
+        )
+        .unwrap();
+
+        assert_eq!(result.affected_clip_ids.len(), 1);
+        let copy = find_clip(&st, &result.affected_clip_ids[0]);
+        assert_eq!((copy.trim_start_frame, copy.trim_end_frame), (-10, -5));
+    }
+
+    let mut unsafe_edge = Clip::new("unsafe-edge", "asset", 0, 10);
+    unsafe_edge.media_type = ClipType::Image;
+    unsafe_edge.source_clip_type = ClipType::Image;
+    unsafe_edge.trim_start_frame = -100;
+    unsafe_edge.trim_end_frame = i32::MAX - 5;
+    assert_arithmetic_rejection_is_atomic(
+        state(vec![video_track("visual", true, vec![unsafe_edge])]),
+        EditCommand::InsertTrack {
+            kind: ClipType::Video,
+            at: Some(0),
+        },
+    );
+}
+
+#[test]
+fn ripple_trim_insert_properties_and_settings_extremes_reject_atomically() {
+    let base = || {
+        state(vec![video_track(
+            "visual",
+            true,
+            vec![Clip::new("source", "asset", 0, 10)],
+        )])
+    };
+    assert_arithmetic_rejection_is_atomic(
+        base(),
+        EditCommand::RippleDeleteRanges {
+            track_index: 0,
+            ranges: vec![FrameRange::new(i32::MIN, i32::MAX)],
+        },
+    );
+    assert_arithmetic_rejection_is_atomic(
+        base(),
+        EditCommand::TrimClips {
+            edits: vec![("source".into(), i32::MAX, 0)],
+        },
+    );
+    assert_arithmetic_rejection_is_atomic(
+        state(vec![video_track("visual", true, vec![])]),
+        EditCommand::InsertClips {
+            track_index: 0,
+            at_frame: i32::MAX - 5,
+            entries: vec![
+                entry(0, ClipType::Video, 0, 3),
+                entry(0, ClipType::Video, 0, 3),
+            ],
+        },
+    );
+
+    let mut video = Clip::new("video", "asset", 0, 10);
+    video.link_group_id = Some("linked".into());
+    let mut audio = Clip::new("audio", "asset", i32::MAX - 10, 10);
+    audio.media_type = ClipType::Audio;
+    audio.source_clip_type = ClipType::Video;
+    audio.link_group_id = Some("linked".into());
+    assert_arithmetic_rejection_is_atomic(
+        state(vec![
+            video_track("video-track", true, vec![video]),
+            audio_track("audio-track", true, vec![audio]),
+        ]),
+        EditCommand::SetClipProperties {
+            clip_ids: vec!["video".into()],
+            properties: Box::new(ClipProperties {
+                duration_frames: Some(20),
+                ..Default::default()
+            }),
+        },
+    );
+
+    let projected = Clip::new("projected", "asset", 1_073_741_824, 1);
+    assert_arithmetic_rejection_is_atomic(
+        state(vec![video_track("visual", true, vec![projected])]),
+        EditCommand::SetTimelineSettings {
+            fps: 60,
+            width: 1920,
+            height: 1080,
+        },
+    );
+}
+
+#[test]
+fn compound_and_dissolve_near_i32_boundary_are_checked_and_undoable() {
+    assert_arithmetic_rejection_is_atomic(
+        state(vec![video_track("visual", true, vec![])]),
+        EditCommand::CreateNestedSequence {
+            name: "Overflow".into(),
+            timeline: Timeline::new(),
+            track_index: 0,
+            start_frame: i32::MAX,
+            duration_frames: 1,
+        },
+    );
+
+    let mut child = Timeline::new();
+    child.tracks = vec![video_track(
+        "child-track",
+        true,
+        vec![Clip::new("child", "asset", 0, 10)],
+    )];
+    let compound = Clip::new_nested("compound", "sequence", i32::MAX - 10, 10);
+    let mut root = Timeline::new();
+    root.tracks = vec![video_track("root-track", true, vec![compound])];
+    root.nested_sequences = vec![NestedSequence::new("sequence", "Boundary", child)];
+    let mut st = EditorState::from_timeline(root);
+    let before = st.timeline.clone();
+    let ids = SeqIdGen::new("boundary-dissolve-");
+
+    let result = apply(
+        &mut st,
+        EditCommand::DissolveNestedSequence {
+            clip_id: "compound".into(),
+        },
+        &ids,
+    )
+    .unwrap();
+    let dissolved = find_clip(&st, &result.affected_clip_ids[0]);
+    assert_eq!(dissolved.start_frame, i32::MAX - 10);
+    assert_eq!(dissolved.duration_frames, 10);
+
+    apply(&mut st, EditCommand::Undo, &ids).unwrap();
+    assert_eq!(st.timeline, before);
+}
+
+#[test]
+fn place_media_settings_new_track_and_linked_audio_are_one_undo_step() {
+    let mut media = media_entry("av", ClipType::Video, 2.0);
+    media.has_audio = Some(true);
+    let mut st = state_with_media(vec![], vec![media]);
+    let before = document_snapshot(&st);
+    let ids = SeqIdGen::new("place-");
+    let mut entry = unplaced_media("av", ClipType::Video, 12, 48);
+    entry.has_audio = true;
+    entry.add_linked_audio = true;
+
+    let result = apply(
+        &mut st,
+        EditCommand::PlaceMedia {
+            sequence_id: None,
+            settings: Some(ProjectTimelineSettings {
+                fps: 60,
+                width: 3840,
+                height: 2160,
+            }),
+            target: PlaceMediaTarget::NewTrack {
+                kind: ClipType::Video,
+                at: Some(0),
+            },
+            entry,
+        },
+        &ids,
+    )
+    .unwrap();
+
+    assert_eq!(result.affected_clip_ids.len(), 2);
+    assert_eq!(st.version(), 1);
+    assert_eq!(st.undo_depth(), 1);
+    assert_eq!(
+        (st.timeline.fps, st.timeline.width, st.timeline.height),
+        (60, 3840, 2160)
+    );
+    assert!(st.timeline.settings_configured);
+    assert_eq!(
+        st.timeline
+            .tracks
+            .iter()
+            .map(|track| track.kind)
+            .collect::<Vec<_>>(),
+        vec![ClipType::Video, ClipType::Audio]
+    );
+    let video = find_clip(&st, &result.affected_clip_ids[0]);
+    let audio = find_clip(&st, &result.affected_clip_ids[1]);
+    assert_eq!(video.media_type, ClipType::Video);
+    assert_eq!(audio.media_type, ClipType::Audio);
+    assert_eq!(video.link_group_id, audio.link_group_id);
+    assert!(video.link_group_id.is_some());
+
+    let undone = apply(&mut st, EditCommand::Undo, &ids).unwrap();
+    assert!(undone.changed);
+    assert_eq!(document_snapshot(&st), before);
+}
+
+#[test]
+fn place_media_targets_a_nested_track_by_stable_id_with_root_settings() {
+    let mut child = Timeline::new();
+    child.tracks = vec![video_track(
+        "child-track",
+        true,
+        vec![Clip::new("existing", "m", 10, 20)],
+    )];
+    let mut root = Timeline::new();
+    root.nested_sequences
+        .push(NestedSequence::new("sequence-a", "Scene", child));
+    let mut st = EditorState::new(root, {
+        let mut manifest = MediaManifest::new();
+        manifest
+            .entries
+            .push(media_entry("m", ClipType::Video, 4.0));
+        manifest
+    });
+    let before = st.timeline.clone();
+    let ids = SeqIdGen::new("nested-place-");
+
+    let result = apply(
+        &mut st,
+        EditCommand::PlaceMedia {
+            sequence_id: Some("sequence-a".into()),
+            settings: Some(ProjectTimelineSettings {
+                fps: 60,
+                width: 1280,
+                height: 720,
+            }),
+            target: PlaceMediaTarget::ExistingTrack {
+                track_id: "child-track".into(),
+            },
+            entry: unplaced_media("m", ClipType::Video, 100, 30),
+        },
+        &ids,
+    )
+    .unwrap();
+
+    assert_eq!(result.affected_clip_ids.len(), 1);
+    assert_eq!(st.version(), 1);
+    assert_eq!(st.undo_depth(), 1);
+    assert_eq!(
+        (st.timeline.fps, st.timeline.width, st.timeline.height),
+        (60, 1280, 720)
+    );
+    let child = &st.timeline.nested_sequences[0].timeline;
+    assert_eq!(child.tracks[0].id, "child-track");
+    assert!(child.tracks[0]
+        .clips
+        .iter()
+        .any(|clip| clip.id == "existing" && clip.start_frame == 20 && clip.duration_frames == 40));
+    assert!(child.tracks[0]
+        .clips
+        .iter()
+        .any(|clip| clip.id == result.affected_clip_ids[0] && clip.start_frame == 100));
+
+    apply(&mut st, EditCommand::Undo, &ids).unwrap();
+    assert_eq!(st.timeline, before);
+}
+
+#[test]
+fn place_media_rejects_manifest_audio_mismatch_without_mutation() {
+    let mut media = media_entry("av", ClipType::Video, 2.0);
+    media.has_audio = Some(true);
+    let mut st = state_with_media(vec![], vec![media]);
+    let before = document_snapshot(&st);
+    let ids = SeqIdGen::new("rejected-place-");
+
+    let error = apply(
+        &mut st,
+        EditCommand::PlaceMedia {
+            sequence_id: None,
+            settings: Some(ProjectTimelineSettings {
+                fps: 60,
+                width: 3840,
+                height: 2160,
+            }),
+            target: PlaceMediaTarget::NewTrack {
+                kind: ClipType::Video,
+                at: None,
+            },
+            // The manifest says the video has audio. The gesture snapshot says
+            // it does not, so even its settings must not be committed.
+            entry: unplaced_media("av", ClipType::Video, 0, 30),
+        },
+        &ids,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("hasAudio"));
+    assert_eq!(document_snapshot(&st), before);
+    assert_eq!(st.version(), 0);
+    assert_eq!(st.undo_depth(), 0);
+}
+
+#[test]
+fn move_clips_to_new_track_uses_stable_ids_and_pins_linked_audio() {
+    let mut lead = Clip::new("lead", "av", 10, 20);
+    lead.link_group_id = Some("old-link".into());
+    let second = Clip::new("second", "b", 50, 20);
+    let mut audio = Clip::new("audio", "av", 10, 20);
+    audio.media_type = ClipType::Audio;
+    audio.source_clip_type = ClipType::Video;
+    audio.link_group_id = Some("old-link".into());
+    let mut st = state(vec![
+        video_track("lead-track", true, vec![lead, second]),
+        video_track("other-track", true, vec![Clip::new("other", "x", 0, 5)]),
+        audio_track("audio-track", true, vec![audio]),
+    ]);
+    let before = st.timeline.clone();
+    let ids = SeqIdGen::new("new-track-");
+
+    let result = apply(
+        &mut st,
+        EditCommand::MoveOrDuplicateClipsToNewTrack {
+            clip_ids: vec!["lead".into(), "audio".into(), "second".into()],
+            lead_clip_id: "lead".into(),
+            requested_frame_delta: -99,
+            insert_at: 1,
+            mode: NewTrackClipMode::Move,
+        },
+        &ids,
+    )
+    .unwrap();
+
+    assert_eq!(result.affected_clip_ids, vec!["lead", "audio", "second"]);
+    assert_eq!(st.version(), 1);
+    assert_eq!(st.undo_depth(), 1);
+    let lead_location = st.find_clip("lead").unwrap();
+    let second_location = st.find_clip("second").unwrap();
+    let audio_location = st.find_clip("audio").unwrap();
+    assert_eq!(
+        st.timeline.tracks[lead_location.track_index].id,
+        st.timeline.tracks[second_location.track_index].id
+    );
+    assert_ne!(
+        st.timeline.tracks[lead_location.track_index].id,
+        "lead-track"
+    );
+    assert_eq!(
+        st.timeline.tracks[audio_location.track_index].id,
+        "audio-track"
+    );
+    assert_eq!(find_clip(&st, "lead").start_frame, 0);
+    assert_eq!(find_clip(&st, "audio").start_frame, 0);
+    assert_eq!(find_clip(&st, "second").start_frame, 40);
+    assert!(st
+        .timeline
+        .tracks
+        .iter()
+        .any(|track| track.id == "other-track"));
+
+    apply(&mut st, EditCommand::Undo, &ids).unwrap();
+    assert_eq!(st.timeline, before);
+}
+
+#[test]
+fn duplicate_clips_to_new_track_keeps_sources_and_remaps_linked_copies() {
+    let mut lead = Clip::new("lead", "av", 10, 20);
+    lead.link_group_id = Some("old-link".into());
+    let mut audio = Clip::new("audio", "av", 10, 20);
+    audio.media_type = ClipType::Audio;
+    audio.source_clip_type = ClipType::Video;
+    audio.link_group_id = Some("old-link".into());
+    let mut st = state(vec![
+        video_track("lead-track", true, vec![lead]),
+        audio_track("audio-track", true, vec![audio]),
+    ]);
+    let before = st.timeline.clone();
+    let ids = SeqIdGen::new("duplicate-new-track-");
+
+    let result = apply(
+        &mut st,
+        EditCommand::MoveOrDuplicateClipsToNewTrack {
+            clip_ids: vec!["lead".into(), "audio".into()],
+            lead_clip_id: "lead".into(),
+            requested_frame_delta: 40,
+            insert_at: 0,
+            mode: NewTrackClipMode::Duplicate,
+        },
+        &ids,
+    )
+    .unwrap();
+
+    assert_eq!(result.affected_clip_ids.len(), 2);
+    assert!(st.find_clip("lead").is_some());
+    assert!(st.find_clip("audio").is_some());
+    let video_copy = find_clip(&st, &result.affected_clip_ids[0]);
+    let audio_copy = find_clip(&st, &result.affected_clip_ids[1]);
+    assert_eq!(video_copy.media_type, ClipType::Video);
+    assert_eq!(audio_copy.media_type, ClipType::Audio);
+    assert_eq!(video_copy.start_frame, 50);
+    assert_eq!(audio_copy.start_frame, 50);
+    assert_eq!(video_copy.link_group_id, audio_copy.link_group_id);
+    assert!(video_copy.link_group_id.is_some());
+    assert_ne!(video_copy.link_group_id.as_deref(), Some("old-link"));
+    assert_eq!(st.version(), 1);
+    assert_eq!(st.undo_depth(), 1);
+
+    apply(&mut st, EditCommand::Undo, &ids).unwrap();
+    assert_eq!(st.timeline, before);
+}
+
+#[test]
+fn duplicate_adjacent_clips_to_new_track_remaps_transition_and_undoes_exactly() {
+    let mut first = Clip::new("first", "a", 10, 20);
+    let second = Clip::new("second", "b", 30, 20);
+    first.transition_out = Some(Transition {
+        from_clip_id: first.id.clone(),
+        to_clip_id: second.id.clone(),
+        kind: TransitionKind::CrossDissolve,
+        duration_frames: 8,
+    });
+    let mut st = state(vec![video_track(
+        "source-track",
+        true,
+        vec![first.clone(), second.clone()],
+    )]);
+    let before = st.timeline.clone();
+    let ids = SeqIdGen::new("transition-copy-");
+
+    let result = apply(
+        &mut st,
+        EditCommand::MoveOrDuplicateClipsToNewTrack {
+            clip_ids: vec!["first".into(), "second".into()],
+            lead_clip_id: "first".into(),
+            requested_frame_delta: 40,
+            insert_at: 0,
+            mode: NewTrackClipMode::Duplicate,
+        },
+        &ids,
+    )
+    .unwrap();
+
+    assert_eq!(result.affected_clip_ids.len(), 2);
+    let first_copy = find_clip(&st, &result.affected_clip_ids[0]);
+    let second_copy = find_clip(&st, &result.affected_clip_ids[1]);
+    assert_eq!((first_copy.start_frame, second_copy.start_frame), (50, 70));
+    assert_eq!(
+        first_copy.transition_out,
+        Some(Transition {
+            from_clip_id: first_copy.id.clone(),
+            to_clip_id: second_copy.id.clone(),
+            kind: TransitionKind::CrossDissolve,
+            duration_frames: 8,
+        })
+    );
+    assert!(second_copy.transition_out.is_none());
+    assert_eq!(find_clip(&st, "first"), &first);
+    assert_eq!(find_clip(&st, "second"), &second);
+    assert_eq!(st.version(), 1);
+    assert_eq!(st.undo_depth(), 1);
+
+    apply(&mut st, EditCommand::Undo, &ids).unwrap();
+    assert_eq!(st.timeline, before);
+}
+
+#[test]
+fn duplicate_linked_av_to_new_track_preserves_sources_at_zero_and_overlapping_delta() {
+    for frame_delta in [0, 5] {
+        let mut lead = Clip::new("lead", "av", 10, 20);
+        lead.link_group_id = Some("old-link".into());
+        let original_lead = lead.clone();
+        let mut audio = Clip::new("audio", "av", 10, 20);
+        audio.media_type = ClipType::Audio;
+        audio.source_clip_type = ClipType::Video;
+        audio.link_group_id = Some("old-link".into());
+        let original_audio = audio.clone();
+        let mut st = state(vec![
+            video_track("lead-track", true, vec![lead]),
+            audio_track("audio-track", true, vec![audio]),
+        ]);
+        let before = st.timeline.clone();
+        let ids = SeqIdGen::new(format!("safe-duplicate-{frame_delta}-"));
+
+        let result = apply(
+            &mut st,
+            EditCommand::MoveOrDuplicateClipsToNewTrack {
+                clip_ids: vec!["lead".into(), "audio".into()],
+                lead_clip_id: "lead".into(),
+                requested_frame_delta: frame_delta,
+                insert_at: 0,
+                mode: NewTrackClipMode::Duplicate,
+            },
+            &ids,
+        )
+        .unwrap();
+
+        assert_eq!(find_clip(&st, "lead"), &original_lead);
+        assert_eq!(find_clip(&st, "audio"), &original_audio);
+        assert_eq!(result.affected_clip_ids.len(), 2);
+        let video_copy = find_clip(&st, &result.affected_clip_ids[0]);
+        let audio_copy = find_clip(&st, &result.affected_clip_ids[1]);
+        assert_eq!(video_copy.start_frame, 10 + frame_delta);
+        assert_eq!(audio_copy.start_frame, 10 + frame_delta);
+        assert_eq!(video_copy.link_group_id, audio_copy.link_group_id);
+        assert_ne!(video_copy.link_group_id.as_deref(), Some("old-link"));
+        let audio_copy_location = st.find_clip(&audio_copy.id).unwrap();
+        assert_ne!(
+            st.timeline.tracks[audio_copy_location.track_index].id,
+            "audio-track"
+        );
+        assert_eq!(st.version(), 1);
+        assert_eq!(st.undo_depth(), 1);
+
+        apply(&mut st, EditCommand::Undo, &ids).unwrap();
+        assert_eq!(st.timeline, before);
+    }
+}
+
+#[test]
+fn new_track_gesture_rejects_an_invalid_lead_before_inserting() {
+    let mut st = state(vec![video_track(
+        "lead-track",
+        true,
+        vec![Clip::new("lead", "av", 10, 20)],
+    )]);
+    let before = document_snapshot(&st);
+    let ids = SeqIdGen::new("invalid-new-track-");
+
+    let error = apply(
+        &mut st,
+        EditCommand::MoveOrDuplicateClipsToNewTrack {
+            clip_ids: vec!["lead".into()],
+            lead_clip_id: "missing".into(),
+            requested_frame_delta: 0,
+            insert_at: 0,
+            mode: NewTrackClipMode::Move,
+        },
+        &ids,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("leadClipId"));
+    assert_eq!(document_snapshot(&st), before);
+    assert_eq!(st.undo_depth(), 0);
+}
+
+#[test]
+fn paste_clips_deep_copies_all_fields_and_remaps_only_internal_references() {
+    let mut video_media = media_entry("video-a", ClipType::Video, 10.0);
+    video_media.has_audio = Some(true);
+    let second_media = media_entry("video-b", ClipType::Video, 10.0);
+
+    let mut nested_timeline = Timeline::new();
+    nested_timeline.tracks = vec![video_track(
+        "nested-track",
+        true,
+        vec![Clip::new("nested-leaf", "video-b", 0, 10)],
+    )];
+    let mut timeline = Timeline::new();
+    timeline.nested_sequences.push(NestedSequence::new(
+        "nested-sequence",
+        "Nested",
+        nested_timeline,
+    ));
+    timeline.tracks = vec![
+        video_track("video-target", true, vec![]),
+        audio_track("audio-target", true, vec![]),
+    ];
+    let mut manifest = MediaManifest::new();
+    manifest.entries = vec![video_media, second_media];
+    let mut st = EditorState::new(timeline, manifest);
+    let before = st.timeline.clone();
+    let ids = SeqIdGen::new("paste-");
+
+    let mut first = Clip::new("old-first", "video-a", 0, 30);
+    first.trim_start_frame = 3;
+    first.trim_end_frame = 7;
+    first.speed = 1.25;
+    first.volume = 0.75;
+    first.fade_in_frames = 4;
+    first.fade_out_frames = 5;
+    first.fade_in_interpolation = Interpolation::Smooth;
+    first.opacity = 0.8;
+    first.transform = Transform {
+        center_x: 0.3,
+        center_y: 0.4,
+        width: 0.5,
+        height: 0.6,
+        rotation: 12.0,
+        flip_horizontal: true,
+        flip_vertical: false,
+    };
+    first.crop = Crop {
+        left: 0.1,
+        top: 0.2,
+        right: 0.05,
+        bottom: 0.15,
+    };
+    first.opacity_track = Some(KeyframeTrack::from_keyframes(vec![Keyframe::new(0, 0.4)]));
+    first.position_track = Some(KeyframeTrack::from_keyframes(vec![Keyframe::new(
+        0,
+        AnimPair::new(0.2, 0.8),
+    )]));
+    first.color_grade = Some(ColorGrade::default());
+    first.lut = Some(LutReference::new("0123456789abcdef".repeat(4), "Paste LUT", 0.6).unwrap());
+    first.chroma_key = Some(ChromaKey::default());
+    first.masks = vec![Mask {
+        shape: MaskShape::Circle {
+            center: Point2::new(0.5, 0.5),
+            radius: Point2::new(0.25, 0.25),
+        },
+        feather: 0.1,
+        invert: true,
+        ..Mask::default()
+    }];
+    first.effects = vec![Effect::new("grayscale").with_param("amount", 0.4)];
+    first.reversed = true;
+    first.link_group_id = Some("old-link".into());
+    first.caption_group_id = Some("old-caption".into());
+
+    let mut second = Clip::new("old-second", "video-b", 30, 30);
+    second.caption_group_id = Some("old-caption".into());
+    first.transition_out = Some(Transition {
+        from_clip_id: first.id.clone(),
+        to_clip_id: second.id.clone(),
+        kind: TransitionKind::CrossDissolve,
+        duration_frames: 8,
+    });
+    second.transition_out = Some(Transition {
+        from_clip_id: second.id.clone(),
+        to_clip_id: "outside-selection".into(),
+        kind: TransitionKind::CrossDissolve,
+        duration_frames: 8,
+    });
+
+    let mut linked_audio = Clip::new("old-audio", "video-a", 0, 30);
+    linked_audio.media_type = ClipType::Audio;
+    linked_audio.source_clip_type = ClipType::Video;
+    linked_audio.link_group_id = Some("old-link".into());
+
+    let mut text = Clip::new("old-text", "", 60, 20);
+    text.media_type = ClipType::Text;
+    text.source_clip_type = ClipType::Text;
+    text.text_content = Some("Copied title".into());
+    text.text_style = Some(opentake_domain::TextStyle::default());
+    text.caption_group_id = Some("old-caption".into());
+
+    let compound = Clip::new_nested("old-compound", "nested-sequence", 90, 20);
+    let entries = vec![
+        PasteClipEntry {
+            clip: second.clone(),
+            target_track_id: "video-target".into(),
+            start_frame: 230,
+        },
+        PasteClipEntry {
+            clip: linked_audio.clone(),
+            target_track_id: "audio-target".into(),
+            start_frame: 200,
+        },
+        PasteClipEntry {
+            clip: first.clone(),
+            target_track_id: "video-target".into(),
+            start_frame: 200,
+        },
+        PasteClipEntry {
+            clip: text.clone(),
+            target_track_id: "video-target".into(),
+            start_frame: 300,
+        },
+        PasteClipEntry {
+            clip: compound.clone(),
+            target_track_id: "video-target".into(),
+            start_frame: 330,
+        },
+    ];
+
+    let result = apply(&mut st, EditCommand::PasteClips { entries }, &ids).unwrap();
+    assert_eq!(result.affected_clip_ids.len(), 5);
+    assert_eq!(st.version(), 1);
+    assert_eq!(st.undo_depth(), 1);
+
+    let new_second = find_clip(&st, &result.affected_clip_ids[0]).clone();
+    let new_audio = find_clip(&st, &result.affected_clip_ids[1]).clone();
+    let new_first = find_clip(&st, &result.affected_clip_ids[2]).clone();
+    let new_text = find_clip(&st, &result.affected_clip_ids[3]).clone();
+    let new_compound = find_clip(&st, &result.affected_clip_ids[4]).clone();
+
+    let mut expected_first = first;
+    expected_first.id = result.affected_clip_ids[2].clone();
+    expected_first.start_frame = 200;
+    expected_first.link_group_id = new_first.link_group_id.clone();
+    expected_first.caption_group_id = new_first.caption_group_id.clone();
+    expected_first.transition_out = Some(Transition {
+        from_clip_id: result.affected_clip_ids[2].clone(),
+        to_clip_id: result.affected_clip_ids[0].clone(),
+        kind: TransitionKind::CrossDissolve,
+        duration_frames: 8,
+    });
+    assert_eq!(new_first, expected_first);
+
+    let mut expected_second = second;
+    expected_second.id = result.affected_clip_ids[0].clone();
+    expected_second.start_frame = 230;
+    expected_second.caption_group_id = new_second.caption_group_id.clone();
+    expected_second.transition_out = None;
+    assert_eq!(new_second, expected_second);
+
+    let mut expected_audio = linked_audio;
+    expected_audio.id = result.affected_clip_ids[1].clone();
+    expected_audio.start_frame = 200;
+    expected_audio.link_group_id = new_audio.link_group_id.clone();
+    assert_eq!(new_audio, expected_audio);
+
+    let mut expected_text = text;
+    expected_text.id = result.affected_clip_ids[3].clone();
+    expected_text.start_frame = 300;
+    expected_text.caption_group_id = new_text.caption_group_id.clone();
+    assert_eq!(new_text, expected_text);
+
+    let mut expected_compound = compound;
+    expected_compound.id = result.affected_clip_ids[4].clone();
+    expected_compound.start_frame = 330;
+    assert_eq!(new_compound, expected_compound);
+
+    assert_eq!(new_first.link_group_id, new_audio.link_group_id);
+    assert_ne!(new_first.link_group_id.as_deref(), Some("old-link"));
+    assert_eq!(new_first.caption_group_id, new_second.caption_group_id);
+    assert_eq!(new_first.caption_group_id, new_text.caption_group_id);
+    assert_ne!(new_first.caption_group_id.as_deref(), Some("old-caption"));
+
+    apply(&mut st, EditCommand::Undo, &ids).unwrap();
+    assert_eq!(st.timeline, before);
+}
+
+#[test]
+fn paste_clips_rejects_invalid_media_without_clearing_destinations() {
+    let blocker = Clip::new("blocker", "known", 0, 30);
+    let mut st = state_with_media(
+        vec![video_track("video-target", true, vec![blocker])],
+        vec![media_entry("known", ClipType::Video, 1.0)],
+    );
+    let before = document_snapshot(&st);
+    let ids = SeqIdGen::new("invalid-paste-");
+    let missing = Clip::new("clipboard", "missing", 0, 30);
+
+    let error = apply(
+        &mut st,
+        EditCommand::PasteClips {
+            entries: vec![PasteClipEntry {
+                clip: missing,
+                target_track_id: "video-target".into(),
+                start_frame: 0,
+            }],
+        },
+        &ids,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("Media not found"));
+    assert_eq!(document_snapshot(&st), before);
+    assert_eq!(st.version(), 0);
+    assert_eq!(st.undo_depth(), 0);
 }
 
 /// Composite acceptance entry tracked by the data-safety implementation plan.

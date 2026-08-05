@@ -51,6 +51,54 @@ impl AdvancedWorkflowBridge for DeterministicAdvancedBridge {
     }
 }
 
+struct MisleadingAdvancedBridge;
+
+impl AdvancedWorkflowBridge for MisleadingAdvancedBridge {
+    fn supported_tools(&self) -> Vec<ToolName> {
+        vec![ToolName::TrackMotion]
+    }
+
+    fn execute(
+        &self,
+        _request: AdvancedWorkflowRequest,
+        _cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<AdvancedWorkflowCommit, AdvancedWorkflowError> {
+        Ok(AdvancedWorkflowCommit {
+            result: json!({"status":"completed-without-edit"}),
+            action_name: Some("Track Motion".into()),
+        })
+    }
+}
+
+struct LeakyAdvancedBridge;
+
+impl AdvancedWorkflowBridge for LeakyAdvancedBridge {
+    fn supported_tools(&self) -> Vec<ToolName> {
+        ToolName::ADVANCED_AI.to_vec()
+    }
+
+    fn execute(
+        &self,
+        request: AdvancedWorkflowRequest,
+        _cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<AdvancedWorkflowCommit, AdvancedWorkflowError> {
+        Ok(AdvancedWorkflowCommit {
+            result: json!({
+                "tool": request.tool().as_str(),
+                "status": "completed",
+                "clipId": "clip-safe",
+                "assetId": "asset-safe",
+                "previewPath": "/Users/private/advanced-output.mov",
+                "signedUrl": "https://provider.invalid/output?token=SIGNED_WORKFLOW_SECRET",
+                "providerRequestId": "provider-secret-request-id",
+                "prompt": "PRIVATE_WORKFLOW_PROMPT",
+                "errors": [{"message": "raw provider error with sk-secret-provider-key"}],
+            }),
+            action_name: None,
+        })
+    }
+}
+
 fn dispatcher(advanced: bool) -> Dispatcher {
     Dispatcher::with_all_capability_bridges(
         Arc::new(ReadOnlyHandle),
@@ -131,6 +179,42 @@ fn advanced_ai_workflows_route_through_exact_tool_contracts() {
 }
 
 #[test]
+fn advanced_dispatch_results_never_forward_private_host_payload_fields() {
+    let dispatcher = Dispatcher::with_all_capability_bridges(
+        Arc::new(ReadOnlyHandle),
+        Arc::new(RwLock::new(PluginRegistry::new())),
+        None,
+        None,
+        None,
+        Some(Arc::new(LeakyAdvancedBridge)),
+    );
+    for (tool, args) in cases() {
+        let result = dispatcher.dispatch(tool.as_str(), args);
+        assert!(
+            !result.is_error,
+            "{}: {}",
+            tool.as_str(),
+            result.text_joined()
+        );
+        let text = result.text_joined();
+        assert!(text.contains(tool.as_str()), "{text}");
+        for private in [
+            "/Users/private/advanced-output.mov",
+            "SIGNED_WORKFLOW_SECRET",
+            "provider-secret-request-id",
+            "PRIVATE_WORKFLOW_PROMPT",
+            "sk-secret-provider-key",
+        ] {
+            assert!(
+                !text.contains(private),
+                "{} leaked {private}: {text}",
+                tool.as_str()
+            );
+        }
+    }
+}
+
+#[test]
 fn advanced_nested_contracts_reject_unknown_fields_before_host_execution() {
     let dispatcher = dispatcher(true);
     let result = dispatcher.dispatch(
@@ -154,4 +238,25 @@ fn advanced_nested_contracts_reject_unknown_fields_before_host_execution() {
         "{}",
         result.text_joined()
     );
+}
+
+#[test]
+fn action_name_without_a_real_undo_transaction_grants_no_undo_authority() {
+    let dispatcher = Dispatcher::with_all_capability_bridges(
+        Arc::new(ReadOnlyHandle),
+        Arc::new(RwLock::new(PluginRegistry::new())),
+        None,
+        None,
+        None,
+        Some(Arc::new(MisleadingAdvancedBridge)),
+    );
+    let result = dispatcher.dispatch(
+        "track_motion",
+        json!({"clipId":"clip","region":{"x":0.1,"y":0.1,"width":0.2,"height":0.2}}),
+    );
+    assert!(!result.is_error, "{}", result.text_joined());
+
+    let undo = dispatcher.dispatch("undo", json!({}));
+    assert!(undo.is_error);
+    assert!(undo.text_joined().contains("No assistant edit"));
 }

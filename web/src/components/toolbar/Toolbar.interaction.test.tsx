@@ -157,9 +157,15 @@ describe("Toolbar command controls", () => {
     const apiSource = readFileSync(join(webRoot, "src/lib/api.ts"), "utf8");
     const rustSource = readFileSync(join(webRoot, "../src-tauri/src/commands.rs"), "utf8");
     expect(toolbarSource).toMatch(/await edit\.undo\(\)/);
-    expect(actionSource).toMatch(/export async function undo\(\)[\s\S]*?await api\.undo\(\)/);
-    expect(apiSource).toMatch(/export async function undo\(\)[\s\S]*?invokeImpl<EditResult>\("undo"\)/);
-    expect(rustSource).toMatch(/pub fn undo[\s\S]*?handle_undo\(&core\)/);
+    expect(actionSource).toMatch(
+      /export async function undo\(\)[\s\S]*?api\.undo\(captureProjectEditIdentity\(\)\)/,
+    );
+    expect(apiSource).toMatch(
+      /export async function undo\(expected: ProjectEditIdentity\)[\s\S]*?invokeImpl<EditResult>\("undo", editIdentityArgs\(expected\)\)/,
+    );
+    expect(rustSource).toMatch(
+      /pub fn undo[\s\S]*?handle_edit_apply_at_project_revision[\s\S]*?EditCommand::Undo/,
+    );
   });
 
   it("control-b001ac6b21c97ad0 redo the last undone edit", async () => {
@@ -208,9 +214,15 @@ describe("Toolbar command controls", () => {
     const apiSource = readFileSync(join(webRoot, "src/lib/api.ts"), "utf8");
     const rustSource = readFileSync(join(webRoot, "../src-tauri/src/commands.rs"), "utf8");
     expect(toolbarSource).toMatch(/await edit\.redo\(\)/);
-    expect(actionSource).toMatch(/export async function redo\(\)[\s\S]*?await api\.redo\(\)/);
-    expect(apiSource).toMatch(/export async function redo\(\)[\s\S]*?invokeImpl<EditResult>\("redo"\)/);
-    expect(rustSource).toMatch(/pub fn redo[\s\S]*?handle_redo\(&core\)/);
+    expect(actionSource).toMatch(
+      /export async function redo\(\)[\s\S]*?api\.redo\(captureProjectEditIdentity\(\)\)/,
+    );
+    expect(apiSource).toMatch(
+      /export async function redo\(expected: ProjectEditIdentity\)[\s\S]*?invokeImpl<EditResult>\("redo", editIdentityArgs\(expected\)\)/,
+    );
+    expect(rustSource).toMatch(
+      /pub fn redo[\s\S]*?handle_edit_apply_at_project_revision[\s\S]*?EditCommand::Redo/,
+    );
   });
 
   it("control-9d69468ce3479312 switch to Pointer tool", async () => {
@@ -256,6 +268,9 @@ describe("Toolbar command controls", () => {
     );
     if (!slider) throw new Error("timeline zoom control was not rendered");
     expect(slider.disabled).toBe(false);
+    const globalCss = readFileSync(join(process.cwd(), "src/styles/global.css"), "utf8");
+    expect(globalCss).toMatch(/\.zoom-slider\s*\{[\s\S]*?height:\s*24px/);
+    expect(globalCss).toMatch(/\.zoom-slider::-webkit-slider-runnable-track/);
 
     slider.focus();
     await act(async () => {
@@ -311,10 +326,18 @@ describe("Toolbar command controls", () => {
     const apiSource = readFileSync(join(webRoot, "src/lib/api.ts"), "utf8");
     const rustSource = readFileSync(join(webRoot, "../src-tauri/src/commands.rs"), "utf8");
     const opsSource = readFileSync(join(webRoot, "../crates/opentake-ops/src/command.rs"), "utf8");
-    expect(actionSource).toMatch(/export async function splitAtPlayhead\(\)[\s\S]*?splitClip\(id, frame\)/);
-    expect(apiSource).toMatch(/export async function editApply[\s\S]*?invokeImpl<EditResult>\("edit_apply", \{ command \}\)/);
-    expect(rustSource).toMatch(/pub fn edit_apply[\s\S]*?other\.into_command\(\)[\s\S]*?handle_edit_apply/);
-    expect(opsSource).toMatch(/SplitClip \{ clip_id: String, at_frame: i32 \}/);
+    expect(actionSource).toMatch(
+      /export async function splitAtPlayhead\(\)[\s\S]*?splitClips\(ids, frame\)/,
+    );
+    expect(apiSource).toMatch(
+      /export async function editApply[\s\S]*?invokeImpl<EditResult>\("edit_apply", \{[\s\S]*?command,[\s\S]*?editIdentityArgs\(expected\)/,
+    );
+    expect(rustSource).toMatch(
+      /pub fn edit_apply[\s\S]*?other\.into_command\(\)[\s\S]*?handle_edit_apply_at_project_revision/,
+    );
+    expect(opsSource).toMatch(
+      /SplitClips \{[\s\S]*?clip_ids: Vec<String>,[\s\S]*?at_frame: i32/,
+    );
   });
 
   it("control-f38c30bc83d65d2e trim selected clip starts to playhead", async () => {

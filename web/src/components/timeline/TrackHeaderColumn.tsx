@@ -128,6 +128,8 @@ interface RowProps {
   onResize: (delta: number) => void;
 }
 
+const TRACK_RESIZE_HIT_TARGET = 24;
+
 function TrackHeaderRow(p: RowProps) {
   const t = useT();
   const pushToast = useEditorUiStore((s) => s.pushToast);
@@ -274,7 +276,16 @@ function TrackHeaderRow(p: RowProps) {
             title={t("timeline.mute")}
             onPointerDown={(e) => e.stopPropagation()}
             onClick={() => updateTrack({ muted: !p.muted })}
-            style={{ color: iconColor(!p.muted), display: "inline-flex", cursor: "pointer" }}
+            className="hover-area"
+            style={{
+              width: 24,
+              height: 24,
+              color: iconColor(!p.muted),
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: "pointer",
+            }}
           >
             <Icon icon={p.muted ? VolumeX : Volume2} size={11} />
           </button>
@@ -288,7 +299,16 @@ function TrackHeaderRow(p: RowProps) {
             title={t("timeline.hide")}
             onPointerDown={(e) => e.stopPropagation()}
             onClick={() => updateTrack({ hidden: !p.hidden })}
-            style={{ color: iconColor(!p.hidden), display: "inline-flex", cursor: "pointer" }}
+            className="hover-area"
+            style={{
+              width: 24,
+              height: 24,
+              color: iconColor(!p.hidden),
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: "pointer",
+            }}
           >
             <Icon icon={p.hidden ? EyeOff : Eye} size={11} />
           </button>
@@ -302,7 +322,16 @@ function TrackHeaderRow(p: RowProps) {
           title={t("timeline.syncLock")}
           onPointerDown={(e) => e.stopPropagation()}
           onClick={() => updateTrack({ syncLocked: !p.syncLocked })}
-          style={{ color: iconColor(p.syncLocked), display: "inline-flex", cursor: "pointer" }}
+          className="hover-area"
+          style={{
+            width: 24,
+            height: 24,
+            color: iconColor(p.syncLocked),
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            cursor: "pointer",
+          }}
         >
           <Icon icon={p.syncLocked ? Link : Unlink} size={11} />
         </button>
@@ -345,9 +374,14 @@ function TrackHeaderRow(p: RowProps) {
         style={{
           position: "absolute",
           left: 0,
-          right: 0,
-          bottom: -TRACK_SIZE.resizeHandleZone / 2,
-          height: TRACK_SIZE.resizeHandleZone,
+          // Keep the 24px drag target out from under the two 24px track
+          // buttons; the label-side segment remains a large resize affordance.
+          right: 56,
+          bottom: -TRACK_RESIZE_HIT_TARGET / 2,
+          height: TRACK_RESIZE_HIT_TARGET,
+          // Later track rows are rendered after this row and otherwise win the
+          // real browser hit test over the lower half of this 24px target.
+          zIndex: 3,
           cursor: "ns-resize",
         }}
       />

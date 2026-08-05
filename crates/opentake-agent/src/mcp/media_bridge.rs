@@ -111,12 +111,21 @@ pub struct InspectMediaResult {
     pub transcription_unavailable: bool,
 }
 
-/// The outcome of an `import_media` call, mirroring upstream's `.ok("…")` string
-/// results. The dispatcher wraps `message` in a [`crate::tools::result::ToolResult`].
+/// Non-secret facts from a completed `import_media` call.
+///
+/// Host adapters deliberately cannot supply arbitrary model-facing success
+/// text here: paths, signed URLs, decoder diagnostics, and recovery causes stay
+/// behind the bridge. The dispatcher constructs the fixed public response from
+/// these bounded scalars.
 #[derive(Debug, Clone)]
 pub struct ImportOutcome {
-    /// Human/LLM-facing confirmation line (same shape as upstream `.ok(...)`).
-    pub message: String,
+    /// Number of media assets committed to the project catalog.
+    pub asset_count: usize,
+    /// Number of project folders created while mirroring a directory.
+    pub folder_count: usize,
+    /// The import itself is authoritative, but a failed postcondition could not
+    /// be rolled back and the project should be saved/reopened before editing.
+    pub recovery_required: bool,
 }
 
 /// One decoded `source` object for [`MediaBridge::import_media`]. The dispatcher

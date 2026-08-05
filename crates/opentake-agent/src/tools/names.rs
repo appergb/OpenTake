@@ -90,6 +90,17 @@ impl ToolName {
         )
     }
 
+    /// Why a schema-known tool is deliberately hidden from discovery, or
+    /// `None` when the tool is not capability-gated. The dispatch gate appends
+    /// this to its fail-closed "not advertised" result so a model invoking a
+    /// gated tool by name learns the missing backend instead of guessing.
+    pub const fn hidden_capability_reason(self) -> Option<&'static str> {
+        match self {
+            ToolName::SmartReframe => Some("vision analysis backend is not available"),
+            _ => None,
+        }
+    }
+
     /// The wire name (matches upstream / spec exactly).
     pub fn as_str(self) -> &'static str {
         match self {
@@ -151,9 +162,10 @@ impl ToolName {
     }
 
     /// Base tools advertised to MCP and in-app Chat in registration order.
-    /// Provider-backed generation and Motion tools are appended only when the
-    /// current host reports their respective live capabilities.
-    pub const ALL: [ToolName; 39] = [
+    /// Provider-backed generation, Motion, and vision-analysis tools are
+    /// appended only when the current host reports their respective live
+    /// capabilities.
+    pub const ALL: [ToolName; 38] = [
         ToolName::GetTimeline,
         ToolName::GetMedia,
         ToolName::InspectMedia,
@@ -175,7 +187,6 @@ impl ToolName {
         ToolName::AddCaptions,
         ToolName::DetectBeats,
         ToolName::AutoCutToBeats,
-        ToolName::SmartReframe,
         ToolName::TightenSilences,
         ToolName::RemoveFillerWords,
         ToolName::ImportMedia,
@@ -208,6 +219,11 @@ impl ToolName {
     /// placement bridge. They remain known for strict compatibility parsing in
     /// all other hosts.
     pub const MOTION: [ToolName; 2] = [ToolName::AddMotionGraphic, ToolName::EditMotionGraphic];
+
+    /// Vision-analysis tools appended only by a host with a live frame-sampling
+    /// / saliency backend. They remain known for strict compatibility parsing
+    /// in all other hosts.
+    pub const VISION: [ToolName; 1] = [ToolName::SmartReframe];
 
     /// Advanced workflows are schema-known but never unconditionally
     /// advertised. The desktop host appends only the exact capabilities backed
@@ -342,8 +358,8 @@ mod tests {
     }
 
     #[test]
-    fn advertised_set_is_39_and_known_set_is_54() {
-        assert_eq!(ToolName::ALL.len(), 39);
+    fn advertised_set_is_38_and_known_set_is_54() {
+        assert_eq!(ToolName::ALL.len(), 38);
         assert_eq!(ToolName::KNOWN.len(), 54);
         assert!(ToolName::ALL
             .iter()
@@ -357,6 +373,33 @@ mod tests {
             assert!(ToolName::KNOWN.contains(&tool));
             assert!(!ToolName::ALL.contains(&tool));
             assert!(!ToolName::UPSTREAM.contains(&tool));
+        }
+    }
+
+    #[test]
+    fn vision_tools_are_known_but_capability_gated() {
+        assert_eq!(ToolName::VISION, [ToolName::SmartReframe]);
+        for tool in ToolName::VISION {
+            assert_eq!(ToolName::from_str(tool.as_str()), Ok(tool));
+            assert!(ToolName::KNOWN.contains(&tool));
+            assert!(!ToolName::ALL.contains(&tool));
+            assert!(!ToolName::UPSTREAM.contains(&tool));
+            assert_eq!(
+                tool.hidden_capability_reason(),
+                Some("vision analysis backend is not available")
+            );
+        }
+    }
+
+    #[test]
+    fn ungated_tools_have_no_hidden_capability_reason() {
+        for tool in ToolName::ALL {
+            assert_eq!(
+                tool.hidden_capability_reason(),
+                None,
+                "{} is advertised but reports a hidden capability",
+                tool.as_str()
+            );
         }
     }
 

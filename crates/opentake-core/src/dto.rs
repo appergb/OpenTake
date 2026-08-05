@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use opentake_domain::Timeline;
 use opentake_ops::command::{EditCommand, EditResult};
 
-use crate::core::{AppCore, TimelineSnapshot};
+use crate::core::{AppCore, ProjectRevision, TimelineSnapshot};
 use crate::error::{CoreError, Result};
 
 /// Machine + human readable error for the Tauri boundary (`core-SPEC.md` §6.3).
@@ -39,6 +39,7 @@ impl From<CoreError> for CmdError {
         let message = match &err {
             CoreError::Edit(_)
             | CoreError::Media(_)
+            | CoreError::StaleProject
             | CoreError::Project(opentake_project::ProjectError::CompatibilityReadOnly {
                 ..
             })
@@ -135,6 +136,20 @@ pub fn handle_edit_apply(
     command: EditCommand,
 ) -> std::result::Result<EditResultDto, CmdError> {
     map(core.apply(command).map(EditResultDto::from))
+}
+
+/// Revision- and path-bound editing entry point for untrusted IPC clients.
+/// Unlike [`handle_edit_apply`], a delayed request is rejected after any
+/// project switch, Save As, or intervening timeline edit.
+pub fn handle_edit_apply_at_project_revision(
+    core: &AppCore,
+    expected: ProjectRevision,
+    expected_project_path: Option<&std::path::Path>,
+    command: EditCommand,
+) -> std::result::Result<EditResultDto, CmdError> {
+    map(core
+        .apply_at_project_revision(expected, expected_project_path, command)
+        .map(EditResultDto::from))
 }
 
 /// `undo`: global undo (Cmd+Z).
@@ -275,6 +290,35 @@ mod tests {
             "failed edit mutated project identity"
         );
         assert_eq!(events.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn revision_bound_edit_reports_stale_project_without_mutation() {
+        let core = core_with_track();
+        let snapshot = core.get_timeline();
+        core.apply(add_one_clip()).unwrap();
+        let before = core.get_timeline();
+
+        let error = handle_edit_apply_at_project_revision(
+            &core,
+            ProjectRevision {
+                project_epoch: snapshot.project_epoch,
+                version: snapshot.version,
+            },
+            snapshot.project_path.as_deref(),
+            add_one_clip(),
+        )
+        .expect_err("a stale IPC mirror must be rejected");
+
+        assert_eq!(error.code, "staleProject");
+        assert_eq!(
+            error.message,
+            "project changed while preparing a deferred edit"
+        );
+        let after = core.get_timeline();
+        assert_eq!(after.timeline, before.timeline);
+        assert_eq!(after.version, before.version);
+        assert_eq!(after.project_epoch, before.project_epoch);
     }
 
     #[test]

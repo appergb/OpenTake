@@ -48,8 +48,14 @@ class WindowsProductCiContractTests(unittest.TestCase):
 
     def test_comment_cannot_replace_workspace_test_command(self) -> None:
         mutated = WORKFLOW.replace(
-            "run: cargo test --workspace -- --test-threads=1",
-            "run: echo skipped # cargo test --workspace -- --test-threads=1",
+            "      - name: Rust workspace tests\n"
+            "        env:\n"
+            "          OPENTAKE_MOTION_TRACE: '1'\n"
+            "        run: cargo test --workspace -- --test-threads=1",
+            "      - name: Rust workspace tests\n"
+            "        env:\n"
+            "          OPENTAKE_MOTION_TRACE: '1'\n"
+            "        run: echo skipped # cargo test --workspace -- --test-threads=1",
             1,
         )
         self.assert_rejected(mutated, "Rust workspace tests command")
@@ -69,6 +75,22 @@ class WindowsProductCiContractTests(unittest.TestCase):
             1,
         )
         self.assert_rejected(mutated, "pinned FFmpeg cancellation lifecycle")
+
+    def test_windows_process_tree_gate_must_cover_fast_parent_exit(self) -> None:
+        mutated = WORKFLOW.replace(
+            "          process_tree::tests::windows_suspended_job_contains_fast_exit_descendant\n",
+            "",
+            1,
+        )
+        self.assert_rejected(mutated, "race-free Windows process-tree containment")
+
+    def test_windows_reparse_gate_must_cover_retained_external_source(self) -> None:
+        mutated = WORKFLOW.replace(
+            "          cargo test -p opentake-tauri --lib retained_external_source_rejects_windows_reparse_contract\n",
+            "",
+            1,
+        )
+        self.assert_rejected(mutated, "complete Windows retained-path reparse safety")
 
     def test_product_cache_cannot_restore_target_outputs(self) -> None:
         mutated = WORKFLOW.replace(

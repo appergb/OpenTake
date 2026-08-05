@@ -79,6 +79,7 @@ export function MediaTabBar({
             }}
             style={{
               position: "relative",
+              minHeight: 24,
               padding: "var(--space-sm) 2px",
               background: "transparent",
               border: "none",
@@ -163,6 +164,7 @@ export function MediaSubTabBar({
             aria-selected={selected}
             onClick={() => onSelect(tab.id)}
             style={{
+              minHeight: 24,
               padding: "2px var(--space-sm-md)",
               borderRadius: "var(--radius-sm)",
               border: "none",

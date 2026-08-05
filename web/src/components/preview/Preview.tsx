@@ -73,6 +73,12 @@ import { rustEngineEnabled } from "./rustEngine";
 import { RustFrameBuffer } from "./RustFrameBuffer.tsx";
 import { createScrubGesture, transitionScrubGesture } from "./scrubGesture";
 
+export function exactTimelineFrame(frame: number, total: number): number {
+  const safeTotal = Number.isFinite(total) ? Math.max(0, Math.round(total)) : 0;
+  const rounded = Number.isFinite(frame) ? Math.round(frame) : 0;
+  return Math.max(0, Math.min(safeTotal, rounded));
+}
+
 export function Preview() {
   const t = useT();
   const rootTimeline = useProjectStore((s) => s.timeline);
@@ -255,6 +261,18 @@ export function Preview() {
       const snapped = snapFrameToEdge(timeline, clamped, Math.max(2, Math.round(fps * 0.25)));
       setCurrentFrame(snapped.frame);
       maybeSnapFeedback(snapped.snappedTo);
+    }
+  };
+
+  // Transport buttons and keyboard slider steps are exact frame operations.
+  // They must not pass through clip-edge magnetism or a request for frame 1
+  // near a clip starting at 0 would snap straight back to 0.
+  const seekToExact = (frame: number) => {
+    const clamped = exactTimelineFrame(frame, total);
+    if (previewing) {
+      if (mediaRef.current) mediaRef.current.currentTime = clamped / fps;
+    } else {
+      setCurrentFrame(clamped);
     }
   };
 
@@ -518,6 +536,7 @@ export function Preview() {
         frame={activeShownFrame}
         total={total}
         onSeek={seekTo}
+        onExactSeek={seekToExact}
         onScrubbingChange={previewing ? undefined : setScrubbing}
       />
 
@@ -539,10 +558,10 @@ export function Preview() {
         </span>
         <div style={{ flex: 1 }} />
         <div style={{ display: "flex", alignItems: "center", gap: "var(--space-md)" }}>
-          <HoverButton title={t("preview.jumpStart")} onClick={() => seekTo(0)}>
+          <HoverButton title={t("preview.jumpStart")} onClick={() => seekToExact(0)}>
             <Icon icon={SkipBack} size={13} />
           </HoverButton>
-          <HoverButton title={t("preview.stepBack")} onClick={() => seekTo(activeShownFrame - 1)}>
+          <HoverButton title={t("preview.stepBack")} onClick={() => seekToExact(activeShownFrame - 1)}>
             <Icon icon={StepBack} size={13} />
           </HoverButton>
           <HoverButton
@@ -552,10 +571,10 @@ export function Preview() {
           >
             <Icon icon={playing ? Pause : Play} size={14} />
           </HoverButton>
-          <HoverButton title={t("preview.stepForward")} onClick={() => seekTo(activeShownFrame + 1)}>
+          <HoverButton title={t("preview.stepForward")} onClick={() => seekToExact(activeShownFrame + 1)}>
             <Icon icon={StepForward} size={13} />
           </HoverButton>
-          <HoverButton title={t("preview.jumpEnd")} onClick={() => seekTo(total)}>
+          <HoverButton title={t("preview.jumpEnd")} onClick={() => seekToExact(total)}>
             <Icon icon={SkipForward} size={13} />
           </HoverButton>
         </div>
@@ -625,7 +644,7 @@ function MediaPreview({
   const t = useT();
   const proxyPlaybackEnabled = useSettingsStore((state) => state.proxyPlaybackEnabled);
   const playbackPath = proxyPlaybackEnabled ? (item.proxyPath ?? item.path) : item.path;
-  const url = assetUrl(playbackPath);
+  const url = item.missing ? null : assetUrl(playbackPath);
   // Hi-res first-frame poster, painted INSTANTLY behind the <video> so a cold
   // click shows a sharp frame with no blank/spinner. Decoded (and cached) by the
   // backend on select; the asset protocol then streams the real video
@@ -717,7 +736,10 @@ function PreviewTabs({ item }: { item: MediaItem | null }) {
         type="button"
         onClick={() => setPreviewMedia(null)}
         style={{
-          paddingBottom: 4,
+          minHeight: 24,
+          display: "inline-flex",
+          alignItems: "center",
+          padding: "0 2px",
           fontSize: "var(--fs-sm-md)",
           fontWeight: "var(--fw-semibold)",
           color: onTimeline ? "var(--text-primary)" : "var(--text-tertiary)",
@@ -729,7 +751,9 @@ function PreviewTabs({ item }: { item: MediaItem | null }) {
       {item && (
         <div
           style={{
-            paddingBottom: 4,
+            minHeight: 24,
+            display: "inline-flex",
+            alignItems: "center",
             maxWidth: 180,
             overflow: "hidden",
             textOverflow: "ellipsis",
@@ -752,12 +776,15 @@ export function ScrubBar({
   frame,
   total,
   onSeek,
+  onExactSeek = onSeek,
   onScrubbingChange,
 }: {
   ariaLabel: string;
   frame: number;
   total: number;
   onSeek: (f: number) => void;
+  /** Exact frame route for keyboard operation; pointer scrubbing remains snapped. */
+  onExactSeek?: (f: number) => void;
   /** Toggled while the user drags the bar, so the engine drives the live
    *  <video> scrub (issue #142) and the GPU composite stays settled-only. */
   onScrubbingChange?: (scrubbing: boolean) => void;
@@ -838,16 +865,17 @@ export function ScrubBar({
           return;
         }
         let next: number | null = null;
-        if (e.key === "ArrowLeft" || e.key === "ArrowDown") next = safeFrame - 1;
-        if (e.key === "ArrowRight" || e.key === "ArrowUp") next = safeFrame + 1;
+        const step = e.shiftKey ? 5 : 1;
+        if (e.key === "ArrowLeft" || e.key === "ArrowDown") next = safeFrame - step;
+        if (e.key === "ArrowRight" || e.key === "ArrowUp") next = safeFrame + step;
         if (e.key === "Home") next = 0;
         if (e.key === "End") next = safeTotal;
         if (next === null || safeTotal <= 0) return;
         e.preventDefault();
-        onSeek(Math.max(0, Math.min(safeTotal, next)));
+        onExactSeek(Math.max(0, Math.min(safeTotal, next)));
       }}
       style={{
-        height: 18,
+        height: 24,
         flex: "0 0 auto",
         display: "flex",
         alignItems: "center",

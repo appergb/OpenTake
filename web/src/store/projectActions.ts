@@ -23,6 +23,31 @@ function withExt(path: string): string {
   return path.endsWith(`.${PROJECT_EXT}`) ? path : `${path}.${PROJECT_EXT}`;
 }
 
+function pathSeparator(path: string): "/" | "\\" {
+  return path.lastIndexOf("\\") > path.lastIndexOf("/") ? "\\" : "/";
+}
+
+async function unusedDefaultProjectPath(defaultDir: string): Promise<string | undefined> {
+  if (!defaultDir) return undefined;
+  const joiner = defaultDir.endsWith("/") || defaultDir.endsWith("\\")
+    ? ""
+    : pathSeparator(defaultDir);
+  const untitled = t("home.untitled");
+
+  try {
+    for (let ordinal = 1; ; ordinal += 1) {
+      const suffix = ordinal === 1 ? "" : ` ${ordinal}`;
+      const candidate = `${defaultDir}${joiner}${untitled}${suffix}.${PROJECT_EXT}`;
+      if (!(await api.checkPathExists(candidate))) return candidate;
+    }
+  } catch {
+    // An unknown candidate must not be passed to NSSavePanel because an
+    // existing `.opentake` directory would be entered as a folder. Point the
+    // panel at the containing directory instead and let it choose a safe name.
+    return defaultDir;
+  }
+}
+
 /**
  * New project. Mirrors upstream `AppState.createNewProject` (`NSSavePanel`):
  * prompt for a save location + name (default `~/Documents/OpenTake`), then
@@ -48,10 +73,7 @@ export async function newProjectAndEnter(): Promise<void> {
     }
 
     const defaultDir = await api.getDefaultProjectDir().catch(() => "");
-    const sep = defaultDir && !defaultDir.endsWith("/") ? "/" : "";
-    const defaultPath = defaultDir
-      ? `${defaultDir}${sep}${t("home.untitled")}.${PROJECT_EXT}`
-      : undefined;
+    const defaultPath = await unusedDefaultProjectPath(defaultDir);
 
     const chosen = await save({
       title: t("home.newProject"),
@@ -135,7 +157,11 @@ async function runSaveCoordinator(): Promise<void> {
     activeSaveSnapshot = snapshot;
 
     try {
-      const savedPath = await api.projectSave(null);
+      const savedPath = await api.projectSave(
+        null,
+        snapshot.projectEpoch,
+        snapshot.projectPath,
+      );
       if (sameProject(snapshot)) {
         useRecentStore.getState().markSaved(savedPath || snapshot.projectPath);
       }
@@ -197,28 +223,64 @@ export function saveCurrentProject(): Promise<void> {
 /** Save the current project to a newly chosen `.opentake` bundle and adopt that
  *  path as the live session. The core performs an atomic Save As (including
  *  project-local media) and only changes its retained root after publication
- *  succeeds; the front-end mirrors the returned canonical path afterwards. */
-export async function saveCurrentProjectAs(): Promise<void> {
+ *  succeeds; the front-end mirrors the returned canonical path afterwards.
+ *  Overlapping gestures share one operation so two native publications cannot
+ *  race the front-end's path ownership. */
+let saveAsInFlight: Promise<void> | null = null;
+
+export function saveCurrentProjectAs(): Promise<void> {
+  if (saveAsInFlight) return saveAsInFlight;
+  const run = runSaveCurrentProjectAs();
+  const tracked = run.finally(() => {
+    if (saveAsInFlight === tracked) saveAsInFlight = null;
+  });
+  saveAsInFlight = tracked;
+  return tracked;
+}
+
+async function runSaveCurrentProjectAs(): Promise<void> {
   const project = useProjectStore.getState();
-  if (!project.projectPath || project.compatibilityReadOnly) return;
+  const request = captureSaveSnapshot();
+  if (!request || project.compatibilityReadOnly) return;
+  const requestIsExactCurrent = () => {
+    const current = captureSaveSnapshot();
+    return Boolean(current && sameSnapshot(request, current));
+  };
+  const requestProjectIsCurrent = (committedPath?: string) => {
+    const current = useProjectStore.getState();
+    return (
+      current.projectEpoch === request.projectEpoch &&
+      (current.projectPath === request.projectPath || current.projectPath === committedPath)
+    );
+  };
   try {
     const save = await saveDialog();
-    if (!save) return;
+    if (!save || !requestIsExactCurrent()) return;
     const selected = await save({
       title: t("menu.saveAs"),
-      defaultPath: project.projectPath,
+      defaultPath: request.projectPath,
       filters: [{ name: "OpenTake", extensions: [PROJECT_EXT] }],
     });
-    if (typeof selected !== "string") return;
-    const committedPath = await api.projectSave(withExt(selected));
+    if (typeof selected !== "string" || !requestIsExactCurrent()) return;
+    const committedPath = await api.projectSave(
+      withExt(selected),
+      request.projectEpoch,
+      request.projectPath,
+    );
+    if (!requestProjectIsCurrent(committedPath)) return;
+    const savedSnapshotIsCurrent = requestIsExactCurrent();
     const current = useProjectStore.getState();
-    current.setProjectPath(committedPath);
-    useProjectStore.getState().markSaved();
+    if (current.projectPath !== committedPath) current.setProjectPath(committedPath);
+    if (savedSnapshotIsCurrent) {
+      useProjectStore.getState().markSaved(request.timelineVersion);
+    }
     useRecentStore.getState().add(committedPath);
   } catch (error) {
-    useEditorUiStore.getState().pushToast(
-      t("project.saveFailed", { error: projectLifecycleErrorMessage(error) }),
-    );
+    if (requestProjectIsCurrent()) {
+      useEditorUiStore.getState().pushToast(
+        t("project.saveFailed", { error: projectLifecycleErrorMessage(error) }),
+      );
+    }
     throw error;
   }
 }
@@ -265,7 +327,7 @@ export async function openProjectViaDialog(): Promise<void> {
       useEditorUiStore.getState().setView("editor");
       return;
     }
-    const selected = await open({ directory: true, multiple: false });
+    const selected = await open({ directory: true, multiple: false, recursive: true });
     if (typeof selected !== "string") return; // cancelled
     delegatedToProjectOpen = true;
     await openProjectPath(selected);

@@ -1,4 +1,4 @@
-# mcp — 回环 MCP server 拉起
+# mcp — Agent 媒体桥与逐轮认证 MCP 宿主
 
 > 上级：[本模块目录](INDEX.md) · [总览](OVERVIEW.md) · [模块文档树](../INDEX.md)
 >
@@ -6,39 +6,28 @@
 
 ## 定位
 
-在 Tauri async runtime 上拉起回环 MCP server（#36）。这是本模块对「AI Agent 网络面」的唯一接线点——真正的 server / 工具派发 / 工作流逻辑都在 `opentake-agent`，本文件只负责**用一个共享会话的 `AppCore` 克隆把它 spawn 起来**。
+本模块实现 Tauri 宿主侧的 `MediaBridge`，让 Agent 的检查、导入、检索和媒体分析复用
+UI 所在的同一个 `AppCore`、缓存、模型与 retained file capability。固定端口外部 MCP
+因为缺少认证配对 UX，在 Beta 2 不由 `lib.rs` 启动。
 
-server 经 Streamable-HTTP 暴露在 `http://127.0.0.1:19789/mcp`，让外部 agent（`claude mcp add --transport http opentake http://127.0.0.1:19789/mcp`、Cursor、Codex…）驱动**与 UI 同一个 `AppCore`**。绑 `127.0.0.1` + 端口 19789 沿用上游约定（见 [`../../architecture/MODULE-PORT-MAP.md`](../../architecture/MODULE-PORT-MAP.md) 设置 / Help 模块）。
+官方 Codex / ChatGPT 的网络面由 `src-tauri/src/codex.rs` 在每轮调用
+`bind_ephemeral_gated` 创建：操作系统分配随机 loopback 端口，随机 256-bit Bearer
+通过子进程私有配置传入，并绑定当前工程 identity / revision / sequence scope。轮次完成、
+取消、deadline 或切工程时关闭 listener 并清理 Codex 进程树。
 
 ## 调用时机
 
-`lib.rs::run()` 的 `setup` 闭包里、`core` 被移入 managed state **之前**调用 `mcp::spawn(core.clone(), workflows_dir)`：
+`lib.rs::run()` 在 setup 中创建共享 `ChatState`、工作流注册表和各能力 bridge，但不启动
+旧的 `server::DEFAULT_ADDR`。用户选择官方 Codex provider 并发送消息时，`codex.rs` 才为
+该轮创建 `Dispatcher`、`AppCoreHandle`、媒体/生成/Motion/高级能力 bridge 与临时 MCP。
 
-```rust
-mcp::spawn(core.clone(), workflows_dir);   // core.clone() 共享同一 live 会话
-…
-app.manage(core);
-```
+## 安全与失败语义
 
-`workflows_dir` = `<app_data_dir>/workflows`。
-
-## spawn 流程
-
-```rust
-pub fn spawn(core: AppCore, workflows_dir: PathBuf) {
-    let handle: Arc<dyn CoreHandle> = Arc::new(AppCoreHandle::new(core));
-    let registry = Arc::new(RwLock::new(build_registry(&workflows_dir)));
-    tauri::async_runtime::spawn(async move {
-        let addr = server::DEFAULT_ADDR.parse()…;     // 解析失败仅记日志后返回
-        if let Err(e) = server::serve(addr, handle, registry).await {
-            eprintln!("[mcp] server stopped: {e}");
-        }
-    });
-}
-```
-
-- **会话共享**：`AppCoreHandle::new(core)` 包住共享会话克隆，对外暴露为 `dyn CoreHandle`。Agent 的编辑与 UI 走同一权威 Timeline 与撤销栈。
-- **容错**：bind 失败（端口占用）等只记日志、**不致命**——app 照常运行，只是没有 agent 网络面。`DEFAULT_ADDR` 解析失败同样只记日志后返回。
+- **逐轮认证**：每轮新端口、新 Bearer；缺失或错误 Authorization 直接拒绝。
+- **工程绑定**：迟到调用必须通过工程 identity、revision 与嵌套序列 scope 守卫。
+- **生命周期闭合**：成功、失败、取消和 deadline 都会关闭 listener 并清理子进程树。
+- **外部入口关闭**：`127.0.0.1:19789` 仍作为 agent crate 的测试/兼容常量保留，
+  但不是 Beta 2 产品启动入口，不能作为公开连接说明。
 
 ## 工作流插件 registry（build_registry）
 
@@ -58,7 +47,7 @@ fn build_registry(workflows_dir: &Path) -> PluginRegistry {
 - **用户插件覆盖同 id 内置**：`register` 按 id 替换，且在内置之后运行。
 - 加载错误逐条记日志，不阻断启动。
 
-> 工具集、Context Signal、工作流插件格式、内置 Agent 提示等详见跨模块文档 [opentake-agent](../opentake-agent/INDEX.md)。本文件只是宿主壳里的拉起点。
+> 工具集、Context Signal、工作流插件格式、内置 Agent 提示等详见跨模块文档 [opentake-agent](../opentake-agent/INDEX.md)。本文件只描述宿主 bridge 与安全生命周期。
 
 ---
 

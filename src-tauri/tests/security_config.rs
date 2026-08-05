@@ -45,8 +45,10 @@ fn packaged_webview_csp_is_explicit_and_local_only() {
             .get(directive)
             .and_then(Value::as_str)
             .unwrap_or_else(|| panic!("{directive} must be explicit"));
-        assert!(value.contains("asset:"));
-        assert!(value.contains("http://asset.localhost"));
+        assert!(value.contains("opentake-asset:"));
+        assert!(value.contains("http://opentake-asset.localhost"));
+        assert!(!value.contains(" asset:"));
+        assert!(!value.contains("http://asset.localhost"));
         assert!(!value.contains("https:"));
         assert!(!value.contains('*'));
     }
@@ -123,6 +125,19 @@ fn dialog_asset_grants_are_persisted_after_fs_initialization() {
         .find(".plugin(tauri_plugin_persisted_scope::init())")
         .expect("persisted-scope plugin must be initialized");
     assert!(fs < persisted, "fs must initialize before persisted-scope");
+}
+
+#[test]
+fn legacy_and_current_asset_schemes_use_the_safe_async_handler() {
+    let runtime = include_str!("../src/lib.rs");
+    assert!(runtime.contains(".register_asynchronous_uri_scheme_protocol(\"asset\","));
+    assert!(runtime
+        .contains(".register_asynchronous_uri_scheme_protocol(\n            \"opentake-asset\","));
+    assert_eq!(
+        runtime.matches(".respond(\n").count(),
+        2,
+        "both schemes must delegate to SafeAssetProtocol::respond"
+    );
 }
 
 #[test]

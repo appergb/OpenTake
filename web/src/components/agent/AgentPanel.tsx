@@ -463,12 +463,14 @@ export function AgentPanel() {
                 aria-label={`${t("agent.closeTab")} ${title}`}
                 disabled={streaming}
                 onClick={() => void closeChat(session)}
+                className="hover-area"
                 style={{
-                  width: 20,
+                  width: 24,
                   height: 24,
                   display: "inline-flex",
                   alignItems: "center",
                   justifyContent: "center",
+                  borderRadius: "var(--radius-xs)",
                   color: "var(--text-muted)",
                   opacity: streaming ? 0.4 : 1,
                 }}

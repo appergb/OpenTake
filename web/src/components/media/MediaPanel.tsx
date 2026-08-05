@@ -14,6 +14,8 @@ import {
   Filter,
   ArrowUpDown,
   LayoutGrid,
+  List,
+  Check,
   FolderOpen,
   Folder as FolderIcon,
   ChevronRight,
@@ -49,7 +51,16 @@ import { assetUrl } from "../../lib/asset";
 import { BoundedCache } from "../../lib/lru";
 import { childFolders, folderTrail, normalizeFolderId } from "../../lib/folderTree";
 import { useProjectStore } from "../../store/projectStore";
-import { addMediaToTimeline } from "../../store/editActions";
+import {
+  addMediaToTimeline,
+  reportMediaPlacementFailure,
+} from "../../store/editActions";
+import {
+  deleteFolderFromContextMenu,
+  deleteMediaFromContextMenu,
+  deleteSelectedFolders,
+  deleteSelectedMediaAssets,
+} from "../../store/mediaDeleteActions";
 import {
   cancelGeneration,
   retryGeneration,
@@ -88,6 +99,94 @@ const mediaThumbnailInFlight = new Map<string, Promise<string | null>>();
 /** Bounded LRU over the resolved thumbnail paths, so a long library scrolled top
  *  to bottom can't grow memory without limit (see {@link BoundedCache}). */
 const mediaThumbnailCache = new BoundedCache<string | null>(MEDIA_THUMBNAIL_CACHE_MAX);
+
+// ── 视图层展示状态（纯前端，不改媒体镜像）──────────────────────────────
+// 排序键与类型筛选只作用于「已加载媒体列表」的渲染顺序/子集；数据本身仍是
+// Rust 权威镜像（store 不动、不发后端命令）。
+export type MediaViewLayout = "grid" | "list";
+export type MediaSortKey = "default" | "name" | "duration" | "fileSize";
+export type MediaTypeFilter = MediaItem["type"] | "all";
+
+const SORT_OPTIONS: ReadonlyArray<{ id: MediaSortKey; labelKey: string }> = [
+  { id: "default", labelKey: "media.sort.default" },
+  { id: "name", labelKey: "media.sort.name" },
+  { id: "duration", labelKey: "media.sort.duration" },
+  { id: "fileSize", labelKey: "media.sort.fileSize" },
+];
+
+const TYPE_FILTER_OPTIONS: ReadonlyArray<{ id: MediaTypeFilter; labelKey: string }> = [
+  { id: "all", labelKey: "media.filter.all" },
+  { id: "video", labelKey: "media.filter.video" },
+  { id: "audio", labelKey: "media.filter.audio" },
+  { id: "image", labelKey: "media.filter.image" },
+  { id: "text", labelKey: "media.filter.text" },
+  { id: "lottie", labelKey: "media.filter.lottie" },
+];
+
+/** 局部排序（ES2019 稳定排序，同值保持原顺序）。`default` 返回原数组引用。 */
+export function sortMediaItems(items: MediaItem[], key: MediaSortKey): MediaItem[] {
+  if (key === "default" || items.length < 2) return items;
+  const sorted = [...items];
+  switch (key) {
+    case "name":
+      sorted.sort((a, b) =>
+        a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }),
+      );
+      break;
+    case "duration":
+      sorted.sort((a, b) => b.duration - a.duration);
+      break;
+    case "fileSize":
+      // 缺失/离线素材没有 fileSize，按 -1 兜底排在最后。
+      sorted.sort((a, b) => (b.fileSize ?? -1) - (a.fileSize ?? -1));
+      break;
+  }
+  return sorted;
+}
+
+/** 局部类型筛选；`all` 返回原数组引用。 */
+export function filterMediaByType(items: MediaItem[], type: MediaTypeFilter): MediaItem[] {
+  if (type === "all") return items;
+  return items.filter((item) => item.type === type);
+}
+
+/** Keep command-routing selection synchronized across every media surface.
+ * Delete/Enter commands intentionally consume selectedMediaAssetIds. */
+export function selectMediaAsset(mediaId: string): void {
+  const ui = useEditorUiStore.getState();
+  ui.focusPanel("media");
+  ui.selectMediaAssets(new Set([mediaId]));
+  useEditorUiStore.setState({ selectedFolderIds: new Set() });
+}
+
+/** Select an asset and make it the preview source when it is ready to decode. */
+export function selectMediaForPreview(mediaId: string): void {
+  selectMediaAsset(mediaId);
+  useEditorUiStore.getState().setPreviewMedia(mediaId);
+}
+
+/** Select a folder without entering it so pointer and keyboard users receive a
+ * visible selection step before Enter/double-click drills into the folder. */
+export function selectMediaFolder(folderId: string): void {
+  const ui = useEditorUiStore.getState();
+  ui.focusPanel("media");
+  ui.selectMediaAssets(new Set());
+  useEditorUiStore.setState({
+    selectedFolderIds: new Set([folderId]),
+    previewMediaId: null,
+  });
+}
+
+/** Commit folder navigation and clear the selection that would otherwise stay
+ * hidden after the folder grid changes. */
+export function openMediaFolder(folderId: string, onOpen: (id: string) => void): void {
+  useEditorUiStore.setState({
+    selectedMediaAssetIds: new Set(),
+    selectedFolderIds: new Set(),
+    previewMediaId: null,
+  });
+  onOpen(folderId);
+}
 
 /** Replace the browser's default whole-card drag ghost (which includes the
  * filename) with a compact visual-only preview, matching the native app. */
@@ -235,6 +334,12 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
   const currentFolderId = useEditorUiStore((s) => s.mediaPanelCurrentFolderId);
   const setCurrentFolderId = useEditorUiStore((s) => s.setMediaPanelCurrentFolderId);
   const [search, setSearch] = useState("");
+  // 视图层展示状态：排序/筛选/视图模式只影响渲染，不改媒体镜像（store 不动）。
+  const [viewMode, setViewMode] = useState<MediaViewLayout>("grid");
+  const [sortKey, setSortKey] = useState<MediaSortKey>("default");
+  const [typeFilter, setTypeFilter] = useState<MediaTypeFilter>("all");
+  const [sortOpen, setSortOpen] = useState(false);
+  const [filterOpen, setFilterOpen] = useState(false);
 
   // Folder navigation only applies to the "import" view (the full library tree).
   // "我的/favorites" is a flat cross-folder collection, so it ignores folders.
@@ -281,16 +386,23 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
   // 3) folder — while browsing without a search, only this folder's direct
   //    files. A search ignores folder scope and matches names library-wide
   //    (within the current main/subtab filter).
+  // 4) presentation — local type filter + sort (view-layer only).
   const filteredItems = useMemo(
     () =>
-      items.filter((item) => {
-        if (kind === "audio" && item.type !== "audio") return false;
-        if (subTab === "mine" && !item.favorite) return false;
-        if (query !== "") return item.name.toLowerCase().includes(query);
-        if (browsing && normalizeFolderId(item.folderId) !== folderId) return false;
-        return true;
-      }),
-    [items, kind, subTab, query, browsing, folderId],
+      sortMediaItems(
+        filterMediaByType(
+          items.filter((item) => {
+            if (kind === "audio" && item.type !== "audio") return false;
+            if (subTab === "mine" && !item.favorite) return false;
+            if (query !== "") return item.name.toLowerCase().includes(query);
+            if (browsing && normalizeFolderId(item.folderId) !== folderId) return false;
+            return true;
+          }),
+          typeFilter,
+        ),
+        sortKey,
+      ),
+    [items, kind, subTab, query, browsing, folderId, typeFilter, sortKey],
   );
   const filteredLibraryEntries = useMemo(
     () =>
@@ -305,17 +417,21 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
   // "提取" subtab (audio only): project videos carrying an extractable audio
   // track. Rendered with the same MediaCard, whose hover Extract button already
   // runs extract_audio — so extracting is reachable without leaving the audio
-  // tab. Search filters by name like the other views.
+  // tab. Search filters by name like the other views; the local sort applies
+  // too (the view is inherently video-only, so the type filter does not).
   const extractableVideos = useMemo(
     () =>
-      items.filter(
-        (item) =>
-          item.type === "video" &&
-          item.hasAudio &&
-          !item.missing &&
-          (query === "" || item.name.toLowerCase().includes(query)),
+      sortMediaItems(
+        items.filter(
+          (item) =>
+            item.type === "video" &&
+            item.hasAudio &&
+            !item.missing &&
+            (query === "" || item.name.toLowerCase().includes(query)),
+        ),
+        sortKey,
       ),
-    [items, query],
+    [items, query, sortKey],
   );
 
   const trail = useMemo(() => folderTrail(folders, folderId), [folders, folderId]);
@@ -386,7 +502,7 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
             onChange={(e) => setSearch(e.target.value)}
             style={{
               flex: 1,
-              height: 22,
+              height: 24,
               background: "var(--bg-raised)",
               border: "var(--bw-thin) solid var(--border-primary)",
               borderRadius: "var(--radius-sm)",
@@ -395,15 +511,57 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
               padding: "0 8px",
             }}
           />
-          <HoverButton title={t("media.viewMode")}>
-            <Icon icon={LayoutGrid} size={13} />
-          </HoverButton>
-          <HoverButton title={t("media.sort")}>
-            <Icon icon={ArrowUpDown} size={13} />
-          </HoverButton>
-          <HoverButton title={t("media.filter")}>
-            <Icon icon={Filter} size={13} />
-          </HoverButton>
+          {/* 视图层展示控件（导入视图）：网格/列表切换 + 排序 + 类型筛选。
+              纯本地渲染行为，不改媒体镜像。我的/音效/提取是任务型列表
+              （数据源不同或语义固定），不显示这些控件，避免死按钮。 */}
+          {subTab === "import" && (
+            <>
+              <HoverButton
+                title={t("media.viewMode")}
+                active={viewMode === "list"}
+                disabled={query !== ""}
+                onClick={() => setViewMode(viewMode === "grid" ? "list" : "grid")}
+              >
+                <Icon icon={viewMode === "grid" ? LayoutGrid : List} size={13} />
+              </HoverButton>
+              <ToolbarMenu
+                title={t("media.sort")}
+                icon={ArrowUpDown}
+                open={sortOpen}
+                onToggle={setSortOpen}
+              >
+                {SORT_OPTIONS.map((option) => (
+                  <ToolbarMenuOption
+                    key={option.id}
+                    label={t(option.labelKey)}
+                    selected={sortKey === option.id}
+                    onSelect={() => {
+                      setSortKey(option.id);
+                      setSortOpen(false);
+                    }}
+                  />
+                ))}
+              </ToolbarMenu>
+              <ToolbarMenu
+                title={t("media.filter")}
+                icon={Filter}
+                open={filterOpen}
+                onToggle={setFilterOpen}
+              >
+                {TYPE_FILTER_OPTIONS.map((option) => (
+                  <ToolbarMenuOption
+                    key={option.id}
+                    label={t(option.labelKey)}
+                    selected={typeFilter === option.id}
+                    onSelect={() => {
+                      setTypeFilter(option.id);
+                      setFilterOpen(false);
+                    }}
+                  />
+                ))}
+              </ToolbarMenu>
+            </>
+          )}
         </div>
         {/* Breadcrumb / 返回上级 — only while browsing the library tree and not
             searching. Root is always clickable; the current folder is plain text. */}
@@ -468,7 +626,12 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
             <span style={{ fontSize: "var(--fs-xs)" }}>{t("media.extract.hint")}</span>
           </div>
         ) : (
-          <MediaGrid folders={[]} items={extractableVideos} onOpenFolder={setCurrentFolderId} />
+          <MediaGrid
+            folders={[]}
+            items={extractableVideos}
+            onOpenFolder={setCurrentFolderId}
+            layout={viewMode}
+          />
         )
       ) : query !== "" ? (
         // Smart search: three result groups (Moments / Spoken / Files) + the
@@ -487,6 +650,7 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
           folders={visibleFolders}
           items={filteredItems}
           onOpenFolder={setCurrentFolderId}
+          layout={viewMode}
         />
       )}
     </>
@@ -546,7 +710,7 @@ function FolderBreadcrumb({
         display: "flex",
         alignItems: "center",
         gap: 2,
-        minHeight: 22,
+        minHeight: 24,
         overflowX: "auto",
         overflowY: "hidden",
       }}
@@ -563,8 +727,8 @@ function FolderBreadcrumb({
             display: "inline-flex",
             alignItems: "center",
             justifyContent: "center",
-            width: 20,
-            height: 20,
+            width: 24,
+            height: 24,
             marginRight: 2,
             borderRadius: "var(--radius-xs)",
             background: "transparent",
@@ -730,13 +894,72 @@ function MediaGrid({
   folders,
   items,
   onOpenFolder,
+  layout = "grid",
 }: {
   folders: MediaFolder[];
   items: MediaItem[];
   onOpenFolder: (id: string) => void;
+  layout?: MediaViewLayout;
 }) {
+  const selectedMediaAssetIds = useEditorUiStore((s) => s.selectedMediaAssetIds);
+  const selectedFolderIds = useEditorUiStore((s) => s.selectedFolderIds);
+  const activeFolderId = folders.find((folder) => selectedFolderIds.has(folder.id))?.id;
+  const activeMediaId = activeFolderId
+    ? undefined
+    : items.find((item) => selectedMediaAssetIds.has(item.id))?.id;
+  const defaultFolderId = folders[0]?.id;
+  const defaultMediaId = defaultFolderId ? undefined : items[0]?.id;
+
+  // 列表视图：同一 roving/selection 契约（data-media-tile + role gridcell），
+  // 只是行布局。文件夹仍在素材前。
+  if (layout === "list") {
+    return (
+      <div
+        role="grid"
+        aria-label="Media"
+        data-media-roving-container="true"
+        data-media-layout="list"
+        style={{
+          flex: 1,
+          overflowY: "auto",
+          display: "flex",
+          flexDirection: "column",
+          gap: 2,
+          padding: "var(--space-sm)",
+          alignContent: "start",
+        }}
+      >
+        {folders.map((folder) => (
+          <div key={folder.id} role="row" style={{ minWidth: 0 }}>
+            <MediaFolderRow
+              folder={folder}
+              onOpen={onOpenFolder}
+              rovingTabIndex={
+                folder.id === (activeFolderId ?? (activeMediaId ? undefined : defaultFolderId))
+                  ? 0
+                  : -1
+              }
+            />
+          </div>
+        ))}
+        {items.map((item) => (
+          <div key={item.id} role="row" style={{ minWidth: 0 }}>
+            <MediaListRow
+              item={item}
+              rovingTabIndex={item.id === (activeMediaId ?? defaultMediaId) ? 0 : -1}
+            />
+          </div>
+        ))}
+      </div>
+    );
+  }
+
   return (
     <div
+      role="grid"
+      aria-label="Media"
+      data-media-roving-container="true"
+      data-media-layout="grid"
       style={{
         flex: 1,
         overflowY: "auto",
@@ -749,52 +972,727 @@ function MediaGrid({
     >
       {/* Folders first (双击进入), then files. */}
       {folders.map((folder) => (
-        <FolderTile key={folder.id} folder={folder} onOpen={onOpenFolder} />
+        <div key={folder.id} role="row" style={{ minWidth: 0 }}>
+          <FolderTile
+            folder={folder}
+            onOpen={onOpenFolder}
+            rovingTabIndex={
+              folder.id === (activeFolderId ?? (activeMediaId ? undefined : defaultFolderId))
+                ? 0
+                : -1
+            }
+          />
+        </div>
       ))}
       {items.map((item) => (
-        <MediaCard key={item.id} item={item} />
+        <div key={item.id} role="row" style={{ minWidth: 0 }}>
+          <MediaCard
+            item={item}
+            rovingTabIndex={item.id === (activeMediaId ?? defaultMediaId) ? 0 : -1}
+          />
+        </div>
       ))}
     </div>
   );
 }
 
-/** A folder shown in the grid (剪映式). Single click selects/enters on
- *  double-click — keeping it consistent with media cards (click=preview,
- *  double-click=add). Not draggable (folders aren't dropped on the timeline). */
-function FolderTile({
+/** 视图层下拉菜单（排序/筛选）：仿 ImportMenu 的弹出菜单 + 外点关闭。 */
+function ToolbarMenu({
+  title,
+  icon,
+  open,
+  onToggle,
+  children,
+}: {
+  title: string;
+  icon: typeof LayoutGrid;
+  open: boolean;
+  onToggle: (open: boolean) => void;
+  children: React.ReactNode;
+}) {
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) onToggle(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    return () => window.removeEventListener("mousedown", onDown);
+  }, [open, onToggle]);
+
+  return (
+    <div ref={rootRef} style={{ position: "relative", display: "inline-flex" }}>
+      <HoverButton title={title} active={open} onClick={() => onToggle(!open)}>
+        <Icon icon={icon} size={13} />
+      </HoverButton>
+      {open && (
+        <div
+          role="menu"
+          style={{
+            position: "absolute",
+            top: "calc(100% + 6px)",
+            right: 0,
+            minWidth: 140,
+            padding: "var(--space-xs)",
+            background: "var(--bg-raised)",
+            border: "var(--bw-thin) solid var(--border-primary)",
+            borderRadius: "var(--radius-md)",
+            boxShadow: "var(--shadow-lg)",
+            zIndex: 200,
+          }}
+        >
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ToolbarMenuOption({
+  label,
+  selected,
+  onSelect,
+}: {
+  label: string;
+  selected: boolean;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="menuitemradio"
+      aria-checked={selected}
+      onClick={onSelect}
+      className="hover-area"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "var(--space-sm)",
+        width: "100%",
+        minHeight: 28,
+        padding: "0 var(--space-sm)",
+        borderRadius: "var(--radius-sm)",
+        color: selected ? "var(--text-primary)" : "var(--text-secondary)",
+        fontSize: "var(--fs-sm)",
+        fontWeight: selected ? "var(--fw-medium)" : "var(--fw-regular)",
+        textAlign: "left",
+      }}
+    >
+      <span style={{ width: 14, display: "inline-flex", justifyContent: "center" }}>
+        {selected && <Icon icon={Check} size={13} />}
+      </span>
+      <span style={{ flex: 1 }}>{label}</span>
+    </button>
+  );
+}
+
+/** 列表视图里的文件夹行：单击选中、双击/Enter 进入、Delete 删除，
+ *  右键菜单打开/删除（与 FolderTile 同一交互契约）。 */
+export function MediaFolderRow({
   folder,
   onOpen,
+  rovingTabIndex = 0,
 }: {
   folder: MediaFolder;
   onOpen: (id: string) => void;
+  rovingTabIndex?: number;
 }) {
-  const [hovered, setHovered] = useState(false);
+  const t = useT();
+  const rowRef = useRef<HTMLDivElement | null>(null);
+  const [focused, setFocused] = useState(false);
+  const [menuPoint, setMenuPoint] = useState<TileMenuState | null>(null);
+  const selected = useEditorUiStore((s) => s.selectedFolderIds.has(folder.id));
+
+  const removeContextFolder = () => {
+    void deleteFolderFromContextMenu(folder.id).catch((error) => {
+      useEditorUiStore.getState().pushToast(String(error));
+    });
+  };
+  const openFolder = () => openMediaFolder(folder.id, onOpen);
+
   return (
     <div
-      onDoubleClick={() => onOpen(folder.id)}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      title={folder.name}
-      role="button"
-      tabIndex={0}
+      ref={rowRef}
+      onClick={(event) => {
+        event.currentTarget.focus();
+        selectMediaFolder(folder.id);
+      }}
+      onDoubleClick={openFolder}
+      onFocus={(event) => {
+        setFocused(true);
+        if (event.target === event.currentTarget) selectMediaFolder(folder.id);
+      }}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false);
+      }}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setMenuPoint({ x: event.clientX, y: event.clientY, restoreFocus: false });
+      }}
       onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") {
+        if (e.target !== e.currentTarget) return;
+        if (handleMediaTileArrowNavigation(e)) return;
+        if (e.key === "Enter") {
           e.preventDefault();
-          onOpen(folder.id);
+          e.stopPropagation();
+          selectMediaFolder(folder.id);
+          openFolder();
+        } else if (e.key === " ") {
+          e.preventDefault();
+          e.stopPropagation();
+          selectMediaFolder(folder.id);
+        } else if (e.key === "Delete" || e.key === "Backspace") {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!e.repeat) {
+            void deleteSelectedFolders().catch((error) => {
+              useEditorUiStore.getState().pushToast(String(error));
+            });
+          }
+        } else if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
+          e.preventDefault();
+          e.stopPropagation();
+          setMenuPoint({ ...keyboardMenuPoint(e.currentTarget), restoreFocus: true });
         }
       }}
-      style={{ display: "flex", flexDirection: "column", gap: 4, cursor: "pointer" }}
+      title={folder.name}
+      role="gridcell"
+      tabIndex={rovingTabIndex}
+      aria-selected={selected}
+      aria-haspopup="menu"
+      data-media-tile="true"
+      data-media-folder-id={folder.id}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "var(--space-sm)",
+        height: 36,
+        padding: "0 var(--space-sm)",
+        borderRadius: "var(--radius-sm)",
+        cursor: "pointer",
+        outline: focused ? "2px solid var(--accent-primary)" : "none",
+        outlineOffset: 2,
+      }}
+    >
+      <Icon icon={FolderIcon} size={15} />
+      <span
+        style={{
+          flex: 1,
+          minWidth: 0,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+          fontSize: "var(--fs-sm)",
+          color: "var(--text-secondary)",
+        }}
+      >
+        {folder.name}
+      </span>
+      {menuPoint && (
+        <TileContextMenu
+          point={menuPoint}
+          onClose={() => setMenuPoint(null)}
+          returnFocus={rowRef}
+          restoreFocus={menuPoint.restoreFocus}
+          actions={[
+            { label: t("common.open"), onSelect: openFolder },
+            { label: t("contextMenu.delete"), onSelect: removeContextFolder, destructive: true },
+          ]}
+        />
+      )}
+    </div>
+  );
+}
+
+/** 列表视图里的素材行：与网格卡片同一交互契约（选择/预览、双击上时间线、
+ *  拖拽、键盘 roving、右键/Delete 删除、收藏）。行内不做懒缩略图与生成
+ *  覆盖层——网格视图保留这些富交互，列表是密度更高的概览。 */
+export function MediaListRow({
+  item,
+  rovingTabIndex = 0,
+}: {
+  item: MediaItem;
+  rovingTabIndex?: number;
+}) {
+  const t = useT();
+  const rowRef = useRef<HTMLDivElement | null>(null);
+  const thumbnailRef = useRef<HTMLDivElement | null>(null);
+  const fps = useProjectStore((s) => s.timeline.fps);
+  const selected = useEditorUiStore((s) => s.selectedMediaAssetIds.has(item.id));
+  const durationFrames = Math.round(item.duration * fps);
+  const favorite = item.favorite ?? false;
+  const generationActive =
+    item.generationStatus === "generating" || item.generationStatus === "downloading";
+  const generationFailed =
+    item.generationStatus === "failed" || item.generationStatus === "cancelled";
+  const [focused, setFocused] = useState(false);
+  const [menuPoint, setMenuPoint] = useState<TileMenuState | null>(null);
+  const [feedback, setFeedback] = useState<string | null>(null);
+
+  const activate = () => {
+    selectMediaAsset(item.id);
+    if (generationActive) return;
+    useEditorUiStore.getState().setPreviewMedia(item.id);
+    void preloadMedia(item.id);
+  };
+
+  const removeContextMedia = () => {
+    void deleteMediaFromContextMenu(item.id).catch((error) => {
+      useEditorUiStore.getState().pushToast(String(error));
+    });
+  };
+
+  const onDragStart = (e: React.DragEvent) => {
+    e.dataTransfer.setData(MEDIA_DND_TYPE, item.id);
+    e.dataTransfer.effectAllowed = "copy";
+    if (thumbnailRef.current) {
+      setMediaThumbnailDragImage(e.dataTransfer, thumbnailRef.current);
+    }
+    setDraggingMedia(item);
+    void preloadMedia(item.id);
+  };
+
+  const onDragEnd = () => setDraggingMedia(null);
+
+  return (
+    <div
+      ref={rowRef}
+      draggable={!generationActive}
+      onDragStart={onDragStart}
+      onDragEnd={onDragEnd}
+      onClick={(event) => {
+        event.currentTarget.focus();
+        activate();
+      }}
+      onDoubleClick={() => {
+        if (!generationActive && !generationFailed) {
+          void addMediaToTimeline(item).catch(reportMediaPlacementFailure);
+        }
+      }}
+      onFocus={(event) => {
+        setFocused(true);
+        if (event.target === event.currentTarget) activate();
+      }}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false);
+      }}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setMenuPoint({ x: event.clientX, y: event.clientY, restoreFocus: false });
+      }}
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return;
+        if (handleMediaTileArrowNavigation(event)) return;
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          event.stopPropagation();
+          activate();
+        } else if (event.key === "Delete" || event.key === "Backspace") {
+          event.preventDefault();
+          event.stopPropagation();
+          if (!event.repeat) {
+            void deleteSelectedMediaAssets().catch((error) => {
+              useEditorUiStore.getState().pushToast(String(error));
+            });
+          }
+        } else if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+          event.preventDefault();
+          event.stopPropagation();
+          setMenuPoint({ ...keyboardMenuPoint(event.currentTarget), restoreFocus: true });
+        }
+      }}
+      title={item.name}
+      role="gridcell"
+      tabIndex={rovingTabIndex}
+      aria-selected={selected}
+      aria-haspopup="menu"
+      data-media-tile="true"
+      data-media-asset-id={item.id}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: "var(--space-sm)",
+        minHeight: 36,
+        padding: "0 var(--space-sm)",
+        borderRadius: "var(--radius-sm)",
+        cursor: generationActive ? "progress" : generationFailed ? "default" : "grab",
+        outline: focused ? "2px solid var(--accent-primary)" : "none",
+        outlineOffset: 2,
+      }}
+    >
+      <div
+        ref={thumbnailRef}
+        style={{
+          flex: "0 0 auto",
+          width: 40,
+          height: 28,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          borderRadius: "var(--radius-xs)",
+          background: "var(--bg-placeholder)",
+          color: "var(--text-muted)",
+          overflow: "hidden",
+        }}
+      >
+        {item.thumbnail ? (
+          <img
+            src={assetUrl(item.thumbnail) ?? undefined}
+            alt=""
+            draggable={false}
+            style={{ width: "100%", height: "100%", objectFit: "cover" }}
+          />
+        ) : (
+          <Icon icon={TYPE_ICON[item.type]} size={14} strokeWidth={1.5} />
+        )}
+      </div>
+      <span
+        style={{
+          flex: 1,
+          minWidth: 0,
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          whiteSpace: "nowrap",
+          fontSize: "var(--fs-sm)",
+          color: "var(--text-primary)",
+        }}
+      >
+        {item.name}
+      </span>
+      {item.duration > 0 && (
+        <span
+          className="tabular"
+          style={{ fontSize: "var(--fs-xs)", color: "var(--text-tertiary)", flex: "0 0 auto" }}
+        >
+          {formatTimecode(durationFrames, fps)}
+        </span>
+      )}
+      {/* MediaFavoriteButton 自带绝对定位，套一个相对定位盒让它落在行内。 */}
+      <div style={{ position: "relative", width: 28, height: 28, flex: "0 0 auto" }}>
+        <MediaFavoriteButton
+          assetId={item.id}
+          favorite={favorite}
+          title={favorite ? t("media.unfavorite") : t("media.favorite")}
+          onSuccess={async (media, project) => {
+            if (!applyMediaListForProject(project, media)) return;
+            await useLibraryStore.getState().refresh();
+          }}
+          onError={(message, project) => {
+            if (!applyMediaErrorForProject(project, message)) return;
+            setFeedback(message);
+          }}
+          onStart={() => setFeedback(null)}
+        />
+      </div>
+      {feedback && (
+        <span style={{ fontSize: "var(--fs-micro)", color: "var(--text-tertiary)" }}>
+          {feedback}
+        </span>
+      )}
+      {menuPoint && (
+        <TileContextMenu
+          point={menuPoint}
+          onClose={() => setMenuPoint(null)}
+          returnFocus={rowRef}
+          restoreFocus={menuPoint.restoreFocus}
+          actions={[
+            { label: t("contextMenu.delete"), onSelect: removeContextMedia, destructive: true },
+          ]}
+        />
+      )}
+    </div>
+  );
+}
+
+export interface TileMenuPoint {
+  x: number;
+  y: number;
+}
+
+interface TileMenuState extends TileMenuPoint {
+  restoreFocus: boolean;
+}
+
+export interface TileMenuAction {
+  label: string;
+  onSelect: () => void;
+  destructive?: boolean;
+}
+
+/** Compact app-native context menu. App.tsx suppresses the WebView's native
+ * menu, so media tiles need their own pointer- and keyboard-reachable actions. */
+export function TileContextMenu({
+  point,
+  actions,
+  onClose,
+  returnFocus,
+  restoreFocus = true,
+}: {
+  point: TileMenuPoint;
+  actions: TileMenuAction[];
+  onClose: () => void;
+  returnFocus: React.RefObject<HTMLElement | null>;
+  restoreFocus?: boolean;
+}) {
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const onCloseRef = useRef(onClose);
+  const firstItemRef = useRef<HTMLButtonElement | null>(null);
+  const restoreFocusRef = useRef(restoreFocus);
+  onCloseRef.current = onClose;
+
+  useEffect(() => {
+    firstItemRef.current?.focus();
+    const closeWithoutRestoringFocus = () => {
+      restoreFocusRef.current = false;
+      onCloseRef.current();
+    };
+    window.addEventListener("pointerdown", closeWithoutRestoringFocus);
+    window.addEventListener("blur", closeWithoutRestoringFocus);
+    return () => {
+      window.removeEventListener("pointerdown", closeWithoutRestoringFocus);
+      window.removeEventListener("blur", closeWithoutRestoringFocus);
+      if (restoreFocusRef.current) returnFocus.current?.focus();
+    };
+  }, [returnFocus]);
+
+  return (
+    <div
+      ref={menuRef}
+      role="menu"
+      onPointerDown={(event) => event.stopPropagation()}
+      onClick={(event) => event.stopPropagation()}
+      onKeyDown={(event) => {
+        // Keep editor-global transport/delete shortcuts from firing while a
+        // menu item owns keyboard focus.
+        event.stopPropagation();
+        if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
+          event.preventDefault();
+          const items = [
+            ...(menuRef.current?.querySelectorAll<HTMLButtonElement>(
+              '[role="menuitem"]:not(:disabled)',
+            ) ?? []),
+          ];
+          if (items.length === 0) return;
+          const current = items.indexOf(document.activeElement as HTMLButtonElement);
+          const next =
+            event.key === "Home"
+              ? 0
+              : event.key === "End"
+                ? items.length - 1
+                : event.key === "ArrowDown"
+                  ? (Math.max(current, -1) + 1) % items.length
+                  : (current <= 0 ? items.length : current) - 1;
+          items[next]?.focus();
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          restoreFocusRef.current = true;
+          onClose();
+        } else if (event.key === "Tab") {
+          // Let the browser advance focus, but remove the transient menu first.
+          restoreFocusRef.current = false;
+          onClose();
+        }
+      }}
+      onBlur={(event) => {
+        const next = event.relatedTarget;
+        if (next instanceof Node && event.currentTarget.contains(next)) return;
+        restoreFocusRef.current = false;
+        onClose();
+      }}
+      onContextMenu={(event) => event.preventDefault()}
+      style={{
+        position: "fixed",
+        left: point.x,
+        top: point.y,
+        zIndex: 1000,
+        minWidth: 132,
+        padding: "var(--space-xs)",
+        borderRadius: "var(--radius-md)",
+        border: "var(--bw-thin) solid var(--border-primary)",
+        background: "var(--bg-raised)",
+        boxShadow: "var(--shadow-lg)",
+      }}
+    >
+      {actions.map((action, index) => (
+        <button
+          key={action.label}
+          ref={index === 0 ? firstItemRef : undefined}
+          type="button"
+          role="menuitem"
+          className="hover-area"
+          onClick={() => {
+            onClose();
+            action.onSelect();
+          }}
+          style={{
+            display: "flex",
+            width: "100%",
+            height: 28,
+            alignItems: "center",
+            padding: "0 var(--space-sm)",
+            borderRadius: "var(--radius-sm)",
+            color: action.destructive ? "var(--status-error)" : "var(--text-secondary)",
+            fontSize: "var(--fs-sm)",
+            textAlign: "left",
+          }}
+        >
+          {action.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export function keyboardMenuPoint(target: HTMLElement): TileMenuPoint {
+  const rect = target.getBoundingClientRect();
+  return { x: rect.left + 8, y: rect.top + 24 };
+}
+
+/** Move through the rendered tile order and update every part of the roving
+ * selection contract before focus moves. */
+export function handleMediaTileArrowNavigation(
+  event: React.KeyboardEvent<HTMLElement>,
+): boolean {
+  const delta =
+    event.key === "ArrowLeft" || event.key === "ArrowUp"
+      ? -1
+      : event.key === "ArrowRight" || event.key === "ArrowDown"
+        ? 1
+        : 0;
+  if (delta === 0) return false;
+  const container = event.currentTarget.closest<HTMLElement>(
+    '[data-media-roving-container="true"]',
+  );
+  const tiles = [
+    ...(container?.querySelectorAll<HTMLElement>('[data-media-tile="true"]') ?? []),
+  ];
+  const current = tiles.indexOf(event.currentTarget);
+  if (current < 0 || tiles.length === 0) return false;
+  event.preventDefault();
+  event.stopPropagation();
+  const nextIndex = Math.max(0, Math.min(tiles.length - 1, current + delta));
+  const next = tiles[nextIndex]!;
+  const folderId = next.dataset.mediaFolderId;
+  const mediaId = next.dataset.mediaAssetId;
+  if (folderId) selectMediaFolder(folderId);
+  else if (mediaId) selectMediaForPreview(mediaId);
+  next.focus();
+  next.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  return true;
+}
+
+/** A folder shown in the grid (剪映式). Single click selects/enters on
+ *  double-click — keeping it consistent with media cards (click=preview,
+ *  double-click=add). Not draggable (folders aren't dropped on the timeline). */
+export function FolderTile({
+  folder,
+  onOpen,
+  rovingTabIndex = 0,
+}: {
+  folder: MediaFolder;
+  onOpen: (id: string) => void;
+  rovingTabIndex?: number;
+}) {
+  const tileRef = useRef<HTMLDivElement | null>(null);
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const [menuPoint, setMenuPoint] = useState<TileMenuState | null>(null);
+  const selected = useEditorUiStore((s) => s.selectedFolderIds.has(folder.id));
+  const t = useT();
+
+  const removeSelectedFolders = () => {
+    void deleteSelectedFolders().catch((error) => {
+      useEditorUiStore.getState().pushToast(String(error));
+    });
+  };
+  const removeContextFolder = () => {
+    void deleteFolderFromContextMenu(folder.id).catch((error) => {
+      useEditorUiStore.getState().pushToast(String(error));
+    });
+  };
+  const openFolder = () => openMediaFolder(folder.id, onOpen);
+
+  return (
+    <div
+      ref={tileRef}
+      onClick={(event) => {
+        event.currentTarget.focus();
+        selectMediaFolder(folder.id);
+      }}
+      onDoubleClick={openFolder}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onFocus={(event) => {
+        setFocused(true);
+        if (event.target === event.currentTarget) selectMediaFolder(folder.id);
+      }}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false);
+      }}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setMenuPoint({
+          x: event.clientX,
+          y: event.clientY,
+          restoreFocus: false,
+        });
+      }}
+      title={folder.name}
+      role="gridcell"
+      tabIndex={rovingTabIndex}
+      aria-selected={selected}
+      aria-haspopup="menu"
+      data-media-tile="true"
+      data-media-folder-id={folder.id}
+      onKeyDown={(e) => {
+        if (e.target !== e.currentTarget) return;
+        if (handleMediaTileArrowNavigation(e)) return;
+        if (e.key === "Enter") {
+          e.preventDefault();
+          e.stopPropagation();
+          selectMediaFolder(folder.id);
+          openFolder();
+        } else if (e.key === " ") {
+          e.preventDefault();
+          e.stopPropagation();
+          selectMediaFolder(folder.id);
+        } else if (e.key === "Delete" || e.key === "Backspace") {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!e.repeat) removeSelectedFolders();
+        } else if (e.key === "ContextMenu" || (e.shiftKey && e.key === "F10")) {
+          e.preventDefault();
+          e.stopPropagation();
+          setMenuPoint({
+            ...keyboardMenuPoint(e.currentTarget),
+            restoreFocus: true,
+          });
+        }
+      }}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: 4,
+        cursor: "pointer",
+        borderRadius: "var(--radius-sm)",
+        outline: focused ? "2px solid var(--accent-primary)" : "none",
+        outlineOffset: 2,
+      }}
     >
       <div
         style={{
           aspectRatio: "5 / 4",
           background: hovered ? "var(--bg-raised)" : "var(--bg-placeholder)",
-          border: `var(--bw-thin) solid ${hovered ? "var(--accent-primary)" : "var(--border-primary)"}`,
+          border: `${selected ? "var(--bw-thick)" : "var(--bw-thin)"} solid ${selected || hovered ? "var(--accent-primary)" : "var(--border-primary)"}`,
           borderRadius: "var(--radius-sm)",
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          color: hovered ? "var(--accent-primary)" : "var(--text-secondary)",
+          color: selected || hovered ? "var(--accent-primary)" : "var(--text-secondary)",
         }}
       >
         <Icon icon={FolderIcon} size={30} strokeWidth={1.5} />
@@ -810,19 +1708,39 @@ function FolderTile({
       >
         {folder.name}
       </span>
+      {menuPoint && (
+        <TileContextMenu
+          point={menuPoint}
+          onClose={() => setMenuPoint(null)}
+          returnFocus={tileRef}
+          restoreFocus={menuPoint.restoreFocus}
+          actions={[
+            { label: t("common.open"), onSelect: openFolder },
+            {
+              label: t("contextMenu.delete"),
+              onSelect: removeContextFolder,
+              destructive: true,
+            },
+          ]}
+        />
+      )}
     </div>
   );
 }
 
-function MediaCard({ item }: { item: MediaItem }) {
+export function MediaCard({
+  item,
+  rovingTabIndex = 0,
+}: {
+  item: MediaItem;
+  rovingTabIndex?: number;
+}) {
   const t = useT();
   const cardRef = useRef<HTMLDivElement | null>(null);
   const thumbnailRef = useRef<HTMLDivElement | null>(null);
   const fps = useProjectStore((s) => s.timeline.fps);
-  const setPreviewMedia = useEditorUiStore((s) => s.setPreviewMedia);
-  const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
+  const selected = useEditorUiStore((s) => s.selectedMediaAssetIds.has(item.id));
   const durationFrames = Math.round(item.duration * fps);
-  const selected = previewMediaId === item.id;
   const favorite = item.favorite ?? false;
   const generationActive =
     item.generationStatus === "generating" || item.generationStatus === "downloading";
@@ -835,7 +1753,30 @@ function MediaCard({ item }: { item: MediaItem }) {
   // Offline assets shouldn't try to load a (now-missing) thumbnail.
   const thumb = item.missing ? null : assetUrl(lazyThumbnail);
   const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const [menuPoint, setMenuPoint] = useState<TileMenuState | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
+
+  const activate = () => {
+    selectMediaAsset(item.id);
+    if (generationActive) return;
+    useEditorUiStore.getState().setPreviewMedia(item.id);
+    // Warm poster/sprite/waveform caches so preview + a later timeline drop
+    // are instant instead of decoding on the interaction path.
+    void preloadMedia(item.id);
+  };
+
+  const removeSelectedMedia = () => {
+    void deleteSelectedMediaAssets().catch((error) => {
+      useEditorUiStore.getState().pushToast(String(error));
+    });
+  };
+
+  const removeContextMedia = () => {
+    void deleteMediaFromContextMenu(item.id).catch((error) => {
+      useEditorUiStore.getState().pushToast(String(error));
+    });
+  };
 
   useEffect(() => {
     setLazyThumbnail(item.thumbnail ?? mediaThumbnailCache.get(thumbnailKey) ?? null);
@@ -947,24 +1888,68 @@ function MediaCard({ item }: { item: MediaItem }) {
       draggable={!generationActive}
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
-      onClick={() => {
-        if (generationActive) return;
-        setPreviewMedia(item.id);
-        // Warm poster/sprite/waveform caches so preview + a later timeline drop
-        // are instant instead of decoding on the interaction path.
-        void preloadMedia(item.id);
+      onClick={(event) => {
+        event.currentTarget.focus();
+        activate();
       }}
       onDoubleClick={() => {
-        if (!generationActive && !generationFailed) void addMediaToTimeline(item);
+        if (!generationActive && !generationFailed) {
+          void addMediaToTimeline(item).catch(reportMediaPlacementFailure);
+        }
       }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
+      onFocus={(event) => {
+        setFocused(true);
+        if (event.target === event.currentTarget) activate();
+      }}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false);
+      }}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setMenuPoint({
+          x: event.clientX,
+          y: event.clientY,
+          restoreFocus: false,
+        });
+      }}
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return;
+        if (handleMediaTileArrowNavigation(event)) return;
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          event.stopPropagation();
+          activate();
+        } else if (event.key === "Delete" || event.key === "Backspace") {
+          event.preventDefault();
+          event.stopPropagation();
+          if (!event.repeat) removeSelectedMedia();
+        } else if (event.key === "ContextMenu" || (event.shiftKey && event.key === "F10")) {
+          event.preventDefault();
+          event.stopPropagation();
+          setMenuPoint({
+            ...keyboardMenuPoint(event.currentTarget),
+            restoreFocus: true,
+          });
+        }
+      }}
       title={item.name}
+      role="gridcell"
+      tabIndex={rovingTabIndex}
+      aria-selected={selected}
+      aria-haspopup="menu"
+      data-media-tile="true"
+      data-media-asset-id={item.id}
       style={{
         display: "flex",
         flexDirection: "column",
         gap: 4,
         cursor: generationActive ? "progress" : generationFailed ? "default" : "grab",
+        borderRadius: "var(--radius-sm)",
+        outline: focused ? "2px solid var(--accent-primary)" : "none",
+        outlineOffset: 2,
       }}
     >
       {/* Thumbnail: generated cache image only. Missing thumbnails are requested
@@ -975,7 +1960,7 @@ function MediaCard({ item }: { item: MediaItem }) {
           position: "relative",
           aspectRatio: "5 / 4",
           background: "var(--bg-placeholder)",
-          border: `var(--bw-thin) solid ${item.missing ? "rgb(255,59,48)" : selected ? "var(--accent-primary)" : "var(--border-primary)"}`,
+          border: `${item.missing || selected ? "var(--bw-thick)" : "var(--bw-thin)"} solid ${item.missing ? "rgb(255,59,48)" : selected ? "var(--accent-primary)" : "var(--border-primary)"}`,
           borderRadius: "var(--radius-sm)",
           display: "flex",
           alignItems: "center",
@@ -1052,8 +2037,10 @@ function MediaCard({ item }: { item: MediaItem }) {
                   void cancelGeneration(item.generationInput!.jobId!);
                 }}
                 style={{
+                  minWidth: 24,
+                  minHeight: 24,
                   fontSize: "var(--fs-micro)",
-                  padding: "2px 8px",
+                  padding: "0 8px",
                   borderRadius: "var(--radius-xs)",
                   background: "rgba(255,255,255,0.14)",
                   color: "#fff",
@@ -1100,8 +2087,10 @@ function MediaCard({ item }: { item: MediaItem }) {
                   }
                 }}
                 style={{
+                  minWidth: 24,
+                  minHeight: 24,
                   fontSize: "var(--fs-micro)",
-                  padding: "2px 8px",
+                  padding: "0 8px",
                   borderRadius: "var(--radius-xs)",
                   background: "rgba(255,255,255,0.16)",
                   color: "#fff",
@@ -1142,9 +2131,11 @@ function MediaCard({ item }: { item: MediaItem }) {
                 void relinkMediaViaDialog(item.id);
               }}
               style={{
+                minWidth: 24,
+                minHeight: 24,
                 fontSize: "var(--fs-micro)",
                 fontWeight: "var(--fw-medium)",
-                padding: "2px 8px",
+                padding: "0 8px",
                 borderRadius: "var(--radius-xs)",
                 background: "rgba(0,0,0,0.55)",
                 color: "#fff",
@@ -1183,8 +2174,8 @@ function MediaCard({ item }: { item: MediaItem }) {
               right: 4,
               top: 4,
               zIndex: 3,
-              width: 20,
-              height: 20,
+              width: 24,
+              height: 24,
               display: "inline-flex",
               alignItems: "center",
               justifyContent: "center",
@@ -1221,6 +2212,21 @@ function MediaCard({ item }: { item: MediaItem }) {
         >
           {feedback}
         </span>
+      )}
+      {menuPoint && (
+        <TileContextMenu
+          point={menuPoint}
+          onClose={() => setMenuPoint(null)}
+          returnFocus={cardRef}
+          restoreFocus={menuPoint.restoreFocus}
+          actions={[
+            {
+              label: t("contextMenu.delete"),
+              onSelect: removeContextMedia,
+              destructive: true,
+            },
+          ]}
+        />
       )}
     </div>
   );
@@ -1284,8 +2290,8 @@ export function MediaFavoriteButton({
         display: "inline-flex",
         alignItems: "center",
         justifyContent: "center",
-        width: 20,
-        height: 20,
+        width: 24,
+        height: 24,
         padding: 0,
         borderRadius: "var(--radius-xs)",
         background: "rgba(0,0,0,0.6)",

@@ -179,7 +179,10 @@ fn automation_children_are_atomic_reviewable_and_command_routed() {
         serde_json::json!({"clipIds": ["clip-a"], "aspectRatio": "9:16"}),
     );
     assert!(unavailable.is_error);
-    assert!(unavailable.text_joined().contains("needs vision"));
+    assert!(unavailable.text_joined().contains("not advertised"));
+    assert!(unavailable
+        .text_joined()
+        .contains("vision analysis backend is not available"));
     assert_eq!(handle.apply_calls.load(Ordering::Acquire), 0);
     assert_eq!(handle.timeline(), before);
 

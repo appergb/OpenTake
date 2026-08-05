@@ -33,12 +33,40 @@ use crate::compatibility;
 use crate::error::{ProjectError, Result};
 use crate::gen_log::{GenerationLog, GenerationLogEntry};
 use crate::layout;
-use crate::ProjectRoot;
+use crate::{is_safe_project_asset_relative_path, ProjectRoot};
 
 /// Persisted schema details this build cannot safely write back.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ProjectCompatibility {
     blockers: Vec<String>,
+}
+
+fn validate_manifest_paths(manifest: &MediaManifest) -> Result<()> {
+    for entry in &manifest.entries {
+        if let opentake_domain::MediaSource::Project { relative_path } = &entry.source {
+            if !is_safe_project_asset_relative_path(relative_path) {
+                return Err(ProjectError::InvalidMediaManifest {
+                    file: layout::MANIFEST_FILE,
+                    reason: format!(
+                        "project source for asset '{}' is not a safe bundle-relative path",
+                        entry.id
+                    ),
+                });
+            }
+        }
+        if let Some(proxy) = &entry.proxy {
+            if !is_safe_project_asset_relative_path(&proxy.relative_path) {
+                return Err(ProjectError::InvalidMediaManifest {
+                    file: layout::MANIFEST_FILE,
+                    reason: format!(
+                        "proxy for asset '{}' is not a safe bundle-relative path",
+                        entry.id
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 impl ProjectCompatibility {
@@ -212,6 +240,7 @@ impl Project {
             let (manifest, blockers, _) =
                 decode_component::<MediaManifest>(&bytes, layout::MANIFEST_FILE)?;
             compatibility.extend(blockers);
+            validate_manifest_paths(&manifest)?;
             manifest
         } else {
             MediaManifest::new()
@@ -625,6 +654,87 @@ mod tests {
             Project::open(link),
             Err(ProjectError::NotABundle(_))
         ));
+    }
+
+    #[test]
+    fn project_open_rejects_unsafe_project_media_and_proxy_paths() {
+        for (index, unsafe_path) in [
+            "../private.mov",
+            "media/../../private.mov",
+            "/private.mov",
+            r"C:\private.mov",
+            "C:private.mov",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let tmp = TmpDir::new(&format!("unsafe-media-path-{index}"));
+            let bundle = tmp.path().join("Unsafe.opentake");
+            Project::new(&bundle).save().unwrap();
+            let manifest = serde_json::json!({
+                "version": 2,
+                "entries": [{
+                    "id": "asset-1",
+                    "name": "clip.mov",
+                    "type": "video",
+                    "source": { "project": { "relativePath": unsafe_path } },
+                    "duration": 1.0
+                }],
+                "folders": []
+            });
+            fs::write(
+                bundle.join(layout::MANIFEST_FILE),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+
+            assert!(Project::open(&bundle).is_err());
+
+            let mut proxy_manifest = manifest;
+            proxy_manifest["entries"][0]["source"] = serde_json::json!({
+                "project": { "relativePath": "media/valid.mov" }
+            });
+            proxy_manifest["entries"][0]["proxy"] = serde_json::json!({
+                "relativePath": unsafe_path,
+                "sourceSha256": "00",
+                "width": 320,
+                "height": 180
+            });
+            fs::write(
+                bundle.join(layout::MANIFEST_FILE),
+                serde_json::to_vec(&proxy_manifest).unwrap(),
+            )
+            .unwrap();
+            assert!(Project::open(&bundle).is_err());
+        }
+    }
+
+    #[test]
+    fn project_open_accepts_nested_project_media_path() {
+        let tmp = TmpDir::new("safe-media-path");
+        let bundle = tmp.path().join("Safe.opentake");
+        Project::new(&bundle).save().unwrap();
+        let manifest = serde_json::json!({
+            "version": 2,
+            "entries": [{
+                "id": "asset-1",
+                "name": "clip.mov",
+                "type": "video",
+                "source": { "project": { "relativePath": "media/nested/clip.mov" } },
+                "duration": 1.0
+            }],
+            "folders": []
+        });
+        fs::write(
+            bundle.join(layout::MANIFEST_FILE),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            Project::open(&bundle).unwrap().manifest.entries[0].id,
+            "asset-1"
+        );
     }
 
     #[cfg(unix)]

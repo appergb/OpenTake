@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "OpenTake",
-  "version": "1.0.0-beta.1",
+  "version": "1.0.0-beta.2",
   "identifier": "com.opentake.desktop",
   "build": {
     "frontendDist": "../web/dist",
@@ -41,8 +41,8 @@
         "connect-src": "'self' ipc: http://ipc.localhost http://127.0.0.1:*",
         "font-src": "'self' data:",
         "frame-ancestors": "'none'",
-        "img-src": "'self' asset: http://asset.localhost blob: data:",
-        "media-src": "'self' asset: http://asset.localhost blob: data:",
+        "img-src": "'self' opentake-asset: http://opentake-asset.localhost blob: data:",
+        "media-src": "'self' opentake-asset: http://opentake-asset.localhost blob: data:",
         "object-src": "'none'",
         "script-src": "'self'",
         "style-src": "'self' 'unsafe-inline'"
@@ -53,8 +53,8 @@
         "connect-src": "'self' ipc: http://ipc.localhost http://127.0.0.1:* ws://127.0.0.1:* ws://localhost:*",
         "font-src": "'self' data:",
         "frame-ancestors": "'none'",
-        "img-src": "'self' asset: http://asset.localhost blob: data:",
-        "media-src": "'self' asset: http://asset.localhost blob: data:",
+        "img-src": "'self' opentake-asset: http://opentake-asset.localhost blob: data:",
+        "media-src": "'self' opentake-asset: http://opentake-asset.localhost blob: data:",
         "object-src": "'none'",
         "script-src": "'self'",
         "style-src": "'self' 'unsafe-inline'"
@@ -96,7 +96,7 @@
     },
     "windows": {
       "wix": {
-        "version": "1.0.0.1"
+        "version": "1.0.0.2"
       }
     }
   }

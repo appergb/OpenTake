@@ -26,7 +26,7 @@
 //! — so plain filename filtering keeps working with zero setup, exactly like the
 //! upstream Files group.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
@@ -323,6 +323,20 @@ pub fn search_index_status(
     }
 }
 
+fn with_verified_index_assets<T>(
+    core: &AppCore,
+    expected_project_epoch: u64,
+    expected_project_path: &Path,
+    submit: impl FnOnce(Vec<ResolvedAsset>) -> Result<T, String>,
+) -> Result<T, String> {
+    let _project_identity = core.lock_project_identity_workflow();
+    let snapshot = core
+        .mutable_runtime_snapshot_for_project(expected_project_epoch, expected_project_path)
+        .map_err(|error| error.to_string())?;
+    let assets = resolve_assets_from_snapshot(&snapshot.media, snapshot.project_dir.as_deref());
+    submit(assets)
+}
+
 /// `search_index_start`: index every not-yet-current video/image asset in the
 /// project (sampled frames → SigLIP2 embeddings → `PALMEMB1` store), emitting
 /// `search://index` progress as each asset completes. Idempotent — already-current
@@ -337,52 +351,62 @@ pub fn search_index_start(
     app: AppHandle,
     core: State<'_, AppCore>,
     media: State<'_, MediaState>,
+    expected_project_epoch: u64,
+    expected_project_path: String,
 ) -> Result<SearchIndexStatusDto, String> {
-    let engine = media.engine();
-    let assets = resolve_assets(&core);
-    let cache_root = engine.cache_root().to_path_buf();
-    let models_dir = engine.models_dir().to_path_buf();
-    let pressure = engine.export_pause();
-    let worker = production_index_worker(pressure.clone());
-    let spec = search_config::embedder_spec();
-    let source_identity = assets
-        .iter()
-        .map(|asset| {
-            opentake_media::cache_key::file_identity_key(&asset.path)
-                .unwrap_or_else(|| format!("missing:{}", asset.id))
-        })
-        .collect::<Vec<_>>()
-        .join("|");
-    let request = opentake_media::ort_worker::JobRequest::new(
-        opentake_media::ort_worker::JobKind::Index,
-        format!("{}@{}", spec.model, spec.version),
-        format!(
-            "{}:{}@{}:{source_identity}",
-            cache_root.display(),
-            spec.model,
-            spec.version
-        ),
-        opentake_media::ort_worker::JobPriority::Background,
-    );
-    let handle = worker
-        .submit(request, move |models, cancel| {
-            let job_engine = MediaEngine::new(cache_root, models_dir.clone());
-            let model_key = format!("{}@{}:{}", spec.model, spec.version, models_dir.display());
-            let embedder = models.get_or_try_init(&model_key, || {
-                load_embedder(&job_engine).map_err(opentake_media::ort_worker::WorkerError::Model)
-            })?;
-            index_assets(
-                app,
-                &job_engine,
-                &assets,
-                embedder.as_ref(),
-                cancel,
-                &pressure,
-            )
-            .map_err(opentake_media::ort_worker::WorkerError::Job)?;
-            Ok(index_status_snapshot(&job_engine, &assets))
-        })
-        .map_err(|error| error.to_string())?;
+    let handle = with_verified_index_assets(
+        &core,
+        expected_project_epoch,
+        Path::new(&expected_project_path),
+        |assets| {
+            let engine = media.engine();
+            let cache_root = engine.cache_root().to_path_buf();
+            let models_dir = engine.models_dir().to_path_buf();
+            let pressure = engine.export_pause();
+            let worker = production_index_worker(pressure.clone());
+            let spec = search_config::embedder_spec();
+            let source_identity = assets
+                .iter()
+                .map(|asset| {
+                    opentake_media::cache_key::file_identity_key(&asset.path)
+                        .unwrap_or_else(|| format!("missing:{}", asset.id))
+                })
+                .collect::<Vec<_>>()
+                .join("|");
+            let request = opentake_media::ort_worker::JobRequest::new(
+                opentake_media::ort_worker::JobKind::Index,
+                format!("{}@{}", spec.model, spec.version),
+                format!(
+                    "{}:{}@{}:{source_identity}",
+                    cache_root.display(),
+                    spec.model,
+                    spec.version
+                ),
+                opentake_media::ort_worker::JobPriority::Background,
+            );
+            worker
+                .submit(request, move |models, cancel| {
+                    let job_engine = MediaEngine::new(cache_root, models_dir.clone());
+                    let model_key =
+                        format!("{}@{}:{}", spec.model, spec.version, models_dir.display());
+                    let embedder = models.get_or_try_init(&model_key, || {
+                        load_embedder(&job_engine)
+                            .map_err(opentake_media::ort_worker::WorkerError::Model)
+                    })?;
+                    index_assets(
+                        app,
+                        &job_engine,
+                        &assets,
+                        embedder.as_ref(),
+                        cancel,
+                        &pressure,
+                    )
+                    .map_err(opentake_media::ort_worker::WorkerError::Job)?;
+                    Ok(index_status_snapshot(&job_engine, &assets))
+                })
+                .map_err(|error| error.to_string())
+        },
+    )?;
     handle.wait().map_err(|error| error.to_string())
 }
 
@@ -1149,6 +1173,39 @@ mod tests {
         assert!(json.contains("\"indexed\":2"));
         let back: SearchIndexStatusDto = serde_json::from_str(&json).unwrap();
         assert_eq!(dto, back);
+    }
+
+    #[test]
+    fn delayed_index_request_for_replaced_project_fails_closed() {
+        let tmp = tempfile::tempdir().expect("temp root");
+        let project_a = tmp.path().join("A.opentake");
+        let project_b = tmp.path().join("B.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(project_a.clone()))
+            .expect("save project A");
+        let expected_epoch = core.runtime_snapshot().project_epoch;
+        opentake_project::Project::new(&project_b)
+            .save()
+            .expect("save project B");
+        core.open_project(&project_b).expect("switch to project B");
+        let submitted = std::cell::Cell::new(false);
+
+        let result = with_verified_index_assets(&core, expected_epoch, &project_a, |_assets| {
+            submitted.set(true);
+            Ok(())
+        });
+
+        assert!(result
+            .expect_err("stale A request must fail")
+            .contains("project changed"));
+        assert!(
+            !submitted.get(),
+            "stale request must not submit an index job"
+        );
+        assert_eq!(
+            core.runtime_snapshot().project_dir.as_deref(),
+            Some(project_b.as_path())
+        );
     }
 
     #[test]

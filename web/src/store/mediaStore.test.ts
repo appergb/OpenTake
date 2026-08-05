@@ -2,33 +2,42 @@
  * mediaStore 单测：refreshMedia 把后端 get_media 的 { items, folders } 双双写入
  * 镜像 store（文件夹浏览需要 folders 不再被丢弃），且 setters 为不可变替换。
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MediaFolder, MediaItem, MediaList } from "../lib/types";
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
-  const promise = new Promise<T>((done) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
     resolve = done;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 const srv = vi.hoisted(() => ({
   media: { items: [], folders: [] } as MediaList,
   getMedia: vi.fn(),
+  onMediaChanged: vi.fn(async () => () => {}),
+  mediaChangedHandler: null as null | (() => Promise<void> | void),
 }));
 
 vi.mock("../lib/api", () => ({
   getMedia: srv.getMedia,
+  onMediaChanged: srv.onMediaChanged,
 }));
 
 import {
+  applyMediaErrorForProject,
   applyMediaListForProject,
   useMediaStore,
   refreshMedia,
   resetProjectMediaState,
+  startMediaSync,
+  stopMediaSync,
 } from "./mediaStore";
 import { useProjectStore } from "./projectStore";
+import { useEditorUiStore } from "./uiStore";
 
 const item = (
   id: string,
@@ -53,16 +62,152 @@ describe("mediaStore", () => {
   beforeEach(() => {
     srv.getMedia.mockReset();
     srv.getMedia.mockImplementation(async () => srv.media);
-    useMediaStore.setState({ items: [], folders: [], importing: false, error: null });
+    srv.onMediaChanged.mockReset();
+    srv.onMediaChanged.mockImplementation(async (handler: () => Promise<void> | void) => {
+      srv.mediaChangedHandler = handler;
+      return () => {};
+    });
+    srv.mediaChangedHandler = null;
+    resetProjectMediaState();
     useProjectStore.setState({
       projectEpoch: 1,
       projectPath: "/tmp/project-a.opentake",
     });
+    useEditorUiStore.setState({ toast: null });
+  });
+
+  afterEach(() => {
+    stopMediaSync();
   });
 
   it("starts with empty items and folders", () => {
     expect(useMediaStore.getState().items).toEqual([]);
     expect(useMediaStore.getState().folders).toEqual([]);
+  });
+
+  it("can retry startup after the initial media refresh rejects", async () => {
+    srv.getMedia
+      .mockRejectedValueOnce(new Error("initial media unavailable"))
+      .mockImplementation(async () => srv.media);
+
+    await expect(startMediaSync()).rejects.toThrow("initial media unavailable");
+    await startMediaSync();
+
+    expect(srv.getMedia).toHaveBeenCalledTimes(3);
+    expect(srv.onMediaChanged).toHaveBeenCalledOnce();
+  });
+
+  it("can retry startup after media-listener registration rejects", async () => {
+    srv.onMediaChanged.mockRejectedValueOnce(new Error("media listener unavailable"));
+
+    await expect(startMediaSync()).rejects.toThrow("media listener unavailable");
+    await startMediaSync();
+
+    expect(srv.getMedia).toHaveBeenCalledTimes(3);
+    expect(srv.onMediaChanged).toHaveBeenCalledTimes(2);
+  });
+
+  it("unsubscribes a media listener registered after startup was stopped", async () => {
+    const registration = deferred<() => void>();
+    const unsubscribe = vi.fn();
+    srv.onMediaChanged.mockImplementationOnce(() => registration.promise);
+
+    const startup = startMediaSync();
+    await vi.waitFor(() => expect(srv.onMediaChanged).toHaveBeenCalledOnce());
+    stopMediaSync();
+    registration.resolve(unsubscribe);
+    await startup;
+
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it("refreshes again after listener registration so a setup-gap event is not lost", async () => {
+    const oldCatalog = {
+      items: [item("old", null)],
+      folders: [folder("old-folder", null)],
+    };
+    const newCatalog = {
+      items: [item("new", null)],
+      folders: [folder("new-folder", null)],
+    };
+    srv.getMedia.mockResolvedValueOnce(oldCatalog).mockResolvedValueOnce(newCatalog);
+
+    await startMediaSync();
+
+    expect(srv.getMedia).toHaveBeenCalledTimes(2);
+    expect(srv.onMediaChanged).toHaveBeenCalledOnce();
+    expect(useMediaStore.getState().items.map(({ id }) => id)).toEqual(["new"]);
+  });
+
+  it("retries a rejected media event refresh and converges without leaking a rejection", async () => {
+    await startMediaSync();
+    srv.getMedia
+      .mockRejectedValueOnce(new Error("transient media read failed"))
+      .mockResolvedValueOnce({
+        items: [item("recovered", null)],
+        folders: [],
+      });
+
+    await srv.mediaChangedHandler?.();
+
+    expect(useMediaStore.getState().items.map(({ id }) => id)).toEqual(["recovered"]);
+    expect(useMediaStore.getState().error).toBeNull();
+  });
+
+  it("reports a media event refresh that still fails after its bounded retry", async () => {
+    await startMediaSync();
+    srv.getMedia
+      .mockRejectedValueOnce(new Error("media read unavailable"))
+      .mockRejectedValueOnce(new Error("media read still unavailable"));
+
+    await srv.mediaChangedHandler?.();
+
+    expect(useMediaStore.getState().error).toBe("media read still unavailable");
+    expect(useEditorUiStore.getState().toast?.message).toContain(
+      "media read still unavailable",
+    );
+  });
+
+  it("clears an old sync error after a later authoritative event refresh succeeds", async () => {
+    await startMediaSync();
+    srv.getMedia
+      .mockRejectedValueOnce(new Error("media sync failed"))
+      .mockRejectedValueOnce(new Error("media sync still failed"));
+
+    await srv.mediaChangedHandler?.();
+    expect(useMediaStore.getState().error).toBe("media sync still failed");
+
+    srv.getMedia.mockResolvedValueOnce({
+      items: [item("recovered", null)],
+      folders: [],
+    });
+    await srv.mediaChangedHandler?.();
+
+    expect(useMediaStore.getState().items.map(({ id }) => id)).toEqual(["recovered"]);
+    expect(useMediaStore.getState().error).toBeNull();
+  });
+
+  it("does not clear an independent import error after media sync recovers", async () => {
+    await startMediaSync();
+    srv.getMedia
+      .mockRejectedValueOnce(new Error("media sync failed"))
+      .mockRejectedValueOnce(new Error("media sync still failed"));
+    await srv.mediaChangedHandler?.();
+
+    expect(
+      applyMediaErrorForProject(
+        { projectEpoch: 1, projectPath: "/tmp/project-a.opentake" },
+        "import failed independently",
+      ),
+    ).toBe(true);
+    srv.getMedia.mockResolvedValueOnce({
+      items: [item("recovered", null)],
+      folders: [],
+    });
+    await srv.mediaChangedHandler?.();
+
+    expect(useMediaStore.getState().items.map(({ id }) => id)).toEqual(["recovered"]);
+    expect(useMediaStore.getState().error).toBe("import failed independently");
   });
 
   it("refreshMedia loads both items and the folder tree", async () => {

@@ -16,5 +16,7 @@ pub mod dispatch;
 pub mod gen_catalog;
 pub mod generation;
 pub mod media_bridge;
+mod media_catalog;
 pub mod motion;
 pub mod server;
+pub mod vision;

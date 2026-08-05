@@ -115,6 +115,7 @@ describe("CaptionsTab translation review", () => {
 
   it("reviews individual changes, rejects one, applies the accepted item, and undoes", async () => {
     await act(async () => root.render(<CaptionsTab />));
+    expect(container.querySelector('select[aria-label="Source"]')).not.toBeNull();
     const consent = Array.from(container.querySelectorAll("input[type=checkbox]")).find((input) => input.parentElement?.textContent?.includes("possible API charges")) as HTMLInputElement;
     await act(async () => consent.click());
     const button = (label: string) => Array.from(container.querySelectorAll("button")).find((candidate) => candidate.textContent?.includes(label))!;

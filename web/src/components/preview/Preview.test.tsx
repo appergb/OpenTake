@@ -38,6 +38,7 @@ const store = vi.hoisted(() => ({
       duration: number;
       hasAudio: boolean;
       path: string;
+      missing?: boolean;
     }>,
   },
   nativeFrame: null as PlaybackFrameEvent | null,
@@ -324,6 +325,30 @@ describe("Preview timeline rendering", () => {
     expect(html.match(/<video/g)?.length).toBe(2);
     expect(html).toContain("asset:///base.mov");
     expect(html).toContain("asset:///pip.mov");
+  });
+
+  it("does not hand an offline source to the WebKit asset protocol", () => {
+    const tl = timeline([
+      track({
+        id: "v1",
+        type: "video",
+        clips: [clip({ id: "offline-clip", mediaRef: "base", mediaType: "video" })],
+      }),
+    ]);
+    store.media.items = [{
+      id: "base",
+      name: "Offline",
+      type: "video",
+      duration: 1,
+      hasAudio: false,
+      path: "/cloud-placeholder.mov",
+      missing: true,
+    }];
+
+    const html = renderToStaticMarkup(<TimelinePlayback timeline={tl} fps={30} />);
+
+    expect(html).not.toContain("cloud-placeholder.mov");
+    expect(html).not.toContain("<video");
   });
 
   it("paints an overlay on upstream visual track 0 after the base layer", () => {

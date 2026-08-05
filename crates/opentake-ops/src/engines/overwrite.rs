@@ -54,14 +54,25 @@ impl OverwriteEngine {
         region_start: i32,
         region_end: i32,
     ) -> Vec<OverwriteAction> {
+        Self::try_compute_overwrite(clips, region_start, region_end).unwrap_or_default()
+    }
+
+    pub fn try_compute_overwrite(
+        clips: &[Clip],
+        region_start: i32,
+        region_end: i32,
+    ) -> Option<Vec<OverwriteAction>> {
         if region_end <= region_start {
-            return Vec::new();
+            return Some(Vec::new());
         }
         let mut actions = Vec::new();
 
         for clip in clips {
             let cs = clip.start_frame;
-            let ce = clip.end_frame();
+            let ce = cs.checked_add(clip.duration_frames)?;
+            if !clip.speed.is_finite() || clip.speed <= 0.0 {
+                return None;
+            }
 
             // Entirely outside the region.
             if ce <= region_start || cs >= region_end {
@@ -75,11 +86,14 @@ impl OverwriteEngine {
                 });
             } else if cs < region_start && ce > region_end {
                 // Spans the whole region — split.
-                let left_duration = region_start - cs;
+                let left_duration = region_start.checked_sub(cs)?;
                 let right_start_frame = region_end;
-                let right_trim_start =
-                    clip.trim_start_frame + ((region_end - cs) as f64 * clip.speed).round() as i32;
-                let right_duration = ce - region_end;
+                let source_delta = (region_end.checked_sub(cs)? as f64 * clip.speed).round();
+                if !(0.0..=i32::MAX as f64).contains(&source_delta) {
+                    return None;
+                }
+                let right_trim_start = clip.trim_start_frame.checked_add(source_delta as i32)?;
+                let right_duration = ce.checked_sub(region_end)?;
                 actions.push(OverwriteAction::Split {
                     clip_id: clip.id.clone(),
                     left_duration,
@@ -89,18 +103,21 @@ impl OverwriteEngine {
                 });
             } else if cs < region_start {
                 // Overlaps left side — trim right edge.
-                let new_duration = region_start - cs;
+                let new_duration = region_start.checked_sub(cs)?;
                 actions.push(OverwriteAction::TrimEnd {
                     clip_id: clip.id.clone(),
                     new_duration,
                 });
             } else {
                 // Overlaps right side — trim left edge.
-                let trim_amount = region_end - cs;
+                let trim_amount = region_end.checked_sub(cs)?;
                 let new_start_frame = region_end;
-                let new_trim_start =
-                    clip.trim_start_frame + (trim_amount as f64 * clip.speed).round() as i32;
-                let new_duration = ce - region_end;
+                let source_delta = (trim_amount as f64 * clip.speed).round();
+                if !(0.0..=i32::MAX as f64).contains(&source_delta) {
+                    return None;
+                }
+                let new_trim_start = clip.trim_start_frame.checked_add(source_delta as i32)?;
+                let new_duration = ce.checked_sub(region_end)?;
                 actions.push(OverwriteAction::TrimStart {
                     clip_id: clip.id.clone(),
                     new_start_frame,
@@ -110,7 +127,7 @@ impl OverwriteEngine {
             }
         }
 
-        actions
+        Some(actions)
     }
 }
 

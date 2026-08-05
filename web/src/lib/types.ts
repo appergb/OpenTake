@@ -361,6 +361,26 @@ export interface ClipEntryReq {
   transform?: Transform;
 }
 
+export type UnplacedClipEntryReq = Omit<ClipEntryReq, "trackIndex">;
+
+export interface ProjectTimelineSettingsReq {
+  fps: number;
+  width: number;
+  height: number;
+}
+
+export type PlaceMediaTargetReq =
+  | { kind: "existingTrack"; trackId: string }
+  | { kind: "newTrack"; trackType: ClipType; at?: number };
+
+export interface PasteClipEntryReq {
+  /** Complete clipboard snapshot. Rust replaces only identity/group mappings,
+   * transition endpoints, and the requested timeline start. */
+  clip: Clip;
+  targetTrackId: string;
+  startFrame: number;
+}
+
 export interface ClipMoveReq {
   clipId: string;
   toTrack: number;
@@ -441,6 +461,13 @@ export type EditRequest =
   | { type: "editNestedSequence"; sequenceId: string; command: EditRequest }
   | { type: "renameNestedSequence"; sequenceId: string; name: string }
   | { type: "dissolveNestedSequence"; clipId: string }
+  | {
+      type: "placeMedia";
+      sequenceId?: string;
+      settings?: ProjectTimelineSettingsReq;
+      target: PlaceMediaTargetReq;
+      entry: UnplacedClipEntryReq;
+    }
   | { type: "addClips"; entries: ClipEntryReq[] }
   | { type: "insertClips"; trackIndex: number; atFrame: number; entries: ClipEntryReq[] }
   | { type: "moveClips"; moves: ClipMoveReq[] }
@@ -450,11 +477,22 @@ export type EditRequest =
       offsetFrames: number;
       targetTrackIndexes: number[];
     }
+  | {
+      type: "moveOrDuplicateClipsToNewTrack";
+      clipIds: string[];
+      leadClipId: string;
+      requestedFrameDelta: number;
+      insertAt: number;
+      mode: "move" | "duplicate";
+    }
+  | { type: "pasteClips"; entries: PasteClipEntryReq[] }
   | { type: "removeClips"; clipIds: string[] }
   | { type: "splitClip"; clipId: string; atFrame: number }
+  | { type: "splitClips"; clipIds: string[]; atFrame: number }
   | { type: "freezeFrame"; clipId: string; atFrame: number; durationFrames: number }
   | { type: "trimClips"; edits: TrimEditReq[] }
   | { type: "setClipProperties"; clipIds: string[]; properties: ClipPropertiesReq }
+  | { type: "setTransformAtFrame"; clipId: string; frame: number; transform: Transform }
   | { type: "setKeyframes"; clipId: string; property: KeyframeProperty; payload: KeyframePayloadReq }
   | { type: "stampKeyframe"; clipId: string; property: KeyframeProperty; frame: number }
   | {
@@ -585,6 +623,11 @@ export interface RuntimeTimelineSnapshot extends TimelineSnapshot {
 export interface ProjectRevision {
   projectEpoch: number;
   timelineVersion: number;
+}
+
+/** Complete optimistic-authority token for an edit/undo/redo IPC request. */
+export interface ProjectEditIdentity extends ProjectRevision {
+  projectPath: string | null;
 }
 
 export interface PlaybackIdentity extends ProjectRevision {
@@ -874,6 +917,37 @@ export interface SearchIndexStatus {
   indexed: number;
 }
 
+// MARK: - Settings Storage pane (mirror of src-tauri storage.rs DTOs)
+
+/** One clearable derived-cache category. The ids match the Rust
+ *  `StorageCategoryId` serde tags verbatim: `thumbnails` and `waveforms` split
+ *  the shared `MediaVisualCache` dir by file extension, `searchIndex` is the
+ *  embedding store, `models` are the downloaded ONNX/ggml weights (re-downloads,
+ *  not lazily-rebuilt caches), `other` are the remaining known cache subdirs. */
+export type StorageCategoryId =
+  | "thumbnails"
+  | "waveforms"
+  | "searchIndex"
+  | "models"
+  | "other";
+
+/** Byte usage for one category plus its on-disk root (display only — mirrors
+ *  Rust `StorageCategoryUsageDto`). */
+export interface StorageCategoryUsage {
+  id: StorageCategoryId;
+  bytes: number;
+  path: string;
+}
+
+/** `storage_usage` result (mirror of Rust `StorageUsageDto`): every category is
+ *  always present (zero bytes included — the pane needs stable rows), plus the
+ *  total and the cache root shown in the pane. */
+export interface StorageUsage {
+  categories: StorageCategoryUsage[];
+  totalBytes: number;
+  cacheRoot: string;
+}
+
 /** One visual ("Moments") hit. `frame` is the shot-start in **source frames**
  *  (thumb + preview anchor); `startSec`/`endSec` are the source-second range used
  *  to drag a trimmed clip onto the timeline (mirror of Rust `MomentHitDto`). */
@@ -1102,4 +1176,46 @@ export interface ChatSession {
   isOpen: boolean;
   provider?: string;
   model?: string;
+}
+
+// MARK: - AI generation audit log (mirror of opentake_project::gen_log,
+// camelCase; optional fields are omitted on the wire when absent)
+
+/** Provider-neutral lifecycle tag of a generation job row. Serialized by
+ *  serde's camelCase rename of `opentake_domain::GenerationJobStatus`, which
+ *  lower-cases each single-word variant (`Ready` -> `ready`). */
+export type GenerationJobStatus =
+  | "queued"
+  | "generating"
+  | "downloading"
+  | "finalizing"
+  | "ready"
+  | "failed"
+  | "cancelled";
+
+/** One row in the project AI generation audit log. `createdAt` is
+ *  Apple-reference-date seconds (2001-01-01 epoch, upstream Swift `Date`
+ *  encoding) — convert with `(createdAt + 978_307_200) * 1000` for a JS
+ *  `Date`. `costCredits` is the billed cost in credits; `None` means unknown. */
+export interface GenerationLogEntry {
+  id: string;
+  model: string;
+  costCredits?: number;
+  createdAt?: number;
+  jobId?: string;
+  provider?: string;
+  providerJobId?: string;
+  assetId?: string;
+  status?: GenerationJobStatus;
+  progress?: number;
+  errorCode?: string;
+  sourceAssetId?: string;
+  sourceClipId?: string;
+}
+
+/** The whole log: schema `version` + append-ordered rows. Read-only mirror of
+ *  the `generation_log` command; the UI never mutates it. */
+export interface GenerationLog {
+  version: number;
+  entries: GenerationLogEntry[];
 }

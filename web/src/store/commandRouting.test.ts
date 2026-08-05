@@ -3,17 +3,26 @@ import { extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Clip, EditRequest, TextStyle, Timeline, Transform } from "../lib/types";
+import type {
+  Clip,
+  EditRequest,
+  ProjectEditIdentity,
+  TextStyle,
+  Timeline,
+  Transform,
+} from "../lib/types";
 
 const ipc = vi.hoisted(() => ({
   calls: [] as EditRequest[],
+  identities: [] as Array<ProjectEditIdentity | undefined>,
   failure: null as Error | null,
 }));
 
 vi.mock("../lib/api", () => ({
   isTauri: true,
-  editApply: async (command: EditRequest) => {
+  editApply: async (command: EditRequest, expected?: ProjectEditIdentity) => {
     ipc.calls.push(structuredClone(command));
+    ipc.identities.push(expected ? structuredClone(expected) : undefined);
     if (ipc.failure) {
       const failure = ipc.failure;
       ipc.failure = null;
@@ -39,6 +48,7 @@ import {
   adjustStabilization,
   applyStabilization,
   createNestedSequence,
+  captureProjectEditContext,
   copyClips,
   currentTimelineEndFrame,
   editNestedSequence,
@@ -53,9 +63,12 @@ import {
   insertTrack,
   linkClips,
   moveClips,
+  moveOrDuplicateClipsToNewTrack,
   moveKeyframe,
   moveToFolder,
   pasteClipsAtPlayhead,
+  pasteClips,
+  placeMedia,
   removeClips,
   removeKeyframe,
   removeTracks,
@@ -79,6 +92,8 @@ import {
   setTrackProps,
   setTransition,
   splitClip,
+  splitClips,
+  splitAtPlayhead,
   stampKeyframe,
   swapClips,
   swapMedia,
@@ -86,6 +101,7 @@ import {
   trimClips,
   unlinkClips,
   upsertKeyframe,
+  setTransformAtFrame,
 } from "./editActions";
 import { useClipboardStore } from "./clipboardStore";
 import { useProjectStore } from "./projectStore";
@@ -138,7 +154,9 @@ function sourceFiles(root: string): string[] {
 describe("edit gesture command routing", () => {
   beforeEach(() => {
     ipc.calls.length = 0;
+    ipc.identities.length = 0;
     ipc.failure = null;
+    useProjectStore.getState().clearProjectSnapshot();
     useEditorUiStore.getState().exitNestedSequence();
     useClipboardStore.getState().clear();
   });
@@ -178,6 +196,28 @@ describe("edit gesture command routing", () => {
       { type: "dissolveNestedSequence", clipId: "compound-a" },
       () => dissolveNestedSequence("compound-a"),
     );
+    const unplaced = {
+      mediaRef: "media-a",
+      mediaType: "video" as const,
+      sourceClipType: "video" as const,
+      startFrame: 10,
+      durationFrames: 20,
+      hasAudio: false,
+      addLinkedAudio: false,
+    };
+    await route(
+      {
+        type: "placeMedia",
+        settings: { fps: 24, width: 3840, height: 2160 },
+        target: { kind: "newTrack", trackType: "video", at: 0 },
+        entry: unplaced,
+      },
+      () => placeMedia({
+        settings: { fps: 24, width: 3840, height: 2160 },
+        target: { kind: "newTrack", trackType: "video", at: 0 },
+        entry: unplaced,
+      }),
+    );
     await route({ type: "addClips", entries: [clipEntry] }, () => addClips([clipEntry]));
     await route(
       { type: "insertClips", trackIndex: 0, atFrame: 5, entries: [clipEntry] },
@@ -191,8 +231,49 @@ describe("edit gesture command routing", () => {
       { type: "duplicateClips", clipIds: ["clip-a"], offsetFrames: 3, targetTrackIndexes: [1] },
       () => duplicateClips(["clip-a"], 3, [1]),
     );
+    await route(
+      {
+        type: "moveOrDuplicateClipsToNewTrack",
+        clipIds: ["clip-a"],
+        leadClipId: "clip-a",
+        requestedFrameDelta: 3,
+        insertAt: 1,
+        mode: "duplicate",
+      },
+      () => moveOrDuplicateClipsToNewTrack(["clip-a"], "clip-a", 3, 1, "duplicate"),
+    );
+    const pasteSnapshot: Clip = {
+      id: "clipboard-a",
+      mediaRef: "media-a",
+      mediaType: "video",
+      sourceClipType: "video",
+      startFrame: 10,
+      durationFrames: 20,
+      trimStartFrame: 0,
+      trimEndFrame: 0,
+      speed: 1,
+      volume: 1,
+      fadeInFrames: 0,
+      fadeOutFrames: 0,
+      fadeInInterpolation: "linear",
+      fadeOutInterpolation: "linear",
+      opacity: 1,
+      transform,
+      crop: { left: 0, top: 0, right: 0, bottom: 0 },
+    };
+    await route(
+      {
+        type: "pasteClips",
+        entries: [{ clip: pasteSnapshot, targetTrackId: "track-a", startFrame: 30 }],
+      },
+      () => pasteClips([{ clip: pasteSnapshot, targetTrackId: "track-a", startFrame: 30 }]),
+    );
     await route({ type: "removeClips", clipIds: ["clip-a"] }, () => removeClips(["clip-a"]));
     await route({ type: "splitClip", clipId: "clip-a", atFrame: 15 }, () => splitClip("clip-a", 15));
+    await route(
+      { type: "splitClips", clipIds: ["clip-a", "clip-b"], atFrame: 15 },
+      () => splitClips(["clip-a", "clip-b"], 15),
+    );
     await route(
       { type: "freezeFrame", clipId: "clip-a", atFrame: 15, durationFrames: 30 },
       () => freezeFrame("clip-a", 15, 30),
@@ -204,6 +285,10 @@ describe("edit gesture command routing", () => {
     await route(
       { type: "setClipProperties", clipIds: ["clip-a"], properties: { opacity: 0.5 } },
       () => setClipProperties(["clip-a"], { opacity: 0.5 }),
+    );
+    await route(
+      { type: "setTransformAtFrame", clipId: "clip-a", frame: 15, transform },
+      () => setTransformAtFrame("clip-a", 15, transform),
     );
     await route(
       { type: "setKeyframes", clipId: "clip-a", property: "opacity", payload: { kind: "scalar", keyframes: [] } },
@@ -345,6 +430,74 @@ describe("edit gesture command routing", () => {
     expect(illegal).toEqual([]);
   });
 
+  it("splits only selected clips intersecting the playhead in one atomic request", async () => {
+    const base: Clip = {
+      id: "inside-video",
+      mediaRef: "media-a",
+      mediaType: "video",
+      sourceClipType: "video",
+      startFrame: 10,
+      durationFrames: 20,
+      trimStartFrame: 0,
+      trimEndFrame: 0,
+      speed: 1,
+      volume: 1,
+      fadeInFrames: 0,
+      fadeOutFrames: 0,
+      fadeInInterpolation: "linear",
+      fadeOutInterpolation: "linear",
+      opacity: 1,
+      transform,
+      crop: { left: 0, top: 0, right: 0, bottom: 0 },
+      linkGroupId: "av",
+    };
+    const linkedAudio: Clip = {
+      ...base,
+      id: "inside-audio",
+      mediaType: "audio",
+      sourceClipType: "audio",
+    };
+    const outside: Clip = {
+      ...base,
+      id: "outside",
+      startFrame: 40,
+      durationFrames: 10,
+      linkGroupId: undefined,
+    };
+    useProjectStore.getState().replaceProjectSnapshot({
+      timeline: {
+        fps: 30,
+        width: 1920,
+        height: 1080,
+        settingsConfigured: true,
+        tracks: [
+          { id: "v1", type: "video", muted: false, hidden: false, syncLocked: true, clips: [base, outside] },
+          { id: "a1", type: "audio", muted: false, hidden: false, syncLocked: true, clips: [linkedAudio] },
+        ],
+      },
+      projectEpoch: 1,
+      version: 3,
+      projectPath: "/split.opentake",
+      compatibilityReadOnly: false,
+      compatibilityBlockers: [],
+    });
+    useEditorUiStore.setState({
+      activeFrame: 15,
+      currentFrame: 15,
+      selectedClipIds: new Set(["inside-video", "inside-audio", "outside"]),
+    });
+
+    await splitAtPlayhead();
+
+    expect(ipc.calls).toEqual([
+      {
+        type: "splitClips",
+        clipIds: ["inside-video", "inside-audio"],
+        atFrame: 15,
+      },
+    ]);
+  });
+
   it("routes child edits to the active sequence but keeps global commands at root", async () => {
     useEditorUiStore.getState().enterNestedSequence("sequence-a");
 
@@ -363,6 +516,44 @@ describe("edit gesture command routing", () => {
       { type: "createFolder", name: "Selects" },
       { type: "setTimelineSettings", fps: 24, width: 1280, height: 720 },
     ]);
+  });
+
+  it("retains gesture-start project authority and nested scope until commit", async () => {
+    const project = useProjectStore.getState();
+    const start = {
+      timeline: {
+        fps: 30,
+        width: 1920,
+        height: 1080,
+        settingsConfigured: true,
+        tracks: [],
+      },
+      projectEpoch: 900,
+      version: 4,
+      projectPath: "/gesture.opentake",
+      compatibilityReadOnly: false,
+      compatibilityBlockers: [],
+    };
+    project.replaceProjectSnapshot(start);
+    useEditorUiStore.getState().enterNestedSequence("sequence-at-pointer-down");
+    const context = captureProjectEditContext();
+
+    project.replaceProjectSnapshot({ ...start, version: 5 });
+    useEditorUiStore.getState().exitNestedSequence();
+    await setTransformAtFrame("clip-a", 15, transform, context);
+
+    expect(ipc.calls).toEqual([
+      {
+        type: "editNestedSequence",
+        sequenceId: "sequence-at-pointer-down",
+        command: { type: "setTransformAtFrame", clipId: "clip-a", frame: 15, transform },
+      },
+    ]);
+    expect(ipc.identities).toEqual([{
+      projectEpoch: 900,
+      projectPath: "/gesture.opentake",
+      timelineVersion: 4,
+    }]);
   });
 
   it("project_store_has_no_timeline_mutator_and_refreshes_only_from_native_events", () => {
@@ -481,20 +672,12 @@ describe("edit gesture command routing", () => {
         type: "editNestedSequence",
         sequenceId: "sequence-a",
         command: {
-          type: "addClips",
+          type: "pasteClips",
           entries: [
             {
-              mediaRef: "media-a",
-              mediaType: "video",
-              sourceClipType: "video",
-              trackIndex: 0,
+              clip: childClip,
+              targetTrackId: "child-video",
               startFrame: 150,
-              durationFrames: 110,
-              trimStartFrame: 10,
-              trimEndFrame: 0,
-              hasAudio: true,
-              addLinkedAudio: false,
-              transform,
             },
           ],
         },

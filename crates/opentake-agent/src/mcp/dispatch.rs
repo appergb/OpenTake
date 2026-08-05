@@ -17,9 +17,11 @@
 //! names for compatibility but stay out of discovery until their backends are
 //! production-ready.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, RwLock};
 
+use opentake_core::OwnedUndoResult;
 use opentake_domain::{AnimPair, Crop, Interpolation, Keyframe, KeyframeTrack};
 use opentake_domain::{
     ChromaKey, ColorGrade, Effect, GenerationJobStatus, LiftGammaGain, Mask, MaskShape,
@@ -30,16 +32,16 @@ use opentake_media::analysis::{
 };
 use opentake_media::{PcmFormat, PcmSpec};
 use opentake_ops::{
-    ClipEntry, ClipMove, ClipProperties, EditCommand, FrameRange, KeyframePayload,
-    KeyframeProperty, RenameEntry, TextEntry,
+    ClipEntry, ClipMove, ClipProperties, ClipPropertyAssignment, EditCommand, FrameRange,
+    KeyframePayload, KeyframeProperty, RenameEntry, TextEntry,
 };
 use serde_json::Value;
 
 use crate::mcp::advanced::{
-    AdvancedWorkflowBridge, AdvancedWorkflowError, AdvancedWorkflowErrorKind,
+    model_safe_result, AdvancedWorkflowBridge, AdvancedWorkflowError, AdvancedWorkflowErrorKind,
     AdvancedWorkflowRequest,
 };
-use crate::mcp::core_handle::CoreHandle;
+use crate::mcp::core_handle::{CoreHandle, CoreRevision, CoreUndoHead};
 use crate::mcp::gen_catalog;
 use crate::mcp::generation::{GenerationBridge, GenerationRequest};
 use crate::mcp::media_bridge::{
@@ -47,10 +49,12 @@ use crate::mcp::media_bridge::{
     InspectMediaResult, InspectResult, MediaBridge, SearchCandidate, TranscriptSource,
     IMPORT_BYTES_BASE64_MAX,
 };
+use crate::mcp::media_catalog::ModelMediaCatalog;
 use crate::mcp::motion::{
-    AddMotionRequest, EditMotionRequest, MotionBridge, MotionBridgeError, MotionBridgeErrorKind,
-    MotionSourceRequest,
+    model_safe_commit, AddMotionRequest, EditMotionRequest, MotionBridge, MotionBridgeError,
+    MotionBridgeErrorKind, MotionSourceRequest,
 };
+use crate::mcp::vision::VisionBridge;
 use crate::plugin::registry::PluginRegistry;
 use crate::signal::engine;
 use crate::signal::rules::OpContext;
@@ -71,6 +75,113 @@ const INSPECT_MEDIA_DEFAULT_FRAMES: usize = 6;
 const INSPECT_MEDIA_MAX_FRAMES: usize = 12;
 const INSPECT_MEDIA_MAX_SEGMENTS: usize = 400;
 const INSPECT_MEDIA_MAX_WORDS: usize = 10_000;
+const DIRECT_UNDO_SCOPE: &str = "opentake:direct";
+
+thread_local! {
+    static ACTIVE_UNDO_SCOPES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+struct ActiveUndoScope;
+
+impl ActiveUndoScope {
+    fn enter(scope: &str) -> Self {
+        ACTIVE_UNDO_SCOPES.with(|scopes| scopes.borrow_mut().push(scope.to_string()));
+        Self
+    }
+
+    fn current() -> String {
+        ACTIVE_UNDO_SCOPES
+            .with(|scopes| scopes.borrow().last().cloned())
+            .unwrap_or_else(|| DIRECT_UNDO_SCOPE.to_string())
+    }
+}
+
+impl Drop for ActiveUndoScope {
+    fn drop(&mut self) {
+        ACTIVE_UNDO_SCOPES.with(|scopes| {
+            scopes.borrow_mut().pop();
+        });
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AgentUndoMarker {
+    revision: CoreRevision,
+    head: CoreUndoHead,
+}
+
+/// Resource class used by the HTTP MCP host before it starts blocking work.
+/// Unknown or malformed calls are conservatively treated as mutations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DispatchAdmissionClass {
+    ReadOnly,
+    Mutation,
+}
+
+pub(crate) fn dispatch_admission_class(name: &str, args: &Value) -> DispatchAdmissionClass {
+    let Ok(tool) = name.parse::<ToolName>() else {
+        return DispatchAdmissionClass::Mutation;
+    };
+    match tool {
+        ToolName::GetTimeline
+        | ToolName::GetMedia
+        | ToolName::InspectMedia
+        | ToolName::GetTranscript
+        | ToolName::InspectTimeline
+        | ToolName::SearchMedia
+        | ToolName::ListModels
+        | ToolName::ListFolders
+        | ToolName::ListWorkflows
+        | ToolName::DetectBeats
+        | ToolName::SmartReframe
+        | ToolName::TightenSilences
+        | ToolName::RemoveFillerWords => DispatchAdmissionClass::ReadOnly,
+        ToolName::AutoCutToBeats => match args.get("write") {
+            None | Some(Value::Bool(false)) => DispatchAdmissionClass::ReadOnly,
+            Some(_) => DispatchAdmissionClass::Mutation,
+        },
+        ToolName::AddClips
+        | ToolName::InsertClips
+        | ToolName::RemoveClips
+        | ToolName::RemoveTracks
+        | ToolName::MoveClips
+        | ToolName::SetClipProperties
+        | ToolName::SetKeyframes
+        | ToolName::SplitClip
+        | ToolName::RippleDeleteRanges
+        | ToolName::Undo
+        | ToolName::AddTexts
+        | ToolName::AddCaptions
+        | ToolName::GenerateVideo
+        | ToolName::GenerateImage
+        | ToolName::GenerateAudio
+        | ToolName::UpscaleMedia
+        | ToolName::ImportMedia
+        | ToolName::CreateFolder
+        | ToolName::MoveToFolder
+        | ToolName::RenameMedia
+        | ToolName::RenameFolder
+        | ToolName::DeleteMedia
+        | ToolName::DeleteFolder
+        | ToolName::ActivateWorkflow
+        | ToolName::DeactivateWorkflow
+        | ToolName::SetColorGrade
+        | ToolName::ChromaKey
+        | ToolName::SetMask
+        | ToolName::ApplyEffect
+        | ToolName::AddMotionGraphic
+        | ToolName::EditMotionGraphic
+        | ToolName::TrackMotion
+        | ToolName::GenerateMatte
+        | ToolName::RemoveObject
+        | ToolName::MatchColor
+        | ToolName::SeparateStems
+        | ToolName::TranslateCaptions
+        | ToolName::ScriptToVideo
+        | ToolName::GenerateAvatar
+        | ToolName::CloneVoice => DispatchAdmissionClass::Mutation,
+    }
+}
 
 /// The in-process tool dispatcher. Holds the [`CoreHandle`] boundary, the plugin
 /// registry (read-locked for the active plugin), and a per-dispatcher agent-undo
@@ -92,9 +203,12 @@ pub struct Dispatcher {
     /// Capability-gated advanced workflows. Each tool is discovered only when
     /// this bridge explicitly reports a production implementation for it.
     advanced_bridge: Option<Arc<dyn AdvancedWorkflowBridge>>,
-    /// Action names of agent edits applied through this dispatcher, newest last.
-    /// Guards `undo`: we only revert when this session has pushed an edit.
-    agent_undo: Mutex<Vec<String>>,
+    /// Capability-gated vision analysis. `smart_reframe` is discovered only
+    /// while this bridge reports a usable backend.
+    vision_bridge: Option<Arc<dyn VisionBridge>>,
+    /// Exact undo ownership markers keyed by the explicit OpenTake chat or MCP
+    /// transport session. The dispatcher is shared, so a global stack is unsafe.
+    agent_undo: Mutex<HashMap<String, Vec<AgentUndoMarker>>>,
 }
 
 impl Dispatcher {
@@ -161,8 +275,24 @@ impl Dispatcher {
             generation_bridge,
             motion_bridge,
             advanced_bridge,
-            agent_undo: Mutex::new(Vec::new()),
+            vision_bridge: None,
+            agent_undo: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Attach a vision-analysis capability (subject-aware reframing). The
+    /// `smart_reframe` tool is discovered only while the injected host reports
+    /// a usable backend; hosts and tests without one stay fail-closed. The
+    /// setter keeps every existing bridge constructor source-compatible.
+    pub fn with_vision_bridge(mut self, vision_bridge: Option<Arc<dyn VisionBridge>>) -> Self {
+        self.vision_bridge = vision_bridge;
+        self
+    }
+
+    pub fn can_do_vision_analysis(&self) -> bool {
+        self.vision_bridge
+            .as_ref()
+            .is_some_and(|bridge| bridge.can_reframe())
     }
 
     /// Whether this dispatcher can satisfy render/import tools that require the
@@ -175,6 +305,19 @@ impl Dispatcher {
         self.generation_bridge
             .as_ref()
             .is_some_and(|bridge| bridge.can_generate())
+    }
+
+    /// Recover the session-owned undo registry after an unrelated unwinding
+    /// panic. `HashMap`/`Vec` retain their memory-safety invariants across
+    /// unwinding, so preserving the completed markers is safer than turning one
+    /// poisoned guard into a process-lifetime denial of all later edit/undo
+    /// calls.
+    fn agent_undo_stacks(
+        &self,
+    ) -> std::sync::MutexGuard<'_, HashMap<String, Vec<AgentUndoMarker>>> {
+        self.agent_undo
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub fn can_render_motion(&self) -> bool {
@@ -201,6 +344,9 @@ impl Dispatcher {
                 }
             }
         }
+        if self.can_do_vision_analysis() {
+            tools.extend(ToolName::VISION);
+        }
         tools
     }
 
@@ -211,7 +357,12 @@ impl Dispatcher {
 
     /// Run one tool through the full pipeline and return its neutral result.
     pub fn dispatch(&self, name: &str, args: Value) -> ToolResult {
-        self.dispatch_cancellable(name, args, &opentake_media::MediaCancelToken::new())
+        self.dispatch_cancellable_scoped(
+            DIRECT_UNDO_SCOPE,
+            name,
+            args,
+            &opentake_media::MediaCancelToken::new(),
+        )
     }
 
     /// Run one tool with cooperative media cancellation. The MCP transport uses
@@ -223,6 +374,23 @@ impl Dispatcher {
         args: Value,
         cancel: &opentake_media::MediaCancelToken,
     ) -> ToolResult {
+        self.dispatch_cancellable_scoped(DIRECT_UNDO_SCOPE, name, args, cancel)
+    }
+
+    /// Dispatch under an explicit assistant-undo ownership scope. The scope is
+    /// supplied by the OpenTake ChatSession or MCP transport session and remains
+    /// active for every editing helper reached by this synchronous invocation.
+    pub fn dispatch_cancellable_scoped(
+        &self,
+        undo_scope: &str,
+        name: &str,
+        args: Value,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> ToolResult {
+        let _undo_scope = ActiveUndoScope::enter(undo_scope);
+        if cancel.is_cancelled() {
+            return ToolResult::error("Cancelled");
+        }
         // 1. Resolve the tool name.
         let Ok(tool) = name.parse::<ToolName>() else {
             return ToolResult::public_error(
@@ -241,10 +409,11 @@ impl Dispatcher {
             );
         }
         if !self.advertised_tools().contains(&tool) {
-            return ToolResult::public_error(
-                PublicErrorKind::UnknownTool,
-                format!("Tool is not advertised: {}", tool.as_str()),
-            );
+            let message = match tool.hidden_capability_reason() {
+                Some(reason) => format!("Tool is not advertised: {} ({reason})", tool.as_str()),
+                None => format!("Tool is not advertised: {}", tool.as_str()),
+            };
+            return ToolResult::public_error(PublicErrorKind::UnknownTool, message);
         }
 
         // 2. Snapshot the pre-run state.
@@ -308,10 +477,9 @@ impl Dispatcher {
             }
             ToolName::GetMedia => {
                 let manifest = self.handle.media();
-                let mut json = serde_json::to_value(&manifest)
+                let json = serde_json::to_value(ModelMediaCatalog::from(&manifest))
                     .map(round_floats_3dp)
                     .map_err(|e| ToolError::new(format!("get_media: {e}")))?;
-                inject_generation_statuses(&mut json, &manifest);
                 Ok(ToolResult::ok(json.to_string()))
             }
             ToolName::ListFolders => {
@@ -354,7 +522,7 @@ impl Dispatcher {
 
             // --- Analysis-driven edit surface ---
             ToolName::DetectBeats => self.detect_beats(args, before),
-            ToolName::AutoCutToBeats => self.auto_cut_to_beats(args, before, op),
+            ToolName::AutoCutToBeats => self.auto_cut_to_beats(args, before, op, cancel),
             ToolName::SmartReframe => self.smart_reframe(args),
             ToolName::TightenSilences => self.tighten_silences(args, before),
             ToolName::RemoveFillerWords => self.remove_filler_words(args, before, manifest),
@@ -363,7 +531,7 @@ impl Dispatcher {
             ToolName::InspectTimeline => self.inspect_timeline(args, before),
             ToolName::ImportMedia => self.import_media(args, manifest, cancel),
             ToolName::GetTranscript => self.get_transcript(args, before, manifest),
-            ToolName::AddCaptions => self.add_captions(args, before, manifest),
+            ToolName::AddCaptions => self.add_captions(args, before, manifest, cancel),
             ToolName::SearchMedia => self.search_media(args, manifest),
 
             // --- Known but deliberately absent from discovery ---
@@ -428,15 +596,15 @@ impl Dispatcher {
             .advanced_bridge
             .as_ref()
             .ok_or_else(|| ToolError::new("advanced workflow host capability is not available"))?;
+        let revision_before = self.handle.current_revision();
         match bridge.execute(request, cancel) {
             Ok(commit) => {
                 if let Some(action_name) = commit.action_name {
-                    self.agent_undo
-                        .lock()
-                        .expect("agent-undo mutex")
-                        .push(action_name);
+                    self.record_external_edit(action_name, revision_before);
                 }
-                Ok(ToolResult::ok(commit.result.to_string()))
+                Ok(ToolResult::ok(
+                    model_safe_result(tool, &commit.result).to_string(),
+                ))
             }
             Err(error) => Ok(advanced_workflow_error(tool, error)),
         }
@@ -460,6 +628,7 @@ impl Dispatcher {
         let bridge = self.motion_bridge.as_ref().ok_or_else(|| {
             ToolError::new("add_motion_graphic: motion renderer is not available")
         })?;
+        let revision_before = self.handle.current_revision();
         let commit = match bridge.add(
             AddMotionRequest {
                 source,
@@ -473,13 +642,8 @@ impl Dispatcher {
             Ok(commit) => commit,
             Err(error) => return Ok(motion_bridge_error(ToolName::AddMotionGraphic, error)),
         };
-        self.agent_undo
-            .lock()
-            .expect("agent-undo mutex")
-            .push(commit.action_name.clone());
-        serde_json::to_string(&commit)
-            .map(ToolResult::ok)
-            .map_err(|error| ToolError::new(format!("motion result encoding failed: {error}")))
+        self.record_external_edit(commit.action_name.clone(), revision_before);
+        Ok(ToolResult::ok(model_safe_commit(&commit).to_string()))
     }
 
     fn edit_motion_graphic(
@@ -491,6 +655,7 @@ impl Dispatcher {
         let bridge = self.motion_bridge.as_ref().ok_or_else(|| {
             ToolError::new("edit_motion_graphic: motion renderer is not available")
         })?;
+        let revision_before = self.handle.current_revision();
         let commit = match bridge.edit(
             EditMotionRequest {
                 clip_id: decoded.clip_id,
@@ -502,13 +667,8 @@ impl Dispatcher {
             Ok(commit) => commit,
             Err(error) => return Ok(motion_bridge_error(ToolName::EditMotionGraphic, error)),
         };
-        self.agent_undo
-            .lock()
-            .expect("agent-undo mutex")
-            .push(commit.action_name.clone());
-        serde_json::to_string(&commit)
-            .map(ToolResult::ok)
-            .map_err(|error| ToolError::new(format!("motion result encoding failed: {error}")))
+        self.record_external_edit(commit.action_name.clone(), revision_before);
+        Ok(ToolResult::ok(model_safe_commit(&commit).to_string()))
     }
 
     // MARK: - Generative read bodies
@@ -754,7 +914,10 @@ impl Dispatcher {
         let source = match args.get("source") {
             Some(raw) => decode_tool_args::<ImportSourceArg>(raw, "source")?,
             None => {
-                return Ok(ToolResult::error("Missing required 'source' object"));
+                return Ok(ToolResult::public_error(
+                    PublicErrorKind::InvalidArguments(ToolName::ImportMedia),
+                    "source: missing required field 'source'",
+                ));
             }
         };
 
@@ -764,33 +927,49 @@ impl Dispatcher {
             .filter(|v| v.is_some())
             .count();
         if set_count != 1 {
-            return Ok(ToolResult::error(format!(
-                "source must set exactly one of 'url', 'path', or 'bytes' (got {set_count})"
-            )));
+            return Ok(ToolResult::public_error(
+                PublicErrorKind::InvalidArguments(ToolName::ImportMedia),
+                format!(
+                    "source: must set exactly one of 'url', 'path', or 'bytes' (got {set_count})"
+                ),
+            ));
+        }
+
+        // LLM/MCP input is never file-system authority. Until the desktop host
+        // injects a picker-issued, persistent scope capability, a path supplied
+        // in a prompt must fail before the media bridge can inspect metadata.
+        if source.path.is_some() {
+            return Ok(ToolResult::public_error(
+                PublicErrorKind::PathAuthorityRequired(ToolName::ImportMedia),
+                "source.path: explicit user-granted file authority is required",
+            ));
         }
 
         // folderId, when provided, must name an existing folder (upstream
         // `resolveFolderId`). There is no reference fallback for a tool call.
         if let Some(folder_id) = a.folder_id.as_deref() {
             if !manifest.folders.iter().any(|f| f.id == folder_id) {
-                return Ok(ToolResult::error(format!(
-                    "folderId not found: {folder_id}"
-                )));
+                return Ok(ToolResult::public_error(
+                    PublicErrorKind::ResourceNotFound(ToolName::ImportMedia),
+                    format!("folderId not found: {folder_id}"),
+                ));
             }
         }
 
-        let import_source = if let Some(path) = source.path.clone() {
-            ImportSource::Path(path)
-        } else if let Some(base64) = source.bytes.clone() {
+        let import_source = if let Some(base64) = source.bytes.clone() {
             let base64_len = base64.trim().len();
             if base64_len > IMPORT_BYTES_BASE64_MAX {
-                return Ok(ToolResult::error(format!(
-                    "source.bytes is too large: {base64_len} base64 bytes, max {IMPORT_BYTES_BASE64_MAX}; use source.path for larger files"
-                )));
+                return Ok(ToolResult::public_error(
+                    PublicErrorKind::InvalidArguments(ToolName::ImportMedia),
+                    format!(
+                        "source.bytes: value is too large ({base64_len} base64 bytes, max {IMPORT_BYTES_BASE64_MAX})"
+                    ),
+                ));
             }
             let Some(mime_type) = source.mime_type.clone() else {
-                return Ok(ToolResult::error(
-                    "source.mimeType is required when source.bytes is set",
+                return Ok(ToolResult::public_error(
+                    PublicErrorKind::InvalidArguments(ToolName::ImportMedia),
+                    "source.mimeType: missing required field when source.bytes is set",
                 ));
             };
             ImportSource::Bytes { base64, mime_type }
@@ -801,19 +980,48 @@ impl Dispatcher {
             }
         } else {
             // Unreachable: set_count == 1 guaranteed one branch above.
-            return Ok(ToolResult::error("import_media: no source set"));
+            return Ok(ToolResult::public_error(
+                PublicErrorKind::InvalidArguments(ToolName::ImportMedia),
+                "source: missing required field",
+            ));
         };
 
         let Some(bridge) = self.bridge.as_ref() else {
-            return Ok(ToolResult::error(
+            return Ok(ToolResult::public_error(
+                PublicErrorKind::CapabilityUnavailable(ToolName::ImportMedia),
                 "import_media: importing is not available in this build",
             ));
         };
 
-        let outcome = bridge
-            .import_media_cancellable(import_source, a.name.clone(), a.folder_id.clone(), cancel)
-            .map_err(|e| ToolError::new(e.message))?;
-        Ok(ToolResult::ok(outcome.message))
+        let outcome = match bridge.import_media_cancellable(
+            import_source,
+            a.name.clone(),
+            a.folder_id.clone(),
+            cancel,
+        ) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let kind = match error.kind {
+                    BridgeErrorKind::Private => return Err(ToolError::new(error.message)),
+                    BridgeErrorKind::NotFound => {
+                        PublicErrorKind::ResourceNotFound(ToolName::ImportMedia)
+                    }
+                    BridgeErrorKind::Unavailable => {
+                        PublicErrorKind::CapabilityUnavailable(ToolName::ImportMedia)
+                    }
+                };
+                return Ok(ToolResult::public_error(kind, error.message));
+            }
+        };
+        let recovery = if outcome.recovery_required {
+            " The asset is committed, but project recovery is required; save and reopen the project before editing it."
+        } else {
+            ""
+        };
+        Ok(ToolResult::ok(format!(
+            "Imported {} media asset(s) and created {} folder(s). Refresh with get_media or list_folders before referencing the new assets.{recovery}",
+            outcome.asset_count, outcome.folder_count
+        )))
     }
 
     /// `search_media`: content search over the library — visual (SigLIP2
@@ -1017,7 +1225,17 @@ impl Dispatcher {
                     .find(|e| e.id == r.media_ref)
                     .map(|e| e.name.clone())
                     .unwrap_or_else(|| r.media_ref.clone());
-                skipped.push(serde_json::json!({ "file": file, "reason": reason }));
+                tracing::warn!(
+                    target: "opentake::agent::private",
+                    media_ref = %r.media_ref,
+                    detail = %reason,
+                    "transcript source was skipped"
+                );
+                skipped.push(serde_json::json!({
+                    "file": file,
+                    "code": "TRANSCRIPTION_SOURCE_UNAVAILABLE",
+                    "reason": "Source unavailable for transcription. Relink or replace the media, then retry."
+                }));
             }
         }
 
@@ -1104,7 +1322,10 @@ impl Dispatcher {
         args: &Value,
         before: &Timeline,
         manifest: &MediaManifest,
+        cancel: &opentake_media::MediaCancelToken,
     ) -> Result<ToolResult, ToolError> {
+        ensure_not_cancelled(cancel)?;
+        let revision = self.handle.current_revision();
         let a: AddCaptionsArgs = decode_tool_args(args, "")?;
 
         // Style from args (defaults: Helvetica-Bold @ AppTheme.Caption.defaultFontSize=48,
@@ -1186,6 +1407,7 @@ impl Dispatcher {
         let source_results = bridge
             .transcribe_sources(&sources)
             .map_err(|e| ToolError::new(e.message))?;
+        ensure_not_cancelled(cancel)?;
         let mut transcripts: BTreeMap<String, opentake_media::TranscriptionResult> =
             BTreeMap::new();
         for r in source_results {
@@ -1268,7 +1490,7 @@ impl Dispatcher {
             .collect();
 
         let count = entries.len();
-        let res = self.apply(EditCommand::AddCaptions { entries })?;
+        let res = self.apply_deferred(EditCommand::AddCaptions { entries }, revision, cancel)?;
         if !res.changed {
             return Ok(ToolResult::error("No speech detected to caption."));
         }
@@ -1512,7 +1734,10 @@ impl Dispatcher {
         args: &Value,
         before: &Timeline,
         op: &mut OpContext,
+        cancel: &opentake_media::MediaCancelToken,
     ) -> Result<ToolResult, ToolError> {
+        ensure_not_cancelled(cancel)?;
+        let revision = self.handle.current_revision();
         let a: AutoCutToBeatsArgs = decode_tool_args(args, "")?;
         let write = a.write.unwrap_or(false);
         if write && a.align_cuts == Some(false) {
@@ -1531,6 +1756,7 @@ impl Dispatcher {
                 tool_name: "auto_cut_to_beats",
             },
         )?;
+        ensure_not_cancelled(cancel)?;
         let min_gap = a.min_clip_frames.unwrap_or(1).max(1);
         let max_gap = a.max_clip_frames.unwrap_or(i32::MAX).max(min_gap);
         let mut cut_frames = Vec::new();
@@ -1571,7 +1797,7 @@ impl Dispatcher {
                 .map(|movement| movement.clip_id.clone())
                 .collect();
             op.track_index = moves.first().map(|movement| movement.to_track);
-            let result = self.apply(EditCommand::MoveClips { moves })?;
+            let result = self.apply_deferred(EditCommand::MoveClips { moves }, revision, cancel)?;
             (result.changed, Some(result.summary), applied_placements)
         } else {
             (false, None, placements)
@@ -1598,8 +1824,8 @@ impl Dispatcher {
 
     fn smart_reframe(&self, args: &Value) -> Result<ToolResult, ToolError> {
         let _: SmartReframeArgs = decode_tool_args(args, "")?;
-        Ok(ToolResult::error(
-            "smart_reframe: needs vision analysis backend; CoreHandle does not expose sampled frames or saliency/subject analysis yet",
+        Err(ToolError::new(
+            "smart_reframe: vision analysis backend is not available; CoreHandle does not expose sampled frames or saliency/subject analysis yet",
         ))
     }
 
@@ -1629,7 +1855,17 @@ impl Dispatcher {
             ) {
                 Ok(pcm) => pcm,
                 Err(e) => {
-                    warnings.push(format!("{}: {e}", target.clip.id));
+                    tracing::warn!(
+                        target: "opentake::agent::private",
+                        clip_id = %target.clip.id,
+                        detail = %e,
+                        "silence analysis source was unavailable"
+                    );
+                    warnings.push(serde_json::json!({
+                        "clipId": target.clip.id,
+                        "code": "ANALYSIS_SOURCE_UNAVAILABLE",
+                        "message": "Source audio is unavailable for analysis. Relink or replace the media, then retry."
+                    }));
                     continue;
                 }
             };
@@ -2129,7 +2365,7 @@ impl Dispatcher {
             return Ok(ToolResult::ok(res.summary));
         };
 
-        let mut per_clip = Vec::new();
+        let mut assignments = Vec::with_capacity(clip_ids.len());
         for clip_id in &clip_ids {
             let clip = find_clip(before, clip_id).ok_or_else(|| {
                 ToolError::new(format!("set_clip_properties: clip not found: {clip_id}"))
@@ -2142,18 +2378,14 @@ impl Dispatcher {
                 transform_patch.clone(),
                 aspect,
             ));
-            per_clip.push((clip_id.clone(), clip_properties));
+            assignments.push(ClipPropertyAssignment {
+                clip_id: clip_id.clone(),
+                properties: clip_properties,
+            });
         }
 
-        let mut summaries = Vec::new();
-        for (clip_id, clip_properties) in per_clip {
-            let res = self.apply(EditCommand::SetClipProperties {
-                clip_ids: vec![clip_id],
-                properties: Box::new(clip_properties),
-            })?;
-            summaries.push(res.summary);
-        }
-        Ok(ToolResult::ok(summaries.join("; ")))
+        let result = self.apply(EditCommand::SetClipPropertiesPerClip { assignments })?;
+        Ok(ToolResult::ok(result.summary))
     }
 
     fn set_color_grade(&self, args: &Value) -> Result<ToolResult, ToolError> {
@@ -2361,14 +2593,62 @@ impl Dispatcher {
     }
 
     fn undo(&self) -> Result<ToolResult, ToolError> {
-        // Only revert when this dispatch session has actually pushed an edit.
-        let mut stack = self.agent_undo.lock().expect("agent-undo mutex");
-        if stack.pop().is_none() {
-            return Ok(ToolResult::error("undo: no agent edits to revert"));
+        let scope = ActiveUndoScope::current();
+        let marker = self
+            .agent_undo_stacks()
+            .get(&scope)
+            .and_then(|stack| stack.last())
+            .cloned();
+        let Some(marker) = marker else {
+            return Ok(ToolResult::error(
+                "No assistant edit to undo this session. The user's own edits are theirs to undo.",
+            ));
+        };
+
+        let outcome = match self.handle.undo_if_owned(&marker.revision, &marker.head) {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                return Ok(ToolResult::error(
+                    "The project or timeline changed after the assistant edit — not undoing it.",
+                ));
+            }
+        };
+        match outcome {
+            OwnedUndoResult::NoHistory => {
+                self.agent_undo_stacks().remove(&scope);
+                Ok(ToolResult::error("Nothing to undo."))
+            }
+            OwnedUndoResult::Conflict {
+                actual_action_name, ..
+            } => Ok(ToolResult::error(format!(
+                "The most recent change ('{}') wasn't made by the assistant — not undoing it.",
+                actual_action_name.as_deref().unwrap_or("unknown")
+            ))),
+            OwnedUndoResult::Undone(_result) => {
+                let mut stacks = self.agent_undo_stacks();
+                let mut remove_scope = false;
+                if let Some(stack) = stacks.get_mut(&scope) {
+                    if let Some(index) = stack.iter().rposition(|candidate| candidate == &marker) {
+                        stack.remove(index);
+                    }
+                    if let (Some((revision, head)), Some(previous)) =
+                        (self.handle.revision_and_undo_head(), stack.last_mut())
+                    {
+                        if previous.head == head {
+                            previous.revision = revision;
+                        }
+                    }
+                    remove_scope = stack.is_empty();
+                }
+                if remove_scope {
+                    stacks.remove(&scope);
+                }
+                Ok(ToolResult::ok(format!(
+                    "Undid: {}. The timeline is restored to its state before that edit; re-read with get_timeline or get_transcript before editing again.",
+                    marker.head.action_name
+                )))
+            }
         }
-        drop(stack);
-        let res = self.apply_raw(EditCommand::Undo)?;
-        Ok(ToolResult::ok(res.summary))
     }
 
     // MARK: - Apply helpers
@@ -2379,12 +2659,64 @@ impl Dispatcher {
     fn apply(&self, cmd: EditCommand) -> Result<opentake_ops::command::EditResult, ToolError> {
         let res = self.apply_raw(cmd)?;
         if res.changed {
-            self.agent_undo
-                .lock()
-                .expect("agent-undo mutex")
-                .push(res.action_name.clone());
+            self.record_current_edit(&res);
         }
         Ok(res)
+    }
+
+    fn apply_deferred(
+        &self,
+        cmd: EditCommand,
+        expected: Option<CoreRevision>,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<opentake_ops::command::EditResult, ToolError> {
+        ensure_not_cancelled(cancel)?;
+        let result = match expected {
+            Some(expected) => self
+                .handle
+                .apply_at_revision(&expected, cmd)
+                .map_err(|error| ToolError::new(error.to_string()))?,
+            None => self.apply_raw(cmd)?,
+        };
+        if result.changed {
+            self.record_current_edit(&result);
+        }
+        Ok(result)
+    }
+
+    fn record_current_edit(&self, result: &opentake_ops::command::EditResult) {
+        let Some((revision, head)) = self.handle.revision_and_undo_head() else {
+            return;
+        };
+        if revision.timeline_version != result.timeline_version
+            || head.action_name != result.action_name
+            || head.transaction_version != result.timeline_version
+        {
+            return;
+        }
+        self.agent_undo_stacks()
+            .entry(ActiveUndoScope::current())
+            .or_default()
+            .push(AgentUndoMarker { revision, head });
+    }
+
+    fn record_external_edit(&self, action_name: String, before: Option<CoreRevision>) {
+        let (Some(before), Some((revision, head))) = (before, self.handle.revision_and_undo_head())
+        else {
+            return;
+        };
+        if before.project_epoch != revision.project_epoch
+            || before.project_dir != revision.project_dir
+            || revision.timeline_version != before.timeline_version.saturating_add(1)
+            || head.action_name != action_name
+            || head.transaction_version != revision.timeline_version
+        {
+            return;
+        }
+        self.agent_undo_stacks()
+            .entry(ActiveUndoScope::current())
+            .or_default()
+            .push(AgentUndoMarker { revision, head });
     }
 
     /// Apply without touching the agent-undo stack (used by `undo` itself).
@@ -2392,6 +2724,14 @@ impl Dispatcher {
         self.handle
             .apply(cmd)
             .map_err(|e| ToolError::new(e.to_string()))
+    }
+}
+
+fn ensure_not_cancelled(cancel: &opentake_media::MediaCancelToken) -> Result<(), ToolError> {
+    if cancel.is_cancelled() {
+        Err(ToolError::new("Cancelled"))
+    } else {
+        Ok(())
     }
 }
 
@@ -2863,35 +3203,6 @@ fn ensure_generation_output_ready(
     )))
 }
 
-fn inject_generation_statuses(payload: &mut Value, manifest: &MediaManifest) {
-    let Some(entries) = payload
-        .as_object_mut()
-        .and_then(|object| object.get_mut("entries"))
-        .and_then(Value::as_array_mut)
-    else {
-        return;
-    };
-    for (payload_entry, manifest_entry) in entries.iter_mut().zip(&manifest.entries) {
-        let Some(object) = payload_entry.as_object_mut() else {
-            continue;
-        };
-        let input = manifest_entry.generation_input.as_ref();
-        object.insert(
-            "generationStatus".into(),
-            Value::String(generation_status_label(input.and_then(|value| value.status)).into()),
-        );
-        if let Some(progress) = input.and_then(|value| value.progress) {
-            object.insert("generationProgress".into(), json_number(progress, 3));
-        }
-        if let Some(error_code) = input.and_then(|value| value.error_code.as_ref()) {
-            object.insert(
-                "generationErrorCode".into(),
-                Value::String(error_code.clone()),
-            );
-        }
-    }
-}
-
 /// Current `(track_index, start_frame)` of a clip on the timeline, or `(None,
 /// None)` if absent. Used to fill optional `move_clips` fields.
 fn clip_location(timeline: &Timeline, clip_id: &str) -> (Option<usize>, Option<i32>) {
@@ -3292,26 +3603,98 @@ fn build_ripple_ranges(
             )));
         }
         let (mut start, mut end) = match units {
-            RangeUnits::Frames => (row[0] as i32, row[1] as i32),
+            RangeUnits::Frames => (
+                checked_frame_number(row[0], &format!("ranges[{i}][0]"))?,
+                checked_frame_number(row[1], &format!("ranges[{i}][1]"))?,
+            ),
             RangeUnits::Seconds => {
                 if let Some(clip) = clip {
                     (
-                        source_seconds_to_timeline_frame_clamped(clip, row[0], timeline.fps),
-                        source_seconds_to_timeline_frame_clamped(clip, row[1], timeline.fps),
+                        checked_source_seconds_to_timeline_frame_clamped(
+                            clip,
+                            row[0],
+                            timeline.fps,
+                            &format!("ranges[{i}][0]"),
+                        )?,
+                        checked_source_seconds_to_timeline_frame_clamped(
+                            clip,
+                            row[1],
+                            timeline.fps,
+                            &format!("ranges[{i}][1]"),
+                        )?,
                     )
                 } else {
                     let fps = timeline.fps.max(1) as f64;
-                    ((row[0] * fps).round() as i32, (row[1] * fps).round() as i32)
+                    (
+                        checked_rounded_frame(row[0] * fps, &format!("ranges[{i}][0]"))?,
+                        checked_rounded_frame(row[1] * fps, &format!("ranges[{i}][1]"))?,
+                    )
                 }
             }
         };
         if let Some(clip) = clip {
-            start = start.clamp(clip.start_frame, clip.end_frame());
-            end = end.clamp(clip.start_frame, clip.end_frame());
+            let clip_end = clip
+                .start_frame
+                .checked_add(clip.duration_frames)
+                .ok_or_else(|| ToolError::new("ripple_delete_ranges: clip endFrame overflows"))?;
+            start = start.clamp(clip.start_frame, clip_end);
+            end = end.clamp(clip.start_frame, clip_end);
+        }
+        if start < 0 || end <= start || end.checked_sub(start).is_none() {
+            return Err(ToolError::new(format!(
+                "ranges[{i}]: expected 0 <= start < end without overflow"
+            )));
         }
         ranges.push(FrameRange::new(start, end));
     }
     Ok(ranges)
+}
+
+fn checked_frame_number(value: f64, label: &str) -> Result<i32, ToolError> {
+    if !value.is_finite() || value.fract() != 0.0 {
+        return Err(ToolError::new(format!(
+            "{label}: frame value must be a finite integer"
+        )));
+    }
+    checked_rounded_frame(value, label)
+}
+
+fn checked_rounded_frame(value: f64, label: &str) -> Result<i32, ToolError> {
+    let rounded = value.round();
+    if !rounded.is_finite() || !(i32::MIN as f64..=i32::MAX as f64).contains(&rounded) {
+        return Err(ToolError::new(format!(
+            "{label}: frame value is outside the supported range"
+        )));
+    }
+    Ok(rounded as i32)
+}
+
+fn checked_source_seconds_to_timeline_frame_clamped(
+    clip: &opentake_domain::Clip,
+    source_seconds: f64,
+    timeline_fps: i32,
+    label: &str,
+) -> Result<i32, ToolError> {
+    if !source_seconds.is_finite() {
+        return Err(ToolError::new(format!(
+            "{label}: seconds value must be finite"
+        )));
+    }
+    let clip_end = clip
+        .start_frame
+        .checked_add(clip.duration_frames)
+        .ok_or_else(|| ToolError::new(format!("{label}: clip endFrame overflows")))?;
+    let fps = timeline_fps.max(1) as f64;
+    let source_frame = source_seconds * fps;
+    let speed = normalized_speed(clip);
+    let mapped = clip.start_frame as f64 + (source_frame - clip.trim_start_frame as f64) / speed;
+    if !mapped.is_finite() {
+        return Err(ToolError::new(format!(
+            "{label}: seconds value maps outside the supported frame range"
+        )));
+    }
+    let clamped = mapped.clamp(clip.start_frame as f64, clip_end as f64);
+    checked_rounded_frame(clamped, label)
 }
 
 /// `add_texts` wraps at 90% of canvas width before auto-fitting the box to the
@@ -3767,6 +4150,13 @@ fn inspect_media_result(
             .into(),
         ),
     );
+    if let Some(progress) = entry
+        .generation_input
+        .as_ref()
+        .and_then(|input| input.progress)
+    {
+        meta.insert("generationProgress".into(), json_number(progress, 3));
+    }
     meta.insert("byteSize".into(), Value::from(inspected.byte_size));
     if let Some(file_name) = manifest_file_name(entry) {
         meta.insert("fileName".into(), Value::String(file_name));
@@ -3779,11 +4169,6 @@ fn inspect_media_result(
     }
     if let Some(fps) = inspected.fps {
         meta.insert("sourceFPS".into(), json_number(fps, 3));
-    }
-    if let Some(input) = &entry.generation_input {
-        if let Ok(input) = serde_json::to_value(input) {
-            meta.insert("generationInput".into(), input);
-        }
     }
     if let (Some(start), Some(end)) = (request.start_seconds, request.end_seconds) {
         meta.insert(
@@ -4076,6 +4461,45 @@ mod tests {
         fn apply(&self, cmd: EditCommand) -> anyhow::Result<EditResult> {
             self.core.apply(cmd).map_err(|e| anyhow::anyhow!("{e}"))
         }
+        fn current_revision(&self) -> Option<CoreRevision> {
+            let snapshot = self.core.runtime_snapshot();
+            Some(CoreRevision {
+                project_epoch: snapshot.project_epoch,
+                project_dir: snapshot.project_dir,
+                timeline_version: snapshot.version,
+            })
+        }
+        fn revision_and_undo_head(&self) -> Option<(CoreRevision, CoreUndoHead)> {
+            let snapshot = self.core.project_undo_snapshot()?;
+            Some((
+                CoreRevision {
+                    project_epoch: snapshot.revision.project_epoch,
+                    project_dir: snapshot.project_path,
+                    timeline_version: snapshot.revision.version,
+                },
+                CoreUndoHead {
+                    action_name: snapshot.action_name,
+                    transaction_version: snapshot.transaction_version,
+                },
+            ))
+        }
+        fn undo_if_owned(
+            &self,
+            expected: &CoreRevision,
+            head: &CoreUndoHead,
+        ) -> anyhow::Result<OwnedUndoResult> {
+            self.core
+                .undo_if_owned(
+                    opentake_core::ProjectRevision {
+                        project_epoch: expected.project_epoch,
+                        version: expected.timeline_version,
+                    },
+                    expected.project_dir.as_deref(),
+                    &head.action_name,
+                    head.transaction_version,
+                )
+                .map_err(|error| anyhow::anyhow!("{error}"))
+        }
         fn project_dir(&self) -> Option<PathBuf> {
             self.core.project_dir()
         }
@@ -4190,7 +4614,8 @@ mod tests {
         let r = d.dispatch("undo", serde_json::json!({}));
         assert!(r.is_error);
         assert!(
-            r.text_joined().contains("no agent edits to revert"),
+            r.text_joined()
+                .contains("No assistant edit to undo this session"),
             "{}",
             r.text_joined()
         );
@@ -4290,12 +4715,14 @@ mod tests {
         timeline: Timeline,
         manifest: MediaManifest,
         pcm: opentake_media::PcmBuffer,
+        extract_error: Option<String>,
     }
 
     struct WritableAnalysisHandle {
         state: Mutex<EditorState>,
         pcm: opentake_media::PcmBuffer,
         commands: Mutex<Vec<EditCommand>>,
+        cancel_after_extract: Mutex<Option<opentake_media::MediaCancelToken>>,
     }
 
     impl CoreHandle for AnalysisHandle {
@@ -4317,6 +4744,9 @@ mod tests {
             _spec: opentake_media::PcmSpec,
             _range: Option<(f64, f64)>,
         ) -> anyhow::Result<opentake_media::PcmBuffer> {
+            if let Some(error) = self.extract_error.as_deref() {
+                anyhow::bail!(error.to_string());
+            }
             // Mirror the real `CoreHandle::media_path` default: an empty
             // `media_ref` (what text clips carry — see `command.rs::add_texts`)
             // never resolves to a path, matching production's real failure mode
@@ -4341,6 +4771,34 @@ mod tests {
             ops_apply(&mut self.state.lock().unwrap(), cmd, &ids)
                 .map_err(|e| anyhow::anyhow!("{e}"))
         }
+        fn current_revision(&self) -> Option<CoreRevision> {
+            Some(CoreRevision {
+                project_epoch: 0,
+                project_dir: None,
+                timeline_version: self.state.lock().unwrap().version(),
+            })
+        }
+        fn revision_and_undo_head(&self) -> Option<(CoreRevision, CoreUndoHead)> {
+            let state = self.state.lock().unwrap();
+            Some((
+                CoreRevision {
+                    project_epoch: 0,
+                    project_dir: None,
+                    timeline_version: state.version(),
+                },
+                CoreUndoHead {
+                    action_name: state.undo_action_name()?.to_string(),
+                    transaction_version: state.undo_transaction_version()?,
+                },
+            ))
+        }
+        fn undo_if_owned(
+            &self,
+            expected: &CoreRevision,
+            head: &CoreUndoHead,
+        ) -> anyhow::Result<OwnedUndoResult> {
+            undo_test_state_if_owned(&self.state, expected, head, "beat-")
+        }
         fn project_dir(&self) -> Option<PathBuf> {
             None
         }
@@ -4350,6 +4808,9 @@ mod tests {
             _spec: opentake_media::PcmSpec,
             _range: Option<(f64, f64)>,
         ) -> anyhow::Result<opentake_media::PcmBuffer> {
+            if let Some(cancel) = self.cancel_after_extract.lock().unwrap().take() {
+                cancel.cancel();
+            }
             Ok(self.pcm.clone())
         }
     }
@@ -4385,9 +4846,69 @@ mod tests {
             let mut st = self.state.lock().unwrap();
             ops_apply(&mut st, cmd, &ids).map_err(|e| anyhow::anyhow!("{e}"))
         }
+        fn current_revision(&self) -> Option<CoreRevision> {
+            Some(CoreRevision {
+                project_epoch: 0,
+                project_dir: None,
+                timeline_version: self.state.lock().unwrap().version(),
+            })
+        }
+        fn revision_and_undo_head(&self) -> Option<(CoreRevision, CoreUndoHead)> {
+            let state = self.state.lock().unwrap();
+            Some((
+                CoreRevision {
+                    project_epoch: 0,
+                    project_dir: None,
+                    timeline_version: state.version(),
+                },
+                CoreUndoHead {
+                    action_name: state.undo_action_name()?.to_string(),
+                    transaction_version: state.undo_transaction_version()?,
+                },
+            ))
+        }
+        fn undo_if_owned(
+            &self,
+            expected: &CoreRevision,
+            head: &CoreUndoHead,
+        ) -> anyhow::Result<OwnedUndoResult> {
+            undo_test_state_if_owned(&self.state, expected, head, "t-")
+        }
         fn project_dir(&self) -> Option<PathBuf> {
             None
         }
+    }
+
+    fn undo_test_state_if_owned(
+        state: &Mutex<EditorState>,
+        expected: &CoreRevision,
+        head: &CoreUndoHead,
+        id_prefix: &str,
+    ) -> anyhow::Result<OwnedUndoResult> {
+        let mut state = state.lock().unwrap();
+        if expected.project_epoch != 0
+            || expected.project_dir.is_some()
+            || expected.timeline_version != state.version()
+        {
+            anyhow::bail!("stale project revision");
+        }
+        let actual_action_name = state.undo_action_name().map(str::to_owned);
+        let actual_transaction_version = state.undo_transaction_version();
+        if actual_action_name.is_none() {
+            return Ok(OwnedUndoResult::NoHistory);
+        }
+        if actual_action_name.as_deref() != Some(&head.action_name)
+            || actual_transaction_version != Some(head.transaction_version)
+        {
+            return Ok(OwnedUndoResult::Conflict {
+                actual_action_name,
+                actual_transaction_version,
+            });
+        }
+        let ids = SeqIdGen::new(id_prefix);
+        ops_apply(&mut state, EditCommand::Undo, &ids)
+            .map(OwnedUndoResult::Undone)
+            .map_err(|error| anyhow::anyhow!("{error}"))
     }
 
     fn entry(id: &str, name: &str) -> MediaManifestEntry {
@@ -4445,6 +4966,7 @@ mod tests {
             state: Mutex::new(EditorState::new(timeline, manifest)),
             pcm: pcm(samples, 1_000),
             commands: Mutex::new(Vec::new()),
+            cancel_after_extract: Mutex::new(None),
         })
     }
 
@@ -4506,6 +5028,169 @@ mod tests {
         let mut m = MediaManifest::new();
         m.entries = entries;
         Arc::new(StateHandle::new(Timeline::new(), m))
+    }
+
+    fn scoped_dispatch(
+        dispatcher: &Dispatcher,
+        scope: &str,
+        tool: &str,
+        args: Value,
+    ) -> ToolResult {
+        dispatcher.dispatch_cancellable_scoped(
+            scope,
+            tool,
+            args,
+            &opentake_media::MediaCancelToken::new(),
+        )
+    }
+
+    #[test]
+    fn assistant_session_can_undo_two_consecutive_owned_edits() {
+        let handle = seeded_handle();
+        let dispatcher = dispatcher_with(handle.clone());
+        for to_frame in [10, 20] {
+            let moved = scoped_dispatch(
+                &dispatcher,
+                "chat-session-x",
+                "move_clips",
+                serde_json::json!({"moves":[{"clipId":"clip-1","toFrame":to_frame}]}),
+            );
+            assert!(!moved.is_error, "{}", moved.text_joined());
+        }
+
+        let first = scoped_dispatch(&dispatcher, "chat-session-x", "undo", serde_json::json!({}));
+        assert!(!first.is_error, "{}", first.text_joined());
+        assert_eq!(handle.timeline().tracks[0].clips[0].start_frame, 10);
+
+        let second = scoped_dispatch(&dispatcher, "chat-session-x", "undo", serde_json::json!({}));
+        assert!(!second.is_error, "{}", second.text_joined());
+        assert_eq!(handle.timeline().tracks[0].clips[0].start_frame, 0);
+    }
+
+    #[test]
+    fn poisoned_agent_undo_mutex_does_not_break_later_edit_or_undo() {
+        let handle = seeded_handle();
+        let dispatcher = dispatcher_with(handle.clone());
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = dispatcher.agent_undo.lock().unwrap();
+            panic!("intentional agent-undo poison");
+        }));
+        assert!(poisoned.is_err());
+        assert!(dispatcher.agent_undo.is_poisoned());
+
+        let moved = scoped_dispatch(
+            &dispatcher,
+            "chat-session-after-poison",
+            "move_clips",
+            serde_json::json!({"moves":[{"clipId":"clip-1","toFrame":18}]}),
+        );
+        assert!(!moved.is_error, "{}", moved.text_joined());
+        assert_eq!(handle.timeline().tracks[0].clips[0].start_frame, 18);
+        assert_eq!(
+            dispatcher
+                .agent_undo_stacks()
+                .get("chat-session-after-poison")
+                .map(Vec::len),
+            Some(1)
+        );
+
+        let undone = scoped_dispatch(
+            &dispatcher,
+            "chat-session-after-poison",
+            "undo",
+            serde_json::json!({}),
+        );
+        assert!(!undone.is_error, "{}", undone.text_joined());
+        assert_eq!(handle.timeline().tracks[0].clips[0].start_frame, 0);
+        assert!(dispatcher
+            .agent_undo_stacks()
+            .get("chat-session-after-poison")
+            .is_none());
+    }
+
+    #[test]
+    fn assistant_undo_is_isolated_between_chat_sessions() {
+        let handle = seeded_handle();
+        let dispatcher = dispatcher_with(handle.clone());
+        assert!(
+            !scoped_dispatch(
+                &dispatcher,
+                "chat-session-x",
+                "move_clips",
+                serde_json::json!({"moves":[{"clipId":"clip-1","toFrame":10}]})
+            )
+            .is_error
+        );
+
+        let wrong_session =
+            scoped_dispatch(&dispatcher, "chat-session-y", "undo", serde_json::json!({}));
+        assert!(wrong_session.is_error);
+        assert!(wrong_session.text_joined().contains("this session"));
+        assert_eq!(handle.timeline().tracks[0].clips[0].start_frame, 10);
+
+        assert!(
+            !scoped_dispatch(&dispatcher, "chat-session-x", "undo", serde_json::json!({})).is_error
+        );
+        assert_eq!(handle.timeline().tracks[0].clips[0].start_frame, 0);
+    }
+
+    #[test]
+    fn assistant_undo_refuses_intervening_ui_edit_with_the_same_action_name() {
+        let handle = seeded_handle();
+        let dispatcher = dispatcher_with(handle.clone());
+        assert!(
+            !scoped_dispatch(
+                &dispatcher,
+                "chat-session-x",
+                "move_clips",
+                serde_json::json!({"moves":[{"clipId":"clip-1","toFrame":10}]})
+            )
+            .is_error
+        );
+        handle
+            .apply(EditCommand::MoveClips {
+                moves: vec![ClipMove {
+                    clip_id: "clip-1".into(),
+                    to_track: 0,
+                    to_frame: 20,
+                }],
+            })
+            .unwrap();
+        let undo_depth = handle.state.lock().unwrap().undo_depth();
+
+        let refused = scoped_dispatch(&dispatcher, "chat-session-x", "undo", serde_json::json!({}));
+        assert!(refused.is_error);
+        assert!(refused.text_joined().contains("not undoing"));
+        assert_eq!(handle.timeline().tracks[0].clips[0].start_frame, 20);
+        assert_eq!(handle.state.lock().unwrap().undo_depth(), undo_depth);
+    }
+
+    #[test]
+    fn assistant_undo_refuses_after_opening_a_different_project() {
+        let root = tempfile::tempdir().unwrap();
+        let handle = Arc::new(TestHandle::new());
+        let project_a = root.path().join("A.opentake");
+        handle.core.save_project(Some(project_a)).unwrap();
+        let dispatcher = dispatcher_with(handle.clone());
+        assert!(
+            !scoped_dispatch(
+                &dispatcher,
+                "chat-session-x",
+                "create_folder",
+                serde_json::json!({"name":"Agent folder"})
+            )
+            .is_error
+        );
+
+        let project_b = root.path().join("B.opentake");
+        AppCore::new()
+            .save_project(Some(project_b.clone()))
+            .unwrap();
+        handle.core.open_project(project_b).unwrap();
+        let refused = scoped_dispatch(&dispatcher, "chat-session-x", "undo", serde_json::json!({}));
+        assert!(refused.is_error);
+        assert!(refused.text_joined().contains("not undoing"));
+        assert!(handle.core.media().folders.is_empty());
     }
 
     fn two_track_ripple_handle() -> Arc<StateHandle> {
@@ -4941,8 +5626,9 @@ mod tests {
     }
 
     #[test]
-    fn ripple_delete_ranges_frames_are_used_without_rounding() {
+    fn ripple_delete_ranges_rejects_fractional_frame_units_without_mutation() {
         let h = two_track_ripple_handle();
+        let before = h.timeline();
         let d = dispatcher_with(h.clone());
 
         let r = d.dispatch(
@@ -4954,14 +5640,71 @@ mod tests {
             }),
         );
 
-        assert!(!r.is_error, "{}", r.text_joined());
-        let tl = h.timeline();
-        let spans: Vec<(i32, i32)> = tl.tracks[1]
-            .clips
-            .iter()
-            .map(|clip| (clip.start_frame, clip.duration_frames))
-            .collect();
-        assert_eq!(spans, vec![(100, 5), (105, 20)]);
+        assert!(r.is_error);
+        assert!(
+            r.text_joined().contains("finite integer"),
+            "{}",
+            r.text_joined()
+        );
+        assert_eq!(h.timeline(), before);
+    }
+
+    #[test]
+    fn ripple_range_f64_conversion_rejects_nonfinite_and_out_of_range_values() {
+        let timeline = two_track_ripple_handle().timeline();
+        let cases = [
+            (
+                RippleDeleteRangesArgs {
+                    track_index: Some(1),
+                    clip_id: None,
+                    ranges: vec![vec![f64::NAN, 110.0]],
+                    units: Some("frames".into()),
+                },
+                RangeUnits::Frames,
+            ),
+            (
+                RippleDeleteRangesArgs {
+                    track_index: Some(1),
+                    clip_id: None,
+                    ranges: vec![vec![105.0, f64::INFINITY]],
+                    units: Some("frames".into()),
+                },
+                RangeUnits::Frames,
+            ),
+            (
+                RippleDeleteRangesArgs {
+                    track_index: Some(1),
+                    clip_id: None,
+                    ranges: vec![vec![i32::MAX as f64 + 1.0, i32::MAX as f64 + 2.0]],
+                    units: Some("frames".into()),
+                },
+                RangeUnits::Frames,
+            ),
+            (
+                RippleDeleteRangesArgs {
+                    track_index: None,
+                    clip_id: Some("clip-b".into()),
+                    ranges: vec![vec![f64::NEG_INFINITY, 0.5]],
+                    units: Some("seconds".into()),
+                },
+                RangeUnits::Seconds,
+            ),
+            (
+                RippleDeleteRangesArgs {
+                    track_index: None,
+                    clip_id: Some("clip-b".into()),
+                    ranges: vec![vec![0.2, f64::MAX]],
+                    units: Some("seconds".into()),
+                },
+                RangeUnits::Seconds,
+            ),
+        ];
+
+        for (args, units) in cases {
+            let result = std::panic::catch_unwind(|| build_ripple_ranges(&timeline, &args, units));
+            assert!(result.is_ok(), "invalid f64 conversion must not panic");
+            assert!(result.unwrap().is_err());
+        }
     }
 
     #[test]
@@ -4997,6 +5740,7 @@ mod tests {
             timeline,
             manifest,
             pcm: pcm(samples, 1_000),
+            extract_error: None,
         });
         let d = dispatcher_with(h);
 
@@ -5035,6 +5779,30 @@ mod tests {
 
         assert!(!result.is_error, "{}", result.text_joined());
         assert_eq!(first_json(&result)["applied"], false);
+        assert!(handle.commands.lock().unwrap().is_empty());
+        assert_eq!(handle.timeline(), before);
+    }
+
+    #[test]
+    fn auto_cut_to_beats_cancelled_after_analysis_commits_nothing() {
+        let handle = linked_beat_handle();
+        let before = handle.timeline();
+        let dispatcher = dispatcher_with(handle.clone());
+        let cancel = opentake_media::MediaCancelToken::new();
+        *handle.cancel_after_extract.lock().unwrap() = Some(cancel.clone());
+
+        let result = dispatcher.dispatch_cancellable(
+            "auto_cut_to_beats",
+            serde_json::json!({
+                "clipIds": ["video-a"],
+                "beatMediaRef": "music",
+                "write": true
+            }),
+            &cancel,
+        );
+
+        assert!(result.is_error);
+        assert!(result.text_joined().contains("Cancelled"));
         assert!(handle.commands.lock().unwrap().is_empty());
         assert_eq!(handle.timeline(), before);
     }
@@ -5101,19 +5869,19 @@ mod tests {
     }
 
     #[test]
-    fn smart_reframe_reports_needs_vision_backend() {
+    fn smart_reframe_is_not_advertised_without_a_vision_backend() {
         let d = dispatcher_with(empty_manifest_handle(vec![]));
+        assert!(!d.advertised_tools().contains(&ToolName::SmartReframe));
         let reframe = d.dispatch(
             "smart_reframe",
             serde_json::json!({"clipIds": ["clip-a"], "aspectRatio": "9:16"}),
         );
         assert!(reframe.is_error);
         assert!(
-            reframe
-                .text_joined()
-                .contains("needs vision analysis backend")
-                || reframe.text_joined().contains("needs vision backend")
-                || reframe.text_joined().contains("needs vision"),
+            reframe.text_joined().contains("not advertised")
+                && reframe
+                    .text_joined()
+                    .contains("vision analysis backend is not available"),
             "{}",
             reframe.text_joined()
         );
@@ -5135,6 +5903,7 @@ mod tests {
             timeline,
             manifest,
             pcm: pcm(samples, 1_000),
+            extract_error: None,
         });
         let d = dispatcher_with(h);
 
@@ -5158,6 +5927,39 @@ mod tests {
         assert!(start <= 3, "{json}");
         assert!(end >= 6, "{json}");
         assert_eq!(json["applied"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn tighten_silences_success_warning_does_not_expose_extractor_diagnostics() {
+        const PRIVATE_DIAGNOSTIC: &str =
+            "ffmpeg could not read /Users/private/voice.wav?token=SIGNED_AUDIO_SECRET";
+        let mut timeline = Timeline::new();
+        timeline.fps = 30;
+        let mut track = Track::new("audio-track", ClipType::Audio);
+        track.clips.push(Clip::new("clip-a", "asset-1", 0, 90));
+        timeline.tracks.push(track);
+        let mut manifest = MediaManifest::new();
+        manifest.entries.push(audio_entry("asset-1", "Voice"));
+        let dispatcher = dispatcher_with(Arc::new(AnalysisHandle {
+            timeline,
+            manifest,
+            pcm: pcm(Vec::new(), 1_000),
+            extract_error: Some(PRIVATE_DIAGNOSTIC.into()),
+        }));
+
+        let result = dispatcher.dispatch(
+            "tighten_silences",
+            serde_json::json!({"clipIds": ["clip-a"]}),
+        );
+        assert!(!result.is_error, "{}", result.text_joined());
+        let text = result.text_joined();
+        assert!(!text.contains(PRIVATE_DIAGNOSTIC), "{text}");
+        assert!(!text.contains("/Users/private"), "{text}");
+        assert!(!text.contains("SIGNED_AUDIO_SECRET"), "{text}");
+        let warning = &first_json(&result)["warnings"][0];
+        assert_eq!(warning["clipId"], "clip-a");
+        assert_eq!(warning["code"], "ANALYSIS_SOURCE_UNAVAILABLE");
+        assert!(warning["message"].as_str().unwrap().contains("Relink"));
     }
 
     /// A text clip carries no source media (`media_ref` is `""` — see
@@ -5188,6 +5990,7 @@ mod tests {
             timeline,
             manifest,
             pcm: pcm(samples, 1_000),
+            extract_error: None,
         });
         let d = dispatcher_with(h);
 
@@ -5234,6 +6037,7 @@ mod tests {
             timeline,
             manifest,
             pcm: pcm(samples, 1_000),
+            extract_error: None,
         });
         let d = dispatcher_with(h);
 
@@ -5610,6 +6414,46 @@ mod tests {
         assert!(r.text_joined().contains("Deactivated"));
     }
 
+    #[test]
+    fn dispatch_admission_class_is_read_allowlisted_and_fail_closed() {
+        for name in [
+            "get_timeline",
+            "inspect_media",
+            "detect_beats",
+            "tighten_silences",
+        ] {
+            assert_eq!(
+                dispatch_admission_class(name, &serde_json::json!({})),
+                DispatchAdmissionClass::ReadOnly,
+                "{name}"
+            );
+        }
+        assert_eq!(
+            dispatch_admission_class("auto_cut_to_beats", &serde_json::json!({})),
+            DispatchAdmissionClass::ReadOnly
+        );
+        assert_eq!(
+            dispatch_admission_class("auto_cut_to_beats", &serde_json::json!({"write": false})),
+            DispatchAdmissionClass::ReadOnly
+        );
+        for (name, args) in [
+            ("add_clips", serde_json::json!({})),
+            ("import_media", serde_json::json!({})),
+            ("unknown_future_tool", serde_json::json!({})),
+            ("auto_cut_to_beats", serde_json::json!({"write": true})),
+            (
+                "auto_cut_to_beats",
+                serde_json::json!({"write": "malformed"}),
+            ),
+        ] {
+            assert_eq!(
+                dispatch_admission_class(name, &args),
+                DispatchAdmissionClass::Mutation,
+                "{name}"
+            );
+        }
+    }
+
     // MARK: - MediaBridge tools (inspect_timeline / import_media)
 
     use crate::mcp::media_bridge::{
@@ -5624,8 +6468,6 @@ mod tests {
     /// folder the dispatcher passed through.
     struct ImportCall {
         tag: String,
-        name: Option<String>,
-        folder_id: Option<String>,
     }
 
     /// A recording fake bridge: captures the last inspect/import call so tests can
@@ -5645,6 +6487,9 @@ mod tests {
         /// Records the media_refs passed to the last `transcribe_sources` call,
         /// so tests can assert dedup.
         transcribe_calls: Mutex<Vec<Vec<String>>>,
+        /// Test hook: cancel immediately after transcription work returns, before
+        /// the dispatcher is allowed to commit captions.
+        cancel_after_transcribe: Mutex<Option<opentake_media::MediaCancelToken>>,
         /// Canned `search_media` result; when `None` the trait default (disabled)
         /// runs. Records the `(query, scope, limit, candidate ids)` of each call.
         search_result: Mutex<Option<SearchMediaResult>>,
@@ -5715,7 +6560,7 @@ mod tests {
             }
             let transcripts = self.transcripts.lock().unwrap();
             let errors = self.transcribe_errors.lock().unwrap();
-            Ok(sources
+            let results = sources
                 .iter()
                 .map(|s| {
                     if let Some(reason) = errors.get(&s.media_ref) {
@@ -5732,7 +6577,11 @@ mod tests {
                         }
                     }
                 })
-                .collect())
+                .collect();
+            if let Some(cancel) = self.cancel_after_transcribe.lock().unwrap().take() {
+                cancel.cancel();
+            }
+            Ok(results)
         }
 
         fn inspect_timeline(
@@ -5761,21 +6610,22 @@ mod tests {
         fn import_media(
             &self,
             source: ImportSource,
-            name: Option<String>,
-            folder_id: Option<String>,
+            _name: Option<String>,
+            _folder_id: Option<String>,
         ) -> Result<ImportOutcome, BridgeError> {
             let tag = match &source {
                 ImportSource::Path(p) => format!("path:{p}"),
                 ImportSource::Bytes { mime_type, .. } => format!("bytes:{mime_type}"),
                 ImportSource::Url { url, .. } => format!("url:{url}"),
             };
-            self.import_calls.lock().unwrap().push(ImportCall {
-                tag: tag.clone(),
-                name,
-                folder_id,
-            });
+            self.import_calls
+                .lock()
+                .unwrap()
+                .push(ImportCall { tag: tag.clone() });
             Ok(ImportOutcome {
-                message: format!("Imported via {tag}."),
+                asset_count: 1,
+                folder_count: 0,
+                recovery_required: false,
             })
         }
 
@@ -5890,6 +6740,82 @@ mod tests {
         assert_eq!(calls[0].max_frames, INSPECT_MEDIA_MAX_FRAMES);
         assert_eq!(calls[0].start_seconds, Some(0.1));
         assert_eq!(calls[0].end_seconds, Some(0.9));
+    }
+
+    #[test]
+    fn inspect_media_omits_durable_generation_secrets() {
+        let mut timeline = Timeline::new();
+        timeline.fps = 30;
+        let mut track = opentake_domain::Track::new("track-1", ClipType::Video);
+        track
+            .clips
+            .push(Clip::new("clip-1", "generated-asset", 0, 60));
+        timeline.tracks.push(track);
+
+        let mut asset = entry("generated-asset", "Generated clip");
+        asset.source = MediaSource::External {
+            absolute_path: "/Users/ABSOLUTE_PATH_SECRET/generated.mp4".into(),
+        };
+        asset.cached_remote_url =
+            Some("https://cdn.invalid/result?token=SIGNED_RESULT_SECRET".into());
+        asset.generation_input = Some(opentake_domain::GenerationInput {
+            prompt: "PRIVATE_PROMPT_SECRET".into(),
+            model: "provider-model".into(),
+            duration: 2,
+            aspect_ratio: "16:9".into(),
+            image_urls: Some(vec![
+                "https://cdn.invalid/input?token=SIGNED_IMAGE_SECRET".into()
+            ]),
+            reference_image_urls: Some(vec![
+                "https://cdn.invalid/reference?token=SIGNED_REFERENCE_SECRET".into(),
+            ]),
+            provider_job_id: Some("PROVIDER_JOB_SECRET".into()),
+            status: Some(GenerationJobStatus::Ready),
+            progress: Some(0.45678),
+            ..opentake_domain::GenerationInput::default()
+        });
+        let mut manifest = MediaManifest::new();
+        manifest.entries.push(asset);
+        let dispatcher = Dispatcher::with_bridge(
+            Arc::new(StateHandle::new(timeline, manifest)),
+            Arc::new(RwLock::new(PluginRegistry::new())),
+            Some(Arc::new(FakeBridge::default()) as Arc<dyn MediaBridge>),
+        );
+
+        let result = dispatcher.dispatch(
+            "inspect_media",
+            serde_json::json!({"mediaRef": "generated-asset"}),
+        );
+        assert!(!result.is_error, "{}", result.text_joined());
+        let serialized = serde_json::to_string(&result).unwrap();
+        for secret in [
+            "ABSOLUTE_PATH_SECRET",
+            "SIGNED_RESULT_SECRET",
+            "SIGNED_IMAGE_SECRET",
+            "SIGNED_REFERENCE_SECRET",
+            "PRIVATE_PROMPT_SECRET",
+            "PROVIDER_JOB_SECRET",
+        ] {
+            assert!(
+                !serialized.contains(secret),
+                "inspect_media leaked {secret}: {serialized}"
+            );
+        }
+        let metadata: Value = serde_json::from_str(
+            result
+                .content
+                .iter()
+                .find_map(|block| match block {
+                    Block::Text { text } if text.starts_with('{') => Some(text),
+                    _ => None,
+                })
+                .expect("inspection metadata"),
+        )
+        .unwrap();
+        assert_eq!(metadata["generationStatus"], "none");
+        assert_eq!(metadata["generationProgress"], serde_json::json!(0.457));
+        assert!(metadata.get("generationInput").is_none());
+        assert_eq!(metadata["fileName"], "generated.mp4");
     }
 
     #[test]
@@ -6130,8 +7056,12 @@ mod tests {
             serde_json::json!({ "source": { "bytes": "AAAA" } }),
         );
         assert!(r.is_error);
+        assert_eq!(
+            r.public_error_kind(),
+            Some(PublicErrorKind::InvalidArguments(ToolName::ImportMedia))
+        );
         assert!(
-            r.text_joined().contains("mimeType is required"),
+            r.text_joined().contains("missing required field"),
             "{}",
             r.text_joined()
         );
@@ -6151,8 +7081,12 @@ mod tests {
             }),
         );
         assert!(r.is_error);
+        assert_eq!(
+            r.public_error_kind(),
+            Some(PublicErrorKind::InvalidArguments(ToolName::ImportMedia))
+        );
         assert!(
-            r.text_joined().contains("source.bytes is too large"),
+            r.text_joined().contains("value is too large"),
             "{}",
             r.text_joined()
         );
@@ -6165,16 +7099,25 @@ mod tests {
     #[test]
     fn import_media_unknown_folder_id_errors() {
         let (d, _b) = dispatcher_with_fake_bridge();
+        const PRIVATE_FOLDER_ID: &str = "ghost-PRIVATE-FOLDER-ID";
         let r = d.dispatch(
             "import_media",
-            serde_json::json!({ "source": { "path": "/a.mp4" }, "folderId": "ghost" }),
+            serde_json::json!({ "source": { "url": "https://example.com/a.mp4" }, "folderId": PRIVATE_FOLDER_ID }),
         );
         assert!(r.is_error);
+        assert_eq!(
+            r.public_error_kind(),
+            Some(PublicErrorKind::ResourceNotFound(ToolName::ImportMedia))
+        );
         assert!(
             r.text_joined().contains("folderId not found"),
             "{}",
             r.text_joined()
         );
+        let safe = crate::mcp::convert::safe_tool_result_for_llm(&r);
+        assert_eq!(safe["code"], "MCP_RESOURCE_NOT_FOUND");
+        assert!(safe["remediation"].as_str().unwrap().contains("Refresh"));
+        assert!(!safe.to_string().contains(PRIVATE_FOLDER_ID));
     }
 
     #[test]
@@ -6193,23 +7136,27 @@ mod tests {
     }
 
     #[test]
-    fn import_media_path_forwards_to_bridge_and_returns_message() {
+    fn import_media_rejects_model_supplied_paths_before_bridge_access() {
         let (d, bridge) = dispatcher_with_fake_bridge();
-        let r = d.dispatch(
-            "import_media",
-            serde_json::json!({ "source": { "path": "/clip.mp4" }, "name": "Clip" }),
-        );
-        assert!(!r.is_error, "{}", r.text_joined());
+        for path in [
+            "/Users/model/Pictures/private.png",
+            "../../Pictures/private.png",
+        ] {
+            let r = d.dispatch(
+                "import_media",
+                serde_json::json!({ "source": { "path": path }, "name": "Clip" }),
+            );
+            assert!(r.is_error, "model-supplied path unexpectedly imported");
+            assert!(r.text_joined().contains("authority"), "{}", r.text_joined());
+            let safe = crate::mcp::convert::safe_tool_result_for_llm(&r);
+            assert_eq!(safe["code"], "MCP_PATH_AUTHORITY_REQUIRED");
+            let safe_wire = safe.to_string();
+            assert!(!safe_wire.contains(path), "path leaked: {safe_wire}");
+        }
         assert!(
-            r.text_joined().contains("Imported via path:/clip.mp4"),
-            "{}",
-            r.text_joined()
+            bridge.import_calls.lock().unwrap().is_empty(),
+            "path rejection must happen before the bridge can touch metadata"
         );
-        let calls = bridge.import_calls.lock().unwrap();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].tag, "path:/clip.mp4");
-        assert_eq!(calls[0].name.as_deref(), Some("Clip"));
-        assert_eq!(calls[0].folder_id, None);
     }
 
     #[test]
@@ -6633,21 +7580,27 @@ mod tests {
 
     #[test]
     fn get_transcript_skipped_source_reported_not_fatal() {
+        const PRIVATE_DIAGNOSTIC: &str =
+            "decode failed at /Users/private/voice.wav?token=SIGNED_TRANSCRIPT_SECRET";
         let (d, bridge) = transcript_dispatcher(transcript(vec![word("a", 0.0, 0.5)]));
         // Force the source to be skipped with a reason.
         bridge
             .transcribe_errors
             .lock()
             .unwrap()
-            .insert("aud".into(), "decode failed".into());
+            .insert("aud".into(), PRIVATE_DIAGNOSTIC.into());
         let r = d.dispatch("get_transcript", serde_json::json!({}));
         assert!(!r.is_error, "{}", r.text_joined());
+        assert!(!r.text_joined().contains(PRIVATE_DIAGNOSTIC));
+        assert!(!r.text_joined().contains("/Users/private"));
+        assert!(!r.text_joined().contains("SIGNED_TRANSCRIPT_SECRET"));
         let v = first_json(&r);
         assert_eq!(v["clips"].as_array().unwrap().len(), 0);
         let skipped = v["skipped"].as_array().unwrap();
         assert_eq!(skipped.len(), 1);
         assert_eq!(skipped[0]["file"], "Voice"); // asset display name
-        assert_eq!(skipped[0]["reason"], "decode failed");
+        assert_eq!(skipped[0]["code"], "TRANSCRIPTION_SOURCE_UNAVAILABLE");
+        assert!(skipped[0]["reason"].as_str().unwrap().contains("Relink"));
     }
 
     #[test]
@@ -6850,6 +7803,24 @@ mod tests {
         let u = d.dispatch("undo", serde_json::json!({}));
         assert!(!u.is_error, "{}", u.text_joined());
         assert_eq!(d.handle.timeline().tracks.len(), before - 1);
+    }
+
+    #[test]
+    fn add_captions_cancelled_after_transcription_commits_nothing() {
+        let (dispatcher, bridge) = caption_dispatcher(caption_transcript(
+            vec![word("a", 0.0, 0.5)],
+            vec![segment("A.", 0.0, 1.0)],
+        ));
+        let before = dispatcher.handle.timeline();
+        let cancel = opentake_media::MediaCancelToken::new();
+        *bridge.cancel_after_transcribe.lock().unwrap() = Some(cancel.clone());
+
+        let result =
+            dispatcher.dispatch_cancellable("add_captions", serde_json::json!({}), &cancel);
+
+        assert!(result.is_error);
+        assert!(result.text_joined().contains("Cancelled"));
+        assert_eq!(dispatcher.handle.timeline(), before);
     }
 
     #[test]

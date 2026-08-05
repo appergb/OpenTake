@@ -16,11 +16,17 @@ struct ReadOnlyHandle;
 
 struct DeterministicMotionBridge;
 
+const PRIVATE_RENDERER: &str = "PRIVATE_MOTION_RENDERER";
+const PRIVATE_RENDERER_VERSION: &str = "PRIVATE_MOTION_RENDERER_VERSION";
+const PRIVATE_OUTPUT_FILE: &str = "/Users/private/motion/output.mp4";
+const PRIVATE_ADD_HASH: &str = "PRIVATE_ADD_CONTENT_HASH";
+const PRIVATE_EDIT_HASH: &str = "PRIVATE_EDIT_CONTENT_HASH";
+
 fn output_metadata(content_hash: &str) -> MotionOutputMetadata {
     MotionOutputMetadata {
-        renderer: "fixture".into(),
-        renderer_version: "1".into(),
-        output_file: "output.mp4".into(),
+        renderer: PRIVATE_RENDERER.into(),
+        renderer_version: PRIVATE_RENDERER_VERSION.into(),
+        output_file: PRIVATE_OUTPUT_FILE.into(),
         fps: 30.0,
         width: 64,
         height: 36,
@@ -43,9 +49,9 @@ impl MotionBridge for DeterministicMotionBridge {
         Ok(MotionCommit {
             clip_id: "motion-clip".into(),
             asset_id: "motion-asset".into(),
-            content_hash: "add-hash".into(),
+            content_hash: PRIVATE_ADD_HASH.into(),
             action_name: "Add Motion Graphic".into(),
-            output: output_metadata("add-hash"),
+            output: output_metadata(PRIVATE_ADD_HASH),
         })
     }
 
@@ -57,9 +63,9 @@ impl MotionBridge for DeterministicMotionBridge {
         Ok(MotionCommit {
             clip_id: request.clip_id,
             asset_id: "edited-motion-asset".into(),
-            content_hash: "edit-hash".into(),
+            content_hash: PRIVATE_EDIT_HASH.into(),
             action_name: "Edit Motion Graphic".into(),
-            output: output_metadata("edit-hash"),
+            output: output_metadata(PRIVATE_EDIT_HASH),
         })
     }
 }
@@ -124,6 +130,10 @@ fn every_advertised_tool_is_live_or_absent() {
             ToolName::EditMotionGraphic,
             serde_json::json!({"clipId": "clip", "code": "export default {}"}),
         ),
+        (
+            ToolName::SmartReframe,
+            serde_json::json!({"clipIds": ["clip-a"], "aspectRatio": "9:16"}),
+        ),
     ];
     let advertised = dispatcher.advertised_tools();
 
@@ -163,5 +173,97 @@ fn motion_tools_are_absent_without_a_live_host_bridge() {
 
     for tool in ToolName::MOTION {
         assert!(!dispatcher.advertised_tools().contains(&tool));
+    }
+}
+
+#[test]
+fn vision_tools_are_absent_without_a_vision_backend() {
+    let dispatcher = Dispatcher::new(
+        Arc::new(ReadOnlyHandle),
+        Arc::new(RwLock::new(PluginRegistry::new())),
+    );
+
+    for tool in ToolName::VISION {
+        assert!(!dispatcher.advertised_tools().contains(&tool));
+        // Capability-gated tools still fail closed with the exact missing
+        // capability named, never as a silent success or a placeholder stub.
+        let result = dispatcher.dispatch(
+            tool.as_str(),
+            serde_json::json!({"clipIds": ["clip-a"], "aspectRatio": "9:16"}),
+        );
+        assert!(result.is_error);
+        assert!(
+            result.text_joined().contains("not advertised"),
+            "{}",
+            result.text_joined()
+        );
+        assert!(
+            result
+                .text_joined()
+                .contains("vision analysis backend is not available"),
+            "{}",
+            result.text_joined()
+        );
+    }
+}
+
+#[test]
+fn motion_tool_results_expose_only_typed_safe_commit_fields() {
+    let dispatcher = Dispatcher::with_capability_bridges(
+        Arc::new(ReadOnlyHandle),
+        Arc::new(RwLock::new(PluginRegistry::new())),
+        None,
+        None,
+        Some(Arc::new(DeterministicMotionBridge)),
+    );
+    let cases = [
+        (
+            ToolName::AddMotionGraphic,
+            serde_json::json!({
+                "source": {"code": "export default {}"},
+                "startFrame": 0,
+                "durationFrames": 30
+            }),
+            "motion-clip",
+            "motion-asset",
+        ),
+        (
+            ToolName::EditMotionGraphic,
+            serde_json::json!({
+                "clipId": "motion-input-clip",
+                "code": "export default {}"
+            }),
+            "motion-input-clip",
+            "edited-motion-asset",
+        ),
+    ];
+
+    for (tool, args, clip_id, asset_id) in cases {
+        let result = dispatcher.dispatch(tool.as_str(), args);
+        assert!(!result.is_error, "{}", result.text_joined());
+        let text = result.text_joined();
+        let value: serde_json::Value = serde_json::from_str(&text).expect("typed motion result");
+        assert_eq!(value["status"], "completed");
+        assert_eq!(value["clipId"], clip_id);
+        assert_eq!(value["assetId"], asset_id);
+        assert_eq!(value["durationFrames"], 30);
+        assert_eq!(value["dimensions"]["width"], 64);
+        assert_eq!(value["dimensions"]["height"], 36);
+        for private in [
+            PRIVATE_RENDERER,
+            PRIVATE_RENDERER_VERSION,
+            PRIVATE_OUTPUT_FILE,
+            PRIVATE_ADD_HASH,
+            PRIVATE_EDIT_HASH,
+            "contentHash",
+            "outputFile",
+            "rendererVersion",
+        ] {
+            assert!(
+                !text.contains(private),
+                "{} leaked {private}: {text}",
+                tool.as_str()
+            );
+        }
     }
 }

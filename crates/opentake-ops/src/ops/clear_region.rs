@@ -8,7 +8,7 @@
 //! piece sitting inside the region — splitting once more if that piece overruns
 //! `end`. This is the shared "make room" primitive behind add / move / paste.
 
-use opentake_domain::Timeline;
+use opentake_domain::{Clip, ClipType, Timeline};
 
 use crate::engines::{OverwriteAction, OverwriteEngine};
 use crate::id::IdGen;
@@ -26,11 +26,22 @@ pub fn clear_region(
     prune: bool,
     ids: &dyn IdGen,
 ) {
-    if track_index >= timeline.tracks.len() {
+    if track_index >= timeline.tracks.len()
+        || start < 0
+        || end < start
+        || timeline
+            .tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .any(|clip| !clip_arithmetic_is_safe(clip))
+    {
         return;
     }
-    let actions =
-        OverwriteEngine::compute_overwrite(&timeline.tracks[track_index].clips, start, end);
+    let Some(actions) =
+        OverwriteEngine::try_compute_overwrite(&timeline.tracks[track_index].clips, start, end)
+    else {
+        return;
+    };
 
     for action in actions {
         match action {
@@ -44,9 +55,17 @@ pub fn clear_region(
             } => {
                 if let Some((ti, ci)) = find(timeline, &clip_id) {
                     let clip = &timeline.tracks[ti].clips[ci];
-                    let source_delta =
-                        ((clip.duration_frames - new_duration) as f64 * clip.speed).round() as i32;
-                    let new_trim_end = clip.trim_end_frame + source_delta;
+                    let source_delta = (clip
+                        .duration_frames
+                        .checked_sub(new_duration)
+                        .expect("overwrite duration is bounded by the source clip")
+                        as f64
+                        * clip.speed)
+                        .round() as i32;
+                    let new_trim_end = clip
+                        .trim_end_frame
+                        .checked_add(source_delta)
+                        .expect("clip edge source extent was prevalidated");
                     let c = &mut timeline.tracks[ti].clips[ci];
                     c.trim_end_frame = new_trim_end;
                     c.loudness_normalization = None;
@@ -82,7 +101,14 @@ pub fn clear_region(
                             .clips
                             .iter()
                             .find(|c| c.start_frame == start && c.id != clip_id)
-                            .map(|c| (c.id.clone(), c.end_frame()))
+                            .map(|clip| {
+                                (
+                                    clip.id.clone(),
+                                    clip.start_frame
+                                        .checked_add(clip.duration_frames)
+                                        .expect("clip arithmetic was prevalidated"),
+                                )
+                            })
                     });
                     if let Some((right_id, right_end)) = right {
                         if right_end > end {
@@ -102,6 +128,36 @@ pub fn clear_region(
     if prune {
         crate::ops::tracks::prune_empty_tracks(timeline);
     }
+}
+
+fn clip_arithmetic_is_safe(clip: &Clip) -> bool {
+    if clip.start_frame < 0
+        || clip.duration_frames < 1
+        || (!matches!(clip.media_type, ClipType::Image | ClipType::Text)
+            && (clip.trim_start_frame < 0 || clip.trim_end_frame < 0))
+        || !clip.speed.is_finite()
+        || clip.speed <= 0.0
+        || clip.start_frame.checked_add(clip.duration_frames).is_none()
+        || clip
+            .duration_frames
+            .checked_add(clip.trim_start_frame)
+            .and_then(|value| value.checked_add(clip.trim_end_frame))
+            .is_none()
+    {
+        return false;
+    }
+    let consumed = (clip.duration_frames as f64 * clip.speed).round();
+    if !(0.0..=i32::MAX as f64).contains(&consumed) {
+        return false;
+    }
+    let consumed = consumed as i32;
+    clip.trim_start_frame.checked_add(consumed).is_some()
+        && clip.trim_end_frame.checked_add(consumed).is_some()
+        && clip
+            .trim_start_frame
+            .checked_add(consumed)
+            .and_then(|value| value.checked_add(clip.trim_end_frame))
+            .is_some()
 }
 
 /// Remove a single clip by id from whatever track holds it.

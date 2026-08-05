@@ -20,6 +20,7 @@ import type {
   EditRequest,
   EditResult,
   GenerateCaptionsResult,
+  GenerationLog,
   MediaList,
   MattingModelStatus,
   MotionTrackingRegion,
@@ -40,12 +41,15 @@ import type {
   PlaybackCommandError,
   PlaybackFrameEvent,
   PlaybackIdentity,
+  ProjectEditIdentity,
   RuntimeTimelineSnapshot,
   SearchIndexStatus,
   SearchModelStatus,
   SearchResults,
   SecretStatus,
   StabilizationTrack,
+  StorageCategoryId,
+  StorageUsage,
   Transcript,
 } from "./types";
 
@@ -110,30 +114,55 @@ export async function getTimeline(): Promise<RuntimeTimelineSnapshot> {
   };
 }
 
-export async function editApply(command: EditRequest): Promise<EditResult> {
+/** The current session's append-only AI generation audit log (rows + credits
+ *  math, persisted as `generation-log.json`). Read-only: the UI never mutates
+ *  the log; only the core's generation lifecycle appends. Infallible — a
+ *  session with no project yields the empty log. Outside Tauri it resolves to
+ *  the honest empty log (no fake data). */
+export async function generationLog(): Promise<GenerationLog> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<GenerationLog>("generation_log");
+  return { version: 1, entries: [] };
+}
+
+function editIdentityArgs(expected: ProjectEditIdentity): Record<string, unknown> {
+  return {
+    expectedProjectEpoch: expected.projectEpoch,
+    expectedTimelineVersion: expected.timelineVersion,
+    expectedProjectPath: expected.projectPath,
+  };
+}
+
+export async function editApply(
+  command: EditRequest,
+  expected: ProjectEditIdentity,
+): Promise<EditResult> {
   await ensureTauri();
   if (invokeImpl) {
-    return invokeImpl<EditResult>("edit_apply", { command }).catch((error: unknown) => {
+    return invokeImpl<EditResult>("edit_apply", {
+      command,
+      ...editIdentityArgs(expected),
+    }).catch((error: unknown) => {
       throw asTauriCommandError(error);
     });
   }
   return fallback.editApply(command);
 }
 
-export async function undo(): Promise<EditResult> {
+export async function undo(expected: ProjectEditIdentity): Promise<EditResult> {
   await ensureTauri();
   if (invokeImpl) {
-    return invokeImpl<EditResult>("undo").catch((error: unknown) => {
+    return invokeImpl<EditResult>("undo", editIdentityArgs(expected)).catch((error: unknown) => {
       throw asTauriCommandError(error);
     });
   }
   return fallback.noop("Undo");
 }
 
-export async function redo(): Promise<EditResult> {
+export async function redo(expected: ProjectEditIdentity): Promise<EditResult> {
   await ensureTauri();
   if (invokeImpl) {
-    return invokeImpl<EditResult>("redo").catch((error: unknown) => {
+    return invokeImpl<EditResult>("redo", editIdentityArgs(expected)).catch((error: unknown) => {
       throw asTauriCommandError(error);
     });
   }
@@ -179,10 +208,18 @@ export async function projectOpen(path: string): Promise<RuntimeTimelineSnapshot
   };
 }
 
-export async function projectSave(path: string | null): Promise<string> {
+export async function projectSave(
+  path: string | null,
+  expectedProjectEpoch: number,
+  expectedProjectPath: string,
+): Promise<string> {
   await ensureTauri();
   if (invokeImpl) {
-    return invokeImpl<string>("project_save", { path }).catch((error: unknown) => {
+    return invokeImpl<string>("project_save", {
+      path,
+      expectedProjectEpoch,
+      expectedProjectPath,
+    }).catch((error: unknown) => {
       throw asTauriCommandError(error);
     });
   }
@@ -195,6 +232,13 @@ export async function getDefaultProjectDir(): Promise<string> {
   await ensureTauri();
   if (invokeImpl) return invokeImpl<string>("get_default_project_dir");
   return "";
+}
+
+/** Whether an exact filesystem path already exists in the desktop shell. */
+export async function checkPathExists(path: string): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("check_path_exists", { path });
+  return false;
 }
 
 export async function sampleProjectMaterialize(slug: string): Promise<string> {
@@ -211,6 +255,7 @@ export interface HomeProjectEntry {
   modifiedAt: number;
   thumbnailPath?: string | null;
   missing: boolean;
+  offline: boolean;
 }
 
 export interface LegacyRecentProject {
@@ -1030,9 +1075,16 @@ export async function searchIndexStatus(): Promise<SearchIndexStatus> {
 /** Index every not-yet-current video/image asset (sampled frames → SigLIP2
  *  embeddings), emitting `search://index` progress. Idempotent. Rejects outside
  *  Tauri or when the model isn't installed. */
-export async function searchIndexStart(): Promise<SearchIndexStatus> {
+export async function searchIndexStart(
+  expectedProjectEpoch: number,
+  expectedProjectPath: string,
+): Promise<SearchIndexStatus> {
   await ensureTauri();
-  if (invokeImpl) return invokeImpl<SearchIndexStatus>("search_index_start");
+  if (invokeImpl)
+    return invokeImpl<SearchIndexStatus>("search_index_start", {
+      expectedProjectEpoch,
+      expectedProjectPath,
+    });
   throw new Error("visual indexing requires the desktop app");
 }
 
@@ -1066,6 +1118,52 @@ export async function searchQuery(query: string): Promise<SearchResults> {
   await ensureTauri();
   if (invokeImpl) return invokeImpl<SearchResults>("search_query", { query });
   return { moments: [], spoken: [], files: [] };
+}
+
+// MARK: - Settings Storage pane (storage_usage / storage_clear)
+
+/** The honest empty usage report used outside Tauri (there is no backend file
+ *  system): every category at zero bytes, no fake data. */
+const EMPTY_STORAGE_USAGE: StorageUsage = {
+  categories: [
+    { id: "thumbnails", bytes: 0, path: "" },
+    { id: "waveforms", bytes: 0, path: "" },
+    { id: "searchIndex", bytes: 0, path: "" },
+    { id: "models", bytes: 0, path: "" },
+    { id: "other", bytes: 0, path: "" },
+  ],
+  totalBytes: 0,
+  cacheRoot: "",
+};
+
+/** Real per-category byte usage for the derived caches (thumbnails, waveforms,
+ *  search index, downloaded models, other) plus the cache root path. Read-only,
+ *  never mutates anything. Outside Tauri resolves to the honest empty report —
+ *  the pane then renders its unsupported state. */
+export async function storageUsage(): Promise<StorageUsage> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<StorageUsage>("storage_usage");
+  return EMPTY_STORAGE_USAGE;
+}
+
+/** Delete ONLY the requested derived caches and return the fresh usage
+ *  snapshot. `modelsConfirmed` is the destructive gate for the `models`
+ *  category (weights are re-downloads, not lazily-rebuilt caches): the pane
+ *  only passes `true` after its explicit confirm step. Project files, the
+ *  global media library, user media and credentials are never touched (the
+ *  Rust command only operates on the engine-owned cache/models roots).
+ *  Outside Tauri there is nothing to clear — resolves to the empty report. */
+export async function storageClear(
+  categories: StorageCategoryId[],
+  modelsConfirmed = false,
+): Promise<StorageUsage> {
+  await ensureTauri();
+  if (invokeImpl) {
+    return invokeImpl<StorageUsage>("storage_clear", {
+      request: { categories, modelsConfirmed },
+    });
+  }
+  return EMPTY_STORAGE_USAGE;
 }
 
 /**
@@ -1844,6 +1942,24 @@ export async function onMediaChanged(handler: () => void): Promise<() => void> {
   await ensureTauri();
   if (!listenImpl) return () => {};
   return listenImpl("media_changed", () => handler());
+}
+
+/** Subscribe to `project_saved` — fired on EVERY bundle write, including
+ *  core-internal saves (e.g. the media manifest) that never flow through the
+ *  explicit save promises in `projectActions`. The payload carries the written
+ *  path and project session, but no document version, so consumers treat it as
+ *  a save-completion signal for that session. No-op outside Tauri. */
+export async function onProjectSaved(
+  handler: (path: string, projectEpoch: number) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("project_saved", (e) => {
+    const p = e.payload as { path?: string; projectEpoch?: number } | undefined;
+    if (p && typeof p.path === "string" && typeof p.projectEpoch === "number") {
+      handler(p.path, p.projectEpoch);
+    }
+  });
 }
 
 /** Subscribe to `go_home` (emitted when the window is closed/hidden so the app

@@ -10,18 +10,28 @@ const mocks = vi.hoisted(() => ({
   openProjectViaDialog: vi.fn(),
   openSampleProject: vi.fn(),
 }));
+const i18nMocks = vi.hoisted(() => ({
+  t: vi.fn((key: string) => key),
+}));
 
-vi.mock("../../i18n", () => ({ useT: () => (key: string) => key }));
-vi.mock("../../lib/api", () => ({ isTauri: false }));
+vi.mock("../../i18n", () => ({ useT: () => i18nMocks.t }));
+vi.mock("../../lib/api", () => ({
+  isTauri: false,
+  generationLog: async () => ({ version: 1, entries: [] }),
+}));
 vi.mock("../../lib/asset", () => ({ assetUrl: (path: string | null) => path }));
 vi.mock("../../store/projectActions", () => mocks);
 
 import { useRecentStore } from "../../store/recentStore";
+import { useEditorUiStore } from "../../store/uiStore";
 import {
   HOME_NOTICE_STORAGE_KEY,
   HOME_NOTICE_VERSION,
   HomeView,
 } from "./HomeView";
+import { DICTS } from "../../i18n/dict";
+
+const defaultValidateRecents = useRecentStore.getState().validateRecents;
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
   .IS_REACT_ACT_ENVIRONMENT = true;
@@ -36,7 +46,10 @@ beforeEach(() => {
   localStorage.setItem(HOME_NOTICE_STORAGE_KEY, HOME_NOTICE_VERSION);
   useRecentStore.setState({
     recents: [{ path: "/tmp/Existing.opentake", name: "Existing", openedAt: 1 }],
+    thumbnailPathsValidated: true,
+    validateRecents: defaultValidateRecents,
   });
+  useEditorUiStore.setState({ view: "home" });
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -45,6 +58,33 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
+});
+
+it("localizes the complete recent-project count in both supported locales", async () => {
+  await act(async () => root.render(<HomeView />));
+
+  expect(i18nMocks.t).toHaveBeenCalledWith("home.recentCount", { count: 1 });
+  expect(container.textContent).not.toContain("1 recent");
+  expect(DICTS["zh-CN"]["home.recentCount"]).toBe("{count} 个最近项目");
+  expect(DICTS.en["home.recentCount"]).toBe("{count} recent");
+});
+
+it("does not let a kept-alive hidden Home handle Enter or Escape", async () => {
+  localStorage.removeItem(HOME_NOTICE_STORAGE_KEY);
+  await act(async () => root.render(<HomeView />));
+  const card = container.querySelector<HTMLButtonElement>('button[aria-label="Existing"]')!;
+  await act(async () => card.focus());
+
+  await act(async () => useEditorUiStore.getState().setView("library"));
+  await act(async () => window.dispatchEvent(
+    new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+  ));
+  await act(async () => window.dispatchEvent(
+    new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+  ));
+
+  expect(mocks.openProjectPath).not.toHaveBeenCalled();
+  expect(localStorage.getItem(HOME_NOTICE_STORAGE_KEY)).toBeNull();
 });
 
 it("new_open_sample_register_only_after_success_and_route_tutorial", async () => {
@@ -98,6 +138,90 @@ it("project_card_renders_thumbnail_relative_time_and_missing_state", async () =>
   expect(container.querySelector("img")).toBeNull();
 });
 
+it("never_mounts_a_cached_thumbnail_before_native_path_validation", async () => {
+  useRecentStore.setState({
+    recents: [{
+      path: "/tmp/Cloud.opentake",
+      name: "Cloud",
+      openedAt: 1,
+      thumbnailPath: "/tmp/Cloud.opentake/thumbnail.jpg",
+      missing: false,
+    }],
+    thumbnailPathsValidated: false,
+  });
+  await act(async () => root.render(<HomeView />));
+
+  expect(container.querySelector("img")).toBeNull();
+
+  act(() => useRecentStore.setState({ thumbnailPathsValidated: true }));
+  await vi.waitFor(() => expect(container.querySelector("img")?.getAttribute("src"))
+    .toContain("thumbnail.jpg"));
+});
+
+it("cloud_only_project_is_accessible_but_cannot_open_or_mount_its_thumbnail", async () => {
+  useRecentStore.setState({
+    recents: [{
+      path: "/tmp/Cloud.opentake",
+      name: "Cloud",
+      openedAt: 1,
+      thumbnailPath: "/tmp/Cloud.opentake/thumbnail.jpg",
+      missing: false,
+      offline: true,
+    }],
+    thumbnailPathsValidated: true,
+  });
+  await act(async () => root.render(<HomeView />));
+
+  const card = container.querySelector<HTMLButtonElement>(
+    'button[aria-label="Cloud · home.fileOffline"]',
+  );
+  expect(card).not.toBeNull();
+  expect(container.querySelector("img")).toBeNull();
+  await act(async () => card?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
+  await act(async () => card?.focus());
+  await act(async () => window.dispatchEvent(
+    new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+  ));
+  expect(mocks.openProjectPath).not.toHaveBeenCalled();
+});
+
+it("revalidates_an_offline_project_when_the_window_regains_focus", async () => {
+  const validateRecents = vi
+    .fn()
+    .mockResolvedValueOnce(undefined)
+    .mockImplementationOnce(async () => {
+      useRecentStore.setState({
+        recents: [{
+          path: "/tmp/Downloaded.opentake",
+          name: "Downloaded",
+          openedAt: 1,
+          missing: false,
+          offline: false,
+        }],
+      });
+    });
+  useRecentStore.setState({
+    recents: [{
+      path: "/tmp/Downloaded.opentake",
+      name: "Downloaded",
+      openedAt: 1,
+      missing: false,
+      offline: true,
+    }],
+    validateRecents,
+  });
+  await act(async () => root.render(<HomeView />));
+  await vi.waitFor(() => expect(validateRecents).toHaveBeenCalledTimes(1));
+
+  await act(async () => window.dispatchEvent(new Event("focus")));
+  await vi.waitFor(() => expect(validateRecents).toHaveBeenCalledTimes(2));
+  const card = container.querySelector<HTMLButtonElement>('button[aria-label="Downloaded"]');
+  expect(card).not.toBeNull();
+  await act(async () => card?.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })));
+
+  expect(mocks.openProjectPath).toHaveBeenCalledWith("/tmp/Downloaded.opentake");
+});
+
 it("missing_card_reveal_remove_and_trash_states", async () => {
   const reveal = vi.fn().mockResolvedValue(undefined);
   const trash = vi
@@ -132,6 +256,12 @@ it("missing_card_reveal_remove_and_trash_states", async () => {
   expect(container.textContent).toContain("home.revealInFinder");
   expect(container.textContent).toContain("home.removeFromRecents");
   expect(container.textContent).toContain("home.moveToTrash");
+  const actionDialog = container.querySelector<HTMLElement>('[role="dialog"]');
+  expect(
+    [...(actionDialog?.querySelectorAll<HTMLButtonElement>("button") ?? [])].every(
+      (button) => Number.parseInt(button.style.minHeight, 10) >= 24,
+    ),
+  ).toBe(true);
 
   await act(async () => [...container.querySelectorAll<HTMLButtonElement>("button")]
     .find((button) => button.textContent?.includes("home.revealInFinder"))?.click());
