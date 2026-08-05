@@ -100,7 +100,7 @@ Knowledge source: [ClipSkills](https://github.com/appergb/ClipSkills) — 12-vol
 
 ### 🔌 Agent Tool Surface
 
-OpenTake exposes 45 compatible Agent tools, filtered at runtime so unavailable media,
+OpenTake exposes 44 compatible Agent tools, filtered at runtime so unavailable media,
 generation, or provider capabilities fail closed instead of being advertised:
 
 | Group | Key Tools |
