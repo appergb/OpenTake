@@ -4418,6 +4418,34 @@ fn grant_proxy_asset_file<R: Runtime>(app: &AppHandle<R>, path: &Path) -> Result
         .map_err(|error| format!("media_proxy_scope_grant_failed:{error}"))
 }
 
+/// Grant the exact media files a freshly opened project references, so the
+/// WebView's asset protocol can serve them without re-approving each one
+/// through a dialog. Only materialized regular files are granted, never whole
+/// directories; grants are idempotent and a failure only leaves the media
+/// offline (the project itself already opened).
+pub(crate) fn grant_project_media_asset_scope<R: Runtime>(
+    app: &AppHandle<R>,
+    core: &AppCore,
+    project_dir: Option<&Path>,
+) {
+    grant_media_entries_asset_scope(app, &core.media().entries, project_dir);
+}
+
+fn grant_media_entries_asset_scope<R: Runtime>(
+    app: &AppHandle<R>,
+    entries: &[MediaManifestEntry],
+    project_dir: Option<&Path>,
+) {
+    for entry in entries {
+        let Some(path) = resolve_source_path(entry, project_dir) else {
+            continue;
+        };
+        if crate::fs_availability::is_materialized_regular_file(&path) {
+            let _ = app.asset_protocol_scope().allow_file(&path);
+        }
+    }
+}
+
 fn revoke_proxy_asset_file<R: Runtime>(app: &AppHandle<R>, path: &Path) {
     let scope = app.asset_protocol_scope();
     // persisted-scope writes on PathAllowed events. Add the exact-file deny
@@ -7434,6 +7462,66 @@ mod tests {
             "media_proxy_scope_regular_file_required"
         );
         assert!(!app.handle().asset_protocol_scope().is_allowed(&target));
+    }
+
+    #[test]
+    fn project_media_asset_scope_grants_external_sources_and_skips_missing() {
+        use opentake_domain::media::{MediaManifest, MediaSource};
+
+        let app = tauri::test::mock_app();
+        let handle = app.handle();
+        let temp = tempfile::tempdir().unwrap();
+        let clip = temp.path().join("clip.mp4");
+        fs::write(&clip, b"clip").unwrap();
+
+        // An external source must become reachable by the asset protocol the
+        // moment the project opens — thumbnails/previews load without another
+        // dialog grant. A missing file must not be granted.
+        let mut manifest = MediaManifest::new();
+        manifest.entries.push(opentake_domain::MediaManifestEntry {
+            id: "external".into(),
+            name: "clip".into(),
+            kind: opentake_domain::ClipType::Video,
+            source: MediaSource::External {
+                absolute_path: clip.to_string_lossy().into_owned(),
+            },
+            duration: 10.0,
+            generation_input: None,
+            source_width: None,
+            source_height: None,
+            source_fps: None,
+            has_audio: None,
+            color: None,
+            proxy: None,
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        });
+        manifest.entries.push(opentake_domain::MediaManifestEntry {
+            id: "missing".into(),
+            name: "gone".into(),
+            kind: opentake_domain::ClipType::Video,
+            source: MediaSource::External {
+                absolute_path: temp.path().join("gone.mp4").to_string_lossy().into_owned(),
+            },
+            duration: 10.0,
+            generation_input: None,
+            source_width: None,
+            source_height: None,
+            source_fps: None,
+            has_audio: None,
+            color: None,
+            proxy: None,
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        });
+
+        grant_media_entries_asset_scope(handle, &manifest.entries, None);
+        assert!(handle.asset_protocol_scope().is_allowed(&clip));
+        assert!(!handle
+            .asset_protocol_scope()
+            .is_allowed(temp.path().join("gone.mp4")));
     }
 
     #[cfg(unix)]

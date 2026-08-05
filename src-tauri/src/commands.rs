@@ -450,6 +450,16 @@ pub async fn project_open(
         &app.state::<crate::media::prewarm::PrewarmScheduler>(),
     );
     drop(lifecycle);
+    // The project itself was approved by a dialog; make its referenced media
+    // files reachable through the asset protocol (thumbnails, previews, scrub
+    // stills) without another dialog per file.
+    if let Ok(snapshot) = &result {
+        crate::media::grant_project_media_asset_scope(
+            &app,
+            &app.state::<AppCore>(),
+            snapshot.project_path.as_deref(),
+        );
+    }
     result
 }
 
@@ -520,6 +530,10 @@ pub async fn project_open(app: AppHandle, path: String) -> Result<TimelineSnapsh
     let snapshot = TimelineSnapshotDto::from(core.commit_project_open(prepared));
     prewarm.activate_project(snapshot.project_epoch);
     drop(lifecycle);
+    // The project itself was approved by a dialog; make its referenced media
+    // files reachable through the asset protocol (thumbnails, previews, scrub
+    // stills) without another dialog per file.
+    crate::media::grant_project_media_asset_scope(&app, &core, snapshot.project_path.as_deref());
     Ok(snapshot)
 }
 
