@@ -143,6 +143,7 @@ fn response_headers_are_origin_bound_and_inert() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn project_helper_rejects_an_ambient_bundle_replacement() {
     let directory = local_tempdir();
@@ -179,6 +180,28 @@ fn project_helper_rejects_an_ambient_bundle_replacement() {
         Some(WireIoErrorKind::PermissionDenied)
     ));
     assert!(response.body.is_empty());
+}
+
+/// cap-std retains the bundle without FILE_SHARE_DELETE: on Windows the
+/// ambient replacement is rejected closed while retained (the helper's
+/// replacement rejection is Unix-verified above).
+#[cfg(target_os = "windows")]
+#[test]
+fn project_helper_blocks_an_ambient_bundle_replacement_while_retained() {
+    let directory = local_tempdir();
+    let selected = directory.path().join("Selected.opentake");
+    std::fs::create_dir_all(selected.join("media")).unwrap();
+    std::fs::write(selected.join("media/clip.mp4"), b"project-a").unwrap();
+    let retained = ProjectRoot::open(&selected).unwrap();
+
+    assert!(std::fs::rename(&selected, directory.path().join("Retained-A.opentake")).is_err());
+
+    drop(retained);
+    std::fs::rename(&selected, directory.path().join("Retained-A.opentake")).unwrap();
+    assert_eq!(
+        std::fs::read(directory.path().join("Retained-A.opentake/media/clip.mp4")).unwrap(),
+        b"project-a"
+    );
 }
 
 #[test]

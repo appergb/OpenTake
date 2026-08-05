@@ -3334,42 +3334,43 @@ mod tests {
         );
     }
 
+    fn write_bundle(path: &Path, color: image::Rgba<u8>) {
+        let project = opentake_project::Project::new(path);
+        project.save().unwrap();
+        std::fs::create_dir_all(path.join("media")).unwrap();
+        image::RgbaImage::from_pixel(12, 12, color)
+            .save(path.join("media/source.png"))
+            .unwrap();
+        let mut manifest = opentake_domain::MediaManifest::new();
+        manifest.entries.push(opentake_domain::MediaManifestEntry {
+            id: "project-image".into(),
+            name: "source.png".into(),
+            kind: ClipType::Image,
+            source: MediaSource::Project {
+                relative_path: "media/source.png".into(),
+            },
+            duration: 0.0,
+            generation_input: None,
+            source_width: Some(12),
+            source_height: Some(12),
+            source_fps: None,
+            has_audio: Some(false),
+            color: None,
+            proxy: None,
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        });
+        std::fs::write(
+            path.join("media.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[cfg(unix)]
     #[test]
     fn inspect_project_media_reads_the_retained_bundle_after_path_rebind() {
-        fn write_bundle(path: &Path, color: image::Rgba<u8>) {
-            let project = opentake_project::Project::new(path);
-            project.save().unwrap();
-            std::fs::create_dir_all(path.join("media")).unwrap();
-            image::RgbaImage::from_pixel(12, 12, color)
-                .save(path.join("media/source.png"))
-                .unwrap();
-            let mut manifest = opentake_domain::MediaManifest::new();
-            manifest.entries.push(opentake_domain::MediaManifestEntry {
-                id: "project-image".into(),
-                name: "source.png".into(),
-                kind: ClipType::Image,
-                source: MediaSource::Project {
-                    relative_path: "media/source.png".into(),
-                },
-                duration: 0.0,
-                generation_input: None,
-                source_width: Some(12),
-                source_height: Some(12),
-                source_fps: None,
-                has_audio: Some(false),
-                color: None,
-                proxy: None,
-                folder_id: None,
-                cached_remote_url: None,
-                cached_remote_url_expires_at: None,
-            });
-            std::fs::write(
-                path.join("media.json"),
-                serde_json::to_vec(&manifest).unwrap(),
-            )
-            .unwrap();
-        }
-
         let tmp = tempfile::tempdir().unwrap();
         let selected = tmp.path().join("Selected.opentake");
         let retained = tmp.path().join("Retained.opentake");
@@ -3403,6 +3404,25 @@ mod tests {
             pixel[0] > pixel[1] + 100,
             "inspection reopened the rebound bundle instead of retained bytes: {pixel:?}"
         );
+    }
+
+    /// cap-std retains the bundle without FILE_SHARE_DELETE: on Windows the
+    /// ambient rename fails closed while the project is open (the
+    /// retained-read-after-rebind property is Unix-verified above).
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn inspect_project_media_blocks_bundle_rebind_while_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let selected = tmp.path().join("Selected.opentake");
+        let retained = tmp.path().join("Retained.opentake");
+        write_bundle(&selected, image::Rgba([240, 10, 10, 255]));
+        let core = AppCore::new();
+        core.open_project(&selected).unwrap();
+
+        assert!(std::fs::rename(&selected, &retained).is_err());
+
+        drop(core);
+        std::fs::rename(&selected, &retained).unwrap();
     }
 
     fn two_frame_lottie_fixture() -> String {

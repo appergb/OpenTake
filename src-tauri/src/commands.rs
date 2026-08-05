@@ -1927,6 +1927,7 @@ mod project_open_async_tests {
     use opentake_core::core::PreparedProjectOpen;
     use opentake_core::AppCore;
     use std::time::Duration;
+    #[cfg(unix)]
     #[test]
     fn prepared_project_detects_an_ambient_namespace_rebind_before_commit() {
         let fixture = tempfile::tempdir().expect("fixture tempdir");
@@ -1945,6 +1946,29 @@ mod project_open_async_tests {
         assert!(!prepared
             .is_current_namespace()
             .expect("namespace identity check"));
+    }
+
+    /// cap-std retains the bundle without FILE_SHARE_DELETE, so on Windows the
+    /// ambient rename fails closed while prepared — the stronger namespace
+    /// guard (rebind detection on the open handle is Unix-verified above).
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn prepared_project_blocks_an_ambient_namespace_rebind_while_retained() {
+        let fixture = tempfile::tempdir().expect("fixture tempdir");
+        let selected = fixture.path().join("Selected.opentake");
+        let retained = fixture.path().join("Retained-A.opentake");
+        AppCore::new()
+            .save_project(Some(selected.clone()))
+            .expect("save project A");
+        let prepared = AppCore::prepare_project_open(selected.clone()).expect("prepare A");
+
+        assert!(std::fs::rename(&selected, &retained).is_err());
+        assert!(prepared
+            .is_current_namespace()
+            .expect("namespace identity check"));
+
+        drop(prepared);
+        std::fs::rename(&selected, &retained).expect("rename succeeds after release");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

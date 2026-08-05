@@ -938,8 +938,11 @@ mod tests {
         }
         run_probe_executor_seam(false, Duration::from_secs(1))
             .expect("healthy work must run after four abandoned cleanup futures");
+        // The four 80ms abandoned cleanups plus the healthy run finish in well
+        // under a second locally; the bound only guards against a cleanup
+        // deadline that never fires at all, so keep it generous for loaded CI.
         assert!(
-            started.elapsed() < Duration::from_secs(2),
+            started.elapsed() < Duration::from_secs(5),
             "nonreturning cleanup work escaped its deadline"
         );
     }
@@ -1000,6 +1003,22 @@ mod tests {
                 .lines()
                 .filter_map(|line| line.split_once('=').map(|(_, pid)| pid))
             {
+                // A SIGKILLed member may linger as a zombie until reaped by
+                // init; poll with a bounded deadline (mirrors
+                // assert_capture_limit_kills_tree) so CI scheduling latency
+                // cannot flake the assertion.
+                let exit_deadline = Instant::now() + Duration::from_secs(5);
+                while Command::new("kill")
+                    .args(["-0", pid])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success()
+                    && Instant::now() < exit_deadline
+                {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
                 assert!(
                     !Command::new("kill")
                         .args(["-0", pid])
@@ -1103,6 +1122,22 @@ mod tests {
             .lines()
             .filter_map(|line| line.split_once('=').map(|(_, pid)| pid))
         {
+            // SIGKILLed members may linger as zombies until init reaps them;
+            // poll with a bounded deadline (mirrors
+            // assert_capture_limit_kills_tree) so CI scheduling latency
+            // cannot flake the assertion.
+            let exit_deadline = Instant::now() + Duration::from_secs(5);
+            while Command::new("kill")
+                .args(["-0", pid])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+                && Instant::now() < exit_deadline
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
             assert!(
                 !Command::new("kill")
                     .args(["-0", pid])
