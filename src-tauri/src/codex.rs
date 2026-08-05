@@ -1425,8 +1425,10 @@ mod tests {
     use opentake_agent::tools::result::ToolResult;
     use opentake_core::AppCore;
 
+    #[cfg(unix)]
     struct TestTurnGate;
 
+    #[cfg(unix)]
     impl ChatTurnGate for TestTurnGate {
         fn timeline(&self, dispatcher: &Dispatcher) -> Option<opentake_domain::Timeline> {
             Some(dispatcher.timeline())
@@ -1437,6 +1439,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn turn_context(cancel: Arc<AtomicBool>) -> CodexTurnContext {
         let registry = Arc::new(RwLock::new(PluginRegistry::with_builtins()));
         let handle: Arc<dyn CoreHandle> = Arc::new(AppCoreHandle::new(AppCore::new()));
