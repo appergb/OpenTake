@@ -675,13 +675,12 @@ fn directory_identity(directory: &Dir, path: &Path) -> Result<ProjectBundleIdent
         .try_clone()
         .map_err(|error| format!("retain directory identity for {}: {error}", path.display()))?
         .into_std_file();
-    let metadata = file
-        .metadata()
-        .map_err(|error| format!("inspect directory identity for {}: {error}", path.display()))?;
-
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata().map_err(|error| {
+            format!("inspect directory identity for {}: {error}", path.display())
+        })?;
         Ok(ProjectBundleIdentity {
             volume: metadata.dev(),
             file: metadata.ino(),

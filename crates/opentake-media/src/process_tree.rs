@@ -179,6 +179,12 @@ pub struct ProcessTree {
     armed: bool,
 }
 
+// SAFETY: on Windows the owned Job Object HANDLE is an opaque kernel value with
+// exclusive ownership here — it is moved, never shared, and closed exactly once
+// (Drop/disarm). Moving the handle between threads is therefore sound; it is
+// only ever used through this value's own methods.
+unsafe impl Send for ProcessTree {}
+
 impl ProcessTree {
     pub fn attach(process_id: u32) -> io::Result<Self> {
         #[cfg(unix)]

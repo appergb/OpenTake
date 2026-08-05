@@ -19,15 +19,9 @@ use std::os::windows::fs::MetadataExt;
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
 #[cfg(target_os = "windows")]
-use windows_sys::Win32::Storage::CloudFilters::{
-    CfGetPlaceholderStateFromAttributeTag, CF_PLACEHOLDER_STATE_PARTIAL,
-    CF_PLACEHOLDER_STATE_PARTIALLY_ON_DISK,
-};
+use windows_sys::Win32::Storage::CloudFilters::CfGetPlaceholderStateFromAttributeTag;
 #[cfg(target_os = "windows")]
-use windows_sys::Win32::Storage::FileSystem::{
-    FindClose, FindFirstFileW, FILE_ATTRIBUTE_OFFLINE, FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS,
-    FILE_ATTRIBUTE_RECALL_ON_OPEN, WIN32_FIND_DATAW,
-};
+use windows_sys::Win32::Storage::FileSystem::{FindClose, FindFirstFileW, WIN32_FIND_DATAW};
 
 #[cfg(target_os = "macos")]
 const MACOS_SF_DATALESS: u32 = 0x4000_0000;

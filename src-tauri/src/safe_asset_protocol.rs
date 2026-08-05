@@ -60,11 +60,10 @@ use helper::{
     IsolatedHelperError,
 };
 
+#[cfg(all(test, not(target_os = "windows")))]
+use helper::{actual_parent_process_id, parent_is_same_executable, terminate_or_quarantine};
 #[cfg(test)]
-use helper::{
-    actual_parent_process_id, bounded_reap, helper_response, parent_is_same_executable,
-    terminate_or_quarantine, WireIoErrorKind,
-};
+use helper::{bounded_reap, helper_response, WireIoErrorKind};
 
 #[derive(Clone)]
 pub(crate) struct SafeAssetProtocol {
