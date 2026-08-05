@@ -1421,8 +1421,11 @@ where
 mod tests {
     use super::*;
     use opentake_agent::chat::{ChatMessage, ChatSession};
+    #[cfg(unix)]
     use opentake_agent::mcp::core_handle::{AppCoreHandle, CoreHandle};
+    #[cfg(unix)]
     use opentake_agent::tools::result::ToolResult;
+    #[cfg(unix)]
     use opentake_core::AppCore;
 
     #[cfg(unix)]
