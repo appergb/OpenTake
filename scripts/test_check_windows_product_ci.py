@@ -65,6 +65,40 @@ class WindowsProductCiContractTests(unittest.TestCase):
     def test_repository_workflow_satisfies_contract(self) -> None:
         self.assertEqual([], contract.validate_workflow(WORKFLOW))
 
+    def test_tauri_manifest_is_checked_out_with_lf_for_cli_rewrites(self) -> None:
+        attributes_path = REPOSITORY_ROOT / ".gitattributes"
+        attributes = (
+            attributes_path.read_text(encoding="utf-8")
+            if attributes_path.exists()
+            else ""
+        )
+        self.assertEqual([], contract.validate_git_attributes(attributes))
+
+    def test_rejects_missing_tauri_manifest_lf_contract(self) -> None:
+        self.assertIn(
+            "LF-stable Tauri Cargo manifest checkout",
+            contract.validate_git_attributes(""),
+        )
+
+    def test_rejects_later_tauri_manifest_eol_override(self) -> None:
+        attributes = (
+            "src-tauri/Cargo.toml text eol=lf\n"
+            "src-tauri/Cargo.toml text eol=crlf\n"
+        )
+        self.assertIn(
+            "LF-stable Tauri Cargo manifest checkout",
+            contract.validate_git_attributes(attributes),
+        )
+
+    def test_rejects_nested_tauri_attributes_override(self) -> None:
+        attributes = "src-tauri/Cargo.toml text eol=lf\n"
+        self.assertIn(
+            "LF-stable Tauri Cargo manifest checkout",
+            contract.validate_git_attributes(
+                attributes, "Cargo.toml text eol=crlf\n"
+            ),
+        )
+
     def test_accepts_beta_app_version_with_numeric_msi_mapping(self) -> None:
         config = json.dumps(
             {

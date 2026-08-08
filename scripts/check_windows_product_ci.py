@@ -19,6 +19,8 @@ from workflow_yaml import WorkflowYamlError, parse_workflow_yaml
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW_PATH = REPOSITORY_ROOT / ".github" / "workflows" / "ci.yml"
 TAURI_CONFIG_PATH = REPOSITORY_ROOT / "src-tauri" / "tauri.conf.json"
+GIT_ATTRIBUTES_PATH = REPOSITORY_ROOT / ".gitattributes"
+NESTED_GIT_ATTRIBUTES_PATH = REPOSITORY_ROOT / "src-tauri" / ".gitattributes"
 NORMAL_JOB_CONDITION = (
     "if: github.event_name != 'workflow_dispatch' || inputs.red_task == 'none'"
 )
@@ -1187,6 +1189,22 @@ def validate_tauri_config(config_text: str) -> list[str]:
     return errors
 
 
+def validate_git_attributes(
+    attributes_text: str, nested_attributes_text: str | None = None
+) -> list[str]:
+    entries = [
+        line.strip()
+        for line in attributes_text.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if (
+        entries != ["src-tauri/Cargo.toml text eol=lf"]
+        or nested_attributes_text is not None
+    ):
+        return ["LF-stable Tauri Cargo manifest checkout"]
+    return []
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -1218,6 +1236,14 @@ def main() -> None:
     if not args.workflow_only:
         errors.extend(
             validate_tauri_config(TAURI_CONFIG_PATH.read_text(encoding="utf-8"))
+        )
+        errors.extend(
+            validate_git_attributes(
+                GIT_ATTRIBUTES_PATH.read_text(encoding="utf-8"),
+                NESTED_GIT_ATTRIBUTES_PATH.read_text(encoding="utf-8")
+                if NESTED_GIT_ATTRIBUTES_PATH.exists()
+                else None,
+            )
         )
     if errors:
         raise SystemExit("windows-product is missing: " + ", ".join(errors))
