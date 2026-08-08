@@ -76,6 +76,59 @@ mod live {
           </script>
         </body></html>"#;
 
+        // The normal post-seek fence advances author time once. Background
+        // readback for alpha recovery must not advance it again between the
+        // black and white samples, or these primary colors become inconsistent.
+        let timer_root = tempfile::tempdir().unwrap();
+        let timer_document = r#"<!doctype html><html><body style="margin:0;background:transparent">
+          <div id="box" style="position:fixed;inset:-16px;background:rgba(0,0,255,.5)"></div>
+          <script>
+            let timer;
+            OpenTake.onSeek(() => {
+              if (window.innerWidth !== 48 || window.innerHeight !== 32) {
+                fetch('https://example.com/viewport-guard-changed-layout');
+              }
+              clearInterval(timer);
+              let ticks = 0;
+              timer = setInterval(() => {
+                ticks += 1;
+                box.style.background = ticks === 1
+                  ? 'rgba(255,0,0,.5)'
+                  : 'rgba(0,255,0,.5)';
+                if (ticks === 2) {
+                  fetch('https://example.com/timer-between-backgrounds');
+                }
+              }, 1);
+            });
+          </script>
+        </body></html>"#;
+        let timer_request =
+            MotionRenderRequest::new(MotionSource::code(timer_document), 10, 1, 48, 32);
+        let timer_frame = renderer(timer_root.path()).render(&timer_request).unwrap();
+        let timer_pixels = image::open(&timer_frame.frames[0]).unwrap().to_rgba8();
+        let unique_timer_pixels = timer_pixels
+            .pixels()
+            .map(|pixel| pixel.0)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            unique_timer_pixels.len(),
+            1,
+            "the full-canvas timer fixture must remain spatially uniform: {unique_timer_pixels:?}"
+        );
+        let timer_pixel = timer_pixels.get_pixel(0, 0).0;
+        assert_eq!(
+            timer_pixels.get_pixel(47, 31).0,
+            timer_pixel,
+            "valid content touching the requested right/bottom edge must survive guard cropping"
+        );
+        assert!(
+            timer_pixel[0] > timer_pixel[1]
+                && timer_pixel[0] > timer_pixel[2]
+                && timer_pixel[3] > 0
+                && timer_pixel[3] < 255,
+            "tick 1 must produce one uniform, red-dominant translucent state; actual={timer_pixel:?}"
+        );
+
         let first_root = tempfile::tempdir().unwrap();
         let second_root = tempfile::tempdir().unwrap();
         let first = renderer(first_root.path())
@@ -88,7 +141,63 @@ mod live {
         assert_eq!(first.frame_count(), 3);
         assert_eq!(second.frame_count(), 3);
         for (a, b) in first.frames.iter().zip(&second.frames) {
-            assert_eq!(fs::read(a).unwrap(), fs::read(b).unwrap());
+            let a_bytes = fs::read(a).unwrap();
+            let b_bytes = fs::read(b).unwrap();
+            if a_bytes != b_bytes {
+                let a_pixels = image::load_from_memory(&a_bytes).unwrap().to_rgba8();
+                let b_pixels = image::load_from_memory(&b_bytes).unwrap().to_rgba8();
+                assert_eq!(a_pixels.dimensions(), b_pixels.dimensions());
+                let differences = a_pixels
+                    .as_raw()
+                    .iter()
+                    .zip(b_pixels.as_raw())
+                    .filter(|(left, right)| left != right)
+                    .count();
+                let max_delta = a_pixels
+                    .as_raw()
+                    .iter()
+                    .zip(b_pixels.as_raw())
+                    .map(|(left, right)| left.abs_diff(*right))
+                    .max()
+                    .unwrap_or(0);
+                let (width, height) = a_pixels.dimensions();
+                let mut differing_pixels = 0usize;
+                let mut canvas_edge_pixels = 0usize;
+                let mut bbox = None::<(u32, u32, u32, u32)>;
+                let mut samples = Vec::new();
+                for (x, y, left) in a_pixels.enumerate_pixels() {
+                    let right = b_pixels.get_pixel(x, y);
+                    if left != right {
+                        differing_pixels += 1;
+                        if x == 0 || y == 0 || x + 1 == width || y + 1 == height {
+                            canvas_edge_pixels += 1;
+                        }
+                        bbox = Some(match bbox {
+                            Some((min_x, min_y, max_x, max_y)) => {
+                                (min_x.min(x), min_y.min(y), max_x.max(x), max_y.max(y))
+                            }
+                            None => (x, y, x, y),
+                        });
+                        if samples.len() < 20 {
+                            samples.push((x, y, left.0, right.0));
+                        }
+                    }
+                }
+                let unique_a = a_pixels
+                    .pixels()
+                    .map(|pixel| pixel.0)
+                    .collect::<BTreeSet<_>>();
+                let unique_b = b_pixels
+                    .pixels()
+                    .map(|pixel| pixel.0)
+                    .collect::<BTreeSet<_>>();
+                panic!(
+                    "deterministic captures differ: {differences} channels, max delta {max_delta}, differing_pixels={differing_pixels}, bbox={bbox:?}, canvas_edge_pixels={canvas_edge_pixels}, interior_pixels={}, samples={samples:?}, png_bytes=({}, {}), unique_a={unique_a:?}, unique_b={unique_b:?}",
+                    differing_pixels - canvas_edge_pixels,
+                    a_bytes.len(),
+                    b_bytes.len()
+                );
+            }
         }
         assert_ne!(
             fs::read(&first.frames[0]).unwrap(),
@@ -108,6 +217,23 @@ mod live {
             .expect("Chromium PNG enters MotionClipSource");
         assert_eq!((composited.width, composited.height), (48, 32));
         assert_eq!(composited.rgba.len(), 48 * 32 * 4);
+
+        // Opaque clips take the single view-capture path that avoids Chromium's
+        // Windows CopyFromSurface/Viz callback. macOS Retina also returns a
+        // larger backing view, so this proves normalization to the fixed canvas.
+        let opaque_root = tempfile::tempdir().unwrap();
+        let opaque = renderer(opaque_root.path())
+            .render(&request(animation).with_transparent(false))
+            .unwrap();
+        assert_eq!(opaque.frame_count(), 3);
+        let opaque_first = image::open(&opaque.frames[0]).unwrap().to_rgba8();
+        assert_eq!(opaque_first.dimensions(), (48, 32));
+        assert!(opaque_first.pixels().all(|pixel| pixel[3] == 255));
+        assert_ne!(
+            fs::read(&opaque.frames[0]).unwrap(),
+            fs::read(&opaque.frames[2]).unwrap(),
+            "opaque view capture must retain deterministic frame animation"
+        );
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();

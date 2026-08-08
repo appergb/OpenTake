@@ -502,7 +502,7 @@ impl MotionRenderer for HeadlessChromiumRenderer {
 
 #[cfg(feature = "chromium")]
 mod chromium_backend {
-    use std::io::{BufRead, BufReader};
+    use std::io::{BufRead, BufReader, Cursor};
     use std::net::TcpStream;
     use std::process::{Child, Command, Stdio};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -603,26 +603,15 @@ mod chromium_backend {
         cdp.command("Page.enable", json!({}), Some(&session))?;
         cdp.command("Runtime.enable", json!({}), Some(&session))?;
         cdp.command("Log.enable", json!({}), Some(&session))?;
-        // A background target can have its compositor throttled on Windows,
-        // leaving a later surface screenshot pending indefinitely.
+        // View-based screenshots require an active target, and Windows can
+        // throttle a background target's compositor indefinitely.
         cdp.command("Page.bringToFront", json!({}), Some(&session))?;
         cdp.command(
             "Fetch.enable",
             json!({"patterns": [{"urlPattern": "*", "requestStage": "Request"}]}),
             Some(&session),
         )?;
-        cdp.command(
-            "Emulation.setDeviceMetricsOverride",
-            json!({
-                "width": req.width,
-                "height": req.height,
-                "deviceScaleFactor": 1,
-                "mobile": false,
-                "screenWidth": req.width,
-                "screenHeight": req.height
-            }),
-            Some(&session),
-        )?;
+        cdp.set_device_metrics(&session, req.width, req.height)?;
         let alpha = if req.transparent { 0.0 } else { 1.0 };
         cdp.command(
             "Emulation.setDefaultBackgroundColorOverride",
@@ -687,40 +676,20 @@ mod chromium_backend {
             cdp.ensure_no_blocked_url()?;
 
             trace(format!("frame {index}: screenshot capture start"));
-            let captured = cdp.command(
-                "Page.captureScreenshot",
-                json!({
-                    "format": "png",
-                    "fromSurface": true,
-                    "captureBeyondViewport": false,
-                    "optimizeForSpeed": false
-                }),
-                Some(&session),
-            )?;
+            let png =
+                cdp.capture_frame_png(&session, req.transparent, req.width, req.height, index)?;
+            check_abort(renderer, deadline)?;
             cdp.ensure_no_blocked_url()?;
             trace(format!("frame {index}: screenshot captured"));
-            let encoded = required_string(&captured, "data")?;
-            let png = base64::engine::general_purpose::STANDARD
-                .decode(encoded)
-                .map_err(|error| {
-                    MotionError::render_failed(format!(
-                        "Chromium returned malformed screenshot data for frame {index}: {error}"
-                    ))
-                })?;
-            if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
-                return Err(MotionError::render_failed(format!(
-                    "Chromium returned a non-PNG screenshot for frame {index}"
-                )));
-            }
             let path = MotionCache::frame_file(&dir, index);
             std::fs::write(&path, png)?;
             frames.push(path);
         }
 
-        cdp.command("Target.closeTarget", json!({"targetId": target_id}), None)?;
+        cdp.close_target(&target_id)?;
+        check_abort(renderer, deadline)?;
         browser.shutdown()?;
-        MotionCache::mark_complete(&dir)?;
-        partial.commit();
+        publish_completed_render(renderer, deadline, &dir, &mut partial)?;
 
         Ok(RenderedClip {
             content_hash: hash,
@@ -770,12 +739,36 @@ mod chromium_backend {
     }
 
     fn check_abort(renderer: &HeadlessChromiumRenderer, deadline: Instant) -> MotionResult<()> {
-        if renderer.cancellation.is_cancelled() {
+        check_abort_state(&renderer.cancellation, deadline, renderer.policy.timeout)
+    }
+
+    fn check_abort_state(
+        cancellation: &MotionCancellationToken,
+        deadline: Instant,
+        timeout: Duration,
+    ) -> MotionResult<()> {
+        if cancellation.is_cancelled() {
             return Err(MotionError::Cancelled);
         }
         if Instant::now() >= deadline {
-            return Err(MotionError::Timeout(renderer.policy.timeout));
+            return Err(MotionError::Timeout(timeout));
         }
+        Ok(())
+    }
+
+    fn publish_completed_render(
+        renderer: &HeadlessChromiumRenderer,
+        deadline: Instant,
+        dir: &Path,
+        partial: &mut PartialFrames,
+    ) -> MotionResult<()> {
+        check_abort(renderer, deadline)?;
+        MotionCache::mark_complete(dir)?;
+        if let Err(error) = check_abort(renderer, deadline) {
+            MotionCache::remove_completion_marker(dir)?;
+            return Err(error);
+        }
+        partial.commit();
         Ok(())
     }
 
@@ -1147,6 +1140,196 @@ mod chromium_backend {
             Ok(())
         }
 
+        fn set_device_metrics(
+            &mut self,
+            session: &str,
+            width: u32,
+            height: u32,
+        ) -> MotionResult<()> {
+            self.command(
+                "Emulation.setDeviceMetricsOverride",
+                device_metrics_params(width, height)?,
+                Some(session),
+            )?;
+            Ok(())
+        }
+
+        fn capture_viewport(
+            &mut self,
+            session: &str,
+            width: u32,
+            height: u32,
+        ) -> MotionResult<Value> {
+            let guard_width = guarded_dimension(width)?;
+            let guard_height = guarded_dimension(height)?;
+            // Capture the page plus one CSS pixel of page-external guard on the
+            // right and bottom. `fromSurface=false` can expose an unstable OS
+            // backing-view boundary there; the guard is cropped before resize.
+            self.command(
+                "Page.captureScreenshot",
+                json!({
+                    "format": "png",
+                    "fromSurface": false,
+                    "captureBeyondViewport": false,
+                    "optimizeForSpeed": false,
+                    "clip": {
+                        "x": 0,
+                        "y": 0,
+                        "width": guard_width,
+                        "height": guard_height,
+                        "scale": 1
+                    }
+                }),
+                Some(session),
+            )
+        }
+
+        fn capture_frame_png(
+            &mut self,
+            session: &str,
+            transparent: bool,
+            width: u32,
+            height: u32,
+            frame_index: usize,
+        ) -> MotionResult<Vec<u8>> {
+            self.check_abort()?;
+            if !transparent {
+                let image = self.capture_normalized_viewport_image(
+                    session,
+                    "opaque",
+                    width,
+                    height,
+                    frame_index,
+                )?;
+                self.check_abort()?;
+                let normalized = encode_viewport_png(image, frame_index)?;
+                self.check_abort()?;
+                return Ok(normalized);
+            }
+
+            let black = self.capture_stable_background_image(
+                session,
+                [0, 0, 0, 255],
+                "black",
+                width,
+                height,
+                frame_index,
+            )?;
+            let white = self.capture_stable_background_image(
+                session,
+                [255, 255, 255, 255],
+                "white",
+                width,
+                height,
+                frame_index,
+            )?;
+            self.check_abort()?;
+            let recovered = recover_transparent_images(black, white, frame_index)?;
+            self.check_abort()?;
+            Ok(recovered)
+        }
+
+        fn check_abort(&self) -> MotionResult<()> {
+            check_abort_state(&self.cancellation, self.deadline, self.policy.timeout)
+        }
+
+        fn close_target(&mut self, target_id: &str) -> MotionResult<()> {
+            self.command("Target.closeTarget", json!({"targetId": target_id}), None)?;
+            self.ensure_no_blocked_url()
+        }
+
+        fn set_capture_background(&mut self, session: &str, rgba: [u8; 4]) -> MotionResult<()> {
+            self.command(
+                "Emulation.setDefaultBackgroundColorOverride",
+                json!({
+                    "color": {
+                        "r": rgba[0],
+                        "g": rgba[1],
+                        "b": rgba[2],
+                        "a": f64::from(rgba[3]) / 255.0
+                    }
+                }),
+                Some(session),
+            )?;
+            self.ensure_no_blocked_url()
+        }
+
+        fn capture_stable_background_image(
+            &mut self,
+            session: &str,
+            rgba: [u8; 4],
+            background: &str,
+            width: u32,
+            height: u32,
+            frame_index: usize,
+        ) -> MotionResult<image::RgbaImage> {
+            self.set_capture_background(session, rgba)?;
+            trace(format!(
+                "frame {frame_index}: {background}-background readback fence start"
+            ));
+            let fence = self.capture_normalized_viewport_image(
+                session,
+                background,
+                width,
+                height,
+                frame_index,
+            )?;
+            self.check_abort()?;
+            trace(format!(
+                "frame {frame_index}: {background}-background used readback start"
+            ));
+            let captured = self.capture_normalized_viewport_image(
+                session,
+                background,
+                width,
+                height,
+                frame_index,
+            )?;
+            self.check_abort()?;
+            ensure_stable_viewport_images(&fence, &captured, background, frame_index)?;
+            self.check_abort()?;
+            Ok(captured)
+        }
+
+        fn capture_normalized_viewport_image(
+            &mut self,
+            session: &str,
+            background: &str,
+            width: u32,
+            height: u32,
+            frame_index: usize,
+        ) -> MotionResult<image::RgbaImage> {
+            let png = self.capture_viewport_png(session, width, height, frame_index)?;
+            self.check_abort()?;
+            let image = decode_viewport_png(&png, background, frame_index)?;
+            normalize_guarded_viewport_image(image, width, height, background, frame_index)
+        }
+
+        fn capture_viewport_png(
+            &mut self,
+            session: &str,
+            width: u32,
+            height: u32,
+            frame_index: usize,
+        ) -> MotionResult<Vec<u8>> {
+            let captured = self.capture_viewport(session, width, height)?;
+            self.ensure_no_blocked_url()?;
+            let encoded = required_string(&captured, "data")?;
+            let png = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|error| {
+                    MotionError::render_failed(format!(
+                        "Chromium returned malformed screenshot data for frame {frame_index}: {error}"
+                    ))
+                })?;
+            if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+                return Err(MotionError::render_failed(format!(
+                    "Chromium returned a non-PNG screenshot for frame {frame_index}"
+                )));
+            }
+            Ok(png)
+        }
+
         fn send(&mut self, value: Value) -> MotionResult<()> {
             self.socket
                 .send(Message::text(value.to_string()))
@@ -1159,12 +1342,7 @@ mod chromium_backend {
 
         fn read(&mut self) -> MotionResult<Value> {
             loop {
-                if self.cancellation.is_cancelled() {
-                    return Err(MotionError::Cancelled);
-                }
-                if Instant::now() >= self.deadline {
-                    return Err(MotionError::Timeout(self.policy.timeout));
-                }
+                self.check_abort()?;
                 match self.socket.read() {
                     Ok(Message::Text(text)) => {
                         return serde_json::from_str(text.as_ref()).map_err(|error| {
@@ -1270,6 +1448,210 @@ mod chromium_backend {
         }
     }
 
+    fn guarded_dimension(value: u32) -> MotionResult<u32> {
+        value.checked_add(1).ok_or_else(|| {
+            MotionError::render_failed("viewport dimension overflowed while adding capture guard")
+        })
+    }
+
+    fn device_metrics_params(width: u32, height: u32) -> MotionResult<Value> {
+        let guard_width = guarded_dimension(width)?;
+        let guard_height = guarded_dimension(height)?;
+        Ok(json!({
+            "width": width,
+            "height": height,
+            "deviceScaleFactor": 1,
+            "mobile": false,
+            "screenWidth": width,
+            "screenHeight": height,
+            "viewport": {
+                "x": 0,
+                "y": 0,
+                "width": guard_width,
+                "height": guard_height,
+                "scale": 1
+            }
+        }))
+    }
+
+    fn recover_transparent_images(
+        black: image::RgbaImage,
+        white: image::RgbaImage,
+        frame_index: usize,
+    ) -> MotionResult<Vec<u8>> {
+        if black.dimensions() != white.dimensions() {
+            return Err(MotionError::render_failed(format!(
+                "Chromium returned inconsistent viewport sizes for frame {frame_index}: black={:?}, white={:?}",
+                black.dimensions(),
+                white.dimensions()
+            )));
+        }
+
+        let rgba = recover_straight_alpha(black.as_raw(), white.as_raw())?;
+        let (width, height) = black.dimensions();
+        let image = image::RgbaImage::from_raw(width, height, rgba).ok_or_else(|| {
+            MotionError::render_failed(format!(
+                "recovered RGBA buffer has the wrong size for frame {frame_index}"
+            ))
+        })?;
+        encode_viewport_png(image, frame_index)
+    }
+
+    fn ensure_stable_viewport_images(
+        fence: &image::RgbaImage,
+        captured: &image::RgbaImage,
+        background: &str,
+        frame_index: usize,
+    ) -> MotionResult<()> {
+        if fence.dimensions() != captured.dimensions() {
+            return Err(MotionError::render_failed(format!(
+                "Chromium {background}-background returned inconsistent stable-readback sizes for frame {frame_index}: fence={:?}, captured={:?}",
+                fence.dimensions(),
+                captured.dimensions()
+            )));
+        }
+        if fence.as_raw() != captured.as_raw() {
+            let differing_channels = fence
+                .as_raw()
+                .iter()
+                .zip(captured.as_raw())
+                .filter(|(left, right)| left != right)
+                .count();
+            return Err(MotionError::render_failed(format!(
+                "Chromium {background}-background did not reach a stable readback for frame {frame_index}: {differing_channels} RGBA channels changed"
+            )));
+        }
+        Ok(())
+    }
+
+    fn decode_viewport_png(
+        png: &[u8],
+        background: &str,
+        frame_index: usize,
+    ) -> MotionResult<image::RgbaImage> {
+        let image = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+            .map(image::DynamicImage::into_rgba8)
+            .map_err(|error| {
+                MotionError::render_failed(format!(
+                    "Chromium returned an invalid {background}-background PNG for frame {frame_index}: {error}"
+                ))
+            })?;
+        let (actual_width, actual_height) = image.dimensions();
+        if actual_width == 0 || actual_height == 0 {
+            return Err(MotionError::render_failed(format!(
+                "Chromium returned an empty {background}-background viewport for frame {frame_index}"
+            )));
+        }
+        Ok(image)
+    }
+
+    fn normalize_guarded_viewport_image(
+        image: image::RgbaImage,
+        width: u32,
+        height: u32,
+        background: &str,
+        frame_index: usize,
+    ) -> MotionResult<image::RgbaImage> {
+        let (actual_width, actual_height) = image.dimensions();
+        let guard_width = guarded_dimension(width)?;
+        let guard_height = guarded_dimension(height)?;
+        if u64::from(actual_width) * u64::from(guard_height)
+            != u64::from(actual_height) * u64::from(guard_width)
+        {
+            return Err(MotionError::render_failed(format!(
+                "Chromium returned an unexpected guarded {background}-background viewport size for frame {frame_index}: actual=({actual_width}, {actual_height}), guard=({guard_width}, {guard_height})"
+            )));
+        }
+
+        let content_width_numerator = u64::from(actual_width) * u64::from(width);
+        let content_height_numerator = u64::from(actual_height) * u64::from(height);
+        if content_width_numerator % u64::from(guard_width) != 0
+            || content_height_numerator % u64::from(guard_height) != 0
+        {
+            return Err(MotionError::render_failed(format!(
+                "Chromium guarded viewport does not map to integer page pixels for frame {frame_index}: actual=({actual_width}, {actual_height}), guard=({guard_width}, {guard_height})"
+            )));
+        }
+        let content_width = u32::try_from(content_width_numerator / u64::from(guard_width))
+            .map_err(|_| MotionError::render_failed("guarded viewport width overflowed"))?;
+        let content_height = u32::try_from(content_height_numerator / u64::from(guard_height))
+            .map_err(|_| MotionError::render_failed("guarded viewport height overflowed"))?;
+        if content_width == 0 || content_height == 0 {
+            return Err(MotionError::render_failed(format!(
+                "Chromium guarded viewport mapped to an empty page for frame {frame_index}"
+            )));
+        }
+        Ok(resize_guarded_subimage(
+            &image,
+            content_width,
+            content_height,
+            width,
+            height,
+        ))
+    }
+
+    fn resize_guarded_subimage(
+        image: &image::RgbaImage,
+        content_width: u32,
+        content_height: u32,
+        width: u32,
+        height: u32,
+    ) -> image::RgbaImage {
+        let content = image::imageops::crop_imm(image, 0, 0, content_width, content_height);
+        if (content_width, content_height) == (width, height) {
+            content.to_image()
+        } else {
+            image::imageops::resize(
+                &*content,
+                width,
+                height,
+                image::imageops::FilterType::Triangle,
+            )
+        }
+    }
+
+    fn encode_viewport_png(image: image::RgbaImage, frame_index: usize) -> MotionResult<Vec<u8>> {
+        let mut encoded = Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .map_err(|error| {
+                MotionError::render_failed(format!(
+                    "failed to encode recovered transparent frame {frame_index}: {error}"
+                ))
+            })?;
+        Ok(encoded.into_inner())
+    }
+
+    fn recover_straight_alpha(black: &[u8], white: &[u8]) -> MotionResult<Vec<u8>> {
+        if black.len() != white.len() || !black.len().is_multiple_of(4) {
+            return Err(MotionError::render_failed(
+                "black/white viewport captures have incompatible RGBA buffers",
+            ));
+        }
+
+        let mut recovered = Vec::with_capacity(black.len());
+        for (black, white) in black.chunks_exact(4).zip(white.chunks_exact(4)) {
+            let mut deltas = [
+                white[0].saturating_sub(black[0]),
+                white[1].saturating_sub(black[1]),
+                white[2].saturating_sub(black[2]),
+            ];
+            deltas.sort_unstable();
+            let alpha = 255_u8.saturating_sub(deltas[1]);
+            for channel in &black[..3] {
+                let straight = if alpha == 0 {
+                    0
+                } else {
+                    ((u32::from(*channel) * 255 + u32::from(alpha) / 2) / u32::from(alpha)).min(255)
+                        as u8
+                };
+                recovered.push(straight);
+            }
+            recovered.push(alpha);
+        }
+        Ok(recovered)
+    }
+
     #[cfg(test)]
     mod tests {
         use std::net::{TcpListener, TcpStream};
@@ -1330,6 +1712,410 @@ mod chromium_backend {
             );
             cdp.settle_compositor("render-session").unwrap();
             assert!(cdp.pending_events.is_empty());
+            server.join().unwrap();
+        }
+
+        #[test]
+        fn device_metrics_add_a_page_external_guard_without_changing_layout_size() {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server_stream, _) = listener.accept().unwrap();
+            let client_socket = WebSocket::from_raw_socket(
+                MaybeTlsStream::Plain(client_stream),
+                Role::Client,
+                None,
+            );
+            let mut server_socket = WebSocket::from_raw_socket(server_stream, Role::Server, None);
+            let server = thread::spawn(move || {
+                let request = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected device-metrics request, got {other:?}"),
+                };
+                assert_eq!(
+                    request,
+                    json!({
+                        "id": 1,
+                        "method": "Emulation.setDeviceMetricsOverride",
+                        "params": {
+                            "width": 48,
+                            "height": 32,
+                            "deviceScaleFactor": 1,
+                            "mobile": false,
+                            "screenWidth": 48,
+                            "screenHeight": 32,
+                            "viewport": {
+                                "x": 0,
+                                "y": 0,
+                                "width": 49,
+                                "height": 33,
+                                "scale": 1
+                            }
+                        },
+                        "sessionId": "render-session"
+                    })
+                );
+                server_socket
+                    .send(Message::text(json!({"id": 1, "result": {}}).to_string()))
+                    .unwrap();
+            });
+
+            let mut cdp = Cdp::new(
+                client_socket,
+                SandboxPolicy::default(),
+                MotionCancellationToken::new(),
+                Instant::now() + Duration::from_secs(1),
+            );
+            cdp.set_device_metrics("render-session", 48, 32).unwrap();
+            server.join().unwrap();
+        }
+
+        #[test]
+        fn viewport_capture_avoids_surface_and_includes_the_guard() {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server_stream, _) = listener.accept().unwrap();
+            let client_socket = WebSocket::from_raw_socket(
+                MaybeTlsStream::Plain(client_stream),
+                Role::Client,
+                None,
+            );
+            let mut server_socket = WebSocket::from_raw_socket(server_stream, Role::Server, None);
+            let server = thread::spawn(move || {
+                let request = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected text CDP request, got {other:?}"),
+                };
+                assert_eq!(
+                    request,
+                    json!({
+                        "id": 1,
+                        "method": "Page.captureScreenshot",
+                        "params": {
+                            "format": "png",
+                            "fromSurface": false,
+                            "captureBeyondViewport": false,
+                            "optimizeForSpeed": false,
+                            "clip": {
+                                "x": 0,
+                                "y": 0,
+                                "width": 49,
+                                "height": 33,
+                                "scale": 1
+                            }
+                        },
+                        "sessionId": "render-session"
+                    })
+                );
+                server_socket
+                    .send(Message::text(
+                        json!({"id": 1, "result": {"data": "png"}}).to_string(),
+                    ))
+                    .unwrap();
+            });
+
+            let mut cdp = Cdp::new(
+                client_socket,
+                SandboxPolicy::default(),
+                MotionCancellationToken::new(),
+                Instant::now() + Duration::from_secs(1),
+            );
+            assert_eq!(
+                cdp.capture_viewport("render-session", 48, 32).unwrap(),
+                json!({"data": "png"})
+            );
+            server.join().unwrap();
+        }
+
+        #[test]
+        fn dual_background_view_capture_recovers_straight_alpha() {
+            let black = [
+                0, 0, 0, 255, // fully transparent
+                128, 0, 0, 255, // 50% red over black
+                10, 20, 30, 255, // opaque color
+            ];
+            let white = [
+                255, 255, 255, 255, // fully transparent
+                255, 127, 127, 255, // 50% red over white
+                10, 20, 30, 255, // opaque color
+            ];
+            assert_eq!(
+                recover_straight_alpha(&black, &white).unwrap(),
+                vec![
+                    0, 0, 0, 0, // transparent RGB canonicalizes to zero
+                    255, 0, 0, 128, // straight, not premultiplied, red
+                    10, 20, 30, 255,
+                ]
+            );
+
+            assert!(matches!(
+                recover_straight_alpha(&black[..4], &white),
+                Err(MotionError::RenderFailed(_))
+            ));
+
+            let first = image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255]));
+            let changed = image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 255, 0, 255]));
+            assert!(matches!(
+                ensure_stable_viewport_images(&first, &changed, "black", 0),
+                Err(MotionError::RenderFailed(_))
+            ));
+        }
+
+        #[test]
+        fn guarded_viewport_discards_only_page_external_pixels() {
+            // requested=1x1, guard=2x2 CSS px, backing scale=2 => raw=4x4.
+            // The requested page occupies the upper-left 2x2 backing pixels.
+            let mut first = image::RgbaImage::from_pixel(4, 4, image::Rgba([10, 20, 30, 40]));
+            let mut second = first.clone();
+            for coordinate in 0..4 {
+                first.put_pixel(3, coordinate, image::Rgba([200, 0, 0, 255]));
+                first.put_pixel(coordinate, 3, image::Rgba([0, 200, 0, 255]));
+                second.put_pixel(2, coordinate, image::Rgba([0, 0, 200, 255]));
+                second.put_pixel(coordinate, 2, image::Rgba([200, 200, 0, 255]));
+            }
+            assert_eq!(
+                normalize_guarded_viewport_image(first.clone(), 1, 1, "black", 0).unwrap(),
+                normalize_guarded_viewport_image(second, 1, 1, "black", 0).unwrap(),
+                "the full page-external guard must not enter the requested canvas"
+            );
+
+            let mut content_changed = first.clone();
+            content_changed.put_pixel(1, 1, image::Rgba([0, 0, 200, 255]));
+            assert_ne!(
+                normalize_guarded_viewport_image(first, 1, 1, "black", 0).unwrap(),
+                normalize_guarded_viewport_image(content_changed, 1, 1, "black", 0).unwrap(),
+                "content inside the requested page must remain observable"
+            );
+        }
+
+        #[test]
+        fn guarded_subimage_resizes_without_losing_valid_right_bottom_content() {
+            let mut raw = image::RgbaImage::from_pixel(4, 4, image::Rgba([240, 0, 240, 255]));
+            raw.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+            raw.put_pixel(1, 0, image::Rgba([0, 255, 0, 255]));
+            raw.put_pixel(0, 1, image::Rgba([0, 0, 255, 255]));
+            raw.put_pixel(1, 1, image::Rgba([255, 255, 0, 255]));
+
+            let expected_content = image::imageops::crop_imm(&raw, 0, 0, 2, 2).to_image();
+            let expected = image::imageops::resize(
+                &expected_content,
+                1,
+                1,
+                image::imageops::FilterType::Triangle,
+            );
+            assert_eq!(resize_guarded_subimage(&raw, 2, 2, 1, 1), expected);
+
+            let exact = resize_guarded_subimage(&raw, 2, 2, 2, 2);
+            assert_eq!(exact, expected_content);
+            assert_eq!(
+                exact.get_pixel(1, 1).0,
+                [255, 255, 0, 255],
+                "valid content touching the requested right/bottom edge must be preserved"
+            );
+        }
+
+        #[test]
+        fn transparent_capture_uses_stable_readbacks_without_advancing_author_time() {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server_stream, _) = listener.accept().unwrap();
+            let client_socket = WebSocket::from_raw_socket(
+                MaybeTlsStream::Plain(client_stream),
+                Role::Client,
+                None,
+            );
+            let mut server_socket = WebSocket::from_raw_socket(server_stream, Role::Server, None);
+            let black_png = base64::engine::general_purpose::STANDARD.encode(
+                encode_viewport_png(
+                    image::RgbaImage::from_pixel(2, 2, image::Rgba([128, 0, 0, 255])),
+                    0,
+                )
+                .unwrap(),
+            );
+            let white_png = base64::engine::general_purpose::STANDARD.encode(
+                encode_viewport_png(
+                    image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 127, 127, 255])),
+                    0,
+                )
+                .unwrap(),
+            );
+            let server = thread::spawn(move || {
+                let backgrounds = [([0, 0, 0], black_png), ([255, 255, 255], white_png)];
+                let mut next_id = 1;
+                for (rgb, png) in backgrounds {
+                    let background = match server_socket.read().unwrap() {
+                        Message::Text(text) => {
+                            serde_json::from_str::<Value>(text.as_ref()).unwrap()
+                        }
+                        other => panic!("expected background override, got {other:?}"),
+                    };
+                    assert_eq!(
+                        background,
+                        json!({
+                            "id": next_id,
+                            "method": "Emulation.setDefaultBackgroundColorOverride",
+                            "params": {"color": {"r": rgb[0], "g": rgb[1], "b": rgb[2], "a": 1.0}},
+                            "sessionId": "render-session"
+                        })
+                    );
+                    server_socket
+                        .send(Message::text(
+                            json!({"id": next_id, "result": {}}).to_string(),
+                        ))
+                        .unwrap();
+                    next_id += 1;
+
+                    for _ in 0..2 {
+                        let capture = match server_socket.read().unwrap() {
+                            Message::Text(text) => {
+                                serde_json::from_str::<Value>(text.as_ref()).unwrap()
+                            }
+                            other => panic!("expected view readback fence, got {other:?}"),
+                        };
+                        assert_eq!(capture["id"], next_id);
+                        assert_eq!(capture["method"], "Page.captureScreenshot");
+                        assert_eq!(capture["params"]["fromSurface"], false);
+                        assert_eq!(capture["params"]["clip"]["width"], 2);
+                        assert_eq!(capture["params"]["clip"]["height"], 2);
+                        assert_eq!(capture["sessionId"], "render-session");
+                        server_socket
+                            .send(Message::text(
+                                json!({"id": next_id, "result": {"data": png}}).to_string(),
+                            ))
+                            .unwrap();
+                        next_id += 1;
+                    }
+                }
+            });
+
+            let mut cdp = Cdp::new(
+                client_socket,
+                SandboxPolicy::default(),
+                MotionCancellationToken::new(),
+                Instant::now() + Duration::from_secs(1),
+            );
+            let png = cdp
+                .capture_frame_png("render-session", true, 1, 1, 0)
+                .unwrap();
+            assert_eq!(
+                image::load_from_memory(&png)
+                    .unwrap()
+                    .to_rgba8()
+                    .get_pixel(0, 0)
+                    .0,
+                [255, 0, 0, 128]
+            );
+            server.join().unwrap();
+        }
+
+        #[test]
+        fn completion_checkpoint_rejects_timeout_and_cancellation_without_cache_commit() {
+            fn complete_frames(dir: &Path) {
+                for index in 0..2 {
+                    std::fs::write(MotionCache::frame_file(dir, index), b"png").unwrap();
+                }
+            }
+
+            let root = tempfile::tempdir().unwrap();
+            let cache = MotionCache::new(root.path());
+            let request = MotionRenderRequest::new(MotionSource::code("<timeout/>"), 30, 2, 8, 8);
+            let dir = cache.begin_render(&request).unwrap();
+            complete_frames(&dir);
+            let mut partial = PartialFrames::new(dir.clone());
+            let renderer = HeadlessChromiumRenderer::new(
+                cache.clone(),
+                SandboxPolicy::offline_with_timeout(Duration::from_secs(1)),
+            );
+            assert!(matches!(
+                publish_completed_render(&renderer, Instant::now(), &dir, &mut partial),
+                Err(MotionError::Timeout(_))
+            ));
+            drop(partial);
+            assert!(!cache.is_cached(&request));
+
+            let cancelled_request =
+                MotionRenderRequest::new(MotionSource::code("<cancelled/>"), 30, 2, 8, 8);
+            let cancelled_dir = cache.begin_render(&cancelled_request).unwrap();
+            complete_frames(&cancelled_dir);
+            let mut cancelled_partial = PartialFrames::new(cancelled_dir.clone());
+            let cancellation = MotionCancellationToken::new();
+            cancellation.cancel();
+            let cancelled_renderer = HeadlessChromiumRenderer::new(
+                cache.clone(),
+                SandboxPolicy::offline_with_timeout(Duration::from_secs(1)),
+            )
+            .with_cancellation_token(cancellation);
+            assert!(matches!(
+                publish_completed_render(
+                    &cancelled_renderer,
+                    Instant::now() + Duration::from_secs(1),
+                    &cancelled_dir,
+                    &mut cancelled_partial
+                ),
+                Err(MotionError::Cancelled)
+            ));
+            drop(cancelled_partial);
+            assert!(!cache.is_cached(&cancelled_request));
+        }
+
+        #[test]
+        fn target_close_fails_closed_on_a_late_blocked_request() {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server_stream, _) = listener.accept().unwrap();
+            let client_socket = WebSocket::from_raw_socket(
+                MaybeTlsStream::Plain(client_stream),
+                Role::Client,
+                None,
+            );
+            let mut server_socket = WebSocket::from_raw_socket(server_stream, Role::Server, None);
+            let server = thread::spawn(move || {
+                let close = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected closeTarget request, got {other:?}"),
+                };
+                assert_eq!(
+                    close,
+                    json!({
+                        "id": 1,
+                        "method": "Target.closeTarget",
+                        "params": {"targetId": "render-target"}
+                    })
+                );
+                server_socket
+                    .send(Message::text(
+                        json!({
+                            "method": "Fetch.requestPaused",
+                            "params": {
+                                "requestId": "late-request",
+                                "request": {"url": "https://example.com/late"}
+                            },
+                            "sessionId": "render-session"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap();
+                server_socket
+                    .send(Message::text(
+                        json!({"id": 1, "result": {"success": true}}).to_string(),
+                    ))
+                    .unwrap();
+                let failed = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected Fetch.failRequest, got {other:?}"),
+                };
+                assert_eq!(failed["method"], "Fetch.failRequest");
+            });
+
+            let mut cdp = Cdp::new(
+                client_socket,
+                SandboxPolicy::default(),
+                MotionCancellationToken::new(),
+                Instant::now() + Duration::from_secs(1),
+            );
+            assert!(matches!(
+                cdp.close_target("render-target"),
+                Err(MotionError::Sandbox(_))
+            ));
             server.join().unwrap();
         }
 
