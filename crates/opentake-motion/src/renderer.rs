@@ -779,7 +779,8 @@ mod chromium_backend {
 
         cdp.close_target(&target_id)?;
         check_abort(renderer, deadline)?;
-        browser.shutdown()?;
+        cdp.close_browser()?;
+        browser.wait_for_graceful_exit(Duration::from_secs(5))?;
         publish_completed_render(renderer, deadline, &dir, &mut partial)?;
 
         Ok(RenderedClip {
@@ -1268,6 +1269,46 @@ mod chromium_backend {
             self.shutdown_complete = true;
             child_wait?;
             trace("browser process-tree shutdown complete");
+            Ok(())
+        }
+
+        fn wait_for_graceful_exit(&mut self, timeout: Duration) -> std::io::Result<()> {
+            if self.shutdown_complete {
+                return Ok(());
+            }
+            trace("browser graceful shutdown wait start");
+            let deadline = Instant::now()
+                .checked_add(timeout)
+                .unwrap_or_else(Instant::now);
+            loop {
+                let Some(child) = self.child.as_mut() else {
+                    return Err(std::io::Error::other(
+                        "Chromium child handle was missing before graceful shutdown",
+                    ));
+                };
+                if child.try_wait()?.is_some() {
+                    break;
+                }
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "Chromium did not exit after Browser.close",
+                    ));
+                }
+                thread::sleep(
+                    Duration::from_millis(20).min(deadline.saturating_duration_since(now)),
+                );
+            }
+
+            drop(self.child.take());
+            #[cfg(unix)]
+            self.tree.terminate()?;
+            self.tree
+                .wait_for_exit(deadline.saturating_duration_since(Instant::now()))?;
+            self.tree.disarm();
+            self.shutdown_complete = true;
+            trace("browser graceful shutdown complete");
             Ok(())
         }
 
@@ -1824,6 +1865,11 @@ mod chromium_backend {
 
         fn close_target(&mut self, target_id: &str) -> MotionResult<()> {
             self.command("Target.closeTarget", json!({"targetId": target_id}), None)?;
+            self.ensure_no_blocked_url()
+        }
+
+        fn close_browser(&mut self) -> MotionResult<()> {
+            self.command("Browser.close", json!({}), None)?;
             self.ensure_no_blocked_url()
         }
 
@@ -3984,6 +4030,45 @@ mod chromium_backend {
                 cdp.close_target("render-target"),
                 Err(MotionError::Sandbox(_))
             ));
+            server.join().unwrap();
+        }
+
+        #[test]
+        fn successful_browser_close_uses_the_root_cdp_session() {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server_stream, _) = listener.accept().unwrap();
+            let client_socket = WebSocket::from_raw_socket(
+                MaybeTlsStream::Plain(client_stream),
+                Role::Client,
+                None,
+            );
+            let mut server_socket = WebSocket::from_raw_socket(server_stream, Role::Server, None);
+            let server = thread::spawn(move || {
+                let close = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected Browser.close request, got {other:?}"),
+                };
+                assert_eq!(
+                    close,
+                    json!({
+                        "id": 1,
+                        "method": "Browser.close",
+                        "params": {}
+                    })
+                );
+                server_socket
+                    .send(Message::text(json!({"id": 1, "result": {}}).to_string()))
+                    .unwrap();
+            });
+
+            let mut cdp = Cdp::new(
+                client_socket,
+                SandboxPolicy::default(),
+                MotionCancellationToken::new(),
+                Instant::now() + Duration::from_secs(1),
+            );
+            cdp.close_browser().unwrap();
             server.join().unwrap();
         }
 
