@@ -26,6 +26,10 @@ import { Icon } from "../ui/Icon";
 import { useT } from "../../i18n";
 import { formatTimecode } from "../../lib/geometry";
 import { assetUrl } from "../../lib/asset";
+import {
+  derivedResourceKinds,
+  derivedResourceScheduler,
+} from "../../lib/derivedResourceScheduler";
 import { setDraggingMedia } from "../../lib/mediaDragState";
 import { setDraggingMomentRange } from "../../lib/momentDragState";
 import {
@@ -338,6 +342,7 @@ export function MediaSearchResults({
               <div key={`${hit.mediaId}:${hit.frame}:${i}`} role="row" style={{ minWidth: 0 }}>
                 <MomentCard
                   hit={hit}
+                  projectEpoch={projectEpoch}
                   rovingTabIndex={i === activeMomentIndex ? 0 : -1}
                 />
               </div>
@@ -357,6 +362,7 @@ export function MediaSearchResults({
               <div key={`${hit.mediaId}:${hit.startSec}:${i}`} role="row" style={{ minWidth: 0 }}>
                 <SpokenRow
                   hit={hit}
+                  projectEpoch={projectEpoch}
                   rovingTabIndex={i === activeSpokenIndex ? 0 : -1}
                 />
               </div>
@@ -754,24 +760,48 @@ function ResultsGrid({ children }: { children: React.ReactNode }) {
 function HitThumbnail({
   mediaId,
   timeSec,
+  projectEpoch,
+  sourceKey,
   alt,
   thumbnailRef,
 }: {
   mediaId: string;
   timeSec: number;
+  projectEpoch: number;
+  sourceKey?: string;
   alt: string;
   thumbnailRef?: React.Ref<HTMLDivElement>;
 }) {
   const [path, setPath] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
-    void generateThumbnail(mediaId, { timeSecs: timeSec, includeSprite: false }).then((r) => {
-      if (!cancelled) setPath(r?.thumbnailPath ?? null);
+    setPath(null);
+    derivedResourceScheduler.activateProject(projectEpoch);
+    const handle = derivedResourceScheduler.request<string | null>({
+      projectEpoch,
+      kind: derivedResourceKinds.searchThumbnail,
+      key: `thumbnail:search:${mediaId}:${sourceKey ?? ""}:${timeSec}`,
+      priority: "visible",
+      run: async () => {
+        const result = await generateThumbnail(mediaId, {
+          timeSecs: timeSec,
+          includeSprite: false,
+        });
+        return result?.thumbnailPath ?? null;
+      },
     });
+    void handle.promise
+      .then((next) => {
+        if (!cancelled) setPath(next);
+      })
+      .catch(() => {
+        if (!cancelled) setPath(null);
+      });
     return () => {
       cancelled = true;
+      handle.cancel();
     };
-  }, [mediaId, timeSec]);
+  }, [mediaId, timeSec, projectEpoch, sourceKey]);
   const src = assetUrl(path);
   return (
     <div
@@ -906,9 +936,11 @@ function useSearchResultInteraction(item: MediaItem | undefined) {
  *  timeline as a trimmed source-range clip (upstream `momentCard`). */
 function MomentCard({
   hit,
+  projectEpoch,
   rovingTabIndex,
 }: {
   hit: MomentHit;
+  projectEpoch: number;
   rovingTabIndex: number;
 }) {
   const t = useT();
@@ -972,6 +1004,8 @@ function MomentCard({
       <HitThumbnail
         mediaId={hit.mediaId}
         timeSec={hit.startSec}
+        projectEpoch={projectEpoch}
+        sourceKey={item.path ?? undefined}
         alt={item.name}
         thumbnailRef={thumbnailRef}
       />
@@ -1000,9 +1034,11 @@ function MomentCard({
  *  trimmed range (upstream `spokenRow`). */
 function SpokenRow({
   hit,
+  projectEpoch,
   rovingTabIndex,
 }: {
   hit: SpokenHit;
+  projectEpoch: number;
   rovingTabIndex: number;
 }) {
   const t = useT();
@@ -1062,6 +1098,8 @@ function SpokenRow({
         <HitThumbnail
           mediaId={hit.mediaId}
           timeSec={hit.startSec}
+          projectEpoch={projectEpoch}
+          sourceKey={item.path ?? undefined}
           alt={item.name}
           thumbnailRef={thumbnailRef}
         />

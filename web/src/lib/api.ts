@@ -91,6 +91,7 @@ function asTauriCommandError(error: unknown): Error {
 
 let invokeImpl: InvokeFn | null = null;
 let listenImpl: ListenFn | null = null;
+let previewEndpointProbe: Promise<string | null> | null = null;
 
 async function ensureTauri(): Promise<void> {
   if (!isTauri || invokeImpl) return;
@@ -2106,7 +2107,18 @@ export async function playbackSeek(identity: PlaybackIdentity, frame: number): P
 /** The loopback `/frame` endpoint used for identity-scoped JPEG requests. */
 export async function getPreviewEndpoint(): Promise<string | null> {
   await ensureTauri();
-  if (invokeImpl) return invokeImpl<string>("get_preview_endpoint");
+  if (invokeImpl) {
+    if (!previewEndpointProbe) {
+      let probe: Promise<string | null>;
+      probe = invokeImpl<string>("get_preview_endpoint").catch((error: unknown) => {
+        if (isTauriCommandNotFound(error, "get_preview_endpoint")) return null;
+        if (previewEndpointProbe === probe) previewEndpointProbe = null;
+        throw error;
+      });
+      previewEndpointProbe = probe;
+    }
+    return previewEndpointProbe;
+  }
   return null;
 }
 
@@ -2154,6 +2166,27 @@ export function decodePlaybackCommandError(error: unknown): PlaybackCommandError
     return null;
   }
   return candidate as PlaybackCommandError;
+}
+
+/** Tauri rejects commands removed by a Cargo feature as plain strings. Keep
+ * this narrow so unrelated missing IPC commands cannot silently change the
+ * playback route. */
+export function isPlaybackCommandUnavailable(error: unknown): boolean {
+  const message = tauriErrorMessage(error);
+  return (
+    message !== null &&
+    /^Command (?:get_preview_endpoint|playback_(?:start|pause|stop|seek)) not found$/.test(
+      message,
+    )
+  );
+}
+
+function tauriErrorMessage(error: unknown): string | null {
+  return typeof error === "string" ? error : error instanceof Error ? error.message : null;
+}
+
+function isTauriCommandNotFound(error: unknown, command: string): boolean {
+  return tauriErrorMessage(error) === `Command ${command} not found`;
 }
 
 // MARK: - Browser fallback (mirror, not authoritative)

@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 
+import { readFileSync } from "node:fs";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { act } from "react";
@@ -12,6 +13,14 @@ import {
   useMediaStore,
 } from "../../store/mediaStore";
 import { useProjectStore } from "../../store/projectStore";
+import { derivedResourceScheduler } from "../../lib/derivedResourceScheduler";
+import { textContrastRatio } from "../../../test/contrast";
+
+const dialogMocks = vi.hoisted(() => ({
+  openDialog: vi.fn(),
+  saveDialog: vi.fn(),
+  save: vi.fn(),
+}));
 
 vi.mock("../../lib/api", () => ({
   isTauri: false,
@@ -35,6 +44,10 @@ vi.mock("../../lib/api", () => ({
 vi.mock("../../lib/asset", () => ({
   assetUrl: (path: string | null | undefined) => (path ? `asset://${path}` : null),
 }));
+vi.mock("../../lib/dialog", () => ({
+  openDialog: dialogMocks.openDialog,
+  saveDialog: dialogMocks.saveDialog,
+}));
 vi.mock("../../store/editActions", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../store/editActions")>();
   return {
@@ -46,6 +59,7 @@ vi.mock("../../store/editActions", async (importOriginal) => {
 });
 
 import { useEditorUiStore } from "../../store/uiStore";
+import * as api from "../../lib/api";
 import * as editActions from "../../store/editActions";
 import {
   deleteSelectedFolders,
@@ -86,6 +100,9 @@ afterEach(() => {
     focusedPanel: null,
     requestMediaPreviewToggle: originalRequestMediaPreviewToggle,
   });
+  dialogMocks.openDialog.mockResolvedValue(null);
+  dialogMocks.saveDialog.mockResolvedValue(dialogMocks.save);
+  dialogMocks.save.mockResolvedValue("/exports/audio.m4a");
 });
 
 function mediaItem(id: string): MediaItem {
@@ -119,7 +136,7 @@ describe("AudioWaveform", () => {
 
   it("renders waveform bars when normalized buckets are available", () => {
     const html = renderToStaticMarkup(
-      <AudioWaveform mediaRef="audio-1" fallback={fallback} bucketsOverride={[0, 0.25, 0.5, 0.75, 1]} />,
+      <AudioWaveform mediaRef="audio-1" projectEpoch={1} fallback={fallback} bucketsOverride={[0, 0.25, 0.5, 0.75, 1]} />,
     );
 
     expect(html).toContain('data-testid="audio-waveform"');
@@ -128,7 +145,7 @@ describe("AudioWaveform", () => {
 
   it("renders the fallback when waveform loading resolves to null", () => {
     const html = renderToStaticMarkup(
-      <AudioWaveform mediaRef="audio-1" fallback={fallback} bucketsOverride={null} />,
+      <AudioWaveform mediaRef="audio-1" projectEpoch={1} fallback={fallback} bucketsOverride={null} />,
     );
 
     expect(html).not.toContain('data-testid="audio-waveform"');
@@ -137,11 +154,164 @@ describe("AudioWaveform", () => {
 
   it("renders the fallback when waveform loading resolves to an empty array", () => {
     const html = renderToStaticMarkup(
-      <AudioWaveform mediaRef="audio-1" fallback={fallback} bucketsOverride={[]} />,
+      <AudioWaveform mediaRef="audio-1" projectEpoch={1} fallback={fallback} bucketsOverride={[]} />,
     );
 
     expect(html).not.toContain('data-testid="audio-waveform"');
     expect(html).toContain('data-testid="audio-fallback"');
+  });
+
+  it("shares the derived-resource active limit and cancels queued waveform work on unmount", async () => {
+    const jobs = Array.from({ length: 4 }, () => deferred<number[] | null>());
+    let nextJob = 0;
+    vi.mocked(api.getWaveform).mockImplementation(() => jobs[nextJob++]!.promise);
+    useProjectStore.setState({ projectEpoch: 90, projectPath: "/waveforms.opentake" });
+    derivedResourceScheduler.activateProject(90);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    let mounted = true;
+    try {
+      await act(async () =>
+        root.render(
+          <>
+            {Array.from({ length: 6 }, (_, index) => (
+              <AudioWaveform
+                key={index}
+                mediaRef={`audio-${index}`}
+                projectEpoch={90}
+                sourceKey={`source-${index}`}
+                fallback={fallback}
+              />
+            ))}
+          </>,
+        ),
+      );
+
+      expect(api.getWaveform).toHaveBeenCalledTimes(4);
+      expect(derivedResourceScheduler.stats()).toEqual({
+        active: 4,
+        pending: 2,
+        inFlight: 6,
+        projectEpoch: 90,
+      });
+
+      await act(async () => root.unmount());
+      mounted = false;
+      expect(derivedResourceScheduler.stats()).toEqual({
+        active: 4,
+        pending: 0,
+        inFlight: 0,
+        projectEpoch: 90,
+      });
+    } finally {
+      if (mounted) await act(async () => root.unmount());
+      for (const job of jobs) job.resolve(null);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      vi.mocked(api.getWaveform).mockResolvedValue(null);
+    }
+    expect(derivedResourceScheduler.stats().active).toBe(0);
+  });
+
+  it("does not publish a waveform result from the previous project epoch", async () => {
+    const stale = deferred<number[] | null>();
+    const current = deferred<number[] | null>();
+    vi.mocked(api.getWaveform)
+      .mockReset()
+      .mockReturnValueOnce(stale.promise)
+      .mockReturnValueOnce(current.promise);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    let mounted = true;
+    try {
+      await act(async () =>
+        root.render(
+          <AudioWaveform
+            mediaRef="audio"
+            projectEpoch={100}
+            sourceKey="old-source"
+            fallback={fallback}
+          />,
+        ),
+      );
+      await act(async () =>
+        root.render(
+          <AudioWaveform
+            mediaRef="audio"
+            projectEpoch={101}
+            sourceKey="new-source"
+            fallback={fallback}
+          />,
+        ),
+      );
+      expect(api.getWaveform).toHaveBeenCalledTimes(2);
+
+      await act(async () => stale.resolve([0, 0, 0]));
+      expect(container.querySelector('[data-testid="audio-waveform"]')).toBeNull();
+      expect(container.querySelector('[data-testid="audio-fallback"]')).not.toBeNull();
+
+      await act(async () => current.resolve([0, 0.5, 1]));
+      expect(container.querySelector('[data-testid="audio-waveform"]')).not.toBeNull();
+    } finally {
+      if (mounted) {
+        await act(async () => root.unmount());
+        mounted = false;
+      }
+      stale.resolve(null);
+      current.resolve(null);
+      vi.mocked(api.getWaveform).mockResolvedValue(null);
+    }
+  });
+});
+
+describe("MediaCard derived-resource lifecycle", () => {
+  it("ignores a disconnected thumbnail observer callback from an older project", async () => {
+    const callbacks: IntersectionObserverCallback[] = [];
+    class FakeIntersectionObserver {
+      readonly root = null;
+      readonly rootMargin = "0px";
+      readonly thresholds = [0];
+
+      constructor(callback: IntersectionObserverCallback) {
+        callbacks.push(callback);
+      }
+
+      disconnect() {}
+      observe() {}
+      takeRecords(): IntersectionObserverEntry[] { return []; }
+      unobserve() {}
+    }
+    vi.stubGlobal("IntersectionObserver", FakeIntersectionObserver);
+    useProjectStore.setState({ projectEpoch: 400 });
+    derivedResourceScheduler.activateProject(400);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<MediaCard item={mediaItem("old-project-video")} />));
+      expect(callbacks.length).toBeGreaterThan(0);
+      await act(async () => root.unmount());
+
+      useProjectStore.setState({ projectEpoch: 401 });
+      derivedResourceScheduler.activateProject(401);
+      await act(async () => {
+        for (const callback of callbacks) {
+          callback(
+            [{ isIntersecting: true } as IntersectionObserverEntry],
+            {} as IntersectionObserver,
+          );
+        }
+      });
+
+      expect(derivedResourceScheduler.stats().projectEpoch).toBe(401);
+      expect(api.generateThumbnail).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 
@@ -373,6 +543,50 @@ describe("media grid interaction consistency", () => {
     expect(relink?.style.minHeight).toBe("24px");
 
     await act(async () => root.unmount());
+  });
+
+  it("keeps extract audio keyboard-reachable from zero hover without adding idle visual noise", async () => {
+    dialogMocks.saveDialog.mockResolvedValue(dialogMocks.save);
+    dialogMocks.save.mockResolvedValue("/exports/audio.m4a");
+    vi.mocked(api.extractAudio).mockResolvedValue("/exports/audio.m4a");
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () =>
+      root.render(<MediaCard item={{ ...mediaItem("talking-head"), hasAudio: true }} />),
+    );
+
+    const extract = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="提取音频"]',
+    );
+    expect(extract).not.toBeNull();
+    expect(extract?.tabIndex).toBeGreaterThanOrEqual(0);
+    expect(extract?.style.opacity).toBe("0");
+
+    await act(async () => extract?.focus());
+    expect(document.activeElement).toBe(extract);
+    expect(extract?.style.opacity).toBe("1");
+
+    await act(async () => {
+      extract?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(api.extractAudio).toHaveBeenCalledWith("talking-head", "/exports/audio.m4a");
+    await act(async () => root.unmount());
+  });
+
+  it("keeps the normal informational empty state at WCAG AA text contrast", () => {
+    const source = readFileSync(
+      "src/components/media/MediaPanel.tsx",
+      "utf8",
+    );
+    const emptyState = source.match(/function EmptyState[\s\S]*?const TYPE_ICON/)?.[0];
+    const color = emptyState?.match(/\bcolor:\s*"([^"]+)"/)?.[1];
+
+    expect(emptyState).toBeDefined();
+    expect(color).toBeDefined();
+    expect(textContrastRatio(color!, "var(--bg-surface)")).toBeGreaterThanOrEqual(4.5);
   });
 
   it("keeps mouse preview, command selection, and visible card state synchronized", async () => {
@@ -1258,6 +1472,260 @@ describe("MediaCard drag image", () => {
     expect(preview.textContent?.trim()).toBe("");
     expect(preview.style.width).toBe("80px");
     expect(preview.style.height).toBe("60px");
+    await act(async () => root.unmount());
+  });
+});
+
+describe("MediaPanel accessibility contracts", () => {
+  it("labels the media search and keeps every tab control target mounted", () => {
+    useEditorUiStore.setState({
+      mediaTab: "material",
+      mediaSubTab: "import",
+      mediaPanelCurrentFolderId: null,
+    });
+
+    const container = document.createElement("div");
+    container.innerHTML = renderToStaticMarkup(<MediaPanel />);
+
+    const search = container.querySelector<HTMLInputElement>('input[type="search"]');
+    expect(search?.getAttribute("aria-label")).toBeTruthy();
+
+    const tablists = [...container.querySelectorAll<HTMLElement>('[role="tablist"]')];
+    expect(tablists).toHaveLength(2);
+    for (const tablist of tablists) {
+      const tabs = [...tablist.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+      expect(tabs.filter((tab) => tab.tabIndex === 0)).toHaveLength(1);
+      for (const tab of tabs) {
+        const panelId = tab.getAttribute("aria-controls");
+        expect(panelId).toBeTruthy();
+        const panel = container.querySelector<HTMLElement>(`#${panelId}`);
+        expect(panel?.getAttribute("role")).toBe("tabpanel");
+        expect(panel?.hidden).toBe(tab.getAttribute("aria-selected") !== "true");
+      }
+    }
+  });
+
+  it("exposes popup state and supports complete menu focus navigation", async () => {
+    useEditorUiStore.setState({
+      view: "editor",
+      mediaTab: "material",
+      mediaSubTab: "import",
+      mediaPanelCurrentFolderId: null,
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<MediaPanel />));
+
+    const popupTriggers = () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button[aria-haspopup="menu"]')];
+    expect(popupTriggers()).toHaveLength(3);
+
+    for (let index = 0; index < popupTriggers().length; index += 1) {
+      const trigger = popupTriggers()[index]!;
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
+      const menuId = trigger.getAttribute("aria-controls");
+      expect(menuId).toBeTruthy();
+
+      await act(async () => trigger.click());
+      const menu = document.getElementById(menuId!);
+      expect(trigger.getAttribute("aria-expanded")).toBe("true");
+      expect(menu?.getAttribute("role")).toBe("menu");
+      const options = [...menu!.querySelectorAll<HTMLButtonElement>('[role^="menuitem"]')];
+      expect(document.activeElement).toBe(options[0]);
+      expect(options.map((option) => option.tabIndex)).toEqual([
+        0,
+        ...options.slice(1).map(() => -1),
+      ]);
+
+      await act(async () =>
+        document.activeElement?.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "End", bubbles: true }),
+        ),
+      );
+      expect(document.activeElement).toBe(options.at(-1));
+      expect(options.map((option) => option.tabIndex)).toEqual([
+        ...options.slice(0, -1).map(() => -1),
+        0,
+      ]);
+      await act(async () =>
+        document.activeElement?.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }),
+        ),
+      );
+      expect(document.activeElement).toBe(options[Math.max(0, options.length - 2)]);
+      expect(options.filter((option) => option.tabIndex === 0)).toEqual([
+        options[Math.max(0, options.length - 2)],
+      ]);
+      await act(async () =>
+        document.activeElement?.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Home", bubbles: true }),
+        ),
+      );
+      expect(document.activeElement).toBe(options[0]);
+      expect(options.filter((option) => option.tabIndex === 0)).toEqual([options[0]]);
+      await act(async () =>
+        document.activeElement?.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+        ),
+      );
+      expect(document.activeElement).toBe(options[Math.min(1, options.length - 1)]);
+      expect(options.filter((option) => option.tabIndex === 0)).toEqual([
+        options[Math.min(1, options.length - 1)],
+      ]);
+      await act(async () =>
+        document.activeElement?.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+        ),
+      );
+      expect(document.getElementById(menuId!)).toBeNull();
+      expect(document.activeElement).toBe(trigger);
+    }
+
+    const importTrigger = popupTriggers()[0]!;
+    await act(async () =>
+      importTrigger.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true })),
+    );
+    const importMenu = document.getElementById(importTrigger.getAttribute("aria-controls")!);
+    const importOptions = [
+      ...importMenu!.querySelectorAll<HTMLButtonElement>('[role^="menuitem"]'),
+    ];
+    expect(document.activeElement).toBe(importOptions.at(-1));
+    await act(async () =>
+      document.activeElement?.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      ),
+    );
+
+    await act(async () => root.unmount());
+  });
+
+  it("dismisses Import, Sort, and Filter on Tab or focusout without restoring the trigger", async () => {
+    useEditorUiStore.setState({
+      view: "editor",
+      mediaTab: "material",
+      mediaSubTab: "import",
+      mediaPanelCurrentFolderId: null,
+    });
+    const container = document.createElement("div");
+    const outside = document.createElement("button");
+    document.body.append(container, outside);
+    const root = createRoot(container);
+    await act(async () => root.render(<MediaPanel />));
+
+    const popupTriggers = () =>
+      [...container.querySelectorAll<HTMLButtonElement>('button[aria-haspopup="menu"]')];
+    expect(popupTriggers()).toHaveLength(3);
+
+    await act(async () => popupTriggers()[0]?.click());
+    await act(async () => popupTriggers()[1]?.click());
+    expect(container.querySelectorAll('[role="menu"]')).toHaveLength(1);
+    expect(popupTriggers()[0]?.getAttribute("aria-expanded")).toBe("false");
+    expect(popupTriggers()[1]?.getAttribute("aria-expanded")).toBe("true");
+    await act(async () =>
+      document.activeElement?.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      ),
+    );
+
+    for (let index = 0; index < 3; index += 1) {
+      let trigger = popupTriggers()[index]!;
+      const menuId = trigger.getAttribute("aria-controls")!;
+      await act(async () => trigger.click());
+      let option = document
+        .getElementById(menuId)!
+        .querySelector<HTMLButtonElement>('[role^="menuitem"]')!;
+      expect(document.activeElement).toBe(option);
+
+      await act(async () =>
+        option.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true })),
+      );
+      trigger = popupTriggers()[index]!;
+      expect(document.getElementById(menuId)).toBeNull();
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
+      expect(document.activeElement).not.toBe(trigger);
+
+      await act(async () => trigger.click());
+      option = document
+        .getElementById(menuId)!
+        .querySelector<HTMLButtonElement>('[role^="menuitem"]')!;
+      expect(document.activeElement).toBe(option);
+      await act(async () => outside.focus());
+      trigger = popupTriggers()[index]!;
+      expect(document.getElementById(menuId)).toBeNull();
+      expect(trigger.getAttribute("aria-expanded")).toBe("false");
+      expect(document.activeElement).toBe(outside);
+    }
+
+    await act(async () => root.unmount());
+    outside.remove();
+  });
+
+  it("restores each popup trigger after Enter or Space selects an item", async () => {
+    useEditorUiStore.setState({
+      view: "editor",
+      mediaTab: "material",
+      mediaSubTab: "import",
+      mediaPanelCurrentFolderId: null,
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<MediaPanel />));
+
+    const keys = ["Enter", " ", "Enter"] as const;
+    for (let index = 0; index < keys.length; index += 1) {
+      const trigger = [
+        ...container.querySelectorAll<HTMLButtonElement>('button[aria-haspopup="menu"]'),
+      ][index]!;
+      const menuId = trigger.getAttribute("aria-controls")!;
+      await act(async () => trigger.click());
+      const option = document
+        .getElementById(menuId)!
+        .querySelector<HTMLButtonElement>('[role^="menuitem"]')!;
+      expect(document.activeElement).toBe(option);
+
+      await act(async () =>
+        option.dispatchEvent(new KeyboardEvent("keydown", { key: keys[index], bubbles: true })),
+      );
+      expect(document.getElementById(menuId)).toBeNull();
+      expect(document.activeElement).toBe(trigger);
+    }
+
+    await act(async () => root.unmount());
+  });
+
+  it("keeps every clickable breadcrumb target at least 24 by 24 CSS pixels", async () => {
+    useEditorUiStore.setState({
+      mediaTab: "material",
+      mediaSubTab: "import",
+      mediaPanelCurrentFolderId: "child",
+    });
+    useMediaStore.setState({
+      items: [],
+      folders: [
+        { id: "parent", name: "Parent" },
+        { id: "child", name: "Child", parentFolderId: "parent" },
+      ],
+      importing: false,
+      error: null,
+    });
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<MediaPanel />));
+    await act(async () =>
+      useEditorUiStore.setState({ mediaPanelCurrentFolderId: "child" }),
+    );
+    const breadcrumbButtons = [
+      ...container.querySelectorAll<HTMLButtonElement>("button[data-folder-breadcrumb-target]"),
+    ];
+    expect(breadcrumbButtons).toHaveLength(2);
+    for (const button of breadcrumbButtons) {
+      expect(Number.parseFloat(button.style.minWidth)).toBeGreaterThanOrEqual(24);
+      expect(Number.parseFloat(button.style.minHeight)).toBeGreaterThanOrEqual(24);
+    }
     await act(async () => root.unmount());
   });
 });

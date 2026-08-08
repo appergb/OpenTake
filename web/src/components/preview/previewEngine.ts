@@ -15,7 +15,7 @@
  * pausing cannot change color management or sizing by swapping renderers.
  */
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useProjectStore } from "../../store/projectStore";
 import { totalFrames } from "../../lib/geometry";
@@ -37,7 +37,7 @@ import {
   interactiveToleranceSec,
 } from "./interactiveSeek";
 import type { Timeline } from "../../lib/types";
-import { isTauri, onPlaybackFrame } from "../../lib/api";
+import { getPreviewEndpoint, isTauri, onPlaybackFrame } from "../../lib/api";
 import {
   clearNativePlaybackPublication,
   getNativePlaybackPublication,
@@ -65,6 +65,48 @@ interface NativeFrameListenerLease {
 }
 
 let nativeFrameListener: NativeFrameListenerSlot | null = null;
+
+export interface RustPlaybackCapability {
+  checked: boolean;
+  available: boolean;
+  endpoint: string | null;
+}
+
+/** The preview endpoint doubles as the feature handshake: it is registered only
+ * when `playback-engine` is compiled into the Tauri shell. */
+export function useRustPlaybackCapability(): RustPlaybackCapability {
+  const [capability, setCapability] = useState<RustPlaybackCapability>(() => ({
+    checked: !isTauri,
+    available: false,
+    endpoint: null,
+  }));
+
+  useEffect(() => {
+    if (!isTauri) return;
+    let disposed = false;
+    void getPreviewEndpoint().then(
+      (endpoint) => {
+        if (!disposed) {
+          setCapability({
+            checked: true,
+            available: endpoint !== null,
+            endpoint,
+          });
+        }
+      },
+      () => {
+        if (!disposed) {
+          setCapability({ checked: true, available: false, endpoint: null });
+        }
+      },
+    );
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  return capability;
+}
 
 // StrictMode performs setup → cleanup → setup in one turn. A deferred teardown
 // lets the second setup reclaim the still-pending listen Promise; the generation
@@ -372,8 +414,10 @@ export function useTimelinePlaybackEngine(): void {
     (s) => s.webkitPlaybackFailedRevision,
   );
   const setEngineFailed = useEditorUiStore((s) => s.setRustEngineFailed);
+  const rustPlaybackCapability = useRustPlaybackCapability();
 
   useEffect(() => {
+    if (!rustPlaybackCapability.available) return;
     const lease = acquireNativeFrameListener();
     nativeFrameListenerLeaseRef.current = lease;
     return () => {
@@ -382,7 +426,7 @@ export function useTimelinePlaybackEngine(): void {
       }
       lease.release();
     };
-  }, []);
+  }, [rustPlaybackCapability.available]);
 
   useEffect(() => {
     if (!isScrubbing) return;
@@ -436,9 +480,14 @@ export function useTimelinePlaybackEngine(): void {
   }, [activeFrame, engineFailed, isPlaying, isScrubbing, projectEpoch, timelineVersion]);
 
   useEffect(() => {
+    if (!rustPlaybackCapability.checked) {
+      cancelPendingInteractiveSeek();
+      pauseAll();
+      return;
+    }
     const timeline = useProjectStore.getState().timeline;
     const route = resolveTimelinePlaybackRoute(timeline, {
-      rustAvailable: isTauri,
+      rustAvailable: rustPlaybackCapability.available,
       rustEnabled: rustEngineEnabled() && !engineFailed,
       forceRust:
         webkitPlaybackFailedRevision === `${projectEpoch}:${timelineVersion}`,
@@ -652,6 +701,8 @@ export function useTimelinePlaybackEngine(): void {
     isScrubbing,
     engineFailed,
     projectEpoch,
+    rustPlaybackCapability.available,
+    rustPlaybackCapability.checked,
     timelineVersion,
     setEngineFailed,
     webkitPlaybackFailedRevision,
@@ -659,7 +710,7 @@ export function useTimelinePlaybackEngine(): void {
 
   useEffect(() => {
     const route = resolveTimelinePlaybackRoute(useProjectStore.getState().timeline, {
-      rustAvailable: isTauri,
+      rustAvailable: rustPlaybackCapability.available,
       rustEnabled: rustEngineEnabled() && !engineFailed,
       forceRust:
         webkitPlaybackFailedRevision === `${projectEpoch}:${timelineVersion}`,
@@ -684,6 +735,7 @@ export function useTimelinePlaybackEngine(): void {
     isPlaying,
     isScrubbing,
     projectEpoch,
+    rustPlaybackCapability.available,
     timelineVersion,
     webkitPlaybackFailedRevision,
   ]);

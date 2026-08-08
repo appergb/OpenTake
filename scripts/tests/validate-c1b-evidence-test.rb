@@ -31,14 +31,22 @@ def prepare_bootstrap_repository(temporary)
   _stdout, stderr, status = Open3.capture3("git", "clone", "--shared", "--no-hardlinks", ROOT, repo)
   raise "git clone failed: #{stderr}" unless status.success?
 
-  %w[validate-c1b-ci.rb validate-c1b-evidence.rb c1b-evidence-policy.json].each do |name|
+  %w[
+    validate-c1b-ci.rb
+    validate-c1b-evidence.rb
+    c1b-evidence-policy.json
+    check_windows_product_ci.py
+    workflow_yaml.py
+  ].each do |name|
     FileUtils.cp(File.join(ROOT, "scripts", name), File.join(repo, "scripts", name))
   end
+  FileUtils.cp(File.join(ROOT, ".github/workflows/ci.yml"),
+    File.join(repo, ".github/workflows/ci.yml"))
   File.write(File.join(repo, "scripts", ".c1b-evidence-test-bootstrap"),
     "synthetic bootstrap commit for validator tests\n")
   git(repo, "config", "user.name", "OpenTake C1B Tests")
   git(repo, "config", "user.email", "c1b-tests@opentake.invalid")
-  git(repo, "add", "scripts/")
+  git(repo, "add", ".github/workflows/ci.yml", "scripts/")
   git(repo, "commit", "-m", "test: create synthetic C1B bootstrap range")
   File.realpath(repo)
 end

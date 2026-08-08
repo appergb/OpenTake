@@ -3,7 +3,14 @@
  * a square 24x24 hit frame, faint hover background, stronger when active.
  */
 
-import type { ReactNode, CSSProperties, MouseEvent } from "react";
+import type {
+  AriaAttributes,
+  CSSProperties,
+  KeyboardEventHandler,
+  MouseEvent,
+  ReactNode,
+  Ref,
+} from "react";
 
 interface HoverButtonProps {
   children: ReactNode;
@@ -14,6 +21,11 @@ interface HoverButtonProps {
   size?: number; // hit-frame edge, default 24
   style?: CSSProperties;
   className?: string;
+  buttonRef?: Ref<HTMLButtonElement>;
+  ariaHasPopup?: AriaAttributes["aria-haspopup"];
+  ariaExpanded?: boolean;
+  ariaControls?: string;
+  onKeyDown?: KeyboardEventHandler<HTMLButtonElement>;
 }
 
 export function HoverButton({
@@ -25,15 +37,25 @@ export function HoverButton({
   size = 24,
   style,
   className,
+  buttonRef,
+  ariaHasPopup,
+  ariaExpanded,
+  ariaControls,
+  onKeyDown,
 }: HoverButtonProps) {
   return (
     <button
+      ref={buttonRef}
       type="button"
       title={title}
       aria-label={title}
+      aria-haspopup={ariaHasPopup}
+      aria-expanded={ariaExpanded}
+      aria-controls={ariaControls}
       disabled={disabled}
       data-interaction-state={disabled ? "disabled" : active ? "active" : "enabled"}
       onClick={onClick}
+      onKeyDown={onKeyDown}
       className={`hover-area${active ? " is-active" : ""}${className ? " " + className : ""}`}
       style={{
         width: size,

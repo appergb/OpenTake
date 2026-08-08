@@ -12,6 +12,7 @@ const nativeApiHarness = vi.hoisted(() => {
     }>,
     order: [] as string[],
     unlistenCalls: 0,
+    getPreviewEndpoint: vi.fn(),
     onPlaybackFrame: vi.fn(),
     playbackStart: vi.fn(),
     playbackPause: vi.fn(),
@@ -53,6 +54,7 @@ const nativeApiHarness = vi.hoisted(() => {
   harness.playbackPause.mockResolvedValue(undefined);
   harness.playbackSeek.mockResolvedValue(undefined);
   harness.playbackStop.mockResolvedValue(undefined);
+  harness.getPreviewEndpoint.mockResolvedValue("http://127.0.0.1:43123/frame");
   return harness;
 });
 
@@ -61,6 +63,7 @@ vi.mock("../../lib/api", async (importOriginal) => {
   return {
     ...actual,
     isTauri: true,
+    getPreviewEndpoint: nativeApiHarness.getPreviewEndpoint,
     onPlaybackFrame: nativeApiHarness.onPlaybackFrame,
     playbackStart: nativeApiHarness.playbackStart,
     playbackPause: nativeApiHarness.playbackPause,
@@ -140,6 +143,9 @@ beforeEach(async () => {
   nativeApiHarness.listenerAttempts = [];
   nativeApiHarness.order = [];
   nativeApiHarness.unlistenCalls = 0;
+  nativeApiHarness.getPreviewEndpoint.mockReset().mockResolvedValue(
+    "http://127.0.0.1:43123/frame",
+  );
   nativeApiHarness.onPlaybackFrame.mockClear();
   nativeApiHarness.playbackStart.mockClear();
   nativeApiHarness.playbackPause.mockClear();
@@ -372,6 +378,46 @@ describe("shouldSyncPausedMediaToFrame", () => {
 
     expect(useEditorUiStore.getState().isPlaying).toBe(false);
     expect(nativeApiHarness.playbackStart).not.toHaveBeenCalled();
+    await unmountPlaybackHook(root);
+  });
+
+  it("uses WebKit without invoking native playback when the endpoint capability is absent", async () => {
+    nativeApiHarness.getPreviewEndpoint.mockResolvedValue(null);
+    vi.stubGlobal("requestAnimationFrame", vi.fn(() => 1));
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    useProjectStore.setState({
+      projectEpoch: 4,
+      timelineVersion: 7,
+      timeline: timeline([
+        track({
+          id: "v1",
+          type: "video",
+          clips: [clip({ id: "base", mediaType: "video" })],
+        }),
+        track({
+          id: "v2",
+          type: "video",
+          clips: [clip({ id: "overlay", mediaType: "video" })],
+        }),
+      ]),
+    });
+    useEditorUiStore.setState({
+      activeFrame: 0,
+      currentFrame: 0,
+      isPlaying: true,
+      isScrubbing: false,
+      rustEngineFailed: false,
+    });
+
+    const root = await mountPlaybackHook();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(nativeApiHarness.playbackStart).not.toHaveBeenCalled();
+    expect(useEditorUiStore.getState().isPlaying).toBe(true);
+    expect(requestAnimationFrame).toHaveBeenCalled();
     await unmountPlaybackHook(root);
   });
 

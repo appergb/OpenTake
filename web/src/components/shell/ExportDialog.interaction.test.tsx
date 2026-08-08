@@ -359,4 +359,20 @@ describe("ExportDialog control acceptance", () => {
     expect(mocks.exportVideo).toHaveBeenCalledTimes(exportCallCount);
     expect(useEditorUiStore.getState().exportDialogOpen).toBe(true);
   });
+
+  it("announces an export failure as an atomic assertive live message", async () => {
+    mocks.exportVideo.mockRejectedValueOnce(new Error("encoder unavailable"));
+    await renderDialog();
+
+    await act(async () => {
+      buttonWithText("export.run").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const alert = container?.querySelector<HTMLElement>(
+      '[role="alert"][aria-live="assertive"][aria-atomic="true"]',
+    );
+    expect(alert?.textContent).toBe("encoder unavailable");
+  });
 });

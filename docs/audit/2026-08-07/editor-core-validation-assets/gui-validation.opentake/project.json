@@ -1,0 +1,49 @@
+{
+  "fps": 60,
+  "width": 3840,
+  "height": 2160,
+  "settingsConfigured": true,
+  "tracks": [
+    {
+      "id": "85985c8e-cbcc-4f0e-bfa6-4375f11b9423",
+      "type": "video",
+      "muted": false,
+      "hidden": false,
+      "syncLocked": true,
+      "clips": [
+        {
+          "id": "3760f060-497e-4e16-bb48-66a8ed20aa67",
+          "mediaRef": "81cf841f-d2a0-4d30-92bd-ffdc1a61dfbd",
+          "mediaType": "video",
+          "sourceClipType": "video",
+          "startFrame": 0,
+          "durationFrames": 240,
+          "trimStartFrame": 0,
+          "trimEndFrame": 0,
+          "speed": 1.0,
+          "volume": 1.0,
+          "fadeInFrames": 0,
+          "fadeOutFrames": 0,
+          "fadeInInterpolation": "linear",
+          "fadeOutInterpolation": "linear",
+          "opacity": 1.0,
+          "transform": {
+            "centerX": 0.5,
+            "centerY": 0.5,
+            "width": 1.0,
+            "height": 1.0,
+            "rotation": 0.0,
+            "flipHorizontal": false,
+            "flipVertical": false
+          },
+          "crop": {
+            "left": 0.0,
+            "top": 0.0,
+            "right": 0.0,
+            "bottom": 0.0
+          }
+        }
+      ]
+    }
+  ]
+}

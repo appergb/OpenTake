@@ -1,0 +1,11 @@
+[package]
+name = "opentake-interchange-audit-harness"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+opentake-domain = { path = "../../../../../crates/opentake-domain" }
+opentake-project = { path = "../../../../../crates/opentake-project" }

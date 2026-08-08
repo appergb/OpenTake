@@ -1,0 +1,943 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing v<semver> tag from a failed run; this workflow never creates or moves tags
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate immutable release source
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    outputs:
+      source_sha: ${{ steps.bind.outputs.source_sha }}
+      tag: ${{ steps.bind.outputs.tag }}
+      version: ${{ steps.bind.outputs.version }}
+      notes_path: ${{ steps.bind.outputs.notes_path }}
+      prerelease: ${{ steps.bind.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate tag, source SHA, versions, and notes
+        id: bind
+        shell: bash
+        run: |
+          set -euo pipefail
+          git show-ref --verify --quiet "refs/tags/${RELEASE_TAG}"
+          source_sha="$(git rev-parse "${RELEASE_TAG}^{commit}" | tr '[:upper:]' '[:lower:]')"
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$source_sha"
+          git cat-file -e "${source_sha}^{commit}"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+          read -r remote_main remote_ref < <(git ls-remote --exit-code origin refs/heads/main)
+          remote_main="$(printf '%s' "$remote_main" | tr '[:upper:]' '[:lower:]')"
+          test "$remote_ref" = "refs/heads/main"
+          if [[ "$source_sha" != "$remote_main" ]]; then
+            echo "tag commit does not equal current remote main HEAD" >&2
+            exit 1
+          fi
+
+          printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
+          RELEASE_TAG="$RELEASE_TAG" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import tomllib
+
+          numeric = r"(?:0|[1-9][0-9]*)"
+          identifier = r"(?:0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+          SEMVER_RE = re.compile(
+              rf"^v{numeric}\.{numeric}\.{numeric}"
+              rf"(?:-{identifier}(?:\.{identifier})*)?"
+              r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$"
+          )
+          tag = os.environ["RELEASE_TAG"]
+          if SEMVER_RE.fullmatch(tag) is None:
+              raise SystemExit(f"release tag is not v<semver>: {tag}")
+          version = tag[1:]
+          cargo = tomllib.loads(Path("Cargo.toml").read_text(encoding="utf-8"))
+          tauri = json.loads(Path("src-tauri/tauri.conf.json").read_text(encoding="utf-8"))
+          web = json.loads(Path("web/package.json").read_text(encoding="utf-8"))
+          versions = {
+              cargo["workspace"]["package"]["version"],
+              tauri["version"],
+              web["version"],
+          }
+          if versions != {version}:
+              raise SystemExit(f"tag/version mismatch: {tag} != {sorted(versions)}")
+          notes = Path("docs/releases") / f"{version}.md"
+          if not notes.is_file() or not notes.read_text(encoding="utf-8").strip():
+              raise SystemExit(f"release notes are missing or empty: {notes}")
+          prerelease = "-" in version.split("+", 1)[0]
+          if version == "1.0.0-beta.2" and not prerelease:
+              raise SystemExit("OpenTake 1.0.0-beta.2 must remain a prerelease")
+          if not prerelease:
+              raise SystemExit("this release workflow publishes prereleases only")
+
+          def emit(name: str, value: str) -> None:
+              with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
+                  stream.write(f"{name}={value}\n")
+
+          emit("tag", tag)
+          emit("version", version)
+          emit("notes_path", notes.as_posix())
+          emit("prerelease", "true")
+          PY
+
+      - name: Reassert exact source after validation
+        env:
+          EXPECTED_SHA: ${{ steps.bind.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          expected="$(printf '%s' "$EXPECTED_SHA" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected"
+          git cat-file -e "${expected}^{commit}"
+          test "$(git rev-parse "${actual}^{tree}")" = "$(git rev-parse "${expected}^{tree}")"
+          git diff --quiet --exit-code HEAD --
+          git diff --cached --quiet --exit-code HEAD --
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+  quality:
+    name: Release quality gates
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      TARGET_SHA: ${{ needs.validate.outputs.source_sha }}
+      CI: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Assert exact checked-out SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          expected="$(printf '%s' "$TARGET_SHA" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected"
+          git cat-file -e "${expected}^{commit}"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android "$AGENT_TOOLSDIRECTORY" /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force || true
+          df -h /
+
+      - name: Install Rust toolchain
+        run: rustup component add rustfmt clippy
+
+      - name: Install system deps (ffmpeg + Tauri/GTK)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            ffmpeg \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libasound2-dev \
+            libglib2.0-dev \
+            libsoup-3.0-dev \
+            patchelf \
+            pkg-config \
+            fonts-dejavu-core
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: '3.3'
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-quality-cargo-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}
+          restore-keys: release-quality-cargo-
+
+      - name: Install locked Motion Canvas dependencies
+        run: npm --prefix plugins/motion-canvas-studio ci --ignore-scripts
+
+      - name: Audit Motion Canvas dependencies and licenses
+        run: |
+          npm --prefix plugins/motion-canvas-studio audit --audit-level=moderate
+          npm --prefix plugins/motion-canvas-studio run licenses
+
+      - name: Test and reproduce Motion Canvas runner
+        run: |
+          npm --prefix plugins/motion-canvas-studio test
+          npm --prefix plugins/motion-canvas-studio run build
+          git diff --exit-code -- plugins/motion-canvas-studio/bundle/runner.html plugins/motion-canvas-studio/package-lock.json
+
+      - name: Validate Windows and release workflow contracts
+        run: |
+          python3 -B scripts/check_windows_product_ci.py
+          python3 -B -m unittest discover -s scripts -p 'test_check_windows_product_ci.py'
+          python3 -B scripts/check_release_workflow.py
+          python3 -B -m unittest discover -s scripts -p 'test_check_release_workflow.py'
+
+      - name: Provisioner unit tests
+        run: python3 -B -m unittest discover -s scripts/tests -p 'test_*.py'
+
+      - name: Install locked Web dependencies
+        run: pnpm -C web install --frozen-lockfile
+
+      - name: Rust formatting
+        run: cargo fmt --all --check
+
+      - name: Rust workspace clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Rust workspace tests
+        env:
+          OPENTAKE_MOTION_TRACE: '1'
+        run: cargo test --workspace -- --test-threads=1
+
+      - name: Live playback transport integration
+        run: |
+          set -euo pipefail
+          cargo test -p opentake-tauri \
+            --features playback-engine \
+            --test playback_transport_integration \
+            -- --test-threads=1
+
+      - name: Minimal-feature Tauri clippy
+        run: cargo clippy -p opentake-tauri --no-default-features --all-targets -- -D warnings
+
+      - name: Web editor behavior suite
+        run: pnpm -C web test
+
+      - name: Web production build
+        run: pnpm -C web build
+
+      - name: Reassert exact source after quality gates
+        env:
+          EXPECTED_SHA: ${{ needs.validate.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          expected="$(printf '%s' "$EXPECTED_SHA" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected"
+          git cat-file -e "${expected}^{commit}"
+          test "$(git rev-parse "${actual}^{tree}")" = "$(git rev-parse "${expected}^{tree}")"
+          git diff --quiet --exit-code HEAD --
+          git diff --cached --quiet --exit-code HEAD --
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+  macos_arm64:
+    name: macOS ARM64 app and DMG
+    needs: validate
+    runs-on: macos-14
+    timeout-minutes: 120
+    env:
+      TARGET_SHA: ${{ needs.validate.outputs.source_sha }}
+      APPLE_SIGNING_IDENTITY: '-'
+      CI: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Assert exact checked-out SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          expected="$(printf '%s' "$TARGET_SHA" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected"
+          git cat-file -e "${expected}^{commit}"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Install Rust toolchain
+        run: rustup component add rustfmt clippy
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: '3.3'
+
+      - name: Provision checksum-pinned ARM64 FFmpeg sidecars
+        run: python3 scripts/provision_ffmpeg_sidecars.py --target aarch64-apple-darwin
+
+      - name: Verify pinned sidecar supply
+        run: ruby scripts/tests/packaged-sidecars-test.rb --name packaged_macos_windows_sidecars_resolve_and_execute
+
+      - name: Install locked Web dependencies
+        run: pnpm -C web install --frozen-lockfile
+
+      - name: Reassert exact source before macOS build
+        env:
+          EXPECTED_SHA: ${{ needs.validate.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          expected="$(printf '%s' "$EXPECTED_SHA" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected"
+          git cat-file -e "${expected}^{commit}"
+          test "$(git rev-parse "${actual}^{tree}")" = "$(git rev-parse "${expected}^{tree}")"
+          git diff --quiet --exit-code HEAD --
+          git diff --cached --quiet --exit-code HEAD --
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Build ad-hoc Tauri app and DMG
+        run: >-
+          ./web/node_modules/.bin/tauri build --ci
+          --target aarch64-apple-darwin --bundles app,dmg
+          --config '{"bundle":{"macOS":{"signingIdentity":"-"}}}'
+
+      - name: Verify complete app, sidecars, and DMG
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_root="target/aarch64-apple-darwin/release/bundle"
+          test "$(find "$bundle_root/macos" -maxdepth 1 -type d -name '*.app' | wc -l | tr -d ' ')" -eq 1
+          test "$(find "$bundle_root/dmg" -maxdepth 1 -type f -name '*.dmg' | wc -l | tr -d ' ')" -eq 1
+          app="$(find "$bundle_root/macos" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          dmg="$(find "$bundle_root/dmg" -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          test -f "$app/Contents/MacOS/ffmpeg"
+          test -f "$app/Contents/MacOS/ffprobe"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          codesign --verify --strict --verbose=2 "$app/Contents/MacOS/ffmpeg"
+          codesign --verify --strict --verbose=2 "$app/Contents/MacOS/ffprobe"
+          codesign -dv --verbose=4 "$app" 2>&1 | grep -F 'Signature=adhoc'
+          codesign -dv --verbose=4 "$app/Contents/MacOS/ffmpeg" 2>&1 | grep -F 'Signature=adhoc'
+          codesign -dv --verbose=4 "$app/Contents/MacOS/ffprobe" 2>&1 | grep -F 'Signature=adhoc'
+          hdiutil verify "$dmg"
+
+          mountpoint="$RUNNER_TEMP/opentake-release-dmg-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$mountpoint"
+          cleanup() { hdiutil detach "$mountpoint" -force >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mountpoint"
+          test "$(find "$mountpoint" -maxdepth 1 -type d -name '*.app' | wc -l | tr -d ' ')" -eq 1
+          mounted_app="$(find "$mountpoint" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          codesign --verify --deep --strict --verbose=2 "$mounted_app"
+          codesign --verify --strict --verbose=2 "$mounted_app/Contents/MacOS/ffmpeg"
+          codesign --verify --strict --verbose=2 "$mounted_app/Contents/MacOS/ffprobe"
+          ruby scripts/tests/packaged-sidecars-test.rb \
+            --name packaged_macos_windows_sidecars_resolve_and_execute \
+            --package "$mounted_app"
+          cleanup
+          trap - EXIT
+
+      - name: Reassert exact source after macOS packaging
+        env:
+          EXPECTED_SHA: ${{ needs.validate.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          expected="$(printf '%s' "$EXPECTED_SHA" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected"
+          git cat-file -e "${expected}^{commit}"
+          test "$(git rev-parse "${actual}^{tree}")" = "$(git rev-parse "${expected}^{tree}")"
+          git diff --quiet --exit-code HEAD --
+          git diff --cached --quiet --exit-code HEAD --
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Create macOS exact-SHA receipt
+        env:
+          RECEIPT_SHA: ${{ needs.validate.outputs.source_sha }}
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          def sha256(path: Path) -> str:
+              digest = hashlib.sha256()
+              with path.open("rb") as stream:
+                  for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              return digest.hexdigest()
+
+          matches = list(Path("target/aarch64-apple-darwin/release/bundle/dmg").glob("*.dmg"))
+          if len(matches) != 1:
+              raise SystemExit(f"expected exactly one DMG, found {len(matches)}")
+          artifact = matches[0]
+          receipt = {
+              "schema": "opentake-macos-arm64-receipt-v1",
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "source_sha": os.environ["RECEIPT_SHA"],
+              "signature_mode": "ad-hoc",
+              "artifact": {
+                  "name": artifact.name,
+                  "sha256": sha256(artifact),
+                  "bytes": artifact.stat().st_size,
+              },
+          }
+          Path("macos-arm64-receipt.json").write_text(
+              json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+          )
+          PY
+
+      - name: Upload exact-SHA macOS package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: opentake-macos-arm64-${{ needs.validate.outputs.source_sha }}
+          path: |
+            target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
+            macos-arm64-receipt.json
+          if-no-files-found: error
+          retention-days: 30
+
+  windows_x64:
+    name: Windows x64 MSI and NSIS
+    needs: validate
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      TARGET_SHA: ${{ needs.validate.outputs.source_sha }}
+      CI: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Assert exact checked-out SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          expected="$(printf '%s' "$TARGET_SHA" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected"
+          git cat-file -e "${expected}^{commit}"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Install Rust toolchain
+        run: rustup component add rustfmt clippy
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b # v1
+        with:
+          ruby-version: '3.3'
+
+      - name: Provision checksum-pinned Windows FFmpeg sidecars
+        run: python scripts/provision_ffmpeg_sidecars.py --target x86_64-pc-windows-msvc
+
+      - name: Verify pinned sidecar supply
+        shell: bash
+        run: ruby scripts/tests/packaged-sidecars-test.rb --name packaged_macos_windows_sidecars_resolve_and_execute
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: release-windows-cargo-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}
+          restore-keys: release-windows-cargo-
+
+      - name: Install locked Web dependencies
+        run: pnpm -C web install --frozen-lockfile
+
+      - name: Rust workspace clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Rust workspace tests
+        env:
+          OPENTAKE_MOTION_TRACE: '1'
+        run: cargo test --workspace -- --test-threads=1
+
+      - name: Web editor behavior suite
+        run: pnpm -C web test
+
+      - name: Minimal-feature Tauri clippy
+        run: cargo clippy -p opentake-tauri --no-default-features --all-targets -- -D warnings
+
+      - name: Web production build
+        run: pnpm -C web build
+
+      - name: Reassert exact source before Windows build
+        env:
+          EXPECTED_SHA: ${{ needs.validate.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          expected="$(printf '%s' "$EXPECTED_SHA" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected"
+          git cat-file -e "${expected}^{commit}"
+          test "$(git rev-parse "${actual}^{tree}")" = "$(git rev-parse "${expected}^{tree}")"
+          git diff --quiet --exit-code HEAD --
+          git diff --cached --quiet --exit-code HEAD --
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Build native MSI and NSIS installers
+        shell: pwsh
+        run: |
+          Remove-Item 'target/release/bundle/msi' -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item 'target/release/bundle/nsis' -Recurse -Force -ErrorAction SilentlyContinue
+          & .\web\node_modules\.bin\tauri.cmd build --ci --bundles msi,nsis
+
+      - name: Install NSIS and smoke installed app and sidecars
+        shell: pwsh
+        run: |
+          $msi = @(Get-ChildItem 'target/release/bundle/msi/*.msi' -File)
+          $installer = @(Get-ChildItem 'target/release/bundle/nsis/*.exe' -File)
+          if ($msi.Count -ne 1) { throw 'expected exactly one MSI installer' }
+          if ($installer.Count -ne 1) { throw 'expected exactly one NSIS installer' }
+          $install = Start-Process -FilePath $installer[0].FullName -ArgumentList '/S' -Wait -PassThru
+          if ($install.ExitCode -ne 0) { throw "silent NSIS install failed: $($install.ExitCode)" }
+          $candidates = @(
+            (Join-Path $env:LOCALAPPDATA 'OpenTake/opentake.exe'),
+            (Join-Path $env:LOCALAPPDATA 'Programs/OpenTake/opentake.exe'),
+            (Join-Path $env:ProgramFiles 'OpenTake/opentake.exe')
+          )
+          $application = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $application) {
+            $uninstall = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' `
+              -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq 'OpenTake' } | Select-Object -First 1
+            if ($uninstall.InstallLocation) {
+              $application = Get-ChildItem $uninstall.InstallLocation -Filter 'opentake.exe' -File `
+                -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName -First 1
+            }
+          }
+          if (-not $application) { throw "installed OpenTake executable not found: $($candidates -join ', ')" }
+          $installDirectory = Split-Path -Parent $application
+          ruby scripts/tests/packaged-sidecars-test.rb `
+            --name packaged_macos_windows_sidecars_resolve_and_execute `
+            --package $installDirectory
+          $app = Start-Process -FilePath $application -PassThru
+          Start-Sleep -Seconds 5
+          if ($app.HasExited) { throw "installed OpenTake exited during launch smoke test: $($app.ExitCode)" }
+          Stop-Process -Id $app.Id -Force
+          Wait-Process -Id $app.Id -ErrorAction SilentlyContinue
+
+      - name: Reassert exact source after Windows packaging
+        env:
+          EXPECTED_SHA: ${{ needs.validate.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          expected="$(printf '%s' "$EXPECTED_SHA" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected"
+          git cat-file -e "${expected}^{commit}"
+          test "$(git rev-parse "${actual}^{tree}")" = "$(git rev-parse "${expected}^{tree}")"
+          git diff --quiet --exit-code HEAD --
+          git diff --cached --quiet --exit-code HEAD --
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Create Windows exact-SHA receipt
+        shell: pwsh
+        env:
+          RECEIPT_SHA: ${{ needs.validate.outputs.source_sha }}
+        run: |
+          $msi = @(Get-ChildItem 'target/release/bundle/msi/*.msi' -File)
+          $nsis = @(Get-ChildItem 'target/release/bundle/nsis/*.exe' -File)
+          if ($msi.Count -ne 1) { throw 'expected exactly one MSI installer' }
+          if ($nsis.Count -ne 1) { throw 'expected exactly one NSIS installer' }
+          $artifacts = @($msi + $nsis) | ForEach-Object {
+            [ordered]@{
+              name = $_.Name
+              sha256 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              bytes = $_.Length
+            }
+          }
+          $receipt = [ordered]@{
+            schema = 'opentake-windows-release-receipt-v1'
+            repository = '${{ github.repository }}'
+            run_id = '${{ github.run_id }}'
+            run_attempt = '${{ github.run_attempt }}'
+            runner_os = '${{ runner.os }}'
+            runner_arch = '${{ runner.arch }}'
+            source_sha = $env:RECEIPT_SHA
+            artifacts = @($artifacts)
+          }
+          $receipt | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8NoBOM windows-x64-receipt.json
+
+      - name: Upload exact-SHA Windows packages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: opentake-windows-x64-${{ needs.validate.outputs.source_sha }}
+          path: |
+            target/release/bundle/msi/*.msi
+            target/release/bundle/nsis/*.exe
+            windows-x64-receipt.json
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish verified GitHub prerelease
+    permissions:
+      contents: write
+    needs: [validate, quality, macos_arm64, windows_x64]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+      RELEASE_SHA: ${{ needs.validate.outputs.source_sha }}
+      RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+      NOTES_PATH: ${{ needs.validate.outputs.notes_path }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Assert exact checked-out SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          expected="$(printf '%s' "$RELEASE_SHA" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected"
+          git cat-file -e "${expected}^{commit}"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Initialize isolated publish root
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$RUNNER_TEMP"
+          publish_root="$RUNNER_TEMP/opentake-release-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          case "$publish_root" in
+            "$RUNNER_TEMP"/opentake-release-*) ;;
+            *) exit 1 ;;
+          esac
+          printf 'PUBLISH_ROOT=%s\n' "$publish_root" >> "$GITHUB_ENV"
+
+      - name: Download macOS artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: opentake-macos-arm64-${{ needs.validate.outputs.source_sha }}
+          path: ${{ runner.temp }}/opentake-release-${{ github.run_id }}-${{ github.run_attempt }}/input/macos
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: opentake-windows-x64-${{ needs.validate.outputs.source_sha }}
+          path: ${{ runner.temp }}/opentake-release-${{ github.run_id }}-${{ github.run_attempt }}/input/windows
+
+      - name: Stage and verify the exact release payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$PUBLISH_ROOT" in
+            "$RUNNER_TEMP"/opentake-release-*) ;;
+            *) echo "publish root must be under RUNNER_TEMP" >&2; exit 1 ;;
+          esac
+          mapfile -d '' dmgs < <(find "$PUBLISH_ROOT/input" -type f -name '*.dmg' -print0)
+          mapfile -d '' msis < <(find "$PUBLISH_ROOT/input" -type f -name '*.msi' -print0)
+          mapfile -d '' exes < <(find "$PUBLISH_ROOT/input" -type f -name '*.exe' -print0)
+          mapfile -d '' mac_receipts < <(find "$PUBLISH_ROOT/input" -type f -name 'macos-arm64-receipt.json' -print0)
+          mapfile -d '' windows_receipts < <(find "$PUBLISH_ROOT/input" -type f -name 'windows-x64-receipt.json' -print0)
+          test "${#dmgs[@]}" -eq 1
+          test "${#msis[@]}" -eq 1
+          test "${#exes[@]}" -eq 1
+          test "${#mac_receipts[@]}" -eq 1
+          test "${#windows_receipts[@]}" -eq 1
+          mkdir -p "$PUBLISH_ROOT/assets"
+          cp "${dmgs[0]}" "${msis[0]}" "${exes[0]}" "$PUBLISH_ROOT/assets/"
+          cp "${mac_receipts[0]}" "$PUBLISH_ROOT/assets/macos-arm64-receipt.json"
+          cp "${windows_receipts[0]}" "$PUBLISH_ROOT/assets/windows-x64-receipt.json"
+
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          def sha256(path: Path) -> str:
+              digest = hashlib.sha256()
+              with path.open("rb") as stream:
+                  for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              return digest.hexdigest()
+
+          root = Path(os.environ["PUBLISH_ROOT"]) / "assets"
+          files = [path for path in root.iterdir() if path.is_file()]
+          expected = {"dmg": 1, "msi": 1, "exe": 1, "json": 2}
+          actual = {
+              "dmg": sum(path.suffix.lower() == ".dmg" for path in files),
+              "msi": sum(path.suffix.lower() == ".msi" for path in files),
+              "exe": sum(path.suffix.lower() == ".exe" for path in files),
+              "json": sum(path.suffix.lower() == ".json" for path in files),
+          }
+          if actual != expected or len(files) != 5:
+              raise SystemExit(f"unexpected staged release payload: {actual}")
+
+          source_sha = os.environ["RELEASE_SHA"]
+          mac = json.loads((root / "macos-arm64-receipt.json").read_text(encoding="utf-8"))
+          if mac.get("source_sha") != source_sha or mac.get("signature_mode") != "ad-hoc":
+              raise SystemExit("macOS receipt is not bound to source SHA and ad-hoc signing")
+          mac_artifact = mac.get("artifact", {})
+          dmg = next(path for path in files if path.suffix.lower() == ".dmg")
+          if mac_artifact.get("name") != dmg.name:
+              raise SystemExit("macOS receipt names a different DMG")
+          if mac_artifact.get("sha256") != sha256(dmg):
+              raise SystemExit("macOS receipt DMG checksum mismatch")
+          if mac_artifact.get("bytes") != dmg.stat().st_size:
+              raise SystemExit("macOS receipt DMG byte count mismatch")
+
+          windows = json.loads((root / "windows-x64-receipt.json").read_text(encoding="utf-8"))
+          if windows.get("source_sha") != source_sha:
+              raise SystemExit("Windows receipt is not bound to source SHA")
+          installers = [path for path in files if path.suffix.lower() in {".msi", ".exe"}]
+          entries = windows.get("artifacts")
+          if not isinstance(entries, list) or len(entries) != 2:
+              raise SystemExit("Windows receipt must contain exactly two installer entries")
+          by_name = {entry.get("name"): entry for entry in entries}
+          if set(by_name) != {path.name for path in installers}:
+              raise SystemExit("Windows receipt installer names mismatch")
+          for installer in installers:
+              entry = by_name[installer.name]
+              if entry.get("sha256") != sha256(installer):
+                  raise SystemExit(f"Windows receipt checksum mismatch: {installer.name}")
+              if entry.get("bytes") != installer.stat().st_size:
+                  raise SystemExit(f"Windows receipt byte count mismatch: {installer.name}")
+          PY
+
+      - name: Create and verify SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$PUBLISH_ROOT/assets"
+          mapfile -t asset_names < <(find . -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
+          payload_names=("${asset_names[@]}")
+          test "${#payload_names[@]}" -eq 5
+          sha256sum "${payload_names[@]}" > SHA256SUMS
+          test "$(wc -l < SHA256SUMS | tr -d ' ')" -eq 5
+          sha256sum --check SHA256SUMS
+          printf '%s\n' "${payload_names[@]}" SHA256SUMS | LC_ALL=C sort > "$PUBLISH_ROOT/expected-assets.txt"
+          test "$(wc -l < "$PUBLISH_ROOT/expected-assets.txt" | tr -d ' ')" -eq 6
+
+      - name: Prepare release notes with provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp "$NOTES_PATH" "$PUBLISH_ROOT/release-body.md"
+          cat >> "$PUBLISH_ROOT/release-body.md" <<EOF
+
+          ## Automated release provenance
+
+          - Source commit: \`$RELEASE_SHA\`
+          - GitHub Actions run: [$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)
+          - Signing limits: the macOS asset uses ad-hoc signing only; it is not Developer ID signed or notarized. Windows installers are not claimed to be Authenticode-signed.
+          EOF
+
+      - name: Reassert exact source before draft mutation
+        env:
+          EXPECTED_SHA: ${{ needs.validate.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          expected="$(printf '%s' "$EXPECTED_SHA" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected"
+          git cat-file -e "${expected}^{commit}"
+          test "$(git rev-parse "${actual}^{tree}")" = "$(git rev-parse "${expected}^{tree}")"
+          git diff --quiet --exit-code HEAD --
+          git diff --cached --quiet --exit-code HEAD --
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Revalidate remote tag before draft mutation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git ls-remote --exit-code origin \
+            "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}" \
+            > "$PUBLISH_ROOT/remote-tag-before-draft.txt"
+          python3 scripts/check_release_workflow.py resolve-remote-tag \
+            --input "$PUBLISH_ROOT/remote-tag-before-draft.txt" \
+            --tag "$RELEASE_TAG" --sha "$RELEASE_SHA"
+
+      - name: Create or refresh draft prerelease
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY%%/*}"
+          repository="${GITHUB_REPOSITORY#*/}"
+          query='query($owner:String!,$name:String!,$tag:String!){repository(owner:$owner,name:$name){release(tagName:$tag){databaseId tagName tagCommit{oid} isDraft isPrerelease releaseAssets(first:100){nodes{id name size} pageInfo{hasNextPage}}}}}'
+          gh api graphql \
+            -f query="$query" -f owner="$owner" -f name="$repository" -f tag="$RELEASE_TAG" \
+            > "$PUBLISH_ROOT/existing-release-graphql.json"
+          python3 scripts/check_release_workflow.py resolve-release-state \
+            --input "$PUBLISH_ROOT/existing-release-graphql.json" \
+            --tag "$RELEASE_TAG" \
+            --sha "$RELEASE_SHA" \
+            --output "$PUBLISH_ROOT/release-state.json"
+          action="$(jq -r '.action' "$PUBLISH_ROOT/release-state.json")"
+          case "$action" in
+            create)
+              gh release create "$RELEASE_TAG" \
+                --verify-tag \
+                --target "$RELEASE_SHA" \
+                --title "OpenTake $RELEASE_VERSION" \
+                --notes-file "$PUBLISH_ROOT/release-body.md" \
+                --draft --prerelease --latest=false
+              ;;
+            refresh)
+              release_id="$(jq -r '.release_id' "$PUBLISH_ROOT/release-state.json")"
+              gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" > "$PUBLISH_ROOT/existing-draft-rest.json"
+              test "$(jq -r '.id' "$PUBLISH_ROOT/existing-draft-rest.json")" = "$release_id"
+              if test "$(jq -r '.draft' "$PUBLISH_ROOT/existing-draft-rest.json")" != "true"; then
+                echo "release is already published; refusing to mutate it" >&2
+                exit 1
+              fi
+              test "$(jq -r '.prerelease' "$PUBLISH_ROOT/existing-draft-rest.json")" = "true"
+              test "$(jq -r '.tag_name' "$PUBLISH_ROOT/existing-draft-rest.json")" = "$RELEASE_TAG"
+              test "$(jq -r '.target_commitish' "$PUBLISH_ROOT/existing-draft-rest.json" | tr '[:upper:]' '[:lower:]')" = "$RELEASE_SHA"
+              jq -e 'all(.assets[]; (.id | type) == "number")' "$PUBLISH_ROOT/existing-draft-rest.json" >/dev/null
+              while read -r asset_id; do
+                gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
+              done < <(jq -r '.assets[].id' "$PUBLISH_ROOT/existing-draft-rest.json")
+              gh release edit "$RELEASE_TAG" \
+                --target "$RELEASE_SHA" \
+                --title "OpenTake $RELEASE_VERSION" \
+                --notes-file "$PUBLISH_ROOT/release-body.md" \
+                --draft --prerelease --latest=false
+              ;;
+            *)
+              exit 1
+              ;;
+          esac
+
+      - name: Upload the exact payload to the draft
+        run: gh release upload "$RELEASE_TAG" "$PUBLISH_ROOT/assets/"* --clobber
+
+      - name: Verify draft target and exact assets
+        run: |
+          set -euo pipefail
+          owner="${GITHUB_REPOSITORY%%/*}"
+          repository="${GITHUB_REPOSITORY#*/}"
+          query='query($owner:String!,$name:String!,$tag:String!){repository(owner:$owner,name:$name){release(tagName:$tag){databaseId tagName tagCommit{oid} isDraft isPrerelease releaseAssets(first:100){nodes{id name size} pageInfo{hasNextPage}}}}}'
+          gh api graphql \
+            -f query="$query" -f owner="$owner" -f name="$repository" -f tag="$RELEASE_TAG" \
+            > "$PUBLISH_ROOT/draft-release-graphql.json"
+          python3 scripts/check_release_workflow.py resolve-release-state \
+            --input "$PUBLISH_ROOT/draft-release-graphql.json" \
+            --tag "$RELEASE_TAG" \
+            --sha "$RELEASE_SHA" \
+            --output "$PUBLISH_ROOT/draft-state.json"
+          test "$(jq -r '.action' "$PUBLISH_ROOT/draft-state.json")" = "refresh"
+          jq -r '.asset_names[]' "$PUBLISH_ROOT/draft-state.json" | LC_ALL=C sort > "$PUBLISH_ROOT/draft-assets.txt"
+          cmp "$PUBLISH_ROOT/expected-assets.txt" "$PUBLISH_ROOT/draft-assets.txt"
+          jq -e '.asset_sizes | length == 6 and all(. > 0)' "$PUBLISH_ROOT/draft-state.json" >/dev/null
+
+      - name: Revalidate remote tag before publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          git ls-remote --exit-code origin \
+            "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}" \
+            > "$PUBLISH_ROOT/remote-tag-before-publication.txt"
+          python3 scripts/check_release_workflow.py resolve-remote-tag \
+            --input "$PUBLISH_ROOT/remote-tag-before-publication.txt" \
+            --tag "$RELEASE_TAG" --sha "$RELEASE_SHA"
+
+      - name: Reassert exact source before publication
+        env:
+          EXPECTED_SHA: ${{ needs.validate.outputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          expected="$(printf '%s' "$EXPECTED_SHA" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected"
+          git cat-file -e "${expected}^{commit}"
+          test "$(git rev-parse "${actual}^{tree}")" = "$(git rev-parse "${expected}^{tree}")"
+          git diff --quiet --exit-code HEAD --
+          git diff --cached --quiet --exit-code HEAD --
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Publish verified prerelease
+        run: gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false
+
+      - name: Verify public release through API and checksums
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$PUBLISH_ROOT/public-release.json"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["PUBLISH_ROOT"])
+          release = json.loads((root / "public-release.json").read_text(encoding="utf-8"))
+          expected_sha = os.environ["RELEASE_SHA"]
+          expected_names = set((root / "expected-assets.txt").read_text(encoding="utf-8").splitlines())
+          actual_names = {asset["name"] for asset in release.get("assets", [])}
+          if release.get("draft") is not False or release.get("prerelease") is not True:
+              raise SystemExit("release was not published as a prerelease")
+          if release.get("tag_name") != os.environ["RELEASE_TAG"]:
+              raise SystemExit("public release tag mismatch")
+          if release.get("target_commitish") != expected_sha:
+              raise SystemExit("public release target SHA mismatch")
+          if expected_names != actual_names:
+              raise SystemExit(f"public release assets mismatch: {sorted(actual_names)}")
+          PY
+          mkdir "$PUBLISH_ROOT/verified-release"
+          gh release download "$RELEASE_TAG" --dir "$PUBLISH_ROOT/verified-release"
+          find "$PUBLISH_ROOT/verified-release" -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort > "$PUBLISH_ROOT/verified-assets.txt"
+          cmp "$PUBLISH_ROOT/expected-assets.txt" "$PUBLISH_ROOT/verified-assets.txt"
+          cd "$PUBLISH_ROOT/verified-release"
+          sha256sum --check SHA256SUMS

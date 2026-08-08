@@ -3,7 +3,7 @@
  * bar with project-setting badges. Transport drives the local playhead.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   SkipBack,
   SkipForward,
@@ -26,6 +26,10 @@ import { formatTimecode, totalFrames } from "../../lib/geometry";
 import { snapFrameToEdge } from "../../lib/snap";
 import { maybeSnapFeedback } from "../../lib/haptic";
 import { assetUrl } from "../../lib/asset";
+import {
+  derivedResourceKinds,
+  derivedResourceScheduler,
+} from "../../lib/derivedResourceScheduler";
 import { TimelinePlayback } from "./TimelinePlaybackLayer";
 import { TransformOverlay } from "./TransformOverlay";
 import { CropOverlay } from "./CropOverlay";
@@ -41,7 +45,6 @@ import {
   captureFrameToMedia,
   cancelCompositeFrame,
   compositeFrame,
-  getPreviewEndpoint,
   isTauri,
   previewPoster,
 } from "../../lib/api";
@@ -72,6 +75,7 @@ import {
 import { rustEngineEnabled } from "./rustEngine";
 import { RustFrameBuffer } from "./RustFrameBuffer.tsx";
 import { createScrubGesture, transitionScrubGesture } from "./scrubGesture";
+import { useRustPlaybackCapability } from "./previewEngine";
 
 export function exactTimelineFrame(frame: number, total: number): number {
   const safeTotal = Number.isFinite(total) ? Math.max(0, Math.round(total)) : 0;
@@ -164,7 +168,8 @@ export function Preview() {
   const [mediaDuration, setMediaDuration] = useState(0);
   const [mediaPlaying, setMediaPlaying] = useState(false);
   const nativeFrameEvent = useNativePlaybackPublication();
-  const [previewFrameEndpoint, setPreviewFrameEndpoint] = useState<string | null>(null);
+  const rustPlaybackCapability = useRustPlaybackCapability();
+  const previewFrameEndpoint = rustPlaybackCapability.endpoint;
   const stageRef = useRef<HTMLDivElement | null>(null);
   // The zoomed canvas box element — the wheel handler measures its rect so the
   // zoom anchors on the cursor's position within the canvas (not the padded stage).
@@ -175,15 +180,6 @@ export function Preview() {
     setMediaDuration(0);
     setMediaPlaying(false);
   }, [previewMediaId]);
-  useEffect(() => {
-    let disposed = false;
-    void getPreviewEndpoint().then((endpoint) => {
-      if (!disposed) setPreviewFrameEndpoint(endpoint);
-    });
-    return () => {
-      disposed = true;
-    };
-  }, []);
   useEffect(() => {
     const el = stageRef.current;
     if (!el || typeof ResizeObserver === "undefined") return;
@@ -230,7 +226,9 @@ export function Preview() {
   const activeShownFrame = previewing ? Math.round(mediaTime * fps) : activeFrame;
   const playing = previewing ? mediaPlaying : isPlaying;
   const playbackRoute = resolveTimelinePlaybackRoute(timeline, {
-    rustAvailable: isTauri && !activeNestedSequenceId,
+    rustAvailable:
+      !activeNestedSequenceId &&
+      (rustPlaybackCapability.checked ? rustPlaybackCapability.available : isTauri),
     rustEnabled: rustEngineEnabled() && !rustEngineFailed,
     forceRust:
       webkitPlaybackFailedRevision === `${projectEpoch}:${timelineVersion}`,
@@ -402,6 +400,12 @@ export function Preview() {
         <PreviewTabs item={previewItem} />
       </PanelHeaderBar>
 
+      <div
+        id="preview-content-panel"
+        role="tabpanel"
+        aria-labelledby={previewItem ? "preview-source-tab" : "preview-timeline-tab"}
+        style={{ flex: 1, minHeight: 0, width: "100%", display: "flex", flexDirection: "column" }}
+      >
       {/* Canvas stage: a flex-centered area; the media inside aspect-fits via
           intrinsic size + max-width/height, so it always fills the largest 16:9
           box and stays centered. */}
@@ -422,6 +426,7 @@ export function Preview() {
         {previewItem ? (
           <MediaPreview
             item={previewItem}
+            projectEpoch={projectEpoch}
             mediaRef={mediaRef}
             onTime={setMediaTime}
             onDuration={setMediaDuration}
@@ -517,7 +522,7 @@ export function Preview() {
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  color: "var(--text-muted)",
+                  color: "var(--text-tertiary)",
                   fontSize: "var(--fs-xs)",
                 }}
               >
@@ -588,6 +593,7 @@ export function Preview() {
         </HoverButton>
         <ProjectSettingsBadges fps={timeline.fps} width={timeline.width} height={timeline.height} />
       </div>
+      </div>
     </>
   );
 }
@@ -628,14 +634,16 @@ function UnsupportedPlaybackSurface({ reasons }: { reasons: UnsupportedPlaybackR
  *  `<video>`/`<audio>` (NO native controls; the app transport drives them via
  *  `mediaRef`), `<img>` for stills. The pragmatic preview path (WebView decodes
  *  the original file); timeline composite preview is a later batch. */
-function MediaPreview({
+export function MediaPreview({
   item,
+  projectEpoch,
   mediaRef,
   onTime,
   onDuration,
   onPlayingChange,
 }: {
   item: MediaItem;
+  projectEpoch: number;
   mediaRef: React.MutableRefObject<HTMLMediaElement | null>;
   onTime: (time: number) => void;
   onDuration: (duration: number) => void;
@@ -659,13 +667,27 @@ function MediaPreview({
     }
     let cancelled = false;
     setPosterUrl(null);
-    void previewPoster(item.id).then((path) => {
-      if (!cancelled && path) setPosterUrl(assetUrl(path));
+    derivedResourceScheduler.activateProject(projectEpoch);
+    const handle = derivedResourceScheduler.request<string | null>({
+      projectEpoch,
+      kind: derivedResourceKinds.previewPoster,
+      key: `poster:preview:${item.id}:${item.path ?? ""}`,
+      latestGroup: "preview-poster",
+      priority: "interactive",
+      run: () => previewPoster(item.id),
     });
+    void handle.promise
+      .then((path) => {
+        if (!cancelled) setPosterUrl(path ? assetUrl(path) : null);
+      })
+      .catch(() => {
+        if (!cancelled) setPosterUrl(null);
+      });
     return () => {
       cancelled = true;
+      handle.cancel();
     };
-  }, [item.id, item.type, item.missing]);
+  }, [item.id, item.path, item.type, item.missing, projectEpoch]);
 
   const box: React.CSSProperties = {
     maxWidth: "100%",
@@ -726,15 +748,54 @@ function MediaPreview({
   );
 }
 
-function PreviewTabs({ item }: { item: MediaItem | null }) {
+export function PreviewTabs({ item }: { item: MediaItem | null }) {
   const t = useT();
   const setPreviewMedia = useEditorUiStore((s) => s.setPreviewMedia);
   const onTimeline = item === null;
+  const timelineRef = useRef<HTMLButtonElement>(null);
+  const sourceRef = useRef<HTMLButtonElement>(null);
+
+  const selectTimeline = () => {
+    setPreviewMedia(null);
+    timelineRef.current?.focus();
+  };
+
+  const handleTabKey = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (!item) return;
+    if (
+      event.key === "ArrowLeft" ||
+      event.key === "ArrowUp" ||
+      event.key === "Home"
+    ) {
+      event.preventDefault();
+      selectTimeline();
+    } else if (
+      event.key === "ArrowRight" ||
+      event.key === "ArrowDown" ||
+      event.key === "End"
+    ) {
+      event.preventDefault();
+      sourceRef.current?.focus();
+    }
+  };
+
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: "var(--space-md)" }}>
+    <div
+      role="tablist"
+      aria-label={t("layout.panel.preview")}
+      aria-orientation="horizontal"
+      style={{ display: "flex", alignItems: "center", gap: "var(--space-md)" }}
+    >
       <button
+        ref={timelineRef}
         type="button"
-        onClick={() => setPreviewMedia(null)}
+        id="preview-timeline-tab"
+        role="tab"
+        aria-selected={onTimeline}
+        aria-controls="preview-content-panel"
+        tabIndex={onTimeline ? 0 : -1}
+        onClick={selectTimeline}
+        onKeyDown={handleTabKey}
         style={{
           minHeight: 24,
           display: "inline-flex",
@@ -749,7 +810,16 @@ function PreviewTabs({ item }: { item: MediaItem | null }) {
         {t("preview.timelineTab")}
       </button>
       {item && (
-        <div
+        <button
+          ref={sourceRef}
+          type="button"
+          id="preview-source-tab"
+          role="tab"
+          aria-selected={!onTimeline}
+          aria-controls="preview-content-panel"
+          tabIndex={onTimeline ? -1 : 0}
+          onClick={() => sourceRef.current?.focus()}
+          onKeyDown={handleTabKey}
           style={{
             minHeight: 24,
             display: "inline-flex",
@@ -762,10 +832,14 @@ function PreviewTabs({ item }: { item: MediaItem | null }) {
             fontWeight: "var(--fw-semibold)",
             color: "var(--text-primary)",
             borderBottom: "var(--bw-medium) solid var(--accent-primary)",
+            background: "transparent",
+            borderTop: "none",
+            borderLeft: "none",
+            borderRight: "none",
           }}
         >
           {item.name}
-        </div>
+        </button>
       )}
     </div>
   );
@@ -952,14 +1026,16 @@ interface BadgeMenuOption {
   onSelect: () => void;
 }
 
+const BADGE_MENU_OPEN_EVENT = "opentake:preview-badge-menu-open";
+
 /**
  * Compact borderless badge that opens a popup menu — the port of upstream's
  * `settingsMenuButton` (`.menuStyle(.borderlessButton)`,
  * PreviewContainerView.swift:253-268). Keeps the Badge's compact look for the
  * trigger and reuses the app Dropdown's raised-popup + checked-row styling for
- * the menu. Closes on outside click / Escape.
+ * the menu. Closes on outside click, Tab, focusout, or Escape.
  */
-function BadgeMenu({
+export function BadgeMenu({
   label,
   ariaLabel,
   options,
@@ -970,31 +1046,104 @@ function BadgeMenu({
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const listboxRef = useRef<HTMLDivElement>(null);
+  const initialFocusRef = useRef<"active" | "first" | "last">("active");
+  const listboxId = useId();
+
+  const optionElements = () => [
+    ...(listboxRef.current?.querySelectorAll<HTMLButtonElement>('[role="option"]') ?? []),
+  ];
+  const setOptionTabStop = (target: HTMLButtonElement | undefined) => {
+    if (!target) return;
+    for (const item of optionElements()) item.tabIndex = item === target ? 0 : -1;
+  };
+  const focusOption = (target: HTMLButtonElement | undefined) => {
+    setOptionTabStop(target);
+    target?.focus();
+  };
+
+  const openListbox = (edge: "active" | "first" | "last" = "active") => {
+    initialFocusRef.current = edge;
+    window.dispatchEvent(new CustomEvent<string>(BADGE_MENU_OPEN_EVENT, { detail: listboxId }));
+    setOpen(true);
+  };
+  const closeWithoutRestore = () => setOpen(false);
+  const closeAndRestore = () => {
+    closeWithoutRestore();
+    triggerRef.current?.focus();
+  };
+
+  useEffect(() => {
+    if (!open) return;
+    const items = optionElements();
+    const target =
+      initialFocusRef.current === "last"
+        ? items[items.length - 1]
+        : initialFocusRef.current === "active"
+          ? items.find((item) => item.getAttribute("aria-selected") === "true") ?? items[0]
+          : items[0];
+    focusOption(target);
+  }, [open]);
+
+  useEffect(() => {
+    const onBadgeMenuOpen = (event: Event) => {
+      if ((event as CustomEvent<string>).detail !== listboxId) closeWithoutRestore();
+    };
+    window.addEventListener(BADGE_MENU_OPEN_EVENT, onBadgeMenuOpen);
+    return () => window.removeEventListener(BADGE_MENU_OPEN_EVENT, onBadgeMenuOpen);
+  }, [listboxId]);
 
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => {
       if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
     };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
     document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
+    return () => document.removeEventListener("mousedown", onDown);
   }, [open]);
+
+  const handleListboxKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Tab") {
+      closeWithoutRestore();
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeAndRestore();
+      return;
+    }
+    const items = optionElements();
+    if (items.length === 0) return;
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    let next: number | null = null;
+    if (event.key === "ArrowDown") next = (Math.max(0, current) + 1) % items.length;
+    else if (event.key === "ArrowUp") next = current <= 0 ? items.length - 1 : current - 1;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = items.length - 1;
+    if (next === null) return;
+    event.preventDefault();
+    focusOption(items[next]);
+  };
 
   return (
     <div ref={rootRef} style={{ position: "relative", display: "inline-block" }}>
       <button
+        ref={triggerRef}
         type="button"
         aria-label={ariaLabel}
         aria-haspopup="listbox"
         aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
+        aria-controls={listboxId}
+        onClick={() => (open ? closeAndRestore() : openListbox())}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            openListbox(event.key === "ArrowUp" ? "last" : "first");
+          } else if (event.key === "Escape" && open) {
+            closeAndRestore();
+          }
+        }}
         className="hover-area tabular"
         style={{
           display: "inline-flex",
@@ -1019,7 +1168,19 @@ function BadgeMenu({
 
       {open && (
         <div
+          ref={listboxRef}
+          id={listboxId}
           role="listbox"
+          aria-label={ariaLabel}
+          onFocus={(event) => {
+            if (event.target instanceof HTMLButtonElement) setOptionTabStop(event.target);
+          }}
+          onBlur={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+              closeWithoutRestore();
+            }
+          }}
+          onKeyDown={handleListboxKeyDown}
           style={{
             position: "absolute",
             bottom: "calc(100% + var(--space-xs))",
@@ -1036,38 +1197,58 @@ function BadgeMenu({
             gap: 1,
           }}
         >
-          {options.map((opt) => (
-            <button
-              key={opt.key}
-              type="button"
-              role="option"
-              aria-selected={opt.active}
-              onClick={() => {
-                opt.onSelect();
-                setOpen(false);
-              }}
-              className="hover-area"
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: "var(--space-sm)",
-                height: 26,
-                padding: "0 var(--space-sm)",
-                borderRadius: "var(--radius-xs-sm)",
-                background: opt.active ? "var(--bg-prominent)" : "transparent",
-                color: opt.active ? "var(--text-primary)" : "var(--text-secondary)",
-                fontSize: "var(--fs-sm)",
-                fontWeight: "var(--fw-medium)",
-                textAlign: "left",
-                cursor: "pointer",
-              }}
-            >
-              <span style={{ width: 12, display: "inline-flex", justifyContent: "center", flex: "0 0 auto" }}>
-                {opt.active && <Icon icon={Check} size={11} />}
-              </span>
-              <span style={{ flex: 1 }}>{opt.label}</span>
-            </button>
-          ))}
+          {options.map((opt, index) => {
+            const selectOption = () => {
+              opt.onSelect();
+              closeAndRestore();
+            };
+            return (
+              <button
+                key={opt.key}
+                type="button"
+                role="option"
+                aria-selected={opt.active}
+                tabIndex={
+                  opt.active || (!options.some((option) => option.active) && index === 0)
+                    ? 0
+                    : -1
+                }
+                onClick={selectOption}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" && event.key !== " ") return;
+                  event.preventDefault();
+                  selectOption();
+                }}
+                className="hover-area"
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "var(--space-sm)",
+                  height: 26,
+                  padding: "0 var(--space-sm)",
+                  borderRadius: "var(--radius-xs-sm)",
+                  background: opt.active ? "var(--bg-prominent)" : "transparent",
+                  color: opt.active ? "var(--text-primary)" : "var(--text-secondary)",
+                  fontSize: "var(--fs-sm)",
+                  fontWeight: "var(--fw-medium)",
+                  textAlign: "left",
+                  cursor: "pointer",
+                }}
+              >
+                <span
+                  style={{
+                    width: 12,
+                    display: "inline-flex",
+                    justifyContent: "center",
+                    flex: "0 0 auto",
+                  }}
+                >
+                  {opt.active && <Icon icon={Check} size={11} />}
+                </span>
+                <span style={{ flex: 1 }}>{opt.label}</span>
+              </button>
+            );
+          })}
         </div>
       )}
     </div>

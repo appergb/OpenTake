@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE fcpxml>
+<fcpxml version="1.10">
+  <resources>
+    <format id="r1" name="OpenTakeTimelineFormat" frameDuration="1/30s" width="1280" height="720" colorSpace="1-1-1 (Rec. 709)"/>
+    <asset id="r2" name="audit-4k60-h264.mp4" src="file:///docs/audit/2026-08-07/editor-core-validation-evidence-a/artifacts/audit-4k60-h264.mp4" start="0s" duration="4s" hasVideo="1" format="r3" hasAudio="0"/>
+    <format id="r3" frameDuration="1/60s" width="3840" height="2160" colorSpace="1-1-1 (Rec. 709)"/>
+  </resources>
+  <library>
+    <event name="OpenTake">
+      <project name="Timeline Export">
+        <sequence format="r1" duration="2s" tcStart="0s" tcFormat="DF" audioLayout="stereo" audioRate="48k">
+          <spine>
+            <asset-clip ref="r2" offset="0s" name="audit-4k60-h264.mp4" start="1/3s" duration="2s" format="r3" tcFormat="DF"/>
+            <asset-clip ref="r2" offset="1/2s" name="audit-4k60-h264.mp4" start="0s" duration="1s" format="r3" tcFormat="DF" lane="1">
+              <adjust-transform scale="0.5000 0.5000"/>
+            </asset-clip>
+            <title offset="1/2s" name="你好，OpenTake
+Second line" duration="1s" lane="2">
+              <text>
+                <text-style>你好，OpenTake
+Second line</text-style>
+              </text>
+            </title>
+          </spine>
+        </sequence>
+      </project>
+    </event>
+  </library>
+</fcpxml>

@@ -82,7 +82,7 @@ pub(super) async fn run_isolated_helper(
         .kill_on_drop(true)
         .spawn()
         .map_err(|_| IsolatedHelperError::Io)?;
-    let mut stdin = child.stdin.take().ok_or(IsolatedHelperError::Io)?;
+    let stdin = child.stdin.take().ok_or(IsolatedHelperError::Io)?;
     let mut stdout = child.stdout.take().ok_or(IsolatedHelperError::Io)?;
     let encoded = serde_json::to_vec(request).map_err(|_| IsolatedHelperError::InvalidResponse)?;
     if encoded.len() > MAX_HELPER_REQUEST_BYTES {
@@ -90,16 +90,7 @@ pub(super) async fn run_isolated_helper(
         return Err(IsolatedHelperError::InvalidResponse);
     }
 
-    let operation = async {
-        stdin
-            .write_all(&encoded)
-            .await
-            .map_err(|_| IsolatedHelperError::Io)?;
-        stdin
-            .shutdown()
-            .await
-            .map_err(|_| IsolatedHelperError::Io)?;
-
+    let operation = write_helper_request_before_response(stdin, &encoded, async {
         let mut metadata_length = [0_u8; 4];
         stdout
             .read_exact(&mut metadata_length)
@@ -131,7 +122,7 @@ pub(super) async fn run_isolated_helper(
             return Err(IsolatedHelperError::InvalidResponse);
         }
         Ok(IsolatedResponse { metadata, body })
-    };
+    });
 
     match tokio::time::timeout(IO_DEADLINE, operation).await {
         Ok(Ok(response)) => Ok(response),
@@ -144,6 +135,25 @@ pub(super) async fn run_isolated_helper(
             Err(IsolatedHelperError::TimedOut)
         }
     }
+}
+
+pub(super) async fn write_helper_request_before_response<T, F>(
+    mut stdin: tokio::process::ChildStdin,
+    encoded: &[u8],
+    response: F,
+) -> Result<T, IsolatedHelperError>
+where
+    F: std::future::Future<Output = Result<T, IsolatedHelperError>>,
+{
+    stdin
+        .write_all(encoded)
+        .await
+        .map_err(|_| IsolatedHelperError::Io)?;
+    // `AsyncWriteExt::shutdown()` is a no-op for Tokio's Unix child pipe.
+    // Drop the handle explicitly so the helper's blocking `read_to_end`
+    // observes EOF before this task starts waiting for the response.
+    drop(stdin);
+    response.await
 }
 
 pub(super) async fn terminate_or_quarantine(
@@ -170,10 +180,12 @@ where
     tokio::time::timeout(deadline, wait).await.is_ok()
 }
 
-pub(super) fn isolated_response_to_http(
+pub(super) fn isolated_response_to_http<R: Runtime>(
+    app: &AppHandle<R>,
     core: &AppCore,
     scope: &Scope,
     expected_project: Option<&ProjectAssetAuthority>,
+    expected_non_project: Option<NonProjectAssetAuthority>,
     token: &str,
     isolated: IsolatedResponse,
 ) -> Response<Vec<u8>> {
@@ -194,12 +206,41 @@ pub(super) fn isolated_response_to_http(
     let Some(final_path) = metadata.final_path.as_deref().map(PathBuf::from) else {
         return error_response(StatusCode::BAD_GATEWAY, "local asset helper failed", None);
     };
-    if expected_project.is_none() && !scope_allows_lexical_path(scope, &final_path) {
-        return error_response(
-            StatusCode::FORBIDDEN,
-            "the opened asset resolves outside its approved scope",
-            None,
+    // Acquire the project-transition lease before the final authorization
+    // comparison. Once held, the current bundle/external-media authority cannot
+    // rotate between this check and byte publication.
+    let requires_project_lease = expected_project.is_some()
+        || matches!(
+            expected_non_project,
+            Some(NonProjectAssetAuthority::ProjectMedia { .. })
         );
+    let _identity_lease = requires_project_lease.then(|| core.lock_project_identity_workflow());
+    if expected_project.is_none() {
+        let response_etag = metadata
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("etag"))
+            .map(|(_, value)| value.as_str());
+        let Some(expected) = expected_non_project.as_ref() else {
+            return error_response(
+                StatusCode::FORBIDDEN,
+                "the opened asset resolves outside its approved scope",
+                None,
+            );
+        };
+        let refreshed = non_project_asset_authority(app, core, scope, expected.requested_path());
+        if !non_project_response_matches_authority(
+            expected,
+            &final_path,
+            response_etag,
+            refreshed.as_ref(),
+        ) {
+            return error_response(
+                StatusCode::FORBIDDEN,
+                "the opened asset resolves outside its approved scope",
+                None,
+            );
+        }
     }
     match (expected_project, opentake_ancestor(&final_path)) {
         (Some(expected), Some(bundle_path))
@@ -217,9 +258,6 @@ pub(super) fn isolated_response_to_http(
         }
     }
 
-    // No await follows this lease. Project open/save-as cannot replace the
-    // retained root between the final authority comparison and publication.
-    let _identity_lease = expected_project.map(|_| core.lock_project_identity_workflow());
     if expected_project.is_some_and(|expected| !core.project_asset_authority_matches(expected)) {
         return error_response(
             StatusCode::FORBIDDEN,

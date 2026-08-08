@@ -25,7 +25,7 @@ use tauri::http::header::{
 };
 use tauri::http::{Method, Request, Response, StatusCode};
 use tauri::scope::fs::Scope;
-use tauri::{AppHandle, Manager, UriSchemeResponder};
+use tauri::{AppHandle, Manager, Runtime, UriSchemeResponder};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::Semaphore;
@@ -60,12 +60,67 @@ use helper::{
     IsolatedHelperError,
 };
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum NonProjectAssetAuthority {
+    ScopeOnly {
+        requested_path: PathBuf,
+        initial_final_path: PathBuf,
+        initial_etag: String,
+    },
+    ProjectMedia {
+        project_epoch: u64,
+        requested_path: PathBuf,
+        initial_final_path: PathBuf,
+        initial_etag: String,
+    },
+}
+
+impl NonProjectAssetAuthority {
+    fn requested_path(&self) -> &Path {
+        match self {
+            Self::ScopeOnly { requested_path, .. } | Self::ProjectMedia { requested_path, .. } => {
+                requested_path
+            }
+        }
+    }
+
+    fn initial_final_path(&self) -> &Path {
+        match self {
+            Self::ScopeOnly {
+                initial_final_path, ..
+            }
+            | Self::ProjectMedia {
+                initial_final_path, ..
+            } => initial_final_path,
+        }
+    }
+
+    fn initial_etag(&self) -> &str {
+        match self {
+            Self::ScopeOnly { initial_etag, .. } | Self::ProjectMedia { initial_etag, .. } => {
+                initial_etag
+            }
+        }
+    }
+}
+
+fn non_project_response_matches_authority(
+    expected: &NonProjectAssetAuthority,
+    final_path: &Path,
+    response_etag: Option<&str>,
+    refreshed: Option<&NonProjectAssetAuthority>,
+) -> bool {
+    paths_equal_for_authority(expected.initial_final_path(), final_path)
+        && response_etag == Some(expected.initial_etag())
+        && refreshed == Some(expected)
+}
+
 #[cfg(all(test, unix))]
 use helper::{
     actual_parent_process_id, parent_is_same_executable, terminate_or_quarantine, WireIoErrorKind,
 };
 #[cfg(test)]
-use helper::{bounded_reap, helper_response};
+use helper::{bounded_reap, helper_response, write_helper_request_before_response};
 
 #[derive(Clone)]
 pub(crate) struct SafeAssetProtocol {
@@ -132,8 +187,8 @@ impl SafeAssetProtocol {
     }
 }
 
-async fn response_for_request(
-    app: &AppHandle,
+async fn response_for_request<R: Runtime>(
+    app: &AppHandle<R>,
     scope: &Scope,
     request: Request<Vec<u8>>,
     process_slots: Arc<Semaphore>,
@@ -160,13 +215,20 @@ async fn response_for_request(
     // A retained current-project root is itself the authority for nested
     // relative assets. External files and the Home thumbnail exception still
     // require an exact/runtime scope grant before any helper is spawned.
-    if project_authority.is_none() && !scope_allows_lexical_path(scope, &path) {
-        return error_response(
-            StatusCode::FORBIDDEN,
-            "local asset path is not approved",
-            None,
-        );
-    }
+    let non_project_authority = if project_authority.is_none() {
+        match non_project_asset_authority(app, &core, scope, &path) {
+            Some(authority) => Some(authority),
+            None => {
+                return error_response(
+                    StatusCode::FORBIDDEN,
+                    "local asset path is not approved",
+                    None,
+                );
+            }
+        }
+    } else {
+        None
+    };
     let Some(path_text) = path.to_str() else {
         return error_response(
             StatusCode::BAD_REQUEST,
@@ -222,7 +284,15 @@ async fn response_for_request(
             );
         }
     };
-    isolated_response_to_http(&core, scope, project_authority.as_ref(), &token, isolated)
+    isolated_response_to_http(
+        app,
+        &core,
+        scope,
+        project_authority.as_ref(),
+        non_project_authority,
+        &token,
+        isolated,
+    )
 }
 
 fn project_request_authority(
@@ -340,6 +410,115 @@ fn scope_has_exact_file_grant(scope: &Scope, path: &Path) -> bool {
             pattern.as_str() == escaped
         }
     })
+}
+
+/// Runtime dialog grants are persisted by Tauri. Keep the configured
+/// application-owned cache/data/resource roots available, but require every
+/// other external media path to remain referenced by the current project.
+/// This also closes stale recursive directory grants from folder imports, not
+/// just exact file grants, without mutating persisted scope state.
+fn non_project_asset_authority<R: Runtime>(
+    app: &AppHandle<R>,
+    core: &AppCore,
+    scope: &Scope,
+    path: &Path,
+) -> Option<NonProjectAssetAuthority> {
+    let normalized = normalized_path(path);
+    if !scope_allows_lexical_path(scope, &normalized) {
+        return None;
+    }
+    enum ScopeOnlyKind {
+        HomeThumbnail,
+        ApplicationOwned,
+    }
+    enum AuthorityKind {
+        ScopeOnly(ScopeOnlyKind),
+        ProjectMedia(u64),
+    }
+    let application_owned_roots = application_owned_asset_roots(app);
+    let scope_only_kind = if opentake_ancestor(&normalized)
+        .is_some_and(|bundle| is_home_thumbnail_exception(scope, &normalized, bundle.as_path()))
+    {
+        Some(ScopeOnlyKind::HomeThumbnail)
+    } else if application_owned_roots
+        .iter()
+        .any(|root| path_is_at_or_below(&normalized, root))
+    {
+        Some(ScopeOnlyKind::ApplicationOwned)
+    } else {
+        None
+    };
+    let kind = if let Some(scope_only_kind) = scope_only_kind {
+        AuthorityKind::ScopeOnly(scope_only_kind)
+    } else {
+        let snapshot = core.runtime_snapshot();
+        if snapshot.project_dir.is_none()
+            || !snapshot.media.entries.iter().any(|entry| {
+                let opentake_domain::MediaSource::External { absolute_path } = &entry.source else {
+                    return false;
+                };
+                paths_equal_for_authority(Path::new(absolute_path), &normalized)
+            })
+        {
+            return None;
+        }
+        AuthorityKind::ProjectMedia(snapshot.project_epoch)
+    };
+    let (file, initial_final_path) = open_retained_regular_file(&normalized).ok()?;
+    let metadata = file.metadata().ok()?;
+    let initial_etag = retained_file_etag(&file, &metadata).ok()?;
+    match kind {
+        AuthorityKind::ScopeOnly(scope_only_kind) => {
+            let final_path_is_authorized = scope_allows_lexical_path(scope, &initial_final_path)
+                && match scope_only_kind {
+                    ScopeOnlyKind::HomeThumbnail => opentake_ancestor(&initial_final_path)
+                        .is_some_and(|bundle| {
+                            is_home_thumbnail_exception(
+                                scope,
+                                &initial_final_path,
+                                bundle.as_path(),
+                            )
+                        }),
+                    ScopeOnlyKind::ApplicationOwned => application_owned_roots
+                        .iter()
+                        .any(|root| path_is_at_or_below(&initial_final_path, root)),
+                };
+            final_path_is_authorized.then_some(NonProjectAssetAuthority::ScopeOnly {
+                requested_path: normalized,
+                initial_final_path,
+                initial_etag,
+            })
+        }
+        AuthorityKind::ProjectMedia(project_epoch) => {
+            scope_allows_lexical_path(scope, &initial_final_path).then_some(
+                NonProjectAssetAuthority::ProjectMedia {
+                    project_epoch,
+                    requested_path: normalized,
+                    initial_final_path,
+                    initial_etag,
+                },
+            )
+        }
+    }
+}
+
+fn application_owned_asset_roots<R: Runtime>(app: &AppHandle<R>) -> Vec<PathBuf> {
+    let resolver = app.path();
+    let mut roots = Vec::with_capacity(3);
+    if let Ok(path) = resolver.app_cache_dir() {
+        roots.push(normalized_path(&path));
+    }
+    if let Ok(path) = resolver.app_data_dir() {
+        roots.push(normalized_path(&path.join("OpenTake/Library")));
+    }
+    if let Ok(path) = resolver.resource_dir() {
+        roots.push(normalized_path(&path));
+    }
+    roots
+}
+
+fn path_is_at_or_below(path: &Path, root: &Path) -> bool {
+    paths_equal_for_authority(path, root) || relative_to_authority(path, root).is_some()
 }
 
 fn decode_request_path(uri_path: &str) -> Result<PathBuf, &'static str> {
@@ -541,7 +720,7 @@ fn retained_file_etag(file: &File, metadata: &std::fs::Metadata) -> std::io::Res
     ))
 }
 
-fn open_retained_regular_file(path: &Path) -> std::io::Result<(File, PathBuf)> {
+pub(crate) fn open_retained_regular_file(path: &Path) -> std::io::Result<(File, PathBuf)> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -588,17 +767,7 @@ pub(crate) fn validate_resident_regular_file(path: &Path) -> std::io::Result<Pat
 
 pub(crate) fn scope_allows_lexical_path(scope: &Scope, path: &Path) -> bool {
     let normalized: PathBuf = path.components().collect();
-    let options = glob::MatchOptions {
-        #[cfg(target_os = "windows")]
-        case_sensitive: false,
-        #[cfg(not(target_os = "windows"))]
-        case_sensitive: true,
-        require_literal_separator: true,
-        #[cfg(unix)]
-        require_literal_leading_dot: true,
-        #[cfg(not(unix))]
-        require_literal_leading_dot: false,
-    };
+    let options = scope_match_options();
     if scope
         .forbidden_patterns()
         .iter()
@@ -610,6 +779,20 @@ pub(crate) fn scope_allows_lexical_path(scope: &Scope, path: &Path) -> bool {
         .allowed_patterns()
         .iter()
         .any(|pattern| pattern.matches_path_with(&normalized, options))
+}
+
+fn scope_match_options() -> glob::MatchOptions {
+    glob::MatchOptions {
+        #[cfg(target_os = "windows")]
+        case_sensitive: false,
+        #[cfg(not(target_os = "windows"))]
+        case_sensitive: true,
+        require_literal_separator: true,
+        #[cfg(unix)]
+        require_literal_leading_dot: true,
+        #[cfg(not(unix))]
+        require_literal_leading_dot: false,
+    }
 }
 
 #[cfg(target_os = "macos")]

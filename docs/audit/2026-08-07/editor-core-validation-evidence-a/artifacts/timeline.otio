@@ -1,0 +1,211 @@
+{
+  "OTIO_SCHEMA": "Timeline.1",
+  "global_start_time": null,
+  "metadata": {},
+  "name": "Timeline Export",
+  "tracks": {
+    "OTIO_SCHEMA": "Stack.1",
+    "children": [
+      {
+        "OTIO_SCHEMA": "Track.1",
+        "children": [
+          {
+            "OTIO_SCHEMA": "Clip.1",
+            "effects": [],
+            "enabled": true,
+            "markers": [],
+            "media_reference": {
+              "OTIO_SCHEMA": "ExternalReference.1",
+              "available_range": {
+                "OTIO_SCHEMA": "TimeRange.1",
+                "duration": {
+                  "OTIO_SCHEMA": "RationalTime.1",
+                  "rate": 30,
+                  "value": 120
+                },
+                "start_time": {
+                  "OTIO_SCHEMA": "RationalTime.1",
+                  "rate": 30,
+                  "value": 0
+                }
+              },
+              "metadata": {},
+              "name": "audit-4k60-h264.mp4",
+              "target_url": "file:///docs/audit/2026-08-07/editor-core-validation-evidence-a/artifacts/audit-4k60-h264.mp4"
+            },
+            "metadata": {},
+            "name": "audit-4k60-h264.mp4",
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "duration": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 30,
+                "value": 60
+              },
+              "start_time": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 30,
+                "value": 10
+              }
+            }
+          }
+        ],
+        "effects": [],
+        "kind": "Video",
+        "markers": [],
+        "metadata": {},
+        "name": "video-primary",
+        "source_range": null
+      },
+      {
+        "OTIO_SCHEMA": "Track.1",
+        "children": [
+          {
+            "OTIO_SCHEMA": "Gap.1",
+            "effects": [],
+            "enabled": true,
+            "markers": [],
+            "metadata": {},
+            "name": "Gap",
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "duration": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 30,
+                "value": 15
+              },
+              "start_time": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 30,
+                "value": 0
+              }
+            }
+          },
+          {
+            "OTIO_SCHEMA": "Clip.1",
+            "effects": [],
+            "enabled": true,
+            "markers": [],
+            "media_reference": {
+              "OTIO_SCHEMA": "ExternalReference.1",
+              "available_range": {
+                "OTIO_SCHEMA": "TimeRange.1",
+                "duration": {
+                  "OTIO_SCHEMA": "RationalTime.1",
+                  "rate": 30,
+                  "value": 120
+                },
+                "start_time": {
+                  "OTIO_SCHEMA": "RationalTime.1",
+                  "rate": 30,
+                  "value": 0
+                }
+              },
+              "metadata": {},
+              "name": "audit-4k60-h264.mp4",
+              "target_url": "file:///docs/audit/2026-08-07/editor-core-validation-evidence-a/artifacts/audit-4k60-h264.mp4"
+            },
+            "metadata": {},
+            "name": "audit-4k60-h264.mp4",
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "duration": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 30,
+                "value": 30
+              },
+              "start_time": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 30,
+                "value": 0
+              }
+            }
+          }
+        ],
+        "effects": [],
+        "kind": "Video",
+        "markers": [],
+        "metadata": {},
+        "name": "video-overlay",
+        "source_range": null
+      },
+      {
+        "OTIO_SCHEMA": "Track.1",
+        "children": [
+          {
+            "OTIO_SCHEMA": "Gap.1",
+            "effects": [],
+            "enabled": true,
+            "markers": [],
+            "metadata": {},
+            "name": "Gap",
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "duration": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 30,
+                "value": 15
+              },
+              "start_time": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 30,
+                "value": 0
+              }
+            }
+          },
+          {
+            "OTIO_SCHEMA": "Clip.1",
+            "effects": [],
+            "enabled": true,
+            "markers": [],
+            "media_reference": {
+              "OTIO_SCHEMA": "ExternalReference.1",
+              "available_range": {
+                "OTIO_SCHEMA": "TimeRange.1",
+                "duration": {
+                  "OTIO_SCHEMA": "RationalTime.1",
+                  "rate": 30,
+                  "value": 30
+                },
+                "start_time": {
+                  "OTIO_SCHEMA": "RationalTime.1",
+                  "rate": 30,
+                  "value": 0
+                }
+              },
+              "metadata": {},
+              "name": "Offline",
+              "target_url": "media/"
+            },
+            "metadata": {},
+            "name": "Offline",
+            "source_range": {
+              "OTIO_SCHEMA": "TimeRange.1",
+              "duration": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 30,
+                "value": 30
+              },
+              "start_time": {
+                "OTIO_SCHEMA": "RationalTime.1",
+                "rate": 30,
+                "value": 0
+              }
+            }
+          }
+        ],
+        "effects": [],
+        "kind": "Video",
+        "markers": [],
+        "metadata": {},
+        "name": "captions",
+        "source_range": null
+      }
+    ],
+    "effects": [],
+    "markers": [],
+    "metadata": {},
+    "name": "tracks",
+    "source_range": null
+  }
+}

@@ -37,12 +37,28 @@ raw = File.read(WORKFLOW)
 assert(raw.include?(%q{printf ' %q' "$@"}), "native gate logs lack an exact command marker")
 windows_product = raw[/^  windows-product:\n.*?(?=^  windows-security:)/m]
 assert(windows_product, "canonical workflow lacks the Windows product job")
+windows_security = raw[/^  windows-security:\n.*?(?=^  web:)/m]
+assert(windows_security, "canonical workflow lacks the Windows security job")
+safe_filesystem = raw[/^  safe-filesystem:\n.*?(?=^  windows-red-evidence:)/m]
+assert(safe_filesystem, "canonical workflow lacks the safe-filesystem job")
 red_harness_raw = File.read(RED_HARNESS)
 assert(
   red_harness_raw.lines.map(&:strip).reject(&:empty?).last == "exit 0",
   "Windows expected-RED harness does not clear expected native failures"
 )
 mutations = {
+  "checkout-action-floating" => [
+    "actions/checkout@11d5960a326750d5838078e36cf38b85af677262",
+    "actions/checkout@v4",
+  ],
+  "cache-action-floating" => [
+    "actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830",
+    "actions/cache@v4",
+  ],
+  "upload-action-floating" => [
+    "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02",
+    "actions/upload-artifact@v4",
+  ],
   "pr-uses-merge" => ["github.event.pull_request.head.sha", "github.sha"],
   "checkout-not-bound" => ["ref: ${{ env.TARGET_SHA }}", "ref: main"],
   "checkout-shallow" => ["fetch-depth: 0", "fetch-depth: 1"],
@@ -95,14 +111,25 @@ mutations = {
 
 Dir.mktmpdir("c1b-ci-mutations") do |directory|
   mutations.each do |label, (before, after)|
-    assert(raw.include?(before), "canonical mutation token missing: #{label}")
+    safe_labels = %w[
+      checkout-action-floating
+      cache-action-floating
+      upload-action-floating
+      receipt-target-not-bound
+      receipt-not-always
+    ]
+    source = safe_labels.include?(label) ? safe_filesystem : raw
+    assert(source.include?(before), "canonical mutation token missing: #{label}")
     path = File.join(directory, "#{label}.yml")
-    File.write(path, raw.sub(before, after))
+    File.write(path, raw.sub(source, source.sub(before, after)))
     _out, _err, result = run_validator(path)
     assert(!result.success?, "validator accepted mutation #{label}")
   end
 
   structural_mutations = {
+    "duplicate-windows-security-key" => raw.sub(
+      "\n  web:\n", "\n#{windows_security}\n  web:\n"
+    ),
     "missing-windows-product" => raw.sub("  windows-product:\n", "  disabled-windows-product:\n"),
     "windows-product-target-not-bound" => raw.sub(
       windows_product,

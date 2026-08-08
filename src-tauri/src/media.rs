@@ -1159,26 +1159,6 @@ fn import_cancel_checkpoint(
     }
 }
 
-fn prepare_import_file(
-    engine: &MediaEngine,
-    path: &Path,
-    folder: Option<PreparedMediaFolderRef>,
-    cancel: Option<&opentake_media::MediaCancelToken>,
-) -> Result<Option<PreparedMediaImportOp>, CoreError> {
-    import_cancel_checkpoint(cancel)?;
-    if importable_clip_type(path).is_none() {
-        return Ok(None);
-    }
-    let probe = probe_media(engine, path);
-    import_cancel_checkpoint(cancel)?;
-    Ok(Some(PreparedMediaImportOp::ImportFile {
-        path: path.to_path_buf(),
-        name: display_name(path),
-        probe,
-        folder,
-    }))
-}
-
 /// Admit an imported asset's small grid poster to the project-scoped scheduler.
 /// The post-import snapshot proves the entry still belongs to the epoch being
 /// scheduled; if a project replacement won the race, old content is rejected.
@@ -2363,6 +2343,117 @@ fn list_top_level(dir: &Path) -> (Vec<PathBuf>, Vec<String>) {
 /// list reflects whatever imported successfully and carries the names of skipped
 /// unsupported files in `skipped` so the front end can toast them (upstream
 /// `mediaPanelToast`) instead of dropping them silently.
+pub(crate) const EXPLICIT_IMPORT_MAX_FILES: usize = 5_000;
+pub(crate) const EXPLICIT_IMPORT_MAX_AGGREGATE_BYTES: u64 = 100 * 1024 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug)]
+struct ExplicitImportLimits {
+    max_files: usize,
+    max_aggregate_bytes: u64,
+}
+
+const EXPLICIT_IMPORT_LIMITS: ExplicitImportLimits = ExplicitImportLimits {
+    max_files: EXPLICIT_IMPORT_MAX_FILES,
+    max_aggregate_bytes: EXPLICIT_IMPORT_MAX_AGGREGATE_BYTES,
+};
+
+struct RetainedExplicitImportSource {
+    requested_path: PathBuf,
+    final_path: PathBuf,
+    identity: FileIdentity,
+    admitted_bytes: u64,
+}
+
+impl RetainedExplicitImportSource {
+    fn open(path: &Path) -> std::io::Result<Self> {
+        // Reuse the local-asset boundary: Unix opens are non-blocking/no-follow;
+        // Windows opens use OPEN_NO_RECALL. The returned handle, rather than a
+        // later pathname reopen, supplies both metadata and ffprobe bytes.
+        let (file, final_path) = crate::safe_asset_protocol::open_retained_regular_file(path)?;
+        let admitted_bytes = file.metadata()?.len();
+        let identity = FileIdentity::from_file(file)?;
+        Ok(Self {
+            requested_path: path.to_path_buf(),
+            final_path,
+            identity,
+            admitted_bytes,
+        })
+    }
+
+    fn verify_current_path(&self) -> Result<u64, CoreError> {
+        let current = crate::safe_asset_protocol::open_retained_regular_file(&self.requested_path)
+            .and_then(|(file, _)| {
+                let bytes = file.metadata()?.len();
+                let identity = FileIdentity::from_file(file)?;
+                Ok((identity, bytes))
+            });
+        match current {
+            Ok((current, bytes)) if current == self.identity && bytes == self.admitted_bytes => {
+                Ok(bytes)
+            }
+            _ => Err(CoreError::Media(format!(
+                "explicit_import_source_changed_before_commit: {}",
+                self.requested_path.display()
+            ))),
+        }
+    }
+}
+
+struct PreparedExplicitImportBatch {
+    plan: Vec<PreparedMediaImportOp>,
+    sources: Vec<RetainedExplicitImportSource>,
+    skipped: Vec<String>,
+}
+
+fn prepare_explicit_import_batch(
+    engine: &MediaEngine,
+    paths: &[String],
+    limits: ExplicitImportLimits,
+) -> Result<PreparedExplicitImportBatch, String> {
+    if paths.len() > limits.max_files {
+        return Err(format!(
+            "explicit_import_files_limit_exceeded: limit={}",
+            limits.max_files
+        ));
+    }
+    let mut aggregate_bytes = 0_u64;
+    let mut plan = Vec::new();
+    let mut sources = Vec::new();
+    let mut skipped = Vec::new();
+    for path_text in paths {
+        let requested_path = PathBuf::from(path_text);
+        let Ok(source) = RetainedExplicitImportSource::open(&requested_path) else {
+            continue;
+        };
+        aggregate_bytes = aggregate_bytes
+            .checked_add(source.admitted_bytes)
+            .ok_or_else(|| "explicit_import_aggregate_bytes_limit_exceeded".to_string())?;
+        if aggregate_bytes > limits.max_aggregate_bytes {
+            return Err(format!(
+                "explicit_import_aggregate_bytes_limit_exceeded: limit={}",
+                limits.max_aggregate_bytes
+            ));
+        }
+        if importable_clip_type(&source.final_path).is_none() {
+            skipped.push(display_file_name(&source.final_path));
+            continue;
+        }
+        let probe = probe_media_file(engine, source.identity.as_file(), None);
+        plan.push(PreparedMediaImportOp::ImportFile {
+            path: source.final_path.clone(),
+            name: display_name(&source.final_path),
+            probe,
+            folder: None,
+        });
+        sources.push(source);
+    }
+    Ok(PreparedExplicitImportBatch {
+        plan,
+        sources,
+        skipped,
+    })
+}
+
 #[tauri::command]
 pub fn import_media(
     core: State<'_, AppCore>,
@@ -2379,38 +2470,57 @@ fn import_media_impl(
     prewarm: &prewarm::PrewarmScheduler,
     paths: Vec<String>,
 ) -> Result<MediaListDto, String> {
+    import_media_impl_with_options(core, engine, prewarm, paths, EXPLICIT_IMPORT_LIMITS, || {})
+}
+
+fn import_media_impl_with_options(
+    core: &AppCore,
+    engine: &MediaEngine,
+    prewarm: &prewarm::PrewarmScheduler,
+    paths: Vec<String>,
+    limits: ExplicitImportLimits,
+    before_commit: impl FnOnce(),
+) -> Result<MediaListDto, String> {
     core.ensure_project_mutable().map_err(|e| e.to_string())?;
     let project = core.runtime_snapshot();
     let project_dir = project
         .project_dir
         .as_ref()
         .ok_or_else(|| "no project open".to_string())?;
-    let mut skipped = Vec::new();
-    let mut plan = Vec::new();
-    for p in &paths {
-        let path = PathBuf::from(p);
-        if !path.is_file() {
-            continue;
-        }
-        // Only an unsupported *type* is a user-visible "skip"; a supported file
-        // that fails to import (unreadable etc.) is not reported here (matches the
-        // pre-existing best-effort behavior and upstream, which only toasts the
-        // unsupported-type case).
-        if importable_clip_type(&path).is_none() {
-            skipped.push(display_file_name(&path));
-            continue;
-        }
-        if let Some(operation) =
-            prepare_import_file(engine, &path, None, None).map_err(|e| e.to_string())?
-        {
-            plan.push(operation);
-        }
-    }
+    let PreparedExplicitImportBatch {
+        plan,
+        sources,
+        skipped,
+    } = prepare_explicit_import_batch(engine, &paths, limits)?;
+    before_commit();
     let committed = if plan.is_empty() {
         Vec::new()
     } else {
-        core.import_media_batch_for_project_persisted(project.project_epoch, project_dir, plan)
-            .map_err(|e| e.to_string())?
+        core.import_media_batch_for_project_persisted_checked(
+            project.project_epoch,
+            project_dir,
+            plan,
+            || {
+                let mut verified_aggregate_bytes = 0_u64;
+                for source in &sources {
+                    verified_aggregate_bytes = verified_aggregate_bytes
+                        .checked_add(source.verify_current_path()?)
+                        .ok_or_else(|| {
+                            CoreError::Media(
+                                "explicit_import_aggregate_bytes_limit_exceeded".to_string(),
+                            )
+                        })?;
+                    if verified_aggregate_bytes > limits.max_aggregate_bytes {
+                        return Err(CoreError::Media(format!(
+                            "explicit_import_aggregate_bytes_limit_exceeded: limit={}",
+                            limits.max_aggregate_bytes
+                        )));
+                    }
+                }
+                Ok(())
+            },
+        )
+        .map_err(|e| e.to_string())?
     };
     let prewarm_results = schedule_committed_posters(core, engine, prewarm, &committed);
     Ok(MediaListDto::from_core_with_import_results(
@@ -4418,34 +4528,6 @@ fn grant_proxy_asset_file<R: Runtime>(app: &AppHandle<R>, path: &Path) -> Result
         .map_err(|error| format!("media_proxy_scope_grant_failed:{error}"))
 }
 
-/// Grant the exact media files a freshly opened project references, so the
-/// WebView's asset protocol can serve them without re-approving each one
-/// through a dialog. Only materialized regular files are granted, never whole
-/// directories; grants are idempotent and a failure only leaves the media
-/// offline (the project itself already opened).
-pub(crate) fn grant_project_media_asset_scope<R: Runtime>(
-    app: &AppHandle<R>,
-    core: &AppCore,
-    project_dir: Option<&Path>,
-) {
-    grant_media_entries_asset_scope(app, &core.media().entries, project_dir);
-}
-
-fn grant_media_entries_asset_scope<R: Runtime>(
-    app: &AppHandle<R>,
-    entries: &[MediaManifestEntry],
-    project_dir: Option<&Path>,
-) {
-    for entry in entries {
-        let Some(path) = resolve_source_path(entry, project_dir) else {
-            continue;
-        };
-        if crate::fs_availability::is_materialized_regular_file(&path) {
-            let _ = app.asset_protocol_scope().allow_file(&path);
-        }
-    }
-}
-
 fn revoke_proxy_asset_file<R: Runtime>(app: &AppHandle<R>, path: &Path) {
     let scope = app.asset_protocol_scope();
     // persisted-scope writes on PathAllowed events. Add the exact-file deny
@@ -5525,6 +5607,179 @@ mod tests {
             .expect("reopen imported project");
         assert_eq!(reopened.media().entries.len(), 1);
         assert_eq!(reopened.media().entries[0].name, "still");
+    }
+
+    #[test]
+    fn explicit_import_rejects_file_count_and_aggregate_bytes_before_mutation() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let bundle = tmp.path().join("ImportLimits.opentake");
+        let first = tmp.path().join("first.mp4");
+        let second = tmp.path().join("second.mp4");
+        fs::write(&first, b"12345").unwrap();
+        fs::write(&second, b"67890").unwrap();
+        let paths = vec![
+            first.to_string_lossy().into_owned(),
+            second.to_string_lossy().into_owned(),
+        ];
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone())).unwrap();
+        let before = core.media();
+        let engine = engine_for(tmp.path());
+        let scheduler = prewarm::PrewarmScheduler::new(core.runtime_snapshot().project_epoch);
+
+        let file_error = import_media_impl_with_options(
+            &core,
+            &engine,
+            &scheduler,
+            paths.clone(),
+            ExplicitImportLimits {
+                max_files: 1,
+                max_aggregate_bytes: 100,
+            },
+            || {},
+        )
+        .expect_err("file-count admission must fail");
+        assert!(file_error.contains("files_limit_exceeded"), "{file_error}");
+        assert_eq!(core.media(), before);
+
+        let byte_error = import_media_impl_with_options(
+            &core,
+            &engine,
+            &scheduler,
+            paths,
+            ExplicitImportLimits {
+                max_files: 2,
+                max_aggregate_bytes: 9,
+            },
+            || {},
+        )
+        .expect_err("aggregate-byte admission must fail");
+        assert!(
+            byte_error.contains("aggregate_bytes_limit_exceeded"),
+            "{byte_error}"
+        );
+        assert_eq!(core.media(), before);
+
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).unwrap();
+        assert_eq!(reopened.media(), before);
+    }
+
+    #[test]
+    fn explicit_import_rejects_a_path_replacement_before_atomic_commit() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let bundle = tmp.path().join("ImportRace.opentake");
+        let source = tmp.path().join("still.png");
+        let retained_old = tmp.path().join("retained-old.png");
+        image::RgbaImage::from_pixel(32, 24, image::Rgba([10, 20, 30, 255]))
+            .save(&source)
+            .unwrap();
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone())).unwrap();
+        let before = core.media();
+        let engine = engine_for(tmp.path());
+        let scheduler = prewarm::PrewarmScheduler::new(core.runtime_snapshot().project_epoch);
+
+        let error = import_media_impl_with_options(
+            &core,
+            &engine,
+            &scheduler,
+            vec![source.to_string_lossy().into_owned()],
+            EXPLICIT_IMPORT_LIMITS,
+            || {
+                fs::rename(&source, &retained_old).unwrap();
+                image::RgbaImage::from_pixel(32, 24, image::Rgba([200, 100, 50, 255]))
+                    .save(&source)
+                    .unwrap();
+            },
+        )
+        .expect_err("a replaced selected path must fail before manifest mutation");
+        assert!(
+            error.contains("explicit_import_source_changed_before_commit"),
+            "{error}"
+        );
+        assert_eq!(core.media(), before);
+
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).unwrap();
+        assert_eq!(reopened.media(), before);
+    }
+
+    #[test]
+    fn explicit_import_rejects_in_place_growth_before_atomic_commit() {
+        use std::io::Write;
+
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let bundle = tmp.path().join("ImportGrowthRace.opentake");
+        let source = tmp.path().join("still.png");
+        image::RgbaImage::from_pixel(32, 24, image::Rgba([10, 20, 30, 255]))
+            .save(&source)
+            .unwrap();
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone())).unwrap();
+        let before = core.media();
+        let engine = engine_for(tmp.path());
+        let scheduler = prewarm::PrewarmScheduler::new(core.runtime_snapshot().project_epoch);
+
+        let error = import_media_impl_with_options(
+            &core,
+            &engine,
+            &scheduler,
+            vec![source.to_string_lossy().into_owned()],
+            EXPLICIT_IMPORT_LIMITS,
+            || {
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(&source)
+                    .unwrap()
+                    .write_all(b"grown-after-planning")
+                    .unwrap();
+            },
+        )
+        .expect_err("in-place growth must invalidate retained admission metadata");
+        assert!(
+            error.contains("explicit_import_source_changed_before_commit"),
+            "{error}"
+        );
+        assert_eq!(core.media(), before);
+
+        let reopened = AppCore::new();
+        reopened.open_project(bundle).unwrap();
+        assert_eq!(reopened.media(), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_import_rejects_a_fifo_without_waiting_for_a_writer() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let bundle = tmp.path().join("ImportFifo.opentake");
+        let fifo = tmp.path().join("blocked.mp4");
+        let fifo_name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `fifo_name` is a valid, NUL-terminated path in our temp dir.
+        assert_eq!(unsafe { libc::mkfifo(fifo_name.as_ptr(), 0o600) }, 0);
+        let core = AppCore::new();
+        core.save_project(Some(bundle)).unwrap();
+        let engine = engine_for(tmp.path());
+        let scheduler = prewarm::PrewarmScheduler::new(core.runtime_snapshot().project_epoch);
+
+        let started = std::time::Instant::now();
+        let imported = import_media_impl_with_options(
+            &core,
+            &engine,
+            &scheduler,
+            vec![fifo.to_string_lossy().into_owned()],
+            EXPLICIT_IMPORT_LIMITS,
+            || {},
+        )
+        .expect("unsupported special file must be skipped");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "non-blocking/no-recall admission must not wait for a FIFO writer"
+        );
+        assert!(imported.items.is_empty());
+        assert!(core.media().entries.is_empty());
     }
 
     #[test]
@@ -7462,66 +7717,6 @@ mod tests {
             "media_proxy_scope_regular_file_required"
         );
         assert!(!app.handle().asset_protocol_scope().is_allowed(&target));
-    }
-
-    #[test]
-    fn project_media_asset_scope_grants_external_sources_and_skips_missing() {
-        use opentake_domain::media::{MediaManifest, MediaSource};
-
-        let app = tauri::test::mock_app();
-        let handle = app.handle();
-        let temp = tempfile::tempdir().unwrap();
-        let clip = temp.path().join("clip.mp4");
-        fs::write(&clip, b"clip").unwrap();
-
-        // An external source must become reachable by the asset protocol the
-        // moment the project opens — thumbnails/previews load without another
-        // dialog grant. A missing file must not be granted.
-        let mut manifest = MediaManifest::new();
-        manifest.entries.push(opentake_domain::MediaManifestEntry {
-            id: "external".into(),
-            name: "clip".into(),
-            kind: opentake_domain::ClipType::Video,
-            source: MediaSource::External {
-                absolute_path: clip.to_string_lossy().into_owned(),
-            },
-            duration: 10.0,
-            generation_input: None,
-            source_width: None,
-            source_height: None,
-            source_fps: None,
-            has_audio: None,
-            color: None,
-            proxy: None,
-            folder_id: None,
-            cached_remote_url: None,
-            cached_remote_url_expires_at: None,
-        });
-        manifest.entries.push(opentake_domain::MediaManifestEntry {
-            id: "missing".into(),
-            name: "gone".into(),
-            kind: opentake_domain::ClipType::Video,
-            source: MediaSource::External {
-                absolute_path: temp.path().join("gone.mp4").to_string_lossy().into_owned(),
-            },
-            duration: 10.0,
-            generation_input: None,
-            source_width: None,
-            source_height: None,
-            source_fps: None,
-            has_audio: None,
-            color: None,
-            proxy: None,
-            folder_id: None,
-            cached_remote_url: None,
-            cached_remote_url_expires_at: None,
-        });
-
-        grant_media_entries_asset_scope(handle, &manifest.entries, None);
-        assert!(handle.asset_protocol_scope().is_allowed(&clip));
-        assert!(!handle
-            .asset_protocol_scope()
-            .is_allowed(temp.path().join("gone.mp4")));
     }
 
     #[cfg(unix)]

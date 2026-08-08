@@ -8,6 +8,7 @@ import { t } from "../../i18n";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useMediaStore } from "../../store/mediaStore";
 import { useProjectStore } from "../../store/projectStore";
+import { derivedResourceScheduler } from "../../lib/derivedResourceScheduler";
 
 vi.mock("../../lib/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../lib/api")>();
@@ -543,6 +544,78 @@ const searchItem: MediaItem = {
   hasAudio: false,
   favorite: false,
 };
+
+describe("MediaSearch derived thumbnail admission", () => {
+  it("bounds a 40-hit cold search and removes queued thumbnails on unmount", async () => {
+    vi.useFakeTimers();
+    const jobs = Array.from({ length: 4 }, () => deferred<null>());
+    let nextJob = 0;
+    vi.mocked(api.generateThumbnail).mockImplementation(() => jobs[nextJob++]!.promise);
+    vi.mocked(api.searchQuery).mockResolvedValue({
+      moments: Array.from({ length: 40 }, (_, index) => ({
+        mediaId: searchItem.id,
+        frame: index,
+        startSec: index,
+        endSec: index + 1,
+        score: 1 - index / 100,
+        isImage: false,
+      })),
+      spoken: [],
+      files: [],
+    });
+    useProjectStore.setState({ projectEpoch: 200, projectPath: "/search.opentake" });
+    useMediaStore.setState({ items: [searchItem], folders: [], importing: false, error: null });
+    derivedResourceScheduler.activateProject(200);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    let mounted = true;
+    try {
+      await act(async () =>
+        root.render(
+          React.createElement(MediaSearchResults, {
+            query: "forty",
+            nameMatches: [],
+            hasIndexableAssets: false,
+          }),
+        ),
+      );
+      await act(async () => vi.advanceTimersByTime(250));
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(api.generateThumbnail).toHaveBeenCalledTimes(4);
+      expect(derivedResourceScheduler.stats()).toEqual({
+        active: 4,
+        pending: 36,
+        inFlight: 40,
+        projectEpoch: 200,
+      });
+
+      await act(async () => root.unmount());
+      mounted = false;
+      expect(derivedResourceScheduler.stats()).toEqual({
+        active: 4,
+        pending: 0,
+        inFlight: 0,
+        projectEpoch: 200,
+      });
+    } finally {
+      if (mounted) await act(async () => root.unmount());
+      for (const job of jobs) job.resolve(null);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      vi.mocked(api.generateThumbnail).mockResolvedValue(null);
+      vi.mocked(api.searchQuery).mockResolvedValue(emptyResults());
+      vi.useRealTimers();
+    }
+    expect(derivedResourceScheduler.stats().active).toBe(0);
+  });
+});
 
 describe("MediaSearch result context menu", () => {
   it("replaces a hidden stale selection when a search result receives direct focus", async () => {

@@ -2,6 +2,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Clip, ClipType, PlaybackFrameEvent, Timeline, Track } from "../../lib/types";
+import { textContrastRatio } from "../../../test/contrast";
 
 const store = vi.hoisted(() => ({
   projectEpoch: 3,
@@ -42,6 +43,11 @@ const store = vi.hoisted(() => ({
     }>,
   },
   nativeFrame: null as PlaybackFrameEvent | null,
+  playbackCapability: {
+    checked: true,
+    available: true,
+    endpoint: "http://127.0.0.1:43123/frame",
+  },
 }));
 
 vi.mock("../../store/projectStore", () => ({
@@ -75,6 +81,11 @@ vi.mock("../../lib/api", async (importOriginal) => ({
 vi.mock("./nativePlaybackSession", () => ({
   useNativePlaybackPublication: () => store.nativeFrame,
   nativePlaybackController: { stop: vi.fn() },
+}));
+
+vi.mock("./previewEngine", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./previewEngine")>()),
+  useRustPlaybackCapability: () => store.playbackCapability,
 }));
 
 import { Preview } from "./Preview";
@@ -144,6 +155,11 @@ describe("Preview timeline rendering", () => {
       { id: "pip", name: "pip", type: "video", duration: 10, hasAudio: true, path: "/pip.mov" },
     ];
     store.nativeFrame = null;
+    store.playbackCapability = {
+      checked: true,
+      available: true,
+      endpoint: "http://127.0.0.1:43123/frame",
+    };
   });
 
   it("keeps paused timeline on DOM video without a composite image overlay", () => {
@@ -157,9 +173,21 @@ describe("Preview timeline rendering", () => {
 
     const html = renderToStaticMarkup(<Preview />);
 
+    expect(html).toContain('role="tablist"');
+    expect(html).toContain('role="tabpanel"');
+    expect(html).toContain('id="preview-content-panel"');
     expect(html).toContain("<video");
     expect(html.match(/data-rust-frame-slot=/g)).toHaveLength(2);
     expect(html).not.toContain("data:image/png");
+  });
+
+  it("keeps the empty-timeline message at WCAG AA normal-text contrast", () => {
+    store.timeline = timeline([]);
+    const html = renderToStaticMarkup(<Preview />);
+    const color = html.match(/<div style="[^"]*color:([^;"]+)[^"]*">暂无媒体<\/div>/)?.[1];
+
+    expect(color).toBeDefined();
+    expect(textContrastRatio(color!, "var(--bg-surface)")).toBeGreaterThanOrEqual(4.5);
   });
 
   it("keeps timeline DOM video visible while playing", () => {
@@ -197,6 +225,27 @@ describe("Preview timeline rendering", () => {
     expect(html).not.toContain('data-playback-surface="webkit"');
     expect(html).not.toContain("<video");
     expect(html.match(/data-rust-frame-slot=/g)).toHaveLength(2);
+  });
+
+  it("uses WebKit for a multi-video timeline when the native capability handshake fails", () => {
+    store.playbackCapability = { checked: true, available: false, endpoint: null };
+    store.timeline = timeline([
+      track({
+        id: "v2",
+        type: "video",
+        clips: [clip({ id: "upper", mediaRef: "pip", mediaType: "video" })],
+      }),
+      track({
+        id: "v1",
+        type: "video",
+        clips: [clip({ id: "lower", mediaRef: "base", mediaType: "video" })],
+      }),
+    ]);
+
+    const html = renderToStaticMarkup(<Preview />);
+
+    expect(html).toContain('data-playback-surface="webkit"');
+    expect(html.match(/<video/g)).toHaveLength(2);
   });
 
   it("mounts WebKit again when native startup fails after a WebKit decode failure", () => {

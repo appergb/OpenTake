@@ -3,7 +3,9 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { exactTimelineFrame, ScrubBar } from "./Preview";
+import type { MediaItem } from "../../lib/types";
+import { useEditorUiStore } from "../../store/uiStore";
+import { BadgeMenu, exactTimelineFrame, PreviewTabs, ScrubBar } from "./Preview";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
   .IS_REACT_ACT_ENVIRONMENT = true;
@@ -129,4 +131,183 @@ it("control-200c9fd6ec3f0f35 pointer scrub preview playhead", async () => {
   expect(onSeek).not.toHaveBeenCalled();
   expect(onExactSeek.mock.calls).toEqual([[26], [20], [0], [100]]);
   expect(document.activeElement).toBe(scrub);
+});
+
+it("gives preview tabs a connected tablist and roving keyboard behavior", async () => {
+  const item: MediaItem = {
+    id: "source",
+    name: "Source clip",
+    type: "video",
+    duration: 1,
+    hasAudio: false,
+    favorite: false,
+  };
+  useEditorUiStore.setState({ previewMediaId: item.id });
+  await act(async () => root.render(<PreviewTabs item={item} />));
+
+  const tablist = container.querySelector('[role="tablist"]');
+  const tabs = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+  expect(tablist).not.toBeNull();
+  expect(tabs).toHaveLength(2);
+  expect(tabs.map((tab) => tab.getAttribute("aria-selected"))).toEqual(["false", "true"]);
+  expect(tabs.map((tab) => tab.tabIndex)).toEqual([-1, 0]);
+  expect(tabs[1]?.getAttribute("aria-controls")).toBe("preview-content-panel");
+
+  tabs[1]?.focus();
+  await act(async () =>
+    tabs[1]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true })),
+  );
+  expect(useEditorUiStore.getState().previewMediaId).toBeNull();
+  expect(document.activeElement).toBe(tabs[0]);
+});
+
+it("moves focus through BadgeMenu listbox options and restores it on Escape", async () => {
+  const selected = vi.fn();
+  await act(async () =>
+    root.render(
+      <BadgeMenu
+        label="100%"
+        ariaLabel="Canvas zoom"
+        options={[
+          { key: "fit", label: "Fit", active: true, onSelect: selected },
+          { key: "100", label: "100%", active: false, onSelect: selected },
+          { key: "200", label: "200%", active: false, onSelect: selected },
+        ]}
+      />,
+    ),
+  );
+
+  const trigger = container.querySelector<HTMLButtonElement>('button[aria-haspopup="listbox"]')!;
+  expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  const listboxId = trigger.getAttribute("aria-controls");
+  expect(listboxId).toBeTruthy();
+  await act(async () => trigger.click());
+
+  const listbox = document.getElementById(listboxId!);
+  const options = [...listbox!.querySelectorAll<HTMLButtonElement>('[role="option"]')];
+  expect(listbox?.getAttribute("aria-label")).toBe("Canvas zoom");
+  expect(document.activeElement).toBe(options[0]);
+  expect(options.map((option) => option.tabIndex)).toEqual([0, -1, -1]);
+  await act(async () =>
+    document.activeElement?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "End", bubbles: true }),
+    ),
+  );
+  expect(document.activeElement).toBe(options[2]);
+  expect(options.map((option) => option.tabIndex)).toEqual([-1, -1, 0]);
+  await act(async () =>
+    document.activeElement?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }),
+    ),
+  );
+  expect(document.activeElement).toBe(options[1]);
+  expect(options.map((option) => option.tabIndex)).toEqual([-1, 0, -1]);
+  await act(async () =>
+    document.activeElement?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Home", bubbles: true }),
+    ),
+  );
+  expect(document.activeElement).toBe(options[0]);
+  expect(options.map((option) => option.tabIndex)).toEqual([0, -1, -1]);
+  await act(async () =>
+    document.activeElement?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }),
+    ),
+  );
+  expect(document.activeElement).toBe(options[1]);
+  expect(options.map((option) => option.tabIndex)).toEqual([-1, 0, -1]);
+  await act(async () =>
+    document.activeElement?.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    ),
+  );
+  expect(document.getElementById(listboxId!)).toBeNull();
+  expect(document.activeElement).toBe(trigger);
+});
+
+it("dismisses BadgeMenu on Tab or focusout without stealing focus and selects with Enter", async () => {
+  const selected = vi.fn();
+  const outside = document.createElement("button");
+  document.body.append(outside);
+  await act(async () =>
+    root.render(
+      <BadgeMenu
+        label="100%"
+        ariaLabel="Canvas zoom"
+        options={[
+          { key: "fit", label: "Fit", active: true, onSelect: selected },
+          { key: "100", label: "100%", active: false, onSelect: selected },
+        ]}
+      />,
+    ),
+  );
+
+  let trigger = container.querySelector<HTMLButtonElement>('button[aria-haspopup="listbox"]')!;
+  const listboxId = trigger.getAttribute("aria-controls")!;
+  await act(async () => trigger.click());
+  let option = document
+    .getElementById(listboxId)!
+    .querySelector<HTMLButtonElement>('[role="option"]')!;
+  await act(async () =>
+    option.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true })),
+  );
+  trigger = container.querySelector<HTMLButtonElement>('button[aria-haspopup="listbox"]')!;
+  expect(document.getElementById(listboxId)).toBeNull();
+  expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  expect(document.activeElement).not.toBe(trigger);
+
+  await act(async () => trigger.click());
+  option = document
+    .getElementById(listboxId)!
+    .querySelector<HTMLButtonElement>('[role="option"]')!;
+  expect(document.activeElement).toBe(option);
+  await act(async () => outside.focus());
+  trigger = container.querySelector<HTMLButtonElement>('button[aria-haspopup="listbox"]')!;
+  expect(document.getElementById(listboxId)).toBeNull();
+  expect(trigger.getAttribute("aria-expanded")).toBe("false");
+  expect(document.activeElement).toBe(outside);
+
+  await act(async () => trigger.click());
+  const options = [
+    ...document.getElementById(listboxId)!.querySelectorAll<HTMLButtonElement>('[role="option"]'),
+  ];
+  await act(async () =>
+    options[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })),
+  );
+  await act(async () =>
+    options[1]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })),
+  );
+  expect(selected).toHaveBeenCalledOnce();
+  expect(document.getElementById(listboxId)).toBeNull();
+  expect(document.activeElement).toBe(trigger);
+  outside.remove();
+});
+
+it("keeps only one BadgeMenu listbox open across assistive click activation", async () => {
+  await act(async () =>
+    root.render(
+      <div>
+        <BadgeMenu
+          label="100%"
+          ariaLabel="Canvas zoom"
+          options={[{ key: "100", label: "100%", active: true, onSelect: () => {} }]}
+        />
+        <BadgeMenu
+          label="1080p"
+          ariaLabel="Preview quality"
+          options={[{ key: "1080", label: "1080p", active: true, onSelect: () => {} }]}
+        />
+      </div>,
+    ),
+  );
+  const triggers = [
+    ...container.querySelectorAll<HTMLButtonElement>('button[aria-haspopup="listbox"]'),
+  ];
+
+  await act(async () => triggers[0]?.click());
+  await act(async () => triggers[1]?.click());
+
+  expect(container.querySelectorAll('[role="listbox"]')).toHaveLength(1);
+  expect(triggers[0]?.getAttribute("aria-expanded")).toBe("false");
+  expect(triggers[1]?.getAttribute("aria-expanded")).toBe("true");
 });

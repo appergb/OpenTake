@@ -596,9 +596,12 @@ export function ExportDialog() {
 
           {error && (
             <div
+              role="alert"
+              aria-live="assertive"
+              aria-atomic="true"
               style={{
                 fontSize: "var(--fs-xs)",
-                color: "var(--accent-danger, #ff6b6b)",
+                color: "var(--text-primary)",
                 background: "rgba(255,107,107,0.08)",
                 borderRadius: "var(--radius-xs-sm)",
                 padding: "6px 8px",
@@ -649,7 +652,7 @@ export function ExportDialog() {
               background: "var(--accent-primary)",
               border: "var(--bw-thin) solid var(--accent-primary)",
               borderRadius: "var(--radius-sm)",
-              color: "#fff",
+              color: "#111",
               fontSize: "var(--fs-sm)",
               fontWeight: "var(--fw-medium)",
               cursor: busy ? "wait" : "pointer",
