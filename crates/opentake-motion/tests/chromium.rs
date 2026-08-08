@@ -10,7 +10,7 @@ mod live {
         Arc,
     };
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use opentake_motion::{
         HeadlessChromiumRenderer, MotionCache, MotionCancellationToken, MotionClipSource,
@@ -38,6 +38,14 @@ mod live {
         .with_browser_path(browser())
     }
 
+    fn four_k_renderer(root: &std::path::Path) -> HeadlessChromiumRenderer {
+        HeadlessChromiumRenderer::new(
+            MotionCache::new(root),
+            SandboxPolicy::offline_with_timeout(Duration::from_secs(180)),
+        )
+        .with_browser_path(browser())
+    }
+
     fn live_profiles() -> BTreeSet<PathBuf> {
         let prefix = format!("opentake-chromium-{}-", std::process::id());
         fs::read_dir(std::env::temp_dir())
@@ -61,6 +69,112 @@ mod live {
             rgba.into_raw(),
             false,
         ))
+    }
+
+    pub(super) fn wrapper_probe() {
+        let root = tempfile::tempdir().unwrap();
+        let document = r#"<!doctype html>
+          <html style="margin:0;width:100%;height:100%;background:rgb(12,34,56)">
+          <body style="margin:0;width:100%;height:100%;background:rgb(12,34,56)">
+            <div id="edge" style="position:fixed;right:0;bottom:0;width:1px;height:1px;background:rgb(1,2,3)"></div>
+            <script>
+              if (!window.OpenTake) throw new Error('child OpenTake clock missing');
+              OpenTake.onSeek(() => {
+                let parentDomAccessible = true;
+                try { void window.parent.document.documentElement; }
+                catch (error) { parentDomAccessible = !(error instanceof DOMException); }
+                const isolated = window.top !== window
+                  && !parentDomAccessible
+                  && location.origin === 'null';
+                const exactViewport = window.innerWidth === 48
+                  && window.innerHeight === 32
+                  && visualViewport.width === 48
+                  && visualViewport.height === 32;
+                if (!isolated || !exactViewport) {
+                  fetch('https://example.com/wrapper-contract-violation');
+                  return;
+                }
+                edge.style.background = 'rgb(7,8,9)';
+              });
+            </script>
+          </body></html>"#;
+        let rendered = renderer(root.path())
+            .render(&MotionRenderRequest::new(
+                MotionSource::code(document),
+                10,
+                1,
+                48,
+                32,
+            ))
+            .unwrap();
+        let pixels = image::open(&rendered.frames[0]).unwrap().to_rgba8();
+        assert_eq!(pixels.dimensions(), (48, 32));
+        assert_eq!(pixels.get_pixel(0, 0).0, [12, 34, 56, 255]);
+        assert_eq!(
+            pixels.get_pixel(47, 31).0,
+            [7, 8, 9, 255],
+            "child seek must run in the unique default child context and preserve legal right/bottom-edge content"
+        );
+    }
+
+    pub(super) fn four_k_budget_smoke() {
+        const WIDTH: u32 = 3840;
+        const HEIGHT: u32 = 2160;
+
+        let opaque_root = tempfile::tempdir().unwrap();
+        let opaque_started = Instant::now();
+        let opaque = four_k_renderer(opaque_root.path())
+            .render(
+                &MotionRenderRequest::new(
+                    MotionSource::code(
+                        r#"<!doctype html><style>html,body{margin:0;width:100%;height:100%;background:rgb(12,34,56)}</style>"#,
+                    ),
+                    30,
+                    1,
+                    WIDTH,
+                    HEIGHT,
+                )
+                .with_transparent(false),
+            )
+            .unwrap();
+        let opaque_elapsed = opaque_started.elapsed();
+        let opaque_pixels = image::open(&opaque.frames[0]).unwrap().to_rgba8();
+        assert_eq!(opaque_pixels.dimensions(), (WIDTH, HEIGHT));
+        assert!(
+            opaque_pixels.pixels().all(|pixel| pixel.0[3] == 255),
+            "the 4K opaque smoke frame must remain fully opaque"
+        );
+        eprintln!(
+            "opentake-motion 4K opaque single-frame elapsed_ms={}",
+            opaque_elapsed.as_millis()
+        );
+
+        let transparent_root = tempfile::tempdir().unwrap();
+        let transparent_started = Instant::now();
+        let transparent = four_k_renderer(transparent_root.path())
+            .render(&MotionRenderRequest::new(
+                MotionSource::code(
+                    r#"<!doctype html><style>html,body{margin:0;width:100%;height:100%;background:transparent}#fill{position:fixed;inset:-16px;background:rgba(10,20,30,.5)}</style><div id="fill"></div>"#,
+                ),
+                30,
+                1,
+                WIDTH,
+                HEIGHT,
+            ))
+            .unwrap();
+        let transparent_elapsed = transparent_started.elapsed();
+        let transparent_pixels = image::open(&transparent.frames[0]).unwrap().to_rgba8();
+        assert_eq!(transparent_pixels.dimensions(), (WIDTH, HEIGHT));
+        assert!(
+            transparent_pixels
+                .pixels()
+                .all(|pixel| pixel.0[3] > 0 && pixel.0[3] < 255),
+            "the 4K transparent smoke frame must retain non-trivial alpha"
+        );
+        eprintln!(
+            "opentake-motion 4K transparent single-frame elapsed_ms={}",
+            transparent_elapsed.as_millis()
+        );
     }
 
     pub(super) fn run() {
@@ -428,6 +542,18 @@ mod live {
             "success, policy failure, timeout, crash, and cancellation must clean browser profiles"
         );
     }
+}
+
+#[cfg(feature = "chromium")]
+#[test]
+fn host_wrapper_context_csp_and_guard_probe() {
+    live::wrapper_probe();
+}
+
+#[cfg(feature = "chromium")]
+#[test]
+fn four_k_single_frame_opaque_and_transparent_budget_smoke() {
+    live::four_k_budget_smoke();
 }
 
 #[cfg(feature = "chromium")]

@@ -333,19 +333,27 @@ impl Crc32 {
 /// Its deterministic fallback flow is:
 /// 1. Launch an offscreen Chromium with no network, an empty profile, and no
 ///    filesystem access beyond the served document — applying [`SandboxPolicy`].
-/// 2. `Emulation.setDeviceMetricsOverride` to the requested `width`×`height`.
-/// 3. `Page.addScriptToEvaluateOnNewDocument` with
-///    [`deterministic_clock_script`] so the page clock is frozen before author
-///    code runs.
-/// 4. `Emulation.setVirtualTimePolicy { policy: "pause" }` to stop real time.
-/// 5. Navigate to the document (inline `data:` URL for `Code`, or the template's
-///    served `entry`).
-/// 6. For each frame `i` in `0..duration_frames`: advance virtual time to
-///    `i / fps` and call `OpenTake.seek(i / fps)`. Each black/white sample uses
-///    a fresh paused PageHandler with a bounded compositor screencast; isolated
-///    stable samples recover transparency before writing
-///    `cache_dir/frame_iiiii.png`.
-/// 7. Return the [`RenderedClip`].
+/// 2. Create an engine-owned `(width + 1)`×`(height + 1)` host document. Author
+///    markup runs in an exact-size `<iframe sandbox="allow-scripts">`; the
+///    external row/column is a compositor-generation guard.
+/// 3. Auto-attach the sandboxed OOPIF paused, install
+///    [`deterministic_clock_script`] plus Fetch/Log enforcement in its own CDP
+///    session, then resume it. This guarantees the clock and network policy are
+///    active before author code runs.
+/// 4. `Emulation.setVirtualTimePolicy { policy: "pause" }` in the author session
+///    to stop real time.
+/// 5. For each frame `i`, call `OpenTake.seek(i / fps)` in the author context.
+///    Every black/white candidate uses a fresh paused main-target PageHandler:
+///    an opaque seed precedes screencast start, then unique transition and
+///    desired guard colors prove compositor generations before the guard is
+///    cropped and independent candidates are compared exactly.
+/// 6. Return the [`RenderedClip`].
+///
+/// Compatibility boundary: author code is intentionally not top-level
+/// (`window.top != window`), has an opaque `null` origin, and cannot read or
+/// navigate the host DOM. Motion code that requires parent/same-origin access is
+/// unsupported; declared external resources continue to use the exact
+/// [`SandboxPolicy`] allowlist.
 ///
 /// The CDP wiring is gated behind the `chromium` cargo feature so the default
 /// build does not require a browser or websocket dependency. The live path
@@ -546,7 +554,7 @@ mod chromium_backend {
             })?;
         trace(format!("browser={}", browser_path.display()));
 
-        let document = match &req.source {
+        let author_document = match &req.source {
             MotionSource::Code { html_css_js } => sandboxed_document(html_css_js, &renderer.policy),
             MotionSource::Template { id, .. } => {
                 return Err(MotionError::unknown_template(format!(
@@ -554,6 +562,16 @@ mod chromium_backend {
                 )));
             }
         };
+        let guarded_width = req
+            .width
+            .checked_add(1)
+            .ok_or_else(|| MotionError::render_failed("Chromium host guard width overflowed"))?;
+        let guarded_height = req
+            .height
+            .checked_add(1)
+            .ok_or_else(|| MotionError::render_failed("Chromium host guard height overflowed"))?;
+        let document =
+            host_wrapper_document(&author_document, req.width, req.height, &renderer.policy);
 
         let hash = content_hash(req);
         if renderer.cache.is_cached(req) {
@@ -612,31 +630,80 @@ mod chromium_backend {
             json!({"patterns": [{"urlPattern": "*", "requestStage": "Request"}]}),
             Some(&session),
         )?;
-        cdp.set_device_metrics(&session, req.width, req.height)?;
+        cdp.set_device_metrics(&session, guarded_width, guarded_height)?;
         let alpha = if req.transparent { 0.0 } else { 1.0 };
         cdp.command(
             "Emulation.setDefaultBackgroundColorOverride",
             json!({"color": {"r": 255, "g": 255, "b": 255, "a": alpha}}),
             Some(&session),
         )?;
-        cdp.command(
-            "Page.addScriptToEvaluateOnNewDocument",
-            json!({"source": deterministic_clock_script()}),
-            Some(&session),
-        )?;
-
-        let url = HeadlessChromiumRenderer::data_url_for_code(&document);
-        cdp.command("Page.navigate", json!({"url": url}), Some(&session))?;
-        cdp.wait_for_event("Page.loadEventFired", Some(&session))?;
+        let installed = install_host_document(&mut cdp, &session, &document)?;
         trace("inline motion document loaded");
-        // Pausing before navigation also pauses the load lifecycle itself in
-        // recent Chromium. The deterministic clock is already installed before
-        // author code; freeze the browser's own timeline immediately after the
-        // synchronous inline document has loaded and before any frame capture.
+        cdp.ensure_no_blocked_url()?;
+        let author_session = installed.author_session_id;
+        let author_context_id = installed.author_context_id;
+        let contract = cdp.command(
+            "Runtime.evaluate",
+            json!({
+                "expression": r#"(() => {
+                  let parentAccessError = '';
+                  try { void window.parent.document.documentElement; }
+                  catch (error) { parentAccessError = error && error.name || ''; }
+                  return {
+                    clockInstalled: !!(window.OpenTake && window.OpenTake.__installed),
+                    isChild: window.top !== window,
+                    parentAccessError,
+                    origin: location.origin,
+                    innerWidth: window.innerWidth,
+                    innerHeight: window.innerHeight,
+                    visualWidth: window.visualViewport && window.visualViewport.width,
+                    visualHeight: window.visualViewport && window.visualViewport.height
+                  };
+                })()"#,
+                "contextId": author_context_id,
+                "returnByValue": true
+            }),
+            Some(&author_session),
+        )?;
+        let contract_value = contract
+            .get("result")
+            .and_then(|result| result.get("value"))
+            .ok_or_else(|| {
+                MotionError::render_failed(
+                    "Chromium author frame did not return its sandbox contract",
+                )
+            })?;
+        let exact_author_context = contract_value
+            .get("clockInstalled")
+            .and_then(Value::as_bool)
+            == Some(true)
+            && contract_value.get("isChild").and_then(Value::as_bool) == Some(true)
+            && contract_value
+                .get("parentAccessError")
+                .and_then(Value::as_str)
+                == Some("SecurityError")
+            && contract_value.get("origin").and_then(Value::as_str) == Some("null")
+            && contract_value.get("innerWidth").and_then(Value::as_u64)
+                == Some(u64::from(req.width))
+            && contract_value.get("innerHeight").and_then(Value::as_u64)
+                == Some(u64::from(req.height))
+            && contract_value.get("visualWidth").and_then(Value::as_f64)
+                == Some(f64::from(req.width))
+            && contract_value.get("visualHeight").and_then(Value::as_f64)
+                == Some(f64::from(req.height));
+        if !exact_author_context {
+            return Err(MotionError::render_failed(
+                "Chromium author frame violated the isolated viewport contract",
+            ));
+        }
+        // Pausing before installing the host document also pauses its load
+        // lifecycle in recent Chromium. The deterministic clock is installed
+        // before the author child is created; freeze the browser's own timeline
+        // immediately after that child has loaded and before any frame capture.
         cdp.command(
             "Emulation.setVirtualTimePolicy",
             json!({"policy": "pause"}),
-            Some(&session),
+            Some(&author_session),
         )?;
         cdp.ensure_no_blocked_url()?;
 
@@ -655,9 +722,10 @@ mod chromium_backend {
                 json!({
                     "expression": expression,
                     "returnByValue": true,
-                    "awaitPromise": true
+                    "awaitPromise": true,
+                    "contextId": author_context_id
                 }),
-                Some(&session),
+                Some(&author_session),
             )?;
             trace(format!("frame {index}: seek complete"));
             if evaluated
@@ -666,13 +734,13 @@ mod chromium_backend {
                 .is_some()
             {
                 return Err(MotionError::render_failed(format!(
-                    "author document failed while seeking frame {index}: {evaluated}"
+                    "author document failed while seeking frame {index}"
                 )));
             }
             cdp.ensure_no_blocked_url()?;
 
             trace(format!("frame {index}: compositor settle start"));
-            cdp.settle_compositor(&session)?;
+            cdp.settle_compositor(&author_session)?;
             trace(format!("frame {index}: compositor settle complete"));
             cdp.ensure_no_blocked_url()?;
 
@@ -726,6 +794,13 @@ mod chromium_backend {
     }
 
     fn sandboxed_document(document: &str, policy: &SandboxPolicy) -> String {
+        let csp = sandbox_csp(policy, "'none'");
+        format!(
+            "<meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\"><style>html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}}</style>{document}"
+        )
+    }
+
+    fn sandbox_csp(policy: &SandboxPolicy, frame_src: &str) -> String {
         let origins = policy
             .allowed_origins
             .iter()
@@ -737,12 +812,210 @@ mod chromium_backend {
         } else {
             origins
         };
-        let csp = format!(
-            "default-src 'none'; script-src 'unsafe-inline' data: {sources}; style-src 'unsafe-inline' data: {sources}; img-src data: {sources}; media-src data: {sources}; font-src data: {sources}; connect-src {sources}; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; worker-src 'none'"
-        );
         format!(
-            "<meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\"><style>html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}}</style>{document}"
+            "default-src 'none'; script-src 'unsafe-inline' data: {sources}; style-src 'unsafe-inline' data: {sources}; img-src data: {sources}; media-src data: {sources}; font-src data: {sources}; connect-src {sources}; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src {frame_src}; worker-src 'none'"
         )
+    }
+
+    fn host_wrapper_document(
+        author_document: &str,
+        width: u32,
+        height: u32,
+        policy: &SandboxPolicy,
+    ) -> String {
+        let author_url = format!(
+            "data:text/html;charset=utf-8,{}",
+            percent_encode_html(author_document)
+        );
+        let csp = sandbox_csp(policy, "data:");
+        format!(
+            "<!doctype html><html><head><meta http-equiv=\"Content-Security-Policy\" content=\"{csp}\"><style>html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:transparent}}#opentake-host-background{{position:fixed;inset:0;z-index:0;background:transparent}}iframe{{position:absolute;left:0;top:0;z-index:1;width:{width}px;height:{height}px;border:0;display:block;background:transparent}}</style></head><body><div id=\"opentake-host-background\" aria-hidden=\"true\"></div><iframe sandbox=\"allow-scripts\" referrerpolicy=\"no-referrer\" src=\"{author_url}\"></iframe></body></html>"
+        )
+    }
+
+    struct InstalledHost {
+        author_session_id: String,
+        author_context_id: u64,
+    }
+
+    fn install_host_document(
+        cdp: &mut Cdp,
+        session: &str,
+        document: &str,
+    ) -> MotionResult<InstalledHost> {
+        cdp.command(
+            "Target.setAutoAttach",
+            json!({
+                "autoAttach": true,
+                "waitForDebuggerOnStart": true,
+                "flatten": true,
+                "filter": [
+                    {"type": "iframe", "exclude": false},
+                    {"exclude": true}
+                ]
+            }),
+            Some(session),
+        )?;
+        let initial_tree = cdp.command("Page.getFrameTree", json!({}), Some(session))?;
+        let main_frame_id = initial_tree
+            .get("frameTree")
+            .and_then(|tree| tree.get("frame"))
+            .and_then(|frame| frame.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                MotionError::render_failed("Chromium about:blank frame tree has no root frame id")
+            })?;
+        cdp.command(
+            "Page.setDocumentContent",
+            json!({"frameId": main_frame_id, "html": document}),
+            Some(session),
+        )?;
+
+        let attached =
+            cdp.wait_for_event_matching("Target.attachedToTarget", Some(session), |event| {
+                let params = event.get("params");
+                params
+                    .and_then(|params| params.get("waitingForDebugger"))
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                    && params
+                        .and_then(|params| params.get("targetInfo"))
+                        .and_then(|target| target.get("type"))
+                        .and_then(Value::as_str)
+                        == Some("iframe")
+            })?;
+        let author_session_id = attached
+            .get("params")
+            .and_then(|params| params.get("sessionId"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                MotionError::render_failed("Chromium author iframe attach has no child session")
+            })?;
+        let author_frame_id = attached
+            .get("params")
+            .and_then(|params| params.get("targetInfo"))
+            .and_then(|target| target.get("targetId"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| {
+                MotionError::render_failed("Chromium author iframe attach has no target id")
+            })?;
+        for (method, params) in [
+            ("Runtime.enable", json!({})),
+            ("Page.enable", json!({})),
+            ("Log.enable", json!({})),
+            (
+                "Fetch.enable",
+                json!({"patterns": [{"urlPattern": "*", "requestStage": "Request"}]}),
+            ),
+            (
+                "Page.addScriptToEvaluateOnNewDocument",
+                json!({"source": deterministic_clock_script()}),
+            ),
+        ] {
+            cdp.command(method, params, Some(&author_session_id))?;
+        }
+        cdp.command(
+            "Runtime.runIfWaitingForDebugger",
+            json!({}),
+            Some(&author_session_id),
+        )?;
+
+        let navigated = cdp.wait_for_author_event(
+            "Page.frameNavigated",
+            &author_session_id,
+            &author_frame_id,
+            |event| {
+                event
+                    .get("params")
+                    .and_then(|params| params.get("frame"))
+                    .and_then(|frame| frame.get("id"))
+                    .and_then(Value::as_str)
+                    == Some(author_frame_id.as_str())
+            },
+        )?;
+        validate_author_navigation(&navigated, &author_frame_id, &main_frame_id)?;
+        let context = cdp.wait_for_author_event(
+            "Runtime.executionContextCreated",
+            &author_session_id,
+            &author_frame_id,
+            |event| {
+                let auxiliary = event
+                    .get("params")
+                    .and_then(|params| params.get("context"))
+                    .and_then(|context| context.get("auxData"));
+                auxiliary
+                    .and_then(|auxiliary| auxiliary.get("frameId"))
+                    .and_then(Value::as_str)
+                    == Some(author_frame_id.as_str())
+                    && auxiliary
+                        .and_then(|auxiliary| auxiliary.get("isDefault"))
+                        .and_then(Value::as_bool)
+                        == Some(true)
+            },
+        )?;
+        let author_context_id = context
+            .get("params")
+            .and_then(|params| params.get("context"))
+            .and_then(|context| context.get("id"))
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                MotionError::render_failed(
+                    "Chromium author frame has no default JavaScript execution context",
+                )
+            })?;
+        cdp.wait_for_author_event(
+            "Page.frameStoppedLoading",
+            &author_session_id,
+            &author_frame_id,
+            |event| {
+                event
+                    .get("params")
+                    .and_then(|params| params.get("frameId"))
+                    .and_then(Value::as_str)
+                    == Some(author_frame_id.as_str())
+            },
+        )?;
+        cdp.wait_for_event("Page.loadEventFired", Some(&author_session_id))?;
+        cdp.ensure_no_blocked_url()?;
+
+        Ok(InstalledHost {
+            author_session_id,
+            author_context_id,
+        })
+    }
+
+    fn validate_author_navigation(
+        event: &Value,
+        author_frame_id: &str,
+        main_frame_id: &str,
+    ) -> MotionResult<()> {
+        let frame = event
+            .get("params")
+            .and_then(|params| params.get("frame"))
+            .ok_or_else(|| MotionError::render_failed("Chromium author navigation has no frame"))?;
+        if frame.get("id").and_then(Value::as_str) != Some(author_frame_id) {
+            return Err(MotionError::render_failed(
+                "Chromium author navigation does not match its iframe target",
+            ));
+        }
+        if frame.get("parentId").and_then(Value::as_str) != Some(main_frame_id) {
+            return Err(MotionError::render_failed(
+                "Chromium author iframe is not a child of the host frame",
+            ));
+        }
+        if !frame
+            .get("url")
+            .and_then(Value::as_str)
+            .is_some_and(|url| url.starts_with("data:"))
+        {
+            return Err(MotionError::render_failed(
+                "Chromium author iframe did not commit a data document",
+            ));
+        }
+        Ok(())
     }
 
     fn check_abort(renderer: &HeadlessChromiumRenderer, deadline: Instant) -> MotionResult<()> {
@@ -1050,6 +1323,7 @@ mod chromium_backend {
         deadline: Instant,
         blocked_url: Option<String>,
         pending_events: Vec<Value>,
+        next_capture_generation: u32,
     }
 
     impl Cdp {
@@ -1067,6 +1341,7 @@ mod chromium_backend {
                 deadline,
                 blocked_url: None,
                 pending_events: Vec::new(),
+                next_capture_generation: 0,
             }
         }
 
@@ -1120,6 +1395,77 @@ mod chromium_backend {
             }
         }
 
+        fn wait_for_event_matching(
+            &mut self,
+            method: &str,
+            session: Option<&str>,
+            mut predicate: impl FnMut(&Value) -> bool,
+        ) -> MotionResult<Value> {
+            if let Some(index) = self.pending_events.iter().position(|event| {
+                event.get("method").and_then(Value::as_str) == Some(method)
+                    && session.is_none_or(|expected| {
+                        event.get("sessionId").and_then(Value::as_str) == Some(expected)
+                    })
+                    && predicate(event)
+            }) {
+                return Ok(self.pending_events.remove(index));
+            }
+            loop {
+                let value = self.read()?;
+                if value.get("method").and_then(Value::as_str) == Some(method)
+                    && session.is_none_or(|expected| {
+                        value.get("sessionId").and_then(Value::as_str) == Some(expected)
+                    })
+                    && predicate(&value)
+                {
+                    return Ok(value);
+                }
+                self.handle_event_or_queue(value)?;
+            }
+        }
+
+        fn wait_for_author_event(
+            &mut self,
+            method: &str,
+            session: &str,
+            author_frame_id: &str,
+            mut predicate: impl FnMut(&Value) -> bool,
+        ) -> MotionResult<Value> {
+            loop {
+                if let Some(index) = self
+                    .pending_events
+                    .iter()
+                    .position(|event| is_frame_detached_event(event, session, author_frame_id))
+                {
+                    self.pending_events.remove(index);
+                    return Err(MotionError::render_failed(
+                        "Chromium author frame detached before loading completed",
+                    ));
+                }
+                if let Some(index) = self.pending_events.iter().position(|event| {
+                    event.get("method").and_then(Value::as_str) == Some(method)
+                        && event.get("sessionId").and_then(Value::as_str) == Some(session)
+                        && predicate(event)
+                }) {
+                    return Ok(self.pending_events.remove(index));
+                }
+
+                let value = self.read()?;
+                if is_frame_detached_event(&value, session, author_frame_id) {
+                    return Err(MotionError::render_failed(
+                        "Chromium author frame detached before loading completed",
+                    ));
+                }
+                if value.get("method").and_then(Value::as_str) == Some(method)
+                    && value.get("sessionId").and_then(Value::as_str) == Some(session)
+                    && predicate(&value)
+                {
+                    return Ok(value);
+                }
+                self.handle_event_or_queue(value)?;
+            }
+        }
+
         fn ensure_no_blocked_url(&mut self) -> MotionResult<()> {
             if let Some(blocked) = self.blocked_url.take() {
                 Err(MotionError::sandbox(format!(
@@ -1161,6 +1507,7 @@ mod chromium_backend {
             Ok(())
         }
 
+        #[cfg(test)]
         fn start_screencast(&mut self, session: &str, width: u32, height: u32) -> MotionResult<()> {
             self.command(
                 "Page.startScreencast",
@@ -1197,6 +1544,18 @@ mod chromium_backend {
             frame_index: usize,
             background: &str,
         ) -> MotionResult<image::RgbaImage> {
+            let generation = self.next_capture_generation;
+            self.next_capture_generation =
+                self.next_capture_generation.checked_add(1).ok_or_else(|| {
+                    MotionError::render_failed("Chromium capture generation overflowed")
+                })?;
+            let (seed, transition) = capture_generation_colors(generation)?;
+            let guarded_width = width
+                .checked_add(1)
+                .ok_or_else(|| MotionError::render_failed("Chromium guard width overflowed"))?;
+            let guarded_height = height
+                .checked_add(1)
+                .ok_or_else(|| MotionError::render_failed("Chromium guard height overflowed"))?;
             let attached = self.command(
                 "Target.attachToTarget",
                 json!({"targetId": target_id, "flatten": true}),
@@ -1211,30 +1570,48 @@ mod chromium_backend {
                     json!({"policy": "pause"}),
                     Some(&capture_session),
                 )?;
+                self.set_host_background(&capture_session, seed)?;
                 self.command(
-                    "Emulation.setDefaultBackgroundColorOverride",
+                    "Page.startScreencast",
                     json!({
-                        "color": {
-                            "r": rgb[0],
-                            "g": rgb[1],
-                            "b": rgb[2],
-                            "a": 1.0
-                        }
+                        "format": "png",
+                        "maxWidth": guarded_width,
+                        "maxHeight": guarded_height,
+                        "everyNthFrame": 1
                     }),
                     Some(&capture_session),
                 )?;
-                self.start_screencast(&capture_session, width, height)?;
                 started = true;
-                self.command("Page.bringToFront", json!({}), Some(&capture_session))?;
-                let png = self.receive_and_ack_screencast_png(&capture_session, frame_index)?;
-                let image = decode_viewport_png(&png, background, frame_index)?;
-                if image.dimensions() != (width, height) {
-                    return Err(MotionError::render_failed(format!(
-                        "Chromium isolated {background} screencast has the wrong size for frame {frame_index}: actual={:?}, expected=({width}, {height})",
-                        image.dimensions()
-                    )));
-                }
-                Ok(image)
+                self.ensure_no_blocked_url()?;
+                trace(format!(
+                    "frame {frame_index}: {background} transition guard start"
+                ));
+                self.set_host_background(&capture_session, transition)?;
+                let transition_image = self.receive_guarded_generation(
+                    &capture_session,
+                    transition,
+                    width,
+                    height,
+                    frame_index,
+                    background,
+                )?;
+                drop(transition_image);
+                trace(format!(
+                    "frame {frame_index}: {background} transition guard complete; desired guard start"
+                ));
+                self.set_host_background(&capture_session, rgb)?;
+                let desired_image = self.receive_guarded_generation(
+                    &capture_session,
+                    rgb,
+                    width,
+                    height,
+                    frame_index,
+                    background,
+                )?;
+                trace(format!(
+                    "frame {frame_index}: {background} desired guard complete"
+                ));
+                crop_guarded_image(desired_image, width, height, frame_index)
             })();
 
             let stopped = if started {
@@ -1260,6 +1637,39 @@ mod chromium_backend {
                     detached?;
                     self.ensure_no_blocked_url()?;
                     Ok(image)
+                }
+            }
+        }
+
+        fn receive_guarded_generation(
+            &mut self,
+            session: &str,
+            expected_guard: [u8; 3],
+            width: u32,
+            height: u32,
+            frame_index: usize,
+            background: &str,
+        ) -> MotionResult<image::RgbaImage> {
+            loop {
+                self.check_abort()?;
+                let png = self.receive_and_ack_screencast_png(session, frame_index)?;
+                let image = decode_viewport_png(&png, background, frame_index)?;
+                let expected_dimensions = (
+                    width.checked_add(1).ok_or_else(|| {
+                        MotionError::render_failed("Chromium guard width overflowed")
+                    })?,
+                    height.checked_add(1).ok_or_else(|| {
+                        MotionError::render_failed("Chromium guard height overflowed")
+                    })?,
+                );
+                if image.dimensions() != expected_dimensions {
+                    return Err(MotionError::render_failed(format!(
+                        "Chromium guarded {background} screencast has the wrong size for frame {frame_index}: actual={:?}, expected={expected_dimensions:?}",
+                        image.dimensions()
+                    )));
+                }
+                if external_guard_matches(&image, width, height, expected_guard) {
+                    return Ok(image);
                 }
             }
         }
@@ -1356,7 +1766,6 @@ mod chromium_backend {
         ) -> MotionResult<Vec<u8>> {
             self.check_abort()?;
             if !transparent {
-                self.set_capture_background(session, [0, 0, 0])?;
                 let white = self.capture_stable_background(
                     target_id,
                     session,
@@ -1371,10 +1780,9 @@ mod chromium_backend {
                 return Ok(normalized);
             }
 
-            // Each background uses one prime handler plus two independent
-            // PageHandlers whose exact images must agree. This is six compositor
-            // encodes for transparency and bounds decoded working memory to the
-            // two stable samples plus the recovered output.
+            // Each background uses two independent PageHandlers whose guard-
+            // committed images must agree exactly. This is four compositor
+            // candidates for transparency and two for opaque output.
             let black = self.capture_stable_background(
                 target_id,
                 session,
@@ -1406,19 +1814,26 @@ mod chromium_backend {
             self.ensure_no_blocked_url()
         }
 
-        fn set_capture_background(&mut self, session: &str, rgb: [u8; 3]) -> MotionResult<()> {
-            self.command(
-                "Emulation.setDefaultBackgroundColorOverride",
+        fn set_host_background(&mut self, session: &str, rgb: [u8; 3]) -> MotionResult<()> {
+            let evaluated = self.command(
+                "Runtime.evaluate",
                 json!({
-                    "color": {
-                        "r": rgb[0],
-                        "g": rgb[1],
-                        "b": rgb[2],
-                        "a": 1.0
-                    }
+                    "expression": host_background_expression(rgb),
+                    "returnByValue": true
                 }),
                 Some(session),
             )?;
+            let updated = evaluated
+                .get("result")
+                .and_then(|result| result.get("value"))
+                .and_then(Value::as_bool)
+                == Some(true)
+                && evaluated.get("exceptionDetails").is_none();
+            if !updated {
+                return Err(MotionError::render_failed(
+                    "Chromium host background layer update failed",
+                ));
+            }
             self.ensure_no_blocked_url()
         }
 
@@ -1432,17 +1847,7 @@ mod chromium_backend {
             frame_index: usize,
         ) -> MotionResult<image::RgbaImage> {
             let (width, height) = size;
-            self.set_capture_background(session, rgb)?;
-            trace(format!("frame {frame_index}: {background} prime start"));
-            let prime = self.capture_isolated_viewport(
-                target_id,
-                rgb,
-                width,
-                height,
-                frame_index,
-                background,
-            )?;
-            drop(prime);
+            self.set_host_background(session, rgb)?;
             let first = self.capture_isolated_viewport(
                 target_id,
                 rgb,
@@ -1590,6 +1995,16 @@ mod chromium_backend {
         }
     }
 
+    fn is_frame_detached_event(event: &Value, session: &str, frame_id: &str) -> bool {
+        event.get("method").and_then(Value::as_str) == Some("Page.frameDetached")
+            && event.get("sessionId").and_then(Value::as_str) == Some(session)
+            && event
+                .get("params")
+                .and_then(|params| params.get("frameId"))
+                .and_then(Value::as_str)
+                == Some(frame_id)
+    }
+
     fn is_screencast_event_for_session(event: &Value, session: &str) -> bool {
         event.get("method").and_then(Value::as_str) == Some("Page.screencastFrame")
             && event.get("sessionId").and_then(Value::as_str) == Some(session)
@@ -1698,6 +2113,76 @@ mod chromium_backend {
         Ok(encoded.into_inner())
     }
 
+    fn capture_generation_colors(generation: u32) -> MotionResult<([u8; 3], [u8; 3])> {
+        let generation = u16::try_from(generation).map_err(|_| {
+            MotionError::render_failed("Chromium capture generation exceeded its unique range")
+        })?;
+        let [low, high] = generation.to_le_bytes();
+        Ok(([low, high, 90], [low, high, 165]))
+    }
+
+    fn host_background_expression(rgb: [u8; 3]) -> String {
+        format!(
+            "(() => {{ const layer = document.getElementById('opentake-host-background'); if (!layer) return false; layer.style.backgroundColor = 'rgb({} {} {})'; return true; }})()",
+            rgb[0], rgb[1], rgb[2]
+        )
+    }
+
+    fn external_guard_matches(
+        image: &image::RgbaImage,
+        width: u32,
+        height: u32,
+        expected: [u8; 3],
+    ) -> bool {
+        let Some(guarded_width) = width.checked_add(1) else {
+            return false;
+        };
+        let Some(guarded_height) = height.checked_add(1) else {
+            return false;
+        };
+        if image.dimensions() != (guarded_width, guarded_height) {
+            return false;
+        }
+        let expected = [expected[0], expected[1], expected[2], 255];
+        (0..guarded_height).all(|y| image.get_pixel(width, y).0 == expected)
+            && (0..guarded_width).all(|x| image.get_pixel(x, height).0 == expected)
+    }
+
+    fn crop_guarded_image(
+        image: image::RgbaImage,
+        width: u32,
+        height: u32,
+        frame_index: usize,
+    ) -> MotionResult<image::RgbaImage> {
+        let guarded_width = width
+            .checked_add(1)
+            .ok_or_else(|| MotionError::render_failed("Chromium host guard width overflowed"))?;
+        let guarded_height = height
+            .checked_add(1)
+            .ok_or_else(|| MotionError::render_failed("Chromium host guard height overflowed"))?;
+        if image.dimensions() != (guarded_width, guarded_height) {
+            return Err(MotionError::render_failed(format!(
+                "Chromium guarded frame {frame_index} has the wrong size: actual={:?}, expected=({guarded_width}, {guarded_height})",
+                image.dimensions()
+            )));
+        }
+
+        let guarded_stride = guarded_width as usize * 4;
+        let content_stride = width as usize * 4;
+        let mut raw = image.into_raw();
+        for row in 1..height as usize {
+            let source = row * guarded_stride;
+            let destination = row * content_stride;
+            raw.copy_within(source..source + content_stride, destination);
+        }
+        raw.truncate(content_stride * height as usize);
+        image::RgbaImage::from_raw(width, height, raw).ok_or_else(|| {
+            MotionError::render_failed(format!(
+                "failed to crop Chromium host guard for frame {frame_index}"
+            ))
+        })
+    }
+
     fn recover_straight_alpha(black: &[u8], white: &[u8]) -> MotionResult<Vec<u8>> {
         if black.len() != white.len() || !black.len().is_multiple_of(4) {
             return Err(MotionError::render_failed(
@@ -1735,6 +2220,404 @@ mod chromium_backend {
         use tungstenite::protocol::Role;
 
         use super::*;
+
+        #[test]
+        fn host_wrapper_isolates_author_in_an_exact_child_viewport() {
+            let wrapper = host_wrapper_document(
+                r#"<main data-value="a&b"><script>window.test = "<ok>"</script></main>"#,
+                48,
+                32,
+                &SandboxPolicy::default(),
+            );
+            assert!(wrapper.contains("sandbox=\"allow-scripts\""));
+            assert!(!wrapper.contains("allow-same-origin"));
+            assert!(!wrapper.contains("allow-top-navigation"));
+            assert!(wrapper.contains("frame-src data:"));
+            assert!(wrapper.contains("width:48px;height:32px"));
+            assert!(wrapper.contains("overflow:hidden;background:transparent"));
+            assert!(wrapper.contains("id=\"opentake-host-background\""));
+            assert!(wrapper.contains(
+                "#opentake-host-background{position:fixed;inset:0;z-index:0;background:transparent}"
+            ));
+            assert!(wrapper.contains("iframe{position:absolute;left:0;top:0;z-index:1"));
+            assert!(wrapper.contains("src=\"data:text/html;charset=utf-8,"));
+            assert!(!wrapper.contains("srcdoc="));
+            assert!(!wrapper.contains("<main"));
+            assert!(!wrapper.contains("data-value=\"a&b\""));
+        }
+
+        #[test]
+        fn host_and_author_csp_share_the_same_offline_resource_policy() {
+            let policy = SandboxPolicy::default();
+            assert_eq!(
+                sandbox_csp(&policy, "data:"),
+                "default-src 'none'; script-src 'unsafe-inline' data: 'none'; style-src 'unsafe-inline' data: 'none'; img-src data: 'none'; media-src data: 'none'; font-src data: 'none'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src data:; worker-src 'none'"
+            );
+            assert_eq!(
+                sandbox_csp(&policy, "'none'"),
+                "default-src 'none'; script-src 'unsafe-inline' data: 'none'; style-src 'unsafe-inline' data: 'none'; img-src data: 'none'; media-src data: 'none'; font-src data: 'none'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; worker-src 'none'"
+            );
+        }
+
+        #[test]
+        fn host_and_author_csp_mirror_an_allowed_loopback_origin() {
+            let policy = SandboxPolicy::default().allow_origin("http://127.0.0.1:51203");
+            let author = sandbox_csp(&policy, "'none'");
+            let host = sandbox_csp(&policy, "data:");
+            assert_eq!(
+                host,
+                author.replacen("frame-src 'none'", "frame-src data:", 1)
+            );
+            for directive in [
+                "script-src 'unsafe-inline' data: http://127.0.0.1:51203",
+                "style-src 'unsafe-inline' data: http://127.0.0.1:51203",
+                "img-src data: http://127.0.0.1:51203",
+                "media-src data: http://127.0.0.1:51203",
+                "font-src data: http://127.0.0.1:51203",
+                "connect-src http://127.0.0.1:51203",
+            ] {
+                assert!(host.contains(directive));
+                assert!(author.contains(directive));
+            }
+        }
+
+        #[test]
+        fn host_document_is_set_into_the_existing_about_blank_frame() {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server_stream, _) = listener.accept().unwrap();
+            let client_socket = WebSocket::from_raw_socket(
+                MaybeTlsStream::Plain(client_stream),
+                Role::Client,
+                None,
+            );
+            set_socket_poll_timeout(&client_socket).unwrap();
+            let mut server_socket = WebSocket::from_raw_socket(server_stream, Role::Server, None);
+            let wrapper =
+                host_wrapper_document("<main>author</main>", 48, 32, &SandboxPolicy::default());
+            let expected_wrapper = wrapper.clone();
+            let server = thread::spawn(move || {
+                let auto_attach = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected auto-attach request, got {other:?}"),
+                };
+                assert_eq!(
+                    auto_attach,
+                    json!({
+                        "id": 1,
+                        "method": "Target.setAutoAttach",
+                        "params": {
+                            "autoAttach": true,
+                            "waitForDebuggerOnStart": true,
+                            "flatten": true,
+                            "filter": [
+                                {"type": "iframe", "exclude": false},
+                                {"exclude": true}
+                            ]
+                        },
+                        "sessionId": "render-session"
+                    })
+                );
+                server_socket
+                    .send(Message::text(json!({"id": 1, "result": {}}).to_string()))
+                    .unwrap();
+
+                let get_tree = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected frame-tree request, got {other:?}"),
+                };
+                assert_eq!(
+                    get_tree,
+                    json!({
+                        "id": 2,
+                        "method": "Page.getFrameTree",
+                        "params": {},
+                        "sessionId": "render-session"
+                    })
+                );
+                server_socket
+                    .send(Message::text(
+                        json!({
+                            "id": 2,
+                            "result": {"frameTree": {"frame": {"id": "main-frame"}}}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap();
+
+                let set_content = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected document-content request, got {other:?}"),
+                };
+                assert_eq!(
+                    set_content,
+                    json!({
+                        "id": 3,
+                        "method": "Page.setDocumentContent",
+                        "params": {"frameId": "main-frame", "html": expected_wrapper},
+                        "sessionId": "render-session"
+                    })
+                );
+                for event in [
+                    json!({
+                        "method": "Page.frameAttached",
+                        "params": {"frameId": "provisional-frame", "parentFrameId": "main-frame"},
+                        "sessionId": "render-session"
+                    }),
+                    json!({
+                        "method": "Page.frameDetached",
+                        "params": {"frameId": "provisional-frame", "reason": "swap"},
+                        "sessionId": "render-session"
+                    }),
+                    json!({
+                        "method": "Target.attachedToTarget",
+                        "params": {
+                            "sessionId": "author-session",
+                            "targetInfo": {
+                                "targetId": "author-frame",
+                                "type": "iframe",
+                                "url": "",
+                                "attached": true
+                            },
+                            "waitingForDebugger": true
+                        },
+                        "sessionId": "render-session"
+                    }),
+                ] {
+                    server_socket
+                        .send(Message::text(event.to_string()))
+                        .unwrap();
+                }
+                server_socket
+                    .send(Message::text(json!({"id": 3, "result": {}}).to_string()))
+                    .unwrap();
+
+                for (id, method, params) in [
+                    (4, "Runtime.enable", json!({})),
+                    (5, "Page.enable", json!({})),
+                    (6, "Log.enable", json!({})),
+                    (
+                        7,
+                        "Fetch.enable",
+                        json!({"patterns": [{"urlPattern": "*", "requestStage": "Request"}]}),
+                    ),
+                    (
+                        8,
+                        "Page.addScriptToEvaluateOnNewDocument",
+                        json!({"source": deterministic_clock_script()}),
+                    ),
+                    (9, "Runtime.runIfWaitingForDebugger", json!({})),
+                ] {
+                    let command = match server_socket.read().unwrap() {
+                        Message::Text(text) => {
+                            serde_json::from_str::<Value>(text.as_ref()).unwrap()
+                        }
+                        other => panic!("expected child setup request, got {other:?}"),
+                    };
+                    assert_eq!(
+                        command,
+                        json!({
+                            "id": id,
+                            "method": method,
+                            "params": params,
+                            "sessionId": "author-session"
+                        })
+                    );
+                    if method == "Runtime.runIfWaitingForDebugger" {
+                        server_socket
+                            .send(Message::text(
+                                json!({
+                                    "method": "Fetch.requestPaused",
+                                    "params": {
+                                        "requestId": "author-data-request",
+                                        "request": {"url": "data:text/html,author"}
+                                    },
+                                    "sessionId": "author-session"
+                                })
+                                .to_string(),
+                            ))
+                            .unwrap();
+                    }
+                    server_socket
+                        .send(Message::text(json!({"id": id, "result": {}}).to_string()))
+                        .unwrap();
+                }
+
+                let continued = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected child data request continuation, got {other:?}"),
+                };
+                assert_eq!(
+                    continued,
+                    json!({
+                        "id": 10,
+                        "method": "Fetch.continueRequest",
+                        "params": {"requestId": "author-data-request"},
+                        "sessionId": "author-session"
+                    })
+                );
+                server_socket
+                    .send(Message::text(json!({"id": 10, "result": {}}).to_string()))
+                    .unwrap();
+
+                for event in [
+                    json!({
+                        "method": "Page.frameNavigated",
+                        "params": {"frame": {
+                            "id": "author-frame",
+                            "parentId": "main-frame",
+                            "url": "data:text/html"
+                        }},
+                        "sessionId": "author-session"
+                    }),
+                    json!({
+                        "method": "Runtime.executionContextCreated",
+                        "params": {"context": {
+                            "id": 17,
+                            "auxData": {"frameId": "author-frame", "isDefault": true}
+                        }},
+                        "sessionId": "author-session"
+                    }),
+                    json!({
+                        "method": "Page.frameStoppedLoading",
+                        "params": {"frameId": "author-frame"},
+                        "sessionId": "author-session"
+                    }),
+                    json!({
+                        "method": "Page.loadEventFired",
+                        "params": {"timestamp": 2.0},
+                        "sessionId": "author-session"
+                    }),
+                ] {
+                    server_socket
+                        .send(Message::text(event.to_string()))
+                        .unwrap();
+                }
+            });
+
+            let mut cdp = Cdp::new(
+                client_socket,
+                SandboxPolicy::default(),
+                MotionCancellationToken::new(),
+                Instant::now() + Duration::from_secs(1),
+            );
+            let installed = install_host_document(&mut cdp, "render-session", &wrapper).unwrap();
+            assert_eq!(installed.author_session_id, "author-session");
+            assert_eq!(installed.author_context_id, 17);
+            server.join().unwrap();
+        }
+
+        #[test]
+        fn author_navigation_must_be_a_data_child_of_the_host_frame() {
+            let navigation = |url: &str, parent: &str| {
+                json!({
+                    "method": "Page.frameNavigated",
+                    "params": {"frame": {
+                        "id": "author-frame",
+                        "parentId": parent,
+                        "url": url
+                    }},
+                    "sessionId": "author-session"
+                })
+            };
+            validate_author_navigation(
+                &navigation("data:text/html,author", "main-frame"),
+                "author-frame",
+                "main-frame",
+            )
+            .unwrap();
+            for rejected in [
+                navigation("about:blank", "main-frame"),
+                navigation("http://127.0.0.1/author", "main-frame"),
+                navigation("data:text/html,author", "other-main-frame"),
+            ] {
+                assert!(
+                    validate_author_navigation(&rejected, "author-frame", "main-frame").is_err()
+                );
+            }
+        }
+
+        #[test]
+        fn oopif_fetch_routes_loopback_policy_on_the_child_session() {
+            fn assert_route(policy: SandboxPolicy, expected_method: &str, should_block: bool) {
+                let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+                let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+                let (server_stream, _) = listener.accept().unwrap();
+                let client_socket = WebSocket::from_raw_socket(
+                    MaybeTlsStream::Plain(client_stream),
+                    Role::Client,
+                    None,
+                );
+                let mut server_socket =
+                    WebSocket::from_raw_socket(server_stream, Role::Server, None);
+                let expected_method = expected_method.to_owned();
+                let server = thread::spawn(move || {
+                    let command = match server_socket.read().unwrap() {
+                        Message::Text(text) => {
+                            serde_json::from_str::<Value>(text.as_ref()).unwrap()
+                        }
+                        other => panic!("expected child Fetch decision, got {other:?}"),
+                    };
+                    assert_eq!(command["method"], expected_method);
+                    assert_eq!(command["params"]["requestId"], "oopif-loopback");
+                    assert_eq!(command["sessionId"], "author-session");
+                });
+                let mut cdp = Cdp::new(
+                    client_socket,
+                    policy,
+                    MotionCancellationToken::new(),
+                    Instant::now() + Duration::from_secs(1),
+                );
+                cdp.handle_event_or_queue(json!({
+                    "method": "Fetch.requestPaused",
+                    "params": {
+                        "requestId": "oopif-loopback",
+                        "request": {"url": "http://127.0.0.1:51203/pixel.svg"}
+                    },
+                    "sessionId": "author-session"
+                }))
+                .unwrap();
+                assert_eq!(cdp.ensure_no_blocked_url().is_err(), should_block);
+                server.join().unwrap();
+            }
+
+            assert_route(SandboxPolicy::default(), "Fetch.failRequest", true);
+            assert_route(
+                SandboxPolicy::default().allow_origin("http://127.0.0.1:51203"),
+                "Fetch.continueRequest",
+                false,
+            );
+        }
+
+        #[test]
+        fn external_guard_validation_and_crop_preserve_the_authors_legal_edge() {
+            let guard = [90, 91, 92];
+            let mut guarded = image::RgbaImage::from_pixel(3, 3, image::Rgba([90, 91, 92, 255]));
+            for (x, y, pixel) in [
+                (0, 0, [1, 2, 3, 255]),
+                (1, 0, [4, 5, 6, 255]),
+                (0, 1, [7, 8, 9, 255]),
+                (1, 1, [10, 11, 12, 255]),
+            ] {
+                guarded.put_pixel(x, y, image::Rgba(pixel));
+            }
+            assert!(external_guard_matches(&guarded, 2, 2, guard));
+            guarded.put_pixel(1, 1, image::Rgba([200, 201, 202, 255]));
+            assert!(
+                external_guard_matches(&guarded, 2, 2, guard),
+                "the author's legal bottom-right pixel is content, not guard"
+            );
+            let mut wrong_guard = guarded.clone();
+            wrong_guard.put_pixel(2, 1, image::Rgba([90, 91, 93, 255]));
+            assert!(!external_guard_matches(&wrong_guard, 2, 2, guard));
+
+            let cropped = crop_guarded_image(guarded, 2, 2, 0).unwrap();
+            assert_eq!(cropped.dimensions(), (2, 2));
+            assert_eq!(cropped.get_pixel(0, 0).0, [1, 2, 3, 255]);
+            assert_eq!(cropped.get_pixel(1, 0).0, [4, 5, 6, 255]);
+            assert_eq!(cropped.get_pixel(0, 1).0, [7, 8, 9, 255]);
+            assert_eq!(cropped.get_pixel(1, 1).0, [200, 201, 202, 255]);
+        }
 
         #[test]
         fn compositor_fence_advances_a_finite_budget_and_waits_for_expiry() {
@@ -1835,6 +2718,321 @@ mod chromium_backend {
                 Instant::now() + Duration::from_secs(1),
             );
             cdp.set_device_metrics("render-session", 48, 32).unwrap();
+            server.join().unwrap();
+        }
+
+        #[test]
+        fn guarded_candidate_requires_transition_then_desired_generation() {
+            fn guarded_png(author: [u8; 4], guard: [u8; 3]) -> String {
+                let mut image = image::RgbaImage::from_pixel(
+                    2,
+                    2,
+                    image::Rgba([guard[0], guard[1], guard[2], 255]),
+                );
+                image.put_pixel(0, 0, image::Rgba(author));
+                base64::engine::general_purpose::STANDARD
+                    .encode(encode_viewport_png(image, 0).unwrap())
+            }
+
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server_stream, _) = listener.accept().unwrap();
+            let client_socket = WebSocket::from_raw_socket(
+                MaybeTlsStream::Plain(client_stream),
+                Role::Client,
+                None,
+            );
+            let mut server_socket = WebSocket::from_raw_socket(server_stream, Role::Server, None);
+            let seed = [0, 0, 90];
+            let transition = [0, 0, 165];
+            let desired = [0, 0, 0];
+            let wrong = guarded_png([1, 2, 3, 255], [17, 18, 19]);
+            let transition_frame = guarded_png([4, 5, 6, 255], transition);
+            let desired_frame = guarded_png([128, 0, 0, 255], desired);
+            let host_background = |rgb: [u8; 3]| {
+                json!({
+                    "expression": format!(
+                        "(() => {{ const layer = document.getElementById('opentake-host-background'); if (!layer) return false; layer.style.backgroundColor = 'rgb({} {} {})'; return true; }})()",
+                        rgb[0], rgb[1], rgb[2]
+                    ),
+                    "returnByValue": true
+                })
+            };
+            let server = thread::spawn(move || {
+                let read_json = |socket: &mut WebSocket<TcpStream>| match socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected CDP command, got {other:?}"),
+                };
+                let send_json = |socket: &mut WebSocket<TcpStream>, value: Value| {
+                    socket.send(Message::text(value.to_string())).unwrap();
+                };
+
+                let attach = read_json(&mut server_socket);
+                assert_eq!(attach["method"], "Target.attachToTarget");
+                send_json(
+                    &mut server_socket,
+                    json!({"id": 1, "result": {"sessionId": "capture-session"}}),
+                );
+                for (id, method, params) in [
+                    (2, "Page.enable", json!({})),
+                    (
+                        3,
+                        "Emulation.setVirtualTimePolicy",
+                        json!({"policy": "pause"}),
+                    ),
+                    (4, "Runtime.evaluate", host_background(seed)),
+                    (
+                        5,
+                        "Page.startScreencast",
+                        json!({
+                            "format": "png",
+                            "maxWidth": 2,
+                            "maxHeight": 2,
+                            "everyNthFrame": 1
+                        }),
+                    ),
+                    (6, "Runtime.evaluate", host_background(transition)),
+                ] {
+                    let command = read_json(&mut server_socket);
+                    assert_eq!(
+                        command,
+                        json!({
+                            "id": id,
+                            "method": method,
+                            "params": params,
+                            "sessionId": "capture-session"
+                        })
+                    );
+                    let result = if method == "Runtime.evaluate" {
+                        json!({"result": {"type": "boolean", "value": true}})
+                    } else {
+                        json!({})
+                    };
+                    send_json(&mut server_socket, json!({"id": id, "result": result}));
+                }
+
+                for (id, data) in [(7, wrong), (8, transition_frame.clone())] {
+                    send_json(
+                        &mut server_socket,
+                        json!({
+                            "method": "Page.screencastFrame",
+                            "params": {"data": data, "metadata": {}, "sessionId": 70 + id},
+                            "sessionId": "capture-session"
+                        }),
+                    );
+                    let ack = read_json(&mut server_socket);
+                    assert_eq!(ack["id"], id);
+                    assert_eq!(ack["method"], "Page.screencastFrameAck");
+                    send_json(&mut server_socket, json!({"id": id, "result": {}}));
+                }
+
+                let desired_command = read_json(&mut server_socket);
+                assert_eq!(
+                    desired_command,
+                    json!({
+                        "id": 9,
+                        "method": "Runtime.evaluate",
+                        "params": host_background(desired),
+                        "sessionId": "capture-session"
+                    })
+                );
+                send_json(
+                    &mut server_socket,
+                    json!({"id": 9, "result": {"result": {"type": "boolean", "value": true}}}),
+                );
+
+                for (id, data) in [(10, transition_frame), (11, desired_frame)] {
+                    send_json(
+                        &mut server_socket,
+                        json!({
+                            "method": "Page.screencastFrame",
+                            "params": {"data": data, "metadata": {}, "sessionId": 70 + id},
+                            "sessionId": "capture-session"
+                        }),
+                    );
+                    let ack = read_json(&mut server_socket);
+                    assert_eq!(ack["id"], id);
+                    assert_eq!(ack["method"], "Page.screencastFrameAck");
+                    send_json(&mut server_socket, json!({"id": id, "result": {}}));
+                }
+
+                for (id, method, params, session) in [
+                    (
+                        12,
+                        "Page.stopScreencast",
+                        json!({}),
+                        Some("capture-session"),
+                    ),
+                    (
+                        13,
+                        "Target.detachFromTarget",
+                        json!({"sessionId": "capture-session"}),
+                        None,
+                    ),
+                ] {
+                    let command = read_json(&mut server_socket);
+                    assert_eq!(command["id"], id);
+                    assert_eq!(command["method"], method);
+                    assert_eq!(command["params"], params);
+                    assert_eq!(command.get("sessionId").and_then(Value::as_str), session);
+                    send_json(&mut server_socket, json!({"id": id, "result": {}}));
+                }
+            });
+
+            let mut cdp = Cdp::new(
+                client_socket,
+                SandboxPolicy::default(),
+                MotionCancellationToken::new(),
+                Instant::now() + Duration::from_secs(1),
+            );
+            let image = cdp
+                .capture_isolated_viewport("target-id", desired, 1, 1, 0, "black")
+                .unwrap();
+            assert_eq!(image.dimensions(), (1, 1));
+            assert_eq!(image.get_pixel(0, 0).0, [128, 0, 0, 255]);
+            server.join().unwrap();
+        }
+
+        #[test]
+        fn guarded_candidate_detaches_and_preserves_a_pre_start_error() {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server_stream, _) = listener.accept().unwrap();
+            let client_socket = WebSocket::from_raw_socket(
+                MaybeTlsStream::Plain(client_stream),
+                Role::Client,
+                None,
+            );
+            let mut server_socket = WebSocket::from_raw_socket(server_stream, Role::Server, None);
+            let server = thread::spawn(move || {
+                let read_json = |socket: &mut WebSocket<TcpStream>| match socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected CDP command, got {other:?}"),
+                };
+                let attach = read_json(&mut server_socket);
+                assert_eq!(attach["method"], "Target.attachToTarget");
+                server_socket
+                    .send(Message::text(
+                        json!({"id": 1, "result": {"sessionId": "capture-session"}}).to_string(),
+                    ))
+                    .unwrap();
+                let enable = read_json(&mut server_socket);
+                assert_eq!(enable["method"], "Page.enable");
+                server_socket
+                    .send(Message::text(
+                        json!({"id": 2, "error": {"code": -1, "message": "setup-primary"}})
+                            .to_string(),
+                    ))
+                    .unwrap();
+                let detach = read_json(&mut server_socket);
+                assert_eq!(detach["method"], "Target.detachFromTarget");
+                assert_eq!(detach["params"]["sessionId"], "capture-session");
+                server_socket
+                    .send(Message::text(
+                        json!({"id": 3, "error": {"code": -2, "message": "cleanup-secondary"}})
+                            .to_string(),
+                    ))
+                    .unwrap();
+            });
+
+            let mut cdp = Cdp::new(
+                client_socket,
+                SandboxPolicy::default(),
+                MotionCancellationToken::new(),
+                Instant::now() + Duration::from_secs(1),
+            );
+            let error = cdp
+                .capture_isolated_viewport("target-id", [0, 0, 0], 1, 1, 0, "black")
+                .unwrap_err();
+            assert!(error.to_string().contains("setup-primary"));
+            assert!(!error.to_string().contains("cleanup-secondary"));
+            server.join().unwrap();
+        }
+
+        #[test]
+        fn guarded_candidate_stops_detaches_and_preserves_a_post_start_error() {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server_stream, _) = listener.accept().unwrap();
+            let client_socket = WebSocket::from_raw_socket(
+                MaybeTlsStream::Plain(client_stream),
+                Role::Client,
+                None,
+            );
+            let mut server_socket = WebSocket::from_raw_socket(server_stream, Role::Server, None);
+            let server = thread::spawn(move || {
+                let read_json = |socket: &mut WebSocket<TcpStream>| match socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected CDP command, got {other:?}"),
+                };
+                let attach = read_json(&mut server_socket);
+                assert_eq!(attach["method"], "Target.attachToTarget");
+                server_socket
+                    .send(Message::text(
+                        json!({"id": 1, "result": {"sessionId": "capture-session"}}).to_string(),
+                    ))
+                    .unwrap();
+                for id in 2..=6 {
+                    let command = read_json(&mut server_socket);
+                    if id == 5 {
+                        assert_eq!(command["method"], "Page.startScreencast");
+                    }
+                    let result = if command["method"] == "Runtime.evaluate" {
+                        json!({"result": {"type": "boolean", "value": true}})
+                    } else {
+                        json!({})
+                    };
+                    server_socket
+                        .send(Message::text(
+                            json!({"id": id, "result": result}).to_string(),
+                        ))
+                        .unwrap();
+                }
+                server_socket
+                    .send(Message::text(
+                        json!({
+                            "method": "Page.screencastFrame",
+                            "params": {"data": "not-base64", "metadata": {}, "sessionId": 7},
+                            "sessionId": "capture-session"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap();
+                let ack = read_json(&mut server_socket);
+                assert_eq!(ack["method"], "Page.screencastFrameAck");
+                server_socket
+                    .send(Message::text(json!({"id": 7, "result": {}}).to_string()))
+                    .unwrap();
+                let stop = read_json(&mut server_socket);
+                assert_eq!(stop["method"], "Page.stopScreencast");
+                server_socket
+                    .send(Message::text(
+                        json!({"id": 8, "error": {"code": -1, "message": "stop-secondary"}})
+                            .to_string(),
+                    ))
+                    .unwrap();
+                let detach = read_json(&mut server_socket);
+                assert_eq!(detach["method"], "Target.detachFromTarget");
+                server_socket
+                    .send(Message::text(
+                        json!({"id": 9, "error": {"code": -2, "message": "detach-secondary"}})
+                            .to_string(),
+                    ))
+                    .unwrap();
+            });
+
+            let mut cdp = Cdp::new(
+                client_socket,
+                SandboxPolicy::default(),
+                MotionCancellationToken::new(),
+                Instant::now() + Duration::from_secs(1),
+            );
+            let error = cdp
+                .capture_isolated_viewport("target-id", [0, 0, 0], 1, 1, 0, "black")
+                .unwrap_err();
+            assert!(error.to_string().contains("malformed screencast data"));
+            assert!(!error.to_string().contains("stop-secondary"));
+            assert!(!error.to_string().contains("detach-secondary"));
             server.join().unwrap();
         }
 
@@ -2282,7 +3480,7 @@ mod chromium_backend {
         }
 
         #[test]
-        fn transparent_capture_uses_six_isolated_page_handlers() {
+        fn transparent_capture_uses_four_guard_committed_page_handlers() {
             fn read_json(socket: &mut WebSocket<TcpStream>) -> Value {
                 match socket.read().unwrap() {
                     Message::Text(text) => serde_json::from_str(text.as_ref()).unwrap(),
@@ -2303,39 +3501,47 @@ mod chromium_backend {
                 None,
             );
             let mut server_socket = WebSocket::from_raw_socket(server_stream, Role::Server, None);
-            let encoded = |pixel: [u8; 4]| {
-                base64::engine::general_purpose::STANDARD.encode(
-                    encode_viewport_png(image::RgbaImage::from_pixel(1, 1, image::Rgba(pixel)), 0)
-                        .unwrap(),
-                )
+            let encoded = |pixel: [u8; 4], guard: [u8; 3]| {
+                let mut image = image::RgbaImage::from_pixel(
+                    2,
+                    2,
+                    image::Rgba([guard[0], guard[1], guard[2], 255]),
+                );
+                image.put_pixel(0, 0, image::Rgba(pixel));
+                base64::engine::general_purpose::STANDARD
+                    .encode(encode_viewport_png(image, 0).unwrap())
             };
-            let black = encoded([128, 0, 0, 255]);
-            let white = encoded([255, 127, 127, 255]);
+            let black = encoded([128, 0, 0, 255], [0, 0, 0]);
+            let white = encoded([255, 127, 127, 255], [255, 255, 255]);
             let server = thread::spawn(move || {
                 let mut next_id = 1u64;
                 let mut capture_index = 0usize;
-                for (rgb, current, stale_prime) in [
-                    ([0, 0, 0], black.clone(), white.clone()),
-                    ([255, 255, 255], white, black),
-                ] {
+                for (rgb, current) in [([0, 0, 0], black), ([255, 255, 255], white)] {
                     let background = read_json(&mut server_socket);
                     assert_eq!(
                         background,
                         json!({
                             "id": next_id,
-                            "method": "Emulation.setDefaultBackgroundColorOverride",
+                            "method": "Runtime.evaluate",
                             "params": {
-                                "color": {"r": rgb[0], "g": rgb[1], "b": rgb[2], "a": 1.0}
+                                "expression": host_background_expression(rgb),
+                                "returnByValue": true
                             },
                             "sessionId": "main-session"
                         })
                     );
-                    send_json(&mut server_socket, json!({"id": next_id, "result": {}}));
+                    send_json(
+                        &mut server_socket,
+                        json!({"id": next_id, "result": {"result": {"type": "boolean", "value": true}}}),
+                    );
                     next_id += 1;
 
                     let mut previous_capture_session = None::<String>;
-                    for sample_index in 0..3 {
+                    for _ in 0..2 {
                         let capture_session = format!("capture-{capture_index}");
+                        let seed = [capture_index as u8, 0, 90];
+                        let transition = [capture_index as u8, 0, 165];
+                        let transition_frame = encoded([4, 5, 6, 255], transition);
                         capture_index += 1;
                         let attach = read_json(&mut server_socket);
                         assert_eq!(
@@ -2356,26 +3562,28 @@ mod chromium_backend {
                             ("Page.enable", json!({})),
                             ("Emulation.setVirtualTimePolicy", json!({"policy": "pause"})),
                             (
-                                "Emulation.setDefaultBackgroundColorOverride",
+                                "Runtime.evaluate",
                                 json!({
-                                    "color": {
-                                        "r": rgb[0],
-                                        "g": rgb[1],
-                                        "b": rgb[2],
-                                        "a": 1.0
-                                    }
+                                    "expression": host_background_expression(seed),
+                                    "returnByValue": true
                                 }),
                             ),
                             (
                                 "Page.startScreencast",
                                 json!({
                                     "format": "png",
-                                    "maxWidth": 1,
-                                    "maxHeight": 1,
+                                    "maxWidth": 2,
+                                    "maxHeight": 2,
                                     "everyNthFrame": 1
                                 }),
                             ),
-                            ("Page.bringToFront", json!({})),
+                            (
+                                "Runtime.evaluate",
+                                json!({
+                                    "expression": host_background_expression(transition),
+                                    "returnByValue": true
+                                }),
+                            ),
                         ] {
                             let command = read_json(&mut server_socket);
                             assert_eq!(
@@ -2387,33 +3595,30 @@ mod chromium_backend {
                                     "sessionId": capture_session
                                 })
                             );
-                            send_json(&mut server_socket, json!({"id": next_id, "result": {}}));
+                            let result = if method == "Runtime.evaluate" {
+                                json!({"result": {"type": "boolean", "value": true}})
+                            } else {
+                                json!({})
+                            };
+                            send_json(&mut server_socket, json!({"id": next_id, "result": result}));
                             next_id += 1;
                         }
 
-                        if sample_index == 2 {
-                            let prior = previous_capture_session
-                                .as_deref()
-                                .expect("the stable sample has a prior PageHandler");
+                        if let Some(prior) = previous_capture_session.as_deref() {
                             send_json(
                                 &mut server_socket,
                                 json!({
                                     "method": "Page.screencastFrame",
-                                    "params": {"data": current, "metadata": {}, "sessionId": 7},
+                                    "params": {"data": current.clone(), "metadata": {}, "sessionId": 6},
                                     "sessionId": prior
                                 }),
                             );
                         }
-                        let data = if sample_index == 0 {
-                            stale_prime.clone()
-                        } else {
-                            current.clone()
-                        };
                         send_json(
                             &mut server_socket,
                             json!({
                                 "method": "Page.screencastFrame",
-                                "params": {"data": data, "metadata": {}, "sessionId": 7},
+                                "params": {"data": transition_frame, "metadata": {}, "sessionId": 7},
                                 "sessionId": capture_session
                             }),
                         );
@@ -2425,6 +3630,46 @@ mod chromium_backend {
                                 "id": next_id,
                                 "method": "Page.screencastFrameAck",
                                 "params": {"sessionId": 7},
+                                "sessionId": capture_session
+                            })
+                        );
+                        send_json(&mut server_socket, json!({"id": next_id, "result": {}}));
+                        next_id += 1;
+
+                        let desired = read_json(&mut server_socket);
+                        assert_eq!(
+                            desired,
+                            json!({
+                                "id": next_id,
+                                "method": "Runtime.evaluate",
+                                "params": {
+                                    "expression": host_background_expression(rgb),
+                                    "returnByValue": true
+                                },
+                                "sessionId": capture_session
+                            })
+                        );
+                        send_json(
+                            &mut server_socket,
+                            json!({"id": next_id, "result": {"result": {"type": "boolean", "value": true}}}),
+                        );
+                        next_id += 1;
+
+                        send_json(
+                            &mut server_socket,
+                            json!({
+                                "method": "Page.screencastFrame",
+                                "params": {"data": current.clone(), "metadata": {}, "sessionId": 8},
+                                "sessionId": capture_session
+                            }),
+                        );
+                        let desired_ack = read_json(&mut server_socket);
+                        assert_eq!(
+                            desired_ack,
+                            json!({
+                                "id": next_id,
+                                "method": "Page.screencastFrameAck",
+                                "params": {"sessionId": 8},
                                 "sessionId": capture_session
                             })
                         );
@@ -2458,6 +3703,7 @@ mod chromium_backend {
                         previous_capture_session = Some(capture_session);
                     }
                 }
+                assert_eq!(capture_index, 4);
             });
 
             let mut cdp = Cdp::new(
@@ -2485,94 +3731,6 @@ mod chromium_backend {
             );
             server.join().unwrap();
         }
-
-        #[test]
-        fn isolated_capture_stops_and_detaches_when_post_start_stimulus_fails() {
-            fn read_json(socket: &mut WebSocket<TcpStream>) -> Value {
-                match socket.read().unwrap() {
-                    Message::Text(text) => serde_json::from_str(text.as_ref()).unwrap(),
-                    other => panic!("expected CDP command, got {other:?}"),
-                }
-            }
-
-            fn send_json(socket: &mut WebSocket<TcpStream>, value: Value) {
-                socket.send(Message::text(value.to_string())).unwrap();
-            }
-
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-            let (server_stream, _) = listener.accept().unwrap();
-            let client_socket = WebSocket::from_raw_socket(
-                MaybeTlsStream::Plain(client_stream),
-                Role::Client,
-                None,
-            );
-            let mut server_socket = WebSocket::from_raw_socket(server_stream, Role::Server, None);
-            let server = thread::spawn(move || {
-                for (id, method, session) in [
-                    (1, "Target.attachToTarget", None),
-                    (2, "Page.enable", Some("capture-session")),
-                    (3, "Emulation.setVirtualTimePolicy", Some("capture-session")),
-                    (
-                        4,
-                        "Emulation.setDefaultBackgroundColorOverride",
-                        Some("capture-session"),
-                    ),
-                    (5, "Page.startScreencast", Some("capture-session")),
-                ] {
-                    let command = read_json(&mut server_socket);
-                    assert_eq!(command["id"], id);
-                    assert_eq!(command["method"], method);
-                    assert_eq!(command.get("sessionId").and_then(Value::as_str), session);
-                    let result = if method == "Target.attachToTarget" {
-                        json!({"id": id, "result": {"sessionId": "capture-session"}})
-                    } else {
-                        json!({"id": id, "result": {}})
-                    };
-                    send_json(&mut server_socket, result);
-                }
-
-                let stimulus = read_json(&mut server_socket);
-                assert_eq!(stimulus["id"], 6);
-                assert_eq!(stimulus["method"], "Page.bringToFront");
-                assert_eq!(stimulus["sessionId"], "capture-session");
-                send_json(
-                    &mut server_socket,
-                    json!({"id": 6, "error": {"message": "stimulus failed"}}),
-                );
-
-                let stop = read_json(&mut server_socket);
-                assert_eq!(stop["id"], 7);
-                assert_eq!(stop["method"], "Page.stopScreencast");
-                assert_eq!(stop["sessionId"], "capture-session");
-                send_json(&mut server_socket, json!({"id": 7, "result": {}}));
-
-                let detach = read_json(&mut server_socket);
-                assert_eq!(detach["id"], 8);
-                assert_eq!(detach["method"], "Target.detachFromTarget");
-                assert_eq!(detach["params"]["sessionId"], "capture-session");
-                assert!(detach.get("sessionId").is_none());
-                send_json(&mut server_socket, json!({"id": 8, "result": {}}));
-            });
-
-            let mut cdp = Cdp::new(
-                client_socket,
-                SandboxPolicy::default(),
-                MotionCancellationToken::new(),
-                Instant::now() + Duration::from_secs(1),
-            );
-            let error = cdp
-                .capture_isolated_viewport("target-id", [0, 0, 0], 1, 1, 0, "black")
-                .expect_err("a failed post-start damage stimulus must fail the capture");
-            assert!(matches!(
-                error,
-                MotionError::RenderFailed(message)
-                    if message.contains("Page.bringToFront")
-                        && message.contains("stimulus failed")
-            ));
-            server.join().unwrap();
-        }
-
         #[test]
         fn completion_checkpoint_rejects_timeout_and_cancellation_without_cache_commit() {
             fn complete_frames(dir: &Path) {

@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use crate::error::MotionResult;
 use crate::source::{MotionRenderRequest, MotionSource, ParamValue};
 
-const COMPLETION_MARKER_FILE: &str = ".opentake-motion-complete-v3";
+const COMPLETION_MARKER_FILE: &str = ".opentake-motion-complete-v4";
 static COMPLETION_MARKER_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Compute the content hash (lowercase hex SHA-256) for a render request.
@@ -179,7 +179,7 @@ impl MotionCache {
                 .write(true)
                 .create_new(true)
                 .open(&temporary)?;
-            file.write_all(b"opentake-motion-cache/v3\n")?;
+            file.write_all(b"opentake-motion-cache/v4\n")?;
             file.sync_all()?;
             drop(file);
             match std::fs::rename(&temporary, &marker) {
@@ -438,8 +438,8 @@ mod tests {
             std::fs::write(MotionCache::frame_file(&dir, index), b"legacy").unwrap();
         }
         std::fs::write(
-            dir.join(".opentake-motion-complete-v2"),
-            b"opentake-motion-cache/v2\n",
+            dir.join(".opentake-motion-complete-v3"),
+            b"opentake-motion-cache/v3\n",
         )
         .unwrap();
 
