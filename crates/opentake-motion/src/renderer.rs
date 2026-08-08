@@ -528,9 +528,15 @@ mod chromium_backend {
     use super::*;
 
     static PROFILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+    const GPU_TRACE_FIELD_LIMIT: usize = 96;
+    const GPU_TRACE_STATUS_LIMIT: usize = 48;
+
+    fn trace_enabled() -> bool {
+        std::env::var_os("OPENTAKE_MOTION_TRACE").is_some()
+    }
 
     fn trace(message: impl AsRef<str>) {
-        if std::env::var_os("OPENTAKE_MOTION_TRACE").is_some() {
+        if trace_enabled() {
             eprintln!("[opentake-motion] {}", message.as_ref());
         }
     }
@@ -620,6 +626,7 @@ mod chromium_backend {
             renderer.cancellation.clone(),
             deadline,
         );
+        trace_gpu_backend_if_enabled(&mut cdp, trace_enabled())?;
 
         let target = cdp.command(
             "Target.createTarget",
@@ -1421,6 +1428,32 @@ mod chromium_backend {
             }
         }
 
+        fn gpu_backend_trace(&mut self) -> MotionResult<String> {
+            let id = self.next_id;
+            self.next_id += 1;
+            self.send(json!({
+                "id": id,
+                "method": "SystemInfo.getInfo",
+                "params": {}
+            }))?;
+
+            loop {
+                let value = self.read()?;
+                if value.get("id").and_then(Value::as_u64) == Some(id) {
+                    if value.get("error").is_some() {
+                        return Ok("gpu backend unavailable reason=command-rejected".to_owned());
+                    }
+                    return Ok(value
+                        .get("result")
+                        .and_then(gpu_backend_summary)
+                        .unwrap_or_else(|| {
+                            "gpu backend unavailable reason=incomplete-result".to_owned()
+                        }));
+                }
+                self.handle_event_or_queue(value)?;
+            }
+        }
+
         fn wait_for_event(&mut self, method: &str, session: Option<&str>) -> MotionResult<Value> {
             if let Some(index) = self.pending_events.iter().position(|event| {
                 event.get("method").and_then(Value::as_str) == Some(method)
@@ -2054,6 +2087,13 @@ mod chromium_backend {
         }
     }
 
+    fn trace_gpu_backend_if_enabled(cdp: &mut Cdp, enabled: bool) -> MotionResult<()> {
+        if enabled {
+            trace(cdp.gpu_backend_trace()?);
+        }
+        Ok(())
+    }
+
     fn is_frame_detached_event(event: &Value, session: &str, frame_id: &str) -> bool {
         event.get("method").and_then(Value::as_str) == Some("Page.frameDetached")
             && event.get("sessionId").and_then(Value::as_str) == Some(session)
@@ -2067,6 +2107,47 @@ mod chromium_backend {
     fn is_screencast_event_for_session(event: &Value, session: &str) -> bool {
         event.get("method").and_then(Value::as_str) == Some("Page.screencastFrame")
             && event.get("sessionId").and_then(Value::as_str) == Some(session)
+    }
+
+    fn gpu_backend_summary(result: &Value) -> Option<String> {
+        let gpu = result.get("gpu")?;
+        let device = gpu.get("devices")?.as_array()?.first()?;
+        let vendor =
+            bounded_gpu_trace_field(device.get("vendorString")?.as_str()?, GPU_TRACE_FIELD_LIMIT);
+        let device =
+            bounded_gpu_trace_field(device.get("deviceString")?.as_str()?, GPU_TRACE_FIELD_LIMIT);
+        let gpu_compositing = bounded_gpu_trace_field(
+            gpu.get("featureStatus")?.get("gpu_compositing")?.as_str()?,
+            GPU_TRACE_STATUS_LIMIT,
+        );
+        let backend = format!("{vendor} {device}").to_ascii_lowercase();
+        let class = if backend.contains("swiftshader") {
+            "swiftshader"
+        } else if vendor.eq_ignore_ascii_case("disabled") || device.eq_ignore_ascii_case("disabled")
+        {
+            "disabled"
+        } else {
+            "driver"
+        };
+        Some(format!(
+            "gpu backend class={class} vendor=\"{vendor}\" device=\"{device}\" gpu_compositing=\"{gpu_compositing}\""
+        ))
+    }
+
+    fn bounded_gpu_trace_field(value: &str, limit: usize) -> String {
+        let mut chars = value.chars();
+        let mut bounded = String::with_capacity(limit + 1);
+        for character in chars.by_ref().take(limit) {
+            let safe = match character {
+                ' '..='!' | '#'..='[' | ']'..='~' => character,
+                _ => '?',
+            };
+            bounded.push(safe);
+        }
+        if chars.next().is_some() {
+            bounded.push('…');
+        }
+        bounded
     }
 
     fn device_metrics_params(width: u32, height: u32) -> Value {
@@ -2279,6 +2360,27 @@ mod chromium_backend {
         use tungstenite::protocol::Role;
 
         use super::*;
+
+        fn fake_cdp_pair() -> (Cdp, WebSocket<TcpStream>) {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server_stream, _) = listener.accept().unwrap();
+            let client_socket = WebSocket::from_raw_socket(
+                MaybeTlsStream::Plain(client_stream),
+                Role::Client,
+                None,
+            );
+            let server_socket = WebSocket::from_raw_socket(server_stream, Role::Server, None);
+            (
+                Cdp::new(
+                    client_socket,
+                    SandboxPolicy::default(),
+                    MotionCancellationToken::new(),
+                    Instant::now() + Duration::from_secs(1),
+                ),
+                server_socket,
+            )
+        }
 
         #[test]
         fn browser_stderr_is_drained_after_the_endpoint_receiver_disconnects() {
@@ -4069,6 +4171,189 @@ mod chromium_backend {
                 Instant::now() + Duration::from_secs(1),
             );
             cdp.close_browser().unwrap();
+            server.join().unwrap();
+        }
+
+        #[test]
+        fn gpu_backend_trace_uses_root_session_and_bounds_safe_fields() {
+            let (mut cdp, mut server_socket) = fake_cdp_pair();
+            let server = thread::spawn(move || {
+                let request = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected SystemInfo.getInfo request, got {other:?}"),
+                };
+                assert_eq!(
+                    request,
+                    json!({
+                        "id": 1,
+                        "method": "SystemInfo.getInfo",
+                        "params": {}
+                    }),
+                    "GPU diagnostics must run on the root CDP session"
+                );
+                server_socket
+                    .send(Message::text(
+                        json!({
+                            "id": 1,
+                            "result": {
+                                "gpu": {
+                                    "devices": [{
+                                        "vendorString": "Google Inc. (Google)",
+                                        "deviceString": format!(
+                                            "ANGLE SwiftShader\nforged-log-line {}",
+                                            "x".repeat(160)
+                                        )
+                                    }],
+                                    "auxAttributes": {
+                                        "commandLine": "--api-key=must-not-appear"
+                                    },
+                                    "featureStatus": {
+                                        "gpu_compositing": "disabled_software"
+                                    }
+                                }
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap();
+            });
+
+            let summary = cdp.gpu_backend_trace().unwrap();
+            assert!(summary.starts_with("gpu backend class=swiftshader "));
+            assert!(summary.contains("vendor=\"Google Inc. (Google)\""));
+            assert!(summary.contains("gpu_compositing=\"disabled_software\""));
+            assert!(!summary.contains("must-not-appear"));
+            assert!(summary.contains("device=\"ANGLE SwiftShader?forged-log-line "));
+            assert!(!summary.contains('\n'));
+            assert!(summary.contains('…'));
+            assert!(
+                summary.chars().count() <= 320,
+                "diagnostic summary must remain bounded: {summary}"
+            );
+            server.join().unwrap();
+        }
+
+        #[test]
+        fn disabled_gpu_backend_trace_leaves_the_root_socket_untouched() {
+            let (mut cdp, mut server_socket) = fake_cdp_pair();
+            let server = thread::spawn(move || {
+                let request = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected Browser.close request, got {other:?}"),
+                };
+                assert_eq!(
+                    request,
+                    json!({
+                        "id": 1,
+                        "method": "Browser.close",
+                        "params": {}
+                    })
+                );
+                server_socket
+                    .send(Message::text(json!({"id": 1, "result": {}}).to_string()))
+                    .unwrap();
+            });
+
+            trace_gpu_backend_if_enabled(&mut cdp, false).unwrap();
+            cdp.close_browser().unwrap();
+            server.join().unwrap();
+        }
+
+        #[test]
+        fn gpu_backend_trace_treats_only_the_diagnostic_rejection_as_unavailable() {
+            let (mut cdp, mut server_socket) = fake_cdp_pair();
+            let server = thread::spawn(move || {
+                let request = server_socket.read().unwrap();
+                assert!(matches!(request, Message::Text(_)));
+                server_socket
+                    .send(Message::text(
+                        json!({
+                            "id": 1,
+                            "error": {
+                                "code": -32601,
+                                "message": "SystemInfo.getInfo was not found --secret"
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap();
+            });
+
+            assert_eq!(
+                cdp.gpu_backend_trace().unwrap(),
+                "gpu backend unavailable reason=command-rejected"
+            );
+            server.join().unwrap();
+
+            let (mut cdp, mut server_socket) = fake_cdp_pair();
+            let server = thread::spawn(move || {
+                let request = server_socket.read().unwrap();
+                assert!(matches!(request, Message::Text(_)));
+                server_socket
+                    .send(Message::text(
+                        json!({
+                            "method": "Inspector.targetCrashed",
+                            "params": {"status": "crashed"}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap();
+            });
+
+            assert!(matches!(
+                cdp.gpu_backend_trace(),
+                Err(MotionError::RenderFailed(message))
+                    if message == "Chromium render target crashed"
+            ));
+            server.join().unwrap();
+
+            let (mut cdp, server_socket) = fake_cdp_pair();
+            drop(server_socket);
+            assert!(matches!(
+                cdp.gpu_backend_trace(),
+                Err(MotionError::RenderFailed(_))
+            ));
+
+            let (mut cdp, mut server_socket) = fake_cdp_pair();
+            cdp.cancellation.cancel();
+            let server = thread::spawn(move || {
+                let request = server_socket.read().unwrap();
+                assert!(matches!(request, Message::Text(_)));
+            });
+            assert!(matches!(
+                cdp.gpu_backend_trace(),
+                Err(MotionError::Cancelled)
+            ));
+            server.join().unwrap();
+        }
+
+        #[test]
+        fn gpu_backend_trace_reports_incomplete_results_without_exposing_payloads() {
+            let (mut cdp, mut server_socket) = fake_cdp_pair();
+            let server = thread::spawn(move || {
+                let request = server_socket.read().unwrap();
+                assert!(matches!(request, Message::Text(_)));
+                server_socket
+                    .send(Message::text(
+                        json!({
+                            "id": 1,
+                            "result": {
+                                "gpu": {
+                                    "auxAttributes": {
+                                        "commandLine": "--password=must-not-appear"
+                                    }
+                                }
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap();
+            });
+
+            assert_eq!(
+                cdp.gpu_backend_trace().unwrap(),
+                "gpu backend unavailable reason=incomplete-result"
+            );
             server.join().unwrap();
         }
 
