@@ -387,8 +387,10 @@ mod live {
         let origin = format!("http://{}", listener.local_addr().unwrap());
         let served = Arc::new(AtomicBool::new(false));
         let server_observed = Arc::clone(&served);
+        let stop_server = Arc::new(AtomicBool::new(false));
+        let server_stopped = Arc::clone(&stop_server);
         let server = thread::spawn(move || {
-            for _ in 0..250 {
+            while !server_stopped.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         let mut request = [0u8; 2048];
@@ -421,10 +423,10 @@ mod live {
             SandboxPolicy::offline_with_timeout(Duration::from_secs(60)).allow_origin(&origin),
         )
         .with_browser_path(browser())
-        .render(&request(&format!("<img src=\"{origin}/pixel.svg\">")))
-        .unwrap();
-        assert_eq!(allowed.frame_count(), 3);
+        .render(&request(&format!("<img src=\"{origin}/pixel.svg\">")));
+        stop_server.store(true, Ordering::Release);
         server.join().unwrap();
+        assert_eq!(allowed.unwrap().frame_count(), 3);
         assert!(served.load(Ordering::Acquire));
 
         let blocked_root = tempfile::tempdir().unwrap();
