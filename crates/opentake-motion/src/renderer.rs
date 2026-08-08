@@ -535,6 +535,22 @@ mod chromium_backend {
         }
     }
 
+    fn drain_browser_stderr<R: BufRead>(reader: R, sender: mpsc::Sender<String>) -> usize {
+        let mut drained = 0usize;
+        for line in reader.lines() {
+            let Ok(line) = line else {
+                break;
+            };
+            drained += 1;
+            // Endpoint discovery drops its receiver as soon as launch returns.
+            // Keep consuming the inherited Chrome/GPU/Viz pipe after that:
+            // stopping here can fill the Windows pipe and block compositor
+            // threads while unrelated CDP commands continue to respond.
+            let _ = sender.send(line);
+        }
+        drained
+    }
+
     pub(super) fn render(
         renderer: &HeadlessChromiumRenderer,
         req: &MotionRenderRequest,
@@ -1188,16 +1204,7 @@ mod chromium_backend {
             };
             let (sender, receiver) = mpsc::channel();
             thread::spawn(move || {
-                for line in BufReader::new(stderr).lines() {
-                    match line {
-                        Ok(line) => {
-                            if sender.send(line).is_err() {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
+                drain_browser_stderr(BufReader::new(stderr), sender);
             });
 
             loop {
@@ -2226,6 +2233,23 @@ mod chromium_backend {
         use tungstenite::protocol::Role;
 
         use super::*;
+
+        #[test]
+        fn browser_stderr_is_drained_after_the_endpoint_receiver_disconnects() {
+            let mut stderr =
+                b"DevTools listening on ws://127.0.0.1/devtools/browser/test\n".to_vec();
+            for index in 0..512 {
+                stderr.extend_from_slice(format!("gpu-viz-diagnostic-{index:04}\n").as_bytes());
+            }
+            let (sender, receiver) = mpsc::channel();
+            drop(receiver);
+
+            assert_eq!(
+                drain_browser_stderr(Cursor::new(stderr), sender),
+                513,
+                "Chrome stderr must be consumed through EOF even after endpoint discovery"
+            );
+        }
 
         #[test]
         fn host_wrapper_isolates_author_in_an_exact_child_viewport() {
