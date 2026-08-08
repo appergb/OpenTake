@@ -1587,6 +1587,11 @@ mod chromium_backend {
                     "frame {frame_index}: {background} transition guard start"
                 ));
                 self.set_host_background(&capture_session, transition)?;
+                // The author runs in a separately paused OOPIF target. Advancing
+                // only the script-free host target gives Windows Chromium a
+                // bounded lifecycle/compositor turn without advancing author
+                // timers between the black and white alpha samples.
+                self.settle_compositor(&capture_session)?;
                 let transition_image = self.receive_guarded_generation(
                     &capture_session,
                     transition,
@@ -1600,6 +1605,7 @@ mod chromium_backend {
                     "frame {frame_index}: {background} transition guard complete; desired guard start"
                 ));
                 self.set_host_background(&capture_session, rgb)?;
+                self.settle_compositor(&capture_session)?;
                 let desired_image = self.receive_guarded_generation(
                     &capture_session,
                     rgb,
@@ -2811,7 +2817,31 @@ mod chromium_backend {
                     send_json(&mut server_socket, json!({"id": id, "result": result}));
                 }
 
-                for (id, data) in [(7, wrong), (8, transition_frame.clone())] {
+                let transition_fence = read_json(&mut server_socket);
+                assert_eq!(
+                    transition_fence,
+                    json!({
+                        "id": 7,
+                        "method": "Emulation.setVirtualTimePolicy",
+                        "params": {
+                            "policy": "advance",
+                            "budget": 1,
+                            "maxVirtualTimeTaskStarvationCount": 10_000
+                        },
+                        "sessionId": "capture-session"
+                    })
+                );
+                send_json(&mut server_socket, json!({"id": 7, "result": {}}));
+                send_json(
+                    &mut server_socket,
+                    json!({
+                        "method": "Emulation.virtualTimeBudgetExpired",
+                        "params": {},
+                        "sessionId": "capture-session"
+                    }),
+                );
+
+                for (id, data) in [(8, wrong), (9, transition_frame.clone())] {
                     send_json(
                         &mut server_socket,
                         json!({
@@ -2830,7 +2860,7 @@ mod chromium_backend {
                 assert_eq!(
                     desired_command,
                     json!({
-                        "id": 9,
+                        "id": 10,
                         "method": "Runtime.evaluate",
                         "params": host_background(desired),
                         "sessionId": "capture-session"
@@ -2838,10 +2868,34 @@ mod chromium_backend {
                 );
                 send_json(
                     &mut server_socket,
-                    json!({"id": 9, "result": {"result": {"type": "boolean", "value": true}}}),
+                    json!({"id": 10, "result": {"result": {"type": "boolean", "value": true}}}),
                 );
 
-                for (id, data) in [(10, transition_frame), (11, desired_frame)] {
+                let desired_fence = read_json(&mut server_socket);
+                assert_eq!(
+                    desired_fence,
+                    json!({
+                        "id": 11,
+                        "method": "Emulation.setVirtualTimePolicy",
+                        "params": {
+                            "policy": "advance",
+                            "budget": 1,
+                            "maxVirtualTimeTaskStarvationCount": 10_000
+                        },
+                        "sessionId": "capture-session"
+                    })
+                );
+                send_json(&mut server_socket, json!({"id": 11, "result": {}}));
+                send_json(
+                    &mut server_socket,
+                    json!({
+                        "method": "Emulation.virtualTimeBudgetExpired",
+                        "params": {},
+                        "sessionId": "capture-session"
+                    }),
+                );
+
+                for (id, data) in [(12, transition_frame), (13, desired_frame)] {
                     send_json(
                         &mut server_socket,
                         json!({
@@ -2858,13 +2912,13 @@ mod chromium_backend {
 
                 for (id, method, params, session) in [
                     (
-                        12,
+                        14,
                         "Page.stopScreencast",
                         json!({}),
                         Some("capture-session"),
                     ),
                     (
-                        13,
+                        15,
                         "Target.detachFromTarget",
                         json!({"sessionId": "capture-session"}),
                         None,
@@ -2988,6 +3042,22 @@ mod chromium_backend {
                         ))
                         .unwrap();
                 }
+                let transition_fence = read_json(&mut server_socket);
+                assert_eq!(transition_fence["method"], "Emulation.setVirtualTimePolicy");
+                assert_eq!(transition_fence["params"]["policy"], "advance");
+                server_socket
+                    .send(Message::text(json!({"id": 7, "result": {}}).to_string()))
+                    .unwrap();
+                server_socket
+                    .send(Message::text(
+                        json!({
+                            "method": "Emulation.virtualTimeBudgetExpired",
+                            "params": {},
+                            "sessionId": "capture-session"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap();
                 server_socket
                     .send(Message::text(
                         json!({
@@ -3001,13 +3071,13 @@ mod chromium_backend {
                 let ack = read_json(&mut server_socket);
                 assert_eq!(ack["method"], "Page.screencastFrameAck");
                 server_socket
-                    .send(Message::text(json!({"id": 7, "result": {}}).to_string()))
+                    .send(Message::text(json!({"id": 8, "result": {}}).to_string()))
                     .unwrap();
                 let stop = read_json(&mut server_socket);
                 assert_eq!(stop["method"], "Page.stopScreencast");
                 server_socket
                     .send(Message::text(
-                        json!({"id": 8, "error": {"code": -1, "message": "stop-secondary"}})
+                        json!({"id": 9, "error": {"code": -1, "message": "stop-secondary"}})
                             .to_string(),
                     ))
                     .unwrap();
@@ -3015,7 +3085,7 @@ mod chromium_backend {
                 assert_eq!(detach["method"], "Target.detachFromTarget");
                 server_socket
                     .send(Message::text(
-                        json!({"id": 9, "error": {"code": -2, "message": "detach-secondary"}})
+                        json!({"id": 10, "error": {"code": -2, "message": "detach-secondary"}})
                             .to_string(),
                     ))
                     .unwrap();
@@ -3604,6 +3674,31 @@ mod chromium_backend {
                             next_id += 1;
                         }
 
+                        let transition_fence = read_json(&mut server_socket);
+                        assert_eq!(
+                            transition_fence,
+                            json!({
+                                "id": next_id,
+                                "method": "Emulation.setVirtualTimePolicy",
+                                "params": {
+                                    "policy": "advance",
+                                    "budget": 1,
+                                    "maxVirtualTimeTaskStarvationCount": 10_000
+                                },
+                                "sessionId": capture_session
+                            })
+                        );
+                        send_json(&mut server_socket, json!({"id": next_id, "result": {}}));
+                        next_id += 1;
+                        send_json(
+                            &mut server_socket,
+                            json!({
+                                "method": "Emulation.virtualTimeBudgetExpired",
+                                "params": {},
+                                "sessionId": capture_session
+                            }),
+                        );
+
                         if let Some(prior) = previous_capture_session.as_deref() {
                             send_json(
                                 &mut server_socket,
@@ -3654,6 +3749,31 @@ mod chromium_backend {
                             json!({"id": next_id, "result": {"result": {"type": "boolean", "value": true}}}),
                         );
                         next_id += 1;
+
+                        let desired_fence = read_json(&mut server_socket);
+                        assert_eq!(
+                            desired_fence,
+                            json!({
+                                "id": next_id,
+                                "method": "Emulation.setVirtualTimePolicy",
+                                "params": {
+                                    "policy": "advance",
+                                    "budget": 1,
+                                    "maxVirtualTimeTaskStarvationCount": 10_000
+                                },
+                                "sessionId": capture_session
+                            })
+                        );
+                        send_json(&mut server_socket, json!({"id": next_id, "result": {}}));
+                        next_id += 1;
+                        send_json(
+                            &mut server_socket,
+                            json!({
+                                "method": "Emulation.virtualTimeBudgetExpired",
+                                "params": {},
+                                "sessionId": capture_session
+                            }),
+                        );
 
                         send_json(
                             &mut server_socket,
