@@ -341,9 +341,10 @@ impl Crc32 {
 /// 5. Navigate to the document (inline `data:` URL for `Code`, or the template's
 ///    served `entry`).
 /// 6. For each frame `i` in `0..duration_frames`: advance virtual time to
-///    `i / fps` and call `OpenTake.seek(i / fps)`, then
-///    `Page.captureScreenshot { format: "png", ... }` (transparent background
-///    when `transparent`), writing the PNG to `cache_dir/frame_iiiii.png`.
+///    `i / fps` and call `OpenTake.seek(i / fps)`. Each black/white sample uses
+///    a fresh paused PageHandler with a bounded compositor screencast; isolated
+///    stable samples recover transparency before writing
+///    `cache_dir/frame_iiiii.png`.
 /// 7. Return the [`RenderedClip`].
 ///
 /// The CDP wiring is gated behind the `chromium` cargo feature so the default
@@ -675,12 +676,18 @@ mod chromium_backend {
             trace(format!("frame {index}: compositor settle complete"));
             cdp.ensure_no_blocked_url()?;
 
-            trace(format!("frame {index}: screenshot capture start"));
-            let png =
-                cdp.capture_frame_png(&session, req.transparent, req.width, req.height, index)?;
+            trace(format!("frame {index}: compositor capture start"));
+            let png = cdp.capture_frame_png(
+                &target_id,
+                &session,
+                req.transparent,
+                req.width,
+                req.height,
+                index,
+            )?;
             check_abort(renderer, deadline)?;
             cdp.ensure_no_blocked_url()?;
-            trace(format!("frame {index}: screenshot captured"));
+            trace(format!("frame {index}: compositor captured"));
             let path = MotionCache::frame_file(&dir, index);
             std::fs::write(&path, png)?;
             frames.push(path);
@@ -1148,44 +1155,199 @@ mod chromium_backend {
         ) -> MotionResult<()> {
             self.command(
                 "Emulation.setDeviceMetricsOverride",
-                device_metrics_params(width, height)?,
+                device_metrics_params(width, height),
                 Some(session),
             )?;
             Ok(())
         }
 
-        fn capture_viewport(
-            &mut self,
-            session: &str,
-            width: u32,
-            height: u32,
-        ) -> MotionResult<Value> {
-            let guard_width = guarded_dimension(width)?;
-            let guard_height = guarded_dimension(height)?;
-            // Capture the page plus one CSS pixel of page-external guard on the
-            // right and bottom. `fromSurface=false` can expose an unstable OS
-            // backing-view boundary there; the guard is cropped before resize.
+        fn start_screencast(&mut self, session: &str, width: u32, height: u32) -> MotionResult<()> {
             self.command(
-                "Page.captureScreenshot",
+                "Page.startScreencast",
                 json!({
                     "format": "png",
-                    "fromSurface": false,
-                    "captureBeyondViewport": false,
-                    "optimizeForSpeed": false,
-                    "clip": {
-                        "x": 0,
-                        "y": 0,
-                        "width": guard_width,
-                        "height": guard_height,
-                        "scale": 1
-                    }
+                    "maxWidth": width,
+                    "maxHeight": height,
+                    "everyNthFrame": 1
                 }),
                 Some(session),
-            )
+            )?;
+            self.ensure_no_blocked_url()
+        }
+
+        fn stop_screencast(&mut self, session: &str) -> MotionResult<()> {
+            let stopped = self.command("Page.stopScreencast", json!({}), Some(session));
+            let drained = if stopped.is_ok() {
+                self.ack_pending_screencast_frames(session)
+            } else {
+                Ok(())
+            };
+
+            stopped?;
+            drained?;
+            self.ensure_no_blocked_url()
+        }
+
+        fn capture_isolated_viewport(
+            &mut self,
+            target_id: &str,
+            rgb: [u8; 3],
+            width: u32,
+            height: u32,
+            frame_index: usize,
+            background: &str,
+        ) -> MotionResult<image::RgbaImage> {
+            let attached = self.command(
+                "Target.attachToTarget",
+                json!({"targetId": target_id, "flatten": true}),
+                None,
+            )?;
+            let capture_session = required_string(&attached, "sessionId")?;
+            let mut started = false;
+            let captured = (|| -> MotionResult<image::RgbaImage> {
+                self.command("Page.enable", json!({}), Some(&capture_session))?;
+                self.command("Page.bringToFront", json!({}), Some(&capture_session))?;
+                self.command(
+                    "Emulation.setVirtualTimePolicy",
+                    json!({"policy": "pause"}),
+                    Some(&capture_session),
+                )?;
+                self.command(
+                    "Emulation.setDefaultBackgroundColorOverride",
+                    json!({
+                        "color": {
+                            "r": rgb[0],
+                            "g": rgb[1],
+                            "b": rgb[2],
+                            "a": 1.0
+                        }
+                    }),
+                    Some(&capture_session),
+                )?;
+                self.start_screencast(&capture_session, width, height)?;
+                started = true;
+                let png = self.receive_and_ack_screencast_png(&capture_session, frame_index)?;
+                let image = decode_viewport_png(&png, background, frame_index)?;
+                if image.dimensions() != (width, height) {
+                    return Err(MotionError::render_failed(format!(
+                        "Chromium isolated {background} screencast has the wrong size for frame {frame_index}: actual={:?}, expected=({width}, {height})",
+                        image.dimensions()
+                    )));
+                }
+                Ok(image)
+            })();
+
+            let stopped = if started {
+                self.stop_screencast(&capture_session)
+            } else {
+                Ok(())
+            };
+            let detached = self
+                .command(
+                    "Target.detachFromTarget",
+                    json!({"sessionId": capture_session}),
+                    None,
+                )
+                .and_then(|_| self.ensure_no_blocked_url());
+            self.pending_events.retain(|event| {
+                event.get("method").and_then(Value::as_str) != Some("Page.screencastFrame")
+            });
+
+            match captured {
+                Err(primary) => Err(primary),
+                Ok(image) => {
+                    stopped?;
+                    detached?;
+                    self.ensure_no_blocked_url()?;
+                    Ok(image)
+                }
+            }
+        }
+
+        fn receive_and_ack_screencast_png(
+            &mut self,
+            session: &str,
+            frame_index: usize,
+        ) -> MotionResult<Vec<u8>> {
+            let event = self.next_screencast_event(session)?;
+            let params = event.get("params").ok_or_else(|| {
+                MotionError::render_failed("Chromium screencast frame has no params")
+            })?;
+            let screencast_session_id = params
+                .get("sessionId")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| {
+                    MotionError::render_failed(format!(
+                        "Chromium screencast frame has no integer sessionId: {event}"
+                    ))
+                })?;
+            self.command(
+                "Page.screencastFrameAck",
+                json!({"sessionId": screencast_session_id}),
+                Some(session),
+            )?;
+            self.ensure_no_blocked_url()?;
+            let encoded = required_string(params, "data")?;
+            let png = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|error| {
+                    MotionError::render_failed(format!(
+                        "Chromium returned malformed screencast data for frame {frame_index}: {error}"
+                    ))
+                })?;
+            if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+                return Err(MotionError::render_failed(format!(
+                    "Chromium returned a non-PNG screencast frame for frame {frame_index}"
+                )));
+            }
+            Ok(png)
+        }
+
+        fn next_screencast_event(&mut self, session: &str) -> MotionResult<Value> {
+            if let Some(index) = self
+                .pending_events
+                .iter()
+                .position(|event| is_screencast_event_for_session(event, session))
+            {
+                return Ok(self.pending_events.remove(index));
+            }
+            loop {
+                let value = self.read()?;
+                if is_screencast_event_for_session(&value, session) {
+                    return Ok(value);
+                }
+                self.handle_event_or_queue(value)?;
+            }
+        }
+
+        fn ack_pending_screencast_frames(&mut self, session: &str) -> MotionResult<()> {
+            while let Some(index) = self
+                .pending_events
+                .iter()
+                .position(|event| is_screencast_event_for_session(event, session))
+            {
+                let event = self.pending_events.remove(index);
+                let screencast_session_id = event
+                    .get("params")
+                    .and_then(|params| params.get("sessionId"))
+                    .and_then(Value::as_u64)
+                    .ok_or_else(|| {
+                        MotionError::render_failed(format!(
+                            "Chromium screencast frame has no integer sessionId: {event}"
+                        ))
+                    })?;
+                self.command(
+                    "Page.screencastFrameAck",
+                    json!({"sessionId": screencast_session_id}),
+                    Some(session),
+                )?;
+            }
+            Ok(())
         }
 
         fn capture_frame_png(
             &mut self,
+            target_id: &str,
             session: &str,
             transparent: bool,
             width: u32,
@@ -1194,33 +1356,39 @@ mod chromium_backend {
         ) -> MotionResult<Vec<u8>> {
             self.check_abort()?;
             if !transparent {
-                let image = self.capture_normalized_viewport_image(
+                self.set_capture_background(session, [0, 0, 0])?;
+                let white = self.capture_stable_background(
+                    target_id,
                     session,
-                    "opaque",
-                    width,
-                    height,
+                    [255, 255, 255],
+                    "opaque-white",
+                    (width, height),
                     frame_index,
                 )?;
                 self.check_abort()?;
-                let normalized = encode_viewport_png(image, frame_index)?;
+                let normalized = encode_viewport_png(white, frame_index)?;
                 self.check_abort()?;
                 return Ok(normalized);
             }
 
-            let black = self.capture_stable_background_image(
+            // Each background uses one prime handler plus two independent
+            // PageHandlers whose exact images must agree. This is six compositor
+            // encodes for transparency and bounds decoded working memory to the
+            // two stable samples plus the recovered output.
+            let black = self.capture_stable_background(
+                target_id,
                 session,
-                [0, 0, 0, 255],
+                [0, 0, 0],
                 "black",
-                width,
-                height,
+                (width, height),
                 frame_index,
             )?;
-            let white = self.capture_stable_background_image(
+            let white = self.capture_stable_background(
+                target_id,
                 session,
-                [255, 255, 255, 255],
+                [255, 255, 255],
                 "white",
-                width,
-                height,
+                (width, height),
                 frame_index,
             )?;
             self.check_abort()?;
@@ -1238,15 +1406,15 @@ mod chromium_backend {
             self.ensure_no_blocked_url()
         }
 
-        fn set_capture_background(&mut self, session: &str, rgba: [u8; 4]) -> MotionResult<()> {
+        fn set_capture_background(&mut self, session: &str, rgb: [u8; 3]) -> MotionResult<()> {
             self.command(
                 "Emulation.setDefaultBackgroundColorOverride",
                 json!({
                     "color": {
-                        "r": rgba[0],
-                        "g": rgba[1],
-                        "b": rgba[2],
-                        "a": f64::from(rgba[3]) / 255.0
+                        "r": rgb[0],
+                        "g": rgb[1],
+                        "b": rgb[2],
+                        "a": 1.0
                     }
                 }),
                 Some(session),
@@ -1254,80 +1422,54 @@ mod chromium_backend {
             self.ensure_no_blocked_url()
         }
 
-        fn capture_stable_background_image(
+        fn capture_stable_background(
             &mut self,
+            target_id: &str,
             session: &str,
-            rgba: [u8; 4],
+            rgb: [u8; 3],
             background: &str,
-            width: u32,
-            height: u32,
+            size: (u32, u32),
             frame_index: usize,
         ) -> MotionResult<image::RgbaImage> {
-            self.set_capture_background(session, rgba)?;
-            trace(format!(
-                "frame {frame_index}: {background}-background readback fence start"
-            ));
-            let fence = self.capture_normalized_viewport_image(
-                session,
-                background,
+            let (width, height) = size;
+            self.set_capture_background(session, rgb)?;
+            trace(format!("frame {frame_index}: {background} prime start"));
+            let prime = self.capture_isolated_viewport(
+                target_id,
+                rgb,
                 width,
                 height,
                 frame_index,
-            )?;
-            self.check_abort()?;
-            trace(format!(
-                "frame {frame_index}: {background}-background used readback start"
-            ));
-            let captured = self.capture_normalized_viewport_image(
-                session,
                 background,
+            )?;
+            drop(prime);
+            let first = self.capture_isolated_viewport(
+                target_id,
+                rgb,
                 width,
                 height,
                 frame_index,
+                background,
             )?;
-            self.check_abort()?;
-            ensure_stable_viewport_images(&fence, &captured, background, frame_index)?;
-            self.check_abort()?;
-            Ok(captured)
-        }
-
-        fn capture_normalized_viewport_image(
-            &mut self,
-            session: &str,
-            background: &str,
-            width: u32,
-            height: u32,
-            frame_index: usize,
-        ) -> MotionResult<image::RgbaImage> {
-            let png = self.capture_viewport_png(session, width, height, frame_index)?;
-            self.check_abort()?;
-            let image = decode_viewport_png(&png, background, frame_index)?;
-            normalize_guarded_viewport_image(image, width, height, background, frame_index)
-        }
-
-        fn capture_viewport_png(
-            &mut self,
-            session: &str,
-            width: u32,
-            height: u32,
-            frame_index: usize,
-        ) -> MotionResult<Vec<u8>> {
-            let captured = self.capture_viewport(session, width, height)?;
-            self.ensure_no_blocked_url()?;
-            let encoded = required_string(&captured, "data")?;
-            let png = base64::engine::general_purpose::STANDARD
-                .decode(encoded)
-                .map_err(|error| {
-                    MotionError::render_failed(format!(
-                        "Chromium returned malformed screenshot data for frame {frame_index}: {error}"
-                    ))
-                })?;
-            if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+            let second = self.capture_isolated_viewport(
+                target_id,
+                rgb,
+                width,
+                height,
+                frame_index,
+                background,
+            )?;
+            if let Err(error) =
+                ensure_stable_viewport_images(&first, &second, background, frame_index)
+            {
                 return Err(MotionError::render_failed(format!(
-                    "Chromium returned a non-PNG screenshot for frame {frame_index}"
+                    "{error}; sandbox_blocked_url_seen={}",
+                    self.blocked_url.is_some()
                 )));
             }
-            Ok(png)
+            drop(first);
+            self.check_abort()?;
+            Ok(second)
         }
 
         fn send(&mut self, value: Value) -> MotionResult<()> {
@@ -1448,30 +1590,20 @@ mod chromium_backend {
         }
     }
 
-    fn guarded_dimension(value: u32) -> MotionResult<u32> {
-        value.checked_add(1).ok_or_else(|| {
-            MotionError::render_failed("viewport dimension overflowed while adding capture guard")
-        })
+    fn is_screencast_event_for_session(event: &Value, session: &str) -> bool {
+        event.get("method").and_then(Value::as_str) == Some("Page.screencastFrame")
+            && event.get("sessionId").and_then(Value::as_str) == Some(session)
     }
 
-    fn device_metrics_params(width: u32, height: u32) -> MotionResult<Value> {
-        let guard_width = guarded_dimension(width)?;
-        let guard_height = guarded_dimension(height)?;
-        Ok(json!({
+    fn device_metrics_params(width: u32, height: u32) -> Value {
+        json!({
             "width": width,
             "height": height,
             "deviceScaleFactor": 1,
             "mobile": false,
             "screenWidth": width,
-            "screenHeight": height,
-            "viewport": {
-                "x": 0,
-                "y": 0,
-                "width": guard_width,
-                "height": guard_height,
-                "scale": 1
-            }
-        }))
+            "screenHeight": height
+        })
     }
 
     fn recover_transparent_images(
@@ -1511,14 +1643,23 @@ mod chromium_backend {
             )));
         }
         if fence.as_raw() != captured.as_raw() {
-            let differing_channels = fence
-                .as_raw()
-                .iter()
-                .zip(captured.as_raw())
-                .filter(|(left, right)| left != right)
-                .count();
+            let (width, height) = fence.dimensions();
+            let mut differing_channels = 0usize;
+            let mut sample_coordinates = Vec::with_capacity(8);
+            for ((x, y, left), right) in fence.enumerate_pixels().zip(captured.pixels()) {
+                let changed_channels = left
+                    .0
+                    .iter()
+                    .zip(right.0.iter())
+                    .filter(|(left, right)| left != right)
+                    .count();
+                differing_channels += changed_channels;
+                if changed_channels > 0 && sample_coordinates.len() < 8 {
+                    sample_coordinates.push((x, y));
+                }
+            }
             return Err(MotionError::render_failed(format!(
-                "Chromium {background}-background did not reach a stable readback for frame {frame_index}: {differing_channels} RGBA channels changed"
+                "Chromium {background}-background did not reach a stable readback for frame {frame_index}: dimensions=({width}, {height}), differing_channels={differing_channels}, sample_coordinates={sample_coordinates:?}"
             )));
         }
         Ok(())
@@ -1543,71 +1684,6 @@ mod chromium_backend {
             )));
         }
         Ok(image)
-    }
-
-    fn normalize_guarded_viewport_image(
-        image: image::RgbaImage,
-        width: u32,
-        height: u32,
-        background: &str,
-        frame_index: usize,
-    ) -> MotionResult<image::RgbaImage> {
-        let (actual_width, actual_height) = image.dimensions();
-        let guard_width = guarded_dimension(width)?;
-        let guard_height = guarded_dimension(height)?;
-        if u64::from(actual_width) * u64::from(guard_height)
-            != u64::from(actual_height) * u64::from(guard_width)
-        {
-            return Err(MotionError::render_failed(format!(
-                "Chromium returned an unexpected guarded {background}-background viewport size for frame {frame_index}: actual=({actual_width}, {actual_height}), guard=({guard_width}, {guard_height})"
-            )));
-        }
-
-        let content_width_numerator = u64::from(actual_width) * u64::from(width);
-        let content_height_numerator = u64::from(actual_height) * u64::from(height);
-        if content_width_numerator % u64::from(guard_width) != 0
-            || content_height_numerator % u64::from(guard_height) != 0
-        {
-            return Err(MotionError::render_failed(format!(
-                "Chromium guarded viewport does not map to integer page pixels for frame {frame_index}: actual=({actual_width}, {actual_height}), guard=({guard_width}, {guard_height})"
-            )));
-        }
-        let content_width = u32::try_from(content_width_numerator / u64::from(guard_width))
-            .map_err(|_| MotionError::render_failed("guarded viewport width overflowed"))?;
-        let content_height = u32::try_from(content_height_numerator / u64::from(guard_height))
-            .map_err(|_| MotionError::render_failed("guarded viewport height overflowed"))?;
-        if content_width == 0 || content_height == 0 {
-            return Err(MotionError::render_failed(format!(
-                "Chromium guarded viewport mapped to an empty page for frame {frame_index}"
-            )));
-        }
-        Ok(resize_guarded_subimage(
-            &image,
-            content_width,
-            content_height,
-            width,
-            height,
-        ))
-    }
-
-    fn resize_guarded_subimage(
-        image: &image::RgbaImage,
-        content_width: u32,
-        content_height: u32,
-        width: u32,
-        height: u32,
-    ) -> image::RgbaImage {
-        let content = image::imageops::crop_imm(image, 0, 0, content_width, content_height);
-        if (content_width, content_height) == (width, height) {
-            content.to_image()
-        } else {
-            image::imageops::resize(
-                &*content,
-                width,
-                height,
-                image::imageops::FilterType::Triangle,
-            )
-        }
     }
 
     fn encode_viewport_png(image: image::RgbaImage, frame_index: usize) -> MotionResult<Vec<u8>> {
@@ -1716,7 +1792,7 @@ mod chromium_backend {
         }
 
         #[test]
-        fn device_metrics_add_a_page_external_guard_without_changing_layout_size() {
+        fn device_metrics_keep_layout_and_capture_viewport_exact() {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
             let (server_stream, _) = listener.accept().unwrap();
@@ -1742,14 +1818,7 @@ mod chromium_backend {
                             "deviceScaleFactor": 1,
                             "mobile": false,
                             "screenWidth": 48,
-                            "screenHeight": 32,
-                            "viewport": {
-                                "x": 0,
-                                "y": 0,
-                                "width": 49,
-                                "height": 33,
-                                "scale": 1
-                            }
+                            "screenHeight": 32
                         },
                         "sessionId": "render-session"
                     })
@@ -1770,7 +1839,143 @@ mod chromium_backend {
         }
 
         #[test]
-        fn viewport_capture_avoids_surface_and_includes_the_guard() {
+        fn viewport_readback_uses_a_bounded_screencast_session() {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server_stream, _) = listener.accept().unwrap();
+            let client_socket = WebSocket::from_raw_socket(
+                MaybeTlsStream::Plain(client_stream),
+                Role::Client,
+                None,
+            );
+            let mut server_socket = WebSocket::from_raw_socket(server_stream, Role::Server, None);
+            let png = base64::engine::general_purpose::STANDARD.encode(
+                encode_viewport_png(
+                    image::RgbaImage::from_pixel(48, 32, image::Rgba([1, 2, 3, 255])),
+                    0,
+                )
+                .unwrap(),
+            );
+            let server = thread::spawn(move || {
+                let start = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected text CDP request, got {other:?}"),
+                };
+                assert_eq!(
+                    start,
+                    json!({
+                        "id": 1,
+                        "method": "Page.startScreencast",
+                        "params": {
+                            "format": "png",
+                            "maxWidth": 48,
+                            "maxHeight": 32,
+                            "everyNthFrame": 1
+                        },
+                        "sessionId": "render-session"
+                    })
+                );
+                server_socket
+                    .send(Message::text(json!({"id": 1, "result": {}}).to_string()))
+                    .unwrap();
+                server_socket
+                    .send(Message::text(
+                        json!({
+                            "method": "Page.screencastFrame",
+                            "params": {
+                                "data": png,
+                                "metadata": {},
+                                "sessionId": 7
+                            },
+                            "sessionId": "render-session"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap();
+
+                let ack = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected screencast ack, got {other:?}"),
+                };
+                assert_eq!(
+                    ack,
+                    json!({
+                        "id": 2,
+                        "method": "Page.screencastFrameAck",
+                        "params": {"sessionId": 7},
+                        "sessionId": "render-session"
+                    })
+                );
+                server_socket
+                    .send(Message::text(json!({"id": 2, "result": {}}).to_string()))
+                    .unwrap();
+
+                let stop = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected screencast stop, got {other:?}"),
+                };
+                assert_eq!(
+                    stop,
+                    json!({
+                        "id": 3,
+                        "method": "Page.stopScreencast",
+                        "params": {},
+                        "sessionId": "render-session"
+                    })
+                );
+                server_socket
+                    .send(Message::text(
+                        json!({
+                            "method": "Page.screencastFrame",
+                            "params": {
+                                "data": "late-frame",
+                                "metadata": {},
+                                "sessionId": 7
+                            },
+                            "sessionId": "render-session"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap();
+                server_socket
+                    .send(Message::text(json!({"id": 3, "result": {}}).to_string()))
+                    .unwrap();
+
+                let late_ack = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected late-frame ack, got {other:?}"),
+                };
+                assert_eq!(
+                    late_ack,
+                    json!({
+                        "id": 4,
+                        "method": "Page.screencastFrameAck",
+                        "params": {"sessionId": 7},
+                        "sessionId": "render-session"
+                    })
+                );
+                server_socket
+                    .send(Message::text(json!({"id": 4, "result": {}}).to_string()))
+                    .unwrap();
+            });
+
+            let mut cdp = Cdp::new(
+                client_socket,
+                SandboxPolicy::default(),
+                MotionCancellationToken::new(),
+                Instant::now() + Duration::from_secs(1),
+            );
+            cdp.start_screencast("render-session", 48, 32).unwrap();
+            let captured = cdp
+                .receive_and_ack_screencast_png("render-session", 0)
+                .unwrap();
+            assert!(captured.starts_with(b"\x89PNG\r\n\x1a\n"));
+            cdp.stop_screencast("render-session").unwrap();
+            server.join().unwrap();
+        }
+
+        #[test]
+        fn screencast_readback_acks_and_stops_when_the_frame_is_invalid() {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
             let (server_stream, _) = listener.accept().unwrap();
@@ -1781,35 +1986,42 @@ mod chromium_backend {
             );
             let mut server_socket = WebSocket::from_raw_socket(server_stream, Role::Server, None);
             let server = thread::spawn(move || {
-                let request = match server_socket.read().unwrap() {
+                let start = match server_socket.read().unwrap() {
                     Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
-                    other => panic!("expected text CDP request, got {other:?}"),
+                    other => panic!("expected screencast start, got {other:?}"),
                 };
-                assert_eq!(
-                    request,
-                    json!({
-                        "id": 1,
-                        "method": "Page.captureScreenshot",
-                        "params": {
-                            "format": "png",
-                            "fromSurface": false,
-                            "captureBeyondViewport": false,
-                            "optimizeForSpeed": false,
-                            "clip": {
-                                "x": 0,
-                                "y": 0,
-                                "width": 49,
-                                "height": 33,
-                                "scale": 1
-                            }
-                        },
-                        "sessionId": "render-session"
-                    })
-                );
+                assert_eq!(start["method"], "Page.startScreencast");
+                server_socket
+                    .send(Message::text(json!({"id": 1, "result": {}}).to_string()))
+                    .unwrap();
                 server_socket
                     .send(Message::text(
-                        json!({"id": 1, "result": {"data": "png"}}).to_string(),
+                        json!({
+                            "method": "Page.screencastFrame",
+                            "params": {"metadata": {}, "sessionId": 7},
+                            "sessionId": "render-session"
+                        })
+                        .to_string(),
                     ))
+                    .unwrap();
+
+                let ack = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected invalid-frame ack, got {other:?}"),
+                };
+                assert_eq!(ack["method"], "Page.screencastFrameAck");
+                assert_eq!(ack["params"]["sessionId"], 7);
+                server_socket
+                    .send(Message::text(json!({"id": 2, "result": {}}).to_string()))
+                    .unwrap();
+
+                let stop = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected cleanup stop, got {other:?}"),
+                };
+                assert_eq!(stop["method"], "Page.stopScreencast");
+                server_socket
+                    .send(Message::text(json!({"id": 3, "result": {}}).to_string()))
                     .unwrap();
             });
 
@@ -1819,10 +2031,186 @@ mod chromium_backend {
                 MotionCancellationToken::new(),
                 Instant::now() + Duration::from_secs(1),
             );
-            assert_eq!(
-                cdp.capture_viewport("render-session", 48, 32).unwrap(),
-                json!({"data": "png"})
+            cdp.start_screencast("render-session", 48, 32).unwrap();
+            let captured = cdp.receive_and_ack_screencast_png("render-session", 0);
+            let stopped = cdp.stop_screencast("render-session");
+            assert!(matches!(
+                captured,
+                Err(MotionError::RenderFailed(message))
+                    if message.contains("missing string field \"data\"")
+            ));
+            stopped.unwrap();
+            server.join().unwrap();
+        }
+
+        #[test]
+        fn screencast_ack_fails_closed_on_a_late_blocked_request() {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server_stream, _) = listener.accept().unwrap();
+            let client_socket = WebSocket::from_raw_socket(
+                MaybeTlsStream::Plain(client_stream),
+                Role::Client,
+                None,
             );
+            let mut server_socket = WebSocket::from_raw_socket(server_stream, Role::Server, None);
+            let server = thread::spawn(move || {
+                let start = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected screencast start, got {other:?}"),
+                };
+                assert_eq!(start["method"], "Page.startScreencast");
+                server_socket
+                    .send(Message::text(json!({"id": 1, "result": {}}).to_string()))
+                    .unwrap();
+                server_socket
+                    .send(Message::text(
+                        json!({
+                            "method": "Page.screencastFrame",
+                            "params": {"data": "ignored", "metadata": {}, "sessionId": 7},
+                            "sessionId": "render-session"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap();
+
+                let ack = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected screencast ack, got {other:?}"),
+                };
+                assert_eq!(ack["method"], "Page.screencastFrameAck");
+                server_socket
+                    .send(Message::text(
+                        json!({
+                            "method": "Fetch.requestPaused",
+                            "params": {
+                                "requestId": "late-request",
+                                "request": {"url": "https://example.com/late-screencast"}
+                            },
+                            "sessionId": "render-session"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap();
+                server_socket
+                    .send(Message::text(json!({"id": 2, "result": {}}).to_string()))
+                    .unwrap();
+
+                let failed = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected late request rejection, got {other:?}"),
+                };
+                assert_eq!(failed["id"], 3);
+                assert_eq!(failed["method"], "Fetch.failRequest");
+                server_socket
+                    .send(Message::text(json!({"id": 3, "result": {}}).to_string()))
+                    .unwrap();
+
+                let stop = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected screencast stop, got {other:?}"),
+                };
+                assert_eq!(stop["id"], 4);
+                assert_eq!(stop["method"], "Page.stopScreencast");
+                server_socket
+                    .send(Message::text(json!({"id": 4, "result": {}}).to_string()))
+                    .unwrap();
+            });
+
+            let mut cdp = Cdp::new(
+                client_socket,
+                SandboxPolicy::default(),
+                MotionCancellationToken::new(),
+                Instant::now() + Duration::from_secs(1),
+            );
+            cdp.start_screencast("render-session", 48, 32).unwrap();
+            let captured = cdp.receive_and_ack_screencast_png("render-session", 0);
+            let stopped = cdp.stop_screencast("render-session");
+            assert!(matches!(captured, Err(MotionError::Sandbox(_))));
+            stopped.unwrap();
+            server.join().unwrap();
+        }
+
+        #[test]
+        fn screencast_readback_filters_the_outer_target_session() {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server_stream, _) = listener.accept().unwrap();
+            let client_socket = WebSocket::from_raw_socket(
+                MaybeTlsStream::Plain(client_stream),
+                Role::Client,
+                None,
+            );
+            let mut server_socket = WebSocket::from_raw_socket(server_stream, Role::Server, None);
+            let current_png = base64::engine::general_purpose::STANDARD.encode(
+                encode_viewport_png(
+                    image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255])),
+                    0,
+                )
+                .unwrap(),
+            );
+            let server = thread::spawn(move || {
+                let start = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected screencast start, got {other:?}"),
+                };
+                assert_eq!(start["method"], "Page.startScreencast");
+                server_socket
+                    .send(Message::text(json!({"id": 1, "result": {}}).to_string()))
+                    .unwrap();
+                for (outer_session, inner_session, data) in [
+                    ("other-target", 99, "wrong-target".to_owned()),
+                    ("render-session", 7, current_png),
+                ] {
+                    server_socket
+                        .send(Message::text(
+                            json!({
+                                "method": "Page.screencastFrame",
+                                "params": {
+                                    "data": data,
+                                    "metadata": {},
+                                    "sessionId": inner_session
+                                },
+                                "sessionId": outer_session
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap();
+                }
+
+                let current_ack = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected current-frame ack, got {other:?}"),
+                };
+                assert_eq!(current_ack["method"], "Page.screencastFrameAck");
+                assert_eq!(current_ack["params"]["sessionId"], 7);
+                server_socket
+                    .send(Message::text(json!({"id": 2, "result": {}}).to_string()))
+                    .unwrap();
+                let stop = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected screencast stop, got {other:?}"),
+                };
+                assert_eq!(stop["method"], "Page.stopScreencast");
+                server_socket
+                    .send(Message::text(json!({"id": 3, "result": {}}).to_string()))
+                    .unwrap();
+            });
+
+            let mut cdp = Cdp::new(
+                client_socket,
+                SandboxPolicy::default(),
+                MotionCancellationToken::new(),
+                Instant::now() + Duration::from_secs(1),
+            );
+            cdp.start_screencast("render-session", 48, 32).unwrap();
+            let captured = cdp
+                .receive_and_ack_screencast_png("render-session", 0)
+                .unwrap();
+            assert!(captured.starts_with(b"\x89PNG\r\n\x1a\n"));
+            cdp.stop_screencast("render-session").unwrap();
+            assert_eq!(cdp.pending_events.len(), 1);
+            assert_eq!(cdp.pending_events[0]["sessionId"], "other-target");
             server.join().unwrap();
         }
 
@@ -1861,60 +2249,51 @@ mod chromium_backend {
         }
 
         #[test]
-        fn guarded_viewport_discards_only_page_external_pixels() {
-            // requested=1x1, guard=2x2 CSS px, backing scale=2 => raw=4x4.
-            // The requested page occupies the upper-left 2x2 backing pixels.
-            let mut first = image::RgbaImage::from_pixel(4, 4, image::Rgba([10, 20, 30, 40]));
-            let mut second = first.clone();
-            for coordinate in 0..4 {
-                first.put_pixel(3, coordinate, image::Rgba([200, 0, 0, 255]));
-                first.put_pixel(coordinate, 3, image::Rgba([0, 200, 0, 255]));
-                second.put_pixel(2, coordinate, image::Rgba([0, 0, 200, 255]));
-                second.put_pixel(coordinate, 2, image::Rgba([200, 200, 0, 255]));
+        fn unstable_high_entropy_viewport_reports_bounded_coordinates_without_pixel_values() {
+            let mut first = image::RgbaImage::new(64, 64);
+            let mut second = image::RgbaImage::new(64, 64);
+            for y in 0..64 {
+                for x in 0..64 {
+                    first.put_pixel(x, y, image::Rgba([x as u8, y as u8, (x + y) as u8, 255]));
+                    second.put_pixel(
+                        x,
+                        y,
+                        image::Rgba([(x + 101) as u8, (y + 109) as u8, (x + y + 127) as u8, 254]),
+                    );
+                }
             }
-            assert_eq!(
-                normalize_guarded_viewport_image(first.clone(), 1, 1, "black", 0).unwrap(),
-                normalize_guarded_viewport_image(second, 1, 1, "black", 0).unwrap(),
-                "the full page-external guard must not enter the requested canvas"
-            );
 
-            let mut content_changed = first.clone();
-            content_changed.put_pixel(1, 1, image::Rgba([0, 0, 200, 255]));
-            assert_ne!(
-                normalize_guarded_viewport_image(first, 1, 1, "black", 0).unwrap(),
-                normalize_guarded_viewport_image(content_changed, 1, 1, "black", 0).unwrap(),
-                "content inside the requested page must remain observable"
-            );
+            let error = ensure_stable_viewport_images(&first, &second, "black", 17)
+                .expect_err("different high-entropy images must fail closed");
+            let MotionError::RenderFailed(message) = error else {
+                panic!("expected render failure, got {error:?}");
+            };
+            assert!(message.len() <= 512, "diagnostic must remain bounded");
+            assert!(message.contains("dimensions=(64, 64)"));
+            assert!(message.contains("differing_channels=16384"));
+            assert!(message.contains(
+                "sample_coordinates=[(0, 0), (1, 0), (2, 0), (3, 0), (4, 0), (5, 0), (6, 0), (7, 0)]"
+            ));
+            assert!(!message.contains("(8, 0)"));
+            assert!(!message.contains("[0, 0, 0, 255]"));
+            assert!(!message.contains("[101, 109, 127, 254]"));
+            assert!(!message.contains("unique"));
+            assert!(!message.contains("corner"));
         }
 
         #[test]
-        fn guarded_subimage_resizes_without_losing_valid_right_bottom_content() {
-            let mut raw = image::RgbaImage::from_pixel(4, 4, image::Rgba([240, 0, 240, 255]));
-            raw.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
-            raw.put_pixel(1, 0, image::Rgba([0, 255, 0, 255]));
-            raw.put_pixel(0, 1, image::Rgba([0, 0, 255, 255]));
-            raw.put_pixel(1, 1, image::Rgba([255, 255, 0, 255]));
+        fn transparent_capture_uses_six_isolated_page_handlers() {
+            fn read_json(socket: &mut WebSocket<TcpStream>) -> Value {
+                match socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str(text.as_ref()).unwrap(),
+                    other => panic!("expected CDP command, got {other:?}"),
+                }
+            }
 
-            let expected_content = image::imageops::crop_imm(&raw, 0, 0, 2, 2).to_image();
-            let expected = image::imageops::resize(
-                &expected_content,
-                1,
-                1,
-                image::imageops::FilterType::Triangle,
-            );
-            assert_eq!(resize_guarded_subimage(&raw, 2, 2, 1, 1), expected);
+            fn send_json(socket: &mut WebSocket<TcpStream>, value: Value) {
+                socket.send(Message::text(value.to_string())).unwrap();
+            }
 
-            let exact = resize_guarded_subimage(&raw, 2, 2, 2, 2);
-            assert_eq!(exact, expected_content);
-            assert_eq!(
-                exact.get_pixel(1, 1).0,
-                [255, 255, 0, 255],
-                "valid content touching the requested right/bottom edge must be preserved"
-            );
-        }
-
-        #[test]
-        fn transparent_capture_uses_stable_readbacks_without_advancing_author_time() {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
             let (server_stream, _) = listener.accept().unwrap();
@@ -1924,65 +2303,159 @@ mod chromium_backend {
                 None,
             );
             let mut server_socket = WebSocket::from_raw_socket(server_stream, Role::Server, None);
-            let black_png = base64::engine::general_purpose::STANDARD.encode(
-                encode_viewport_png(
-                    image::RgbaImage::from_pixel(2, 2, image::Rgba([128, 0, 0, 255])),
-                    0,
+            let encoded = |pixel: [u8; 4]| {
+                base64::engine::general_purpose::STANDARD.encode(
+                    encode_viewport_png(image::RgbaImage::from_pixel(1, 1, image::Rgba(pixel)), 0)
+                        .unwrap(),
                 )
-                .unwrap(),
-            );
-            let white_png = base64::engine::general_purpose::STANDARD.encode(
-                encode_viewport_png(
-                    image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 127, 127, 255])),
-                    0,
-                )
-                .unwrap(),
-            );
+            };
+            let black = encoded([128, 0, 0, 255]);
+            let white = encoded([255, 127, 127, 255]);
             let server = thread::spawn(move || {
-                let backgrounds = [([0, 0, 0], black_png), ([255, 255, 255], white_png)];
-                let mut next_id = 1;
-                for (rgb, png) in backgrounds {
-                    let background = match server_socket.read().unwrap() {
-                        Message::Text(text) => {
-                            serde_json::from_str::<Value>(text.as_ref()).unwrap()
-                        }
-                        other => panic!("expected background override, got {other:?}"),
-                    };
+                let mut next_id = 1u64;
+                let mut capture_index = 0usize;
+                for (rgb, current, stale_prime) in [
+                    ([0, 0, 0], black.clone(), white.clone()),
+                    ([255, 255, 255], white, black),
+                ] {
+                    let background = read_json(&mut server_socket);
                     assert_eq!(
                         background,
                         json!({
                             "id": next_id,
                             "method": "Emulation.setDefaultBackgroundColorOverride",
-                            "params": {"color": {"r": rgb[0], "g": rgb[1], "b": rgb[2], "a": 1.0}},
-                            "sessionId": "render-session"
+                            "params": {
+                                "color": {"r": rgb[0], "g": rgb[1], "b": rgb[2], "a": 1.0}
+                            },
+                            "sessionId": "main-session"
                         })
                     );
-                    server_socket
-                        .send(Message::text(
-                            json!({"id": next_id, "result": {}}).to_string(),
-                        ))
-                        .unwrap();
+                    send_json(&mut server_socket, json!({"id": next_id, "result": {}}));
                     next_id += 1;
 
-                    for _ in 0..2 {
-                        let capture = match server_socket.read().unwrap() {
-                            Message::Text(text) => {
-                                serde_json::from_str::<Value>(text.as_ref()).unwrap()
-                            }
-                            other => panic!("expected view readback fence, got {other:?}"),
-                        };
-                        assert_eq!(capture["id"], next_id);
-                        assert_eq!(capture["method"], "Page.captureScreenshot");
-                        assert_eq!(capture["params"]["fromSurface"], false);
-                        assert_eq!(capture["params"]["clip"]["width"], 2);
-                        assert_eq!(capture["params"]["clip"]["height"], 2);
-                        assert_eq!(capture["sessionId"], "render-session");
-                        server_socket
-                            .send(Message::text(
-                                json!({"id": next_id, "result": {"data": png}}).to_string(),
-                            ))
-                            .unwrap();
+                    let mut previous_capture_session = None::<String>;
+                    for sample_index in 0..3 {
+                        let capture_session = format!("capture-{capture_index}");
+                        capture_index += 1;
+                        let attach = read_json(&mut server_socket);
+                        assert_eq!(
+                            attach,
+                            json!({
+                                "id": next_id,
+                                "method": "Target.attachToTarget",
+                                "params": {"targetId": "target-id", "flatten": true}
+                            })
+                        );
+                        send_json(
+                            &mut server_socket,
+                            json!({"id": next_id, "result": {"sessionId": capture_session}}),
+                        );
                         next_id += 1;
+
+                        for (method, params) in [
+                            ("Page.enable", json!({})),
+                            ("Page.bringToFront", json!({})),
+                            ("Emulation.setVirtualTimePolicy", json!({"policy": "pause"})),
+                            (
+                                "Emulation.setDefaultBackgroundColorOverride",
+                                json!({
+                                    "color": {
+                                        "r": rgb[0],
+                                        "g": rgb[1],
+                                        "b": rgb[2],
+                                        "a": 1.0
+                                    }
+                                }),
+                            ),
+                            (
+                                "Page.startScreencast",
+                                json!({
+                                    "format": "png",
+                                    "maxWidth": 1,
+                                    "maxHeight": 1,
+                                    "everyNthFrame": 1
+                                }),
+                            ),
+                        ] {
+                            let command = read_json(&mut server_socket);
+                            assert_eq!(
+                                command,
+                                json!({
+                                    "id": next_id,
+                                    "method": method,
+                                    "params": params,
+                                    "sessionId": capture_session
+                                })
+                            );
+                            send_json(&mut server_socket, json!({"id": next_id, "result": {}}));
+                            next_id += 1;
+                        }
+
+                        if sample_index == 2 {
+                            let prior = previous_capture_session
+                                .as_deref()
+                                .expect("the stable sample has a prior PageHandler");
+                            send_json(
+                                &mut server_socket,
+                                json!({
+                                    "method": "Page.screencastFrame",
+                                    "params": {"data": current, "metadata": {}, "sessionId": 7},
+                                    "sessionId": prior
+                                }),
+                            );
+                        }
+                        let data = if sample_index == 0 {
+                            stale_prime.clone()
+                        } else {
+                            current.clone()
+                        };
+                        send_json(
+                            &mut server_socket,
+                            json!({
+                                "method": "Page.screencastFrame",
+                                "params": {"data": data, "metadata": {}, "sessionId": 7},
+                                "sessionId": capture_session
+                            }),
+                        );
+
+                        let ack = read_json(&mut server_socket);
+                        assert_eq!(
+                            ack,
+                            json!({
+                                "id": next_id,
+                                "method": "Page.screencastFrameAck",
+                                "params": {"sessionId": 7},
+                                "sessionId": capture_session
+                            })
+                        );
+                        send_json(&mut server_socket, json!({"id": next_id, "result": {}}));
+                        next_id += 1;
+
+                        let stop = read_json(&mut server_socket);
+                        assert_eq!(
+                            stop,
+                            json!({
+                                "id": next_id,
+                                "method": "Page.stopScreencast",
+                                "params": {},
+                                "sessionId": capture_session
+                            })
+                        );
+                        send_json(&mut server_socket, json!({"id": next_id, "result": {}}));
+                        next_id += 1;
+
+                        let detach = read_json(&mut server_socket);
+                        assert_eq!(
+                            detach,
+                            json!({
+                                "id": next_id,
+                                "method": "Target.detachFromTarget",
+                                "params": {"sessionId": capture_session}
+                            })
+                        );
+                        send_json(&mut server_socket, json!({"id": next_id, "result": {}}));
+                        next_id += 1;
+                        previous_capture_session = Some(capture_session);
                     }
                 }
             });
@@ -1994,7 +2467,7 @@ mod chromium_backend {
                 Instant::now() + Duration::from_secs(1),
             );
             let png = cdp
-                .capture_frame_png("render-session", true, 1, 1, 0)
+                .capture_frame_png("target-id", "main-session", true, 1, 1, 0)
                 .unwrap();
             assert_eq!(
                 image::load_from_memory(&png)
@@ -2004,9 +2477,14 @@ mod chromium_backend {
                     .0,
                 [255, 0, 0, 128]
             );
+            assert!(
+                cdp.pending_events
+                    .iter()
+                    .all(|event| event["method"] != "Page.screencastFrame"),
+                "late frames owned by a detached PageHandler must not leak into another capture"
+            );
             server.join().unwrap();
         }
-
         #[test]
         fn completion_checkpoint_rejects_timeout_and_cancellation_without_cache_commit() {
             fn complete_frames(dir: &Path) {

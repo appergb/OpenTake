@@ -65,6 +65,28 @@ mod live {
 
     pub(super) fn run() {
         let profiles_before = live_profiles();
+        let page_background_root = tempfile::tempdir().unwrap();
+        let page_background_document = r#"<!doctype html>
+          <html style="margin:0;width:100%;height:100%;background:rgb(12,34,56)">
+          <body style="margin:0;width:100%;height:100%;background:rgb(12,34,56)">
+          </body></html>"#;
+        let page_background = renderer(page_background_root.path())
+            .render(&MotionRenderRequest::new(
+                MotionSource::code(page_background_document),
+                10,
+                1,
+                48,
+                32,
+            ))
+            .unwrap();
+        let page_background_pixels = image::open(&page_background.frames[0]).unwrap().to_rgba8();
+        assert!(
+            page_background_pixels
+                .pixels()
+                .all(|pixel| pixel.0 == [12, 34, 56, 255]),
+            "opaque author html/body backgrounds must render exactly without interfering with capture-session isolation"
+        );
+
         let animation = r#"<!doctype html><html><body style="margin:0;background:transparent">
           <div id="box" style="width:24px;height:16px"></div>
           <script>
@@ -86,7 +108,7 @@ mod live {
             let timer;
             OpenTake.onSeek(() => {
               if (window.innerWidth !== 48 || window.innerHeight !== 32) {
-                fetch('https://example.com/viewport-guard-changed-layout');
+                fetch('https://example.com/capture-session-changed-layout');
               }
               clearInterval(timer);
               let ticks = 0;
@@ -103,7 +125,7 @@ mod live {
           </script>
         </body></html>"#;
         let timer_request =
-            MotionRenderRequest::new(MotionSource::code(timer_document), 10, 1, 48, 32);
+            MotionRenderRequest::new(MotionSource::code(timer_document), 10, 2, 48, 32);
         let timer_frame = renderer(timer_root.path()).render(&timer_request).unwrap();
         let timer_pixels = image::open(&timer_frame.frames[0]).unwrap().to_rgba8();
         let unique_timer_pixels = timer_pixels
@@ -119,7 +141,7 @@ mod live {
         assert_eq!(
             timer_pixels.get_pixel(47, 31).0,
             timer_pixel,
-            "valid content touching the requested right/bottom edge must survive guard cropping"
+            "an exact-size capture must preserve valid content touching the right/bottom edge"
         );
         assert!(
             timer_pixel[0] > timer_pixel[1]
@@ -218,14 +240,25 @@ mod live {
         assert_eq!((composited.width, composited.height), (48, 32));
         assert_eq!(composited.rgba.len(), 48 * 32 * 4);
 
-        // Opaque clips take the single view-capture path that avoids Chromium's
-        // Windows CopyFromSurface/Viz callback. macOS Retina also returns a
-        // larger backing view, so this proves normalization to the fixed canvas.
+        // Opaque clips use isolated stable PageHandlers without alpha recovery.
+        // Render twice to prove determinism across independent browser processes.
         let opaque_root = tempfile::tempdir().unwrap();
         let opaque = renderer(opaque_root.path())
             .render(&request(animation).with_transparent(false))
             .unwrap();
+        let opaque_again_root = tempfile::tempdir().unwrap();
+        let opaque_again = renderer(opaque_again_root.path())
+            .render(&request(animation).with_transparent(false))
+            .unwrap();
         assert_eq!(opaque.frame_count(), 3);
+        assert_eq!(opaque_again.frame_count(), 3);
+        for (first, second) in opaque.frames.iter().zip(&opaque_again.frames) {
+            assert_eq!(
+                fs::read(first).unwrap(),
+                fs::read(second).unwrap(),
+                "opaque compositor captures must be byte-identical across browsers"
+            );
+        }
         let opaque_first = image::open(&opaque.frames[0]).unwrap().to_rgba8();
         assert_eq!(opaque_first.dimensions(), (48, 32));
         assert!(opaque_first.pixels().all(|pixel| pixel[3] == 255));
