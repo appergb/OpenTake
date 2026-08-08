@@ -541,6 +541,34 @@ mod chromium_backend {
         }
     }
 
+    fn browser_launch_args() -> &'static [&'static str] {
+        &[
+            "--headless=new",
+            "--use-gl=angle",
+            "--use-angle=swiftshader-webgl",
+            "--remote-debugging-port=0",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-background-networking",
+            "--disable-component-update",
+            "--disable-client-side-phishing-detection",
+            "--disable-domain-reliability",
+            "--disable-sync",
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--run-all-compositor-stages-before-draw",
+            "--metrics-recording-only",
+            "--disable-breakpad",
+            "--disable-extensions",
+            "--disable-dev-shm-usage",
+            "--disable-features=FileSystemAccessAPI,InterestFeedContentSuggestions,OptimizationHints,MediaRouter",
+            "--password-store=basic",
+            "--use-mock-keychain",
+            "about:blank",
+        ]
+    }
+
     fn drain_browser_stderr<R: BufRead>(reader: R, sender: mpsc::Sender<String>) -> usize {
         let mut drained = 0usize;
         for line in reader.lines() {
@@ -1145,29 +1173,7 @@ mod chromium_backend {
             std::fs::create_dir_all(&profile)?;
             let mut command = Command::new(executable);
             command
-                .args([
-                    "--headless=new",
-                    "--remote-debugging-port=0",
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                    "--disable-background-networking",
-                    "--disable-component-update",
-                    "--disable-client-side-phishing-detection",
-                    "--disable-domain-reliability",
-                    "--disable-sync",
-                    "--disable-background-timer-throttling",
-                    "--disable-backgrounding-occluded-windows",
-                    "--disable-renderer-backgrounding",
-                    "--run-all-compositor-stages-before-draw",
-                    "--metrics-recording-only",
-                    "--disable-breakpad",
-                    "--disable-extensions",
-                    "--disable-dev-shm-usage",
-                    "--disable-features=FileSystemAccessAPI,InterestFeedContentSuggestions,OptimizationHints,MediaRouter",
-                    "--password-store=basic",
-                    "--use-mock-keychain",
-                    "about:blank",
-                ])
+                .args(browser_launch_args())
                 .arg(format!("--user-data-dir={}", profile.display()))
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
@@ -2382,6 +2388,48 @@ mod chromium_backend {
             )
         }
 
+        fn validate_browser_launch_args_contract(args: &[&str]) -> Result<(), String> {
+            const EXPECTED: &[&str] = &[
+                "--headless=new",
+                "--use-gl=angle",
+                "--use-angle=swiftshader-webgl",
+                "--remote-debugging-port=0",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-background-networking",
+                "--disable-component-update",
+                "--disable-client-side-phishing-detection",
+                "--disable-domain-reliability",
+                "--disable-sync",
+                "--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-renderer-backgrounding",
+                "--run-all-compositor-stages-before-draw",
+                "--metrics-recording-only",
+                "--disable-breakpad",
+                "--disable-extensions",
+                "--disable-dev-shm-usage",
+                "--disable-features=FileSystemAccessAPI,InterestFeedContentSuggestions,OptimizationHints,MediaRouter",
+                "--password-store=basic",
+                "--use-mock-keychain",
+                "about:blank",
+            ];
+            let mut keys = std::collections::BTreeSet::new();
+            for argument in args.iter().filter(|argument| argument.starts_with("--")) {
+                let key = argument.split_once('=').map_or(*argument, |(key, _)| key);
+                if key == "--disable-gpu" {
+                    return Err(format!("forbidden Chromium switch key: {key}"));
+                }
+                if !keys.insert(key) {
+                    return Err(format!("duplicate Chromium switch key: {key}"));
+                }
+            }
+            if args != EXPECTED {
+                return Err("Chromium launch arguments differ from the expected contract".into());
+            }
+            Ok(())
+        }
+
         #[test]
         fn browser_stderr_is_drained_after_the_endpoint_receiver_disconnects() {
             let mut stderr =
@@ -2396,6 +2444,28 @@ mod chromium_backend {
                 drain_browser_stderr(Cursor::new(stderr), sender),
                 513,
                 "Chrome stderr must be consumed through EOF even after endpoint discovery"
+            );
+        }
+
+        #[test]
+        fn browser_launch_args_select_swiftshader_without_disabling_gpu() {
+            validate_browser_launch_args_contract(browser_launch_args()).unwrap();
+        }
+
+        #[test]
+        fn browser_launch_args_contract_rejects_overrides_and_disable_variants() {
+            let mut angle_override = browser_launch_args().to_vec();
+            angle_override.push("--use-angle=d3d11");
+            assert_eq!(
+                validate_browser_launch_args_contract(&angle_override).unwrap_err(),
+                "duplicate Chromium switch key: --use-angle"
+            );
+
+            let mut disable_gpu = browser_launch_args().to_vec();
+            disable_gpu.push("--disable-gpu=true");
+            assert_eq!(
+                validate_browser_launch_args_contract(&disable_gpu).unwrap_err(),
+                "forbidden Chromium switch key: --disable-gpu"
             );
         }
 
