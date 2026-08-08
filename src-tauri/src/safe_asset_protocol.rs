@@ -117,10 +117,11 @@ fn non_project_response_matches_authority(
 
 #[cfg(all(test, unix))]
 use helper::{
-    actual_parent_process_id, parent_is_same_executable, terminate_or_quarantine, WireIoErrorKind,
+    actual_parent_process_id, parent_is_same_executable, terminate_or_quarantine,
+    write_helper_request_before_response, WireIoErrorKind,
 };
 #[cfg(test)]
-use helper::{bounded_reap, helper_response, write_helper_request_before_response};
+use helper::{bounded_reap, helper_response};
 
 #[derive(Clone)]
 pub(crate) struct SafeAssetProtocol {
