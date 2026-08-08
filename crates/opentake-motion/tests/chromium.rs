@@ -1,4 +1,22 @@
 #[cfg(feature = "chromium")]
+static LIVE_CHROMIUM_TEST_GATE: std::sync::OnceLock<std::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+
+#[cfg(feature = "chromium")]
+fn test_gate_guard(
+    gate: &'static std::sync::OnceLock<std::sync::Mutex<()>>,
+) -> std::sync::MutexGuard<'static, ()> {
+    gate.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .expect("live Chromium test gate was poisoned by an earlier test failure")
+}
+
+#[cfg(feature = "chromium")]
+fn live_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    test_gate_guard(&LIVE_CHROMIUM_TEST_GATE)
+}
+
+#[cfg(feature = "chromium")]
 mod live {
     use std::collections::BTreeSet;
     use std::fs;
@@ -69,6 +87,34 @@ mod live {
             rgba.into_raw(),
             false,
         ))
+    }
+
+    pub(super) fn assert_gate_serializes_concurrent_callers() {
+        static PROBE_GATE: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        let first = super::test_gate_guard(&PROBE_GATE);
+        let (attempted_tx, attempted_rx) = std::sync::mpsc::channel();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let second = thread::spawn(move || {
+            attempted_tx.send(()).unwrap();
+            let _second = super::test_gate_guard(&PROBE_GATE);
+            entered_tx.send(()).unwrap();
+        });
+
+        attempted_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("second gate caller did not start");
+        assert!(
+            matches!(
+                entered_rx.recv_timeout(Duration::from_millis(50)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "a second live Chromium test must not enter while the first guard is held"
+        );
+        drop(first);
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("second gate caller did not enter after the first guard was released");
+        second.join().unwrap();
     }
 
     pub(super) fn wrapper_probe() {
@@ -549,18 +595,22 @@ mod live {
 #[cfg(feature = "chromium")]
 #[test]
 fn host_wrapper_context_csp_and_guard_probe() {
+    live::assert_gate_serializes_concurrent_callers();
+    let _live_test_guard = live_test_guard();
     live::wrapper_probe();
 }
 
 #[cfg(feature = "chromium")]
 #[test]
 fn four_k_single_frame_opaque_and_transparent_budget_smoke() {
+    let _live_test_guard = live_test_guard();
     live::four_k_budget_smoke();
 }
 
 #[cfg(feature = "chromium")]
 #[test]
 fn virtual_time_network_csp_timeout_cleanup_and_frame_identity() {
+    let _live_test_guard = live_test_guard();
     live::run();
 }
 
