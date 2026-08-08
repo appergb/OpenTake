@@ -633,11 +633,7 @@ mod chromium_backend {
             json!({"policy": "pause"}),
             Some(&session),
         )?;
-        if let Some(blocked) = cdp.take_blocked_url() {
-            return Err(MotionError::sandbox(format!(
-                "network access to {blocked:?} is not in the allowlist"
-            )));
-        }
+        cdp.ensure_no_blocked_url()?;
 
         let mut frames = Vec::with_capacity(req.duration_frames as usize);
         for (index, seconds) in HeadlessChromiumRenderer::frame_time_grid(req)
@@ -668,11 +664,10 @@ mod chromium_backend {
                     "author document failed while seeking frame {index}: {evaluated}"
                 )));
             }
-            if let Some(blocked) = cdp.take_blocked_url() {
-                return Err(MotionError::sandbox(format!(
-                    "network access to {blocked:?} is not in the allowlist"
-                )));
-            }
+            cdp.ensure_no_blocked_url()?;
+
+            cdp.settle_compositor(&session)?;
+            cdp.ensure_no_blocked_url()?;
 
             let captured = cdp.command(
                 "Page.captureScreenshot",
@@ -684,6 +679,7 @@ mod chromium_backend {
                 }),
                 Some(&session),
             )?;
+            cdp.ensure_no_blocked_url()?;
             trace(format!("frame {index}: screenshot captured"));
             let encoded = required_string(&captured, "data")?;
             let png = base64::engine::general_purpose::STANDARD
@@ -1069,8 +1065,28 @@ mod chromium_backend {
             }
         }
 
-        fn take_blocked_url(&mut self) -> Option<String> {
-            self.blocked_url.take()
+        fn ensure_no_blocked_url(&mut self) -> MotionResult<()> {
+            if let Some(blocked) = self.blocked_url.take() {
+                Err(MotionError::sandbox(format!(
+                    "network access to {blocked:?} is not in the allowlist"
+                )))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn settle_compositor(&mut self, session: &str) -> MotionResult<()> {
+            self.command(
+                "Emulation.setVirtualTimePolicy",
+                json!({
+                    "policy": "advance",
+                    "budget": 1,
+                    "maxVirtualTimeTaskStarvationCount": 10_000
+                }),
+                Some(session),
+            )?;
+            self.wait_for_event("Emulation.virtualTimeBudgetExpired", Some(session))?;
+            Ok(())
         }
 
         fn send(&mut self, value: Value) -> MotionResult<()> {
@@ -1192,6 +1208,70 @@ mod chromium_backend {
                 message["sessionId"] = Value::String(session.to_owned());
             }
             self.send(message)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::net::{TcpListener, TcpStream};
+
+        use tungstenite::protocol::Role;
+
+        use super::*;
+
+        #[test]
+        fn compositor_fence_advances_a_finite_budget_and_waits_for_expiry() {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server_stream, _) = listener.accept().unwrap();
+            let client_socket = WebSocket::from_raw_socket(
+                MaybeTlsStream::Plain(client_stream),
+                Role::Client,
+                None,
+            );
+            let mut server_socket = WebSocket::from_raw_socket(server_stream, Role::Server, None);
+            let server = thread::spawn(move || {
+                let request = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected text CDP request, got {other:?}"),
+                };
+                assert_eq!(
+                    request,
+                    json!({
+                        "id": 1,
+                        "method": "Emulation.setVirtualTimePolicy",
+                        "params": {
+                            "policy": "advance",
+                            "budget": 1,
+                            "maxVirtualTimeTaskStarvationCount": 10_000
+                        },
+                        "sessionId": "render-session"
+                    })
+                );
+                server_socket
+                    .send(Message::text(
+                        json!({
+                            "method": "Emulation.virtualTimeBudgetExpired",
+                            "params": {},
+                            "sessionId": "render-session"
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap();
+                server_socket
+                    .send(Message::text(json!({"id": 1, "result": {}}).to_string()))
+                    .unwrap();
+            });
+
+            let mut cdp = Cdp::new(
+                client_socket,
+                SandboxPolicy::default(),
+                MotionCancellationToken::new(),
+                Instant::now() + Duration::from_secs(1),
+            );
+            cdp.settle_compositor("render-session").unwrap();
+            assert!(cdp.pending_events.is_empty());
+            server.join().unwrap();
         }
     }
 }

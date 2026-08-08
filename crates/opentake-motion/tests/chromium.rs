@@ -171,6 +171,33 @@ mod live {
             "a rejected render must not leave partial frames"
         );
 
+        let late_blocked_root = tempfile::tempdir().unwrap();
+        let late_blocked = renderer(late_blocked_root.path())
+            .render(&request(
+                r#"<script>
+                  OpenTake.onSeek((t) => {
+                    if (t >= 0.2 && !window.lateFetchScheduled) {
+                      window.lateFetchScheduled = true;
+                      setTimeout(() => fetch('https://example.com/late-forbidden'), 0);
+                    }
+                  });
+                </script>"#,
+            ))
+            .unwrap_err();
+        assert!(
+            matches!(late_blocked, MotionError::Sandbox(_)),
+            "{late_blocked:?}"
+        );
+        assert!(
+            fs::read_dir(late_blocked_root.path())
+                .unwrap()
+                .all(|entry| fs::read_dir(entry.unwrap().path())
+                    .unwrap()
+                    .next()
+                    .is_none()),
+            "a timer-triggered policy failure must not leave partial frames"
+        );
+
         let filesystem_root = tempfile::tempdir().unwrap();
         let filesystem = renderer(filesystem_root.path())
             .render(&request(r#"<img src="file:///etc/passwd">"#))
