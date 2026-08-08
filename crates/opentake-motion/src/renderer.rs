@@ -1206,7 +1206,6 @@ mod chromium_backend {
             let mut started = false;
             let captured = (|| -> MotionResult<image::RgbaImage> {
                 self.command("Page.enable", json!({}), Some(&capture_session))?;
-                self.command("Page.bringToFront", json!({}), Some(&capture_session))?;
                 self.command(
                     "Emulation.setVirtualTimePolicy",
                     json!({"policy": "pause"}),
@@ -1226,6 +1225,7 @@ mod chromium_backend {
                 )?;
                 self.start_screencast(&capture_session, width, height)?;
                 started = true;
+                self.command("Page.bringToFront", json!({}), Some(&capture_session))?;
                 let png = self.receive_and_ack_screencast_png(&capture_session, frame_index)?;
                 let image = decode_viewport_png(&png, background, frame_index)?;
                 if image.dimensions() != (width, height) {
@@ -2354,7 +2354,6 @@ mod chromium_backend {
 
                         for (method, params) in [
                             ("Page.enable", json!({})),
-                            ("Page.bringToFront", json!({})),
                             ("Emulation.setVirtualTimePolicy", json!({"policy": "pause"})),
                             (
                                 "Emulation.setDefaultBackgroundColorOverride",
@@ -2376,6 +2375,7 @@ mod chromium_backend {
                                     "everyNthFrame": 1
                                 }),
                             ),
+                            ("Page.bringToFront", json!({})),
                         ] {
                             let command = read_json(&mut server_socket);
                             assert_eq!(
@@ -2485,6 +2485,94 @@ mod chromium_backend {
             );
             server.join().unwrap();
         }
+
+        #[test]
+        fn isolated_capture_stops_and_detaches_when_post_start_stimulus_fails() {
+            fn read_json(socket: &mut WebSocket<TcpStream>) -> Value {
+                match socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str(text.as_ref()).unwrap(),
+                    other => panic!("expected CDP command, got {other:?}"),
+                }
+            }
+
+            fn send_json(socket: &mut WebSocket<TcpStream>, value: Value) {
+                socket.send(Message::text(value.to_string())).unwrap();
+            }
+
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (server_stream, _) = listener.accept().unwrap();
+            let client_socket = WebSocket::from_raw_socket(
+                MaybeTlsStream::Plain(client_stream),
+                Role::Client,
+                None,
+            );
+            let mut server_socket = WebSocket::from_raw_socket(server_stream, Role::Server, None);
+            let server = thread::spawn(move || {
+                for (id, method, session) in [
+                    (1, "Target.attachToTarget", None),
+                    (2, "Page.enable", Some("capture-session")),
+                    (3, "Emulation.setVirtualTimePolicy", Some("capture-session")),
+                    (
+                        4,
+                        "Emulation.setDefaultBackgroundColorOverride",
+                        Some("capture-session"),
+                    ),
+                    (5, "Page.startScreencast", Some("capture-session")),
+                ] {
+                    let command = read_json(&mut server_socket);
+                    assert_eq!(command["id"], id);
+                    assert_eq!(command["method"], method);
+                    assert_eq!(command.get("sessionId").and_then(Value::as_str), session);
+                    let result = if method == "Target.attachToTarget" {
+                        json!({"id": id, "result": {"sessionId": "capture-session"}})
+                    } else {
+                        json!({"id": id, "result": {}})
+                    };
+                    send_json(&mut server_socket, result);
+                }
+
+                let stimulus = read_json(&mut server_socket);
+                assert_eq!(stimulus["id"], 6);
+                assert_eq!(stimulus["method"], "Page.bringToFront");
+                assert_eq!(stimulus["sessionId"], "capture-session");
+                send_json(
+                    &mut server_socket,
+                    json!({"id": 6, "error": {"message": "stimulus failed"}}),
+                );
+
+                let stop = read_json(&mut server_socket);
+                assert_eq!(stop["id"], 7);
+                assert_eq!(stop["method"], "Page.stopScreencast");
+                assert_eq!(stop["sessionId"], "capture-session");
+                send_json(&mut server_socket, json!({"id": 7, "result": {}}));
+
+                let detach = read_json(&mut server_socket);
+                assert_eq!(detach["id"], 8);
+                assert_eq!(detach["method"], "Target.detachFromTarget");
+                assert_eq!(detach["params"]["sessionId"], "capture-session");
+                assert!(detach.get("sessionId").is_none());
+                send_json(&mut server_socket, json!({"id": 8, "result": {}}));
+            });
+
+            let mut cdp = Cdp::new(
+                client_socket,
+                SandboxPolicy::default(),
+                MotionCancellationToken::new(),
+                Instant::now() + Duration::from_secs(1),
+            );
+            let error = cdp
+                .capture_isolated_viewport("target-id", [0, 0, 0], 1, 1, 0, "black")
+                .expect_err("a failed post-start damage stimulus must fail the capture");
+            assert!(matches!(
+                error,
+                MotionError::RenderFailed(message)
+                    if message.contains("Page.bringToFront")
+                        && message.contains("stimulus failed")
+            ));
+            server.join().unwrap();
+        }
+
         #[test]
         fn completion_checkpoint_rejects_timeout_and_cancellation_without_cache_commit() {
             fn complete_frames(dir: &Path) {
