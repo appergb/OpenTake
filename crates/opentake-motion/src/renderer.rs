@@ -173,7 +173,20 @@ impl MotionRenderer for StubRenderer {
         }
 
         let hash = content_hash(req);
-        let dir = self.cache.ensure_dir(req)?;
+        if self.cache.is_cached(req) {
+            let dir = self.cache.dir_for(req);
+            return Ok(RenderedClip {
+                content_hash: hash,
+                frames: (0..req.duration_frames as usize)
+                    .map(|index| MotionCache::frame_file(&dir, index))
+                    .collect(),
+                fps: req.fps,
+                width: req.width,
+                height: req.height,
+                transparent: req.transparent,
+            });
+        }
+        let dir = self.cache.begin_render(req)?;
 
         let mut frames: Vec<PathBuf> = Vec::with_capacity(req.duration_frames as usize);
         for frame in 0..req.duration_frames {
@@ -182,6 +195,7 @@ impl MotionRenderer for StubRenderer {
             write_solid_rgba_png(&path, req.width, req.height, color)?;
             frames.push(path);
         }
+        MotionCache::mark_complete(&dir)?;
 
         Ok(RenderedClip {
             content_hash: hash,
@@ -545,7 +559,7 @@ mod chromium_backend {
             return Ok(clip_from_cache(req, hash, renderer.cache.dir_for(req)));
         }
 
-        let dir = renderer.cache.ensure_dir(req)?;
+        let dir = renderer.cache.begin_render(req)?;
         remove_partial_frames(&dir)?;
         let mut partial = PartialFrames::new(dir.clone());
         let deadline = Instant::now()
@@ -667,9 +681,12 @@ mod chromium_backend {
             }
             cdp.ensure_no_blocked_url()?;
 
+            trace(format!("frame {index}: compositor settle start"));
             cdp.settle_compositor(&session)?;
+            trace(format!("frame {index}: compositor settle complete"));
             cdp.ensure_no_blocked_url()?;
 
+            trace(format!("frame {index}: screenshot capture start"));
             let captured = cdp.command(
                 "Page.captureScreenshot",
                 json!({
@@ -701,8 +718,9 @@ mod chromium_backend {
         }
 
         cdp.command("Target.closeTarget", json!({"targetId": target_id}), None)?;
+        browser.shutdown()?;
+        MotionCache::mark_complete(&dir)?;
         partial.commit();
-        browser.shutdown();
 
         Ok(RenderedClip {
             content_hash: hash,
@@ -806,15 +824,17 @@ mod chromium_backend {
     impl Drop for PartialFrames {
         fn drop(&mut self) {
             if !self.committed {
+                let _ = MotionCache::remove_completion_marker(&self.dir);
                 let _ = remove_partial_frames(&self.dir);
             }
         }
     }
 
     struct BrowserProcess {
-        child: Child,
+        child: Option<Child>,
         profile: PathBuf,
         tree: ProcessTree,
+        shutdown_complete: bool,
     }
 
     impl BrowserProcess {
@@ -882,12 +902,13 @@ mod chromium_backend {
                 }
             };
             let mut process = BrowserProcess {
-                child,
+                child: Some(child),
                 profile,
                 tree,
+                shutdown_complete: false,
             };
-            let Some(stderr) = process.child.stderr.take() else {
-                process.shutdown();
+            let Some(stderr) = process.child.as_mut().and_then(|child| child.stderr.take()) else {
+                let _ = process.shutdown();
                 return Err(MotionError::render_failed(
                     "Chromium stderr was not captured",
                 ));
@@ -913,7 +934,12 @@ mod chromium_backend {
                 if Instant::now() >= deadline {
                     return Err(MotionError::Timeout(timeout));
                 }
-                if let Some(status) = process.child.try_wait()? {
+                if let Some(status) = process
+                    .child
+                    .as_mut()
+                    .expect("launched Chromium child is present")
+                    .try_wait()?
+                {
                     return Err(MotionError::render_failed(format!(
                         "Chromium exited before CDP was ready: {status}"
                     )));
@@ -934,13 +960,35 @@ mod chromium_backend {
             }
         }
 
-        fn shutdown(&mut self) {
-            let tree_terminated = self.tree.terminate().is_ok();
-            let _ = self.child.kill();
-            let _ = self.child.wait();
-            if tree_terminated {
-                self.tree.disarm();
+        fn shutdown(&mut self) -> std::io::Result<()> {
+            const PROCESS_TREE_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+            if self.shutdown_complete {
+                return Ok(());
             }
+            trace("browser process-tree shutdown start");
+            let termination = self.tree.terminate();
+            let child_wait = if let Some(mut child) = self.child.take() {
+                // TerminateJobObject is authoritative on Windows; `kill` is a
+                // fallback for an attach/termination failure and is harmless
+                // when the root has already exited.
+                let _ = child.kill();
+                let result = child.wait().map(|_| ());
+                // ActiveProcesses stays nonzero while an external process
+                // handle remains open, so release Child before the Job query.
+                drop(child);
+                result
+            } else {
+                Ok(())
+            };
+
+            termination?;
+            self.tree.wait_for_exit(PROCESS_TREE_EXIT_TIMEOUT)?;
+            self.tree.disarm();
+            self.shutdown_complete = true;
+            child_wait?;
+            trace("browser process-tree shutdown complete");
+            Ok(())
         }
 
         fn remove_profile(&self) {
@@ -964,7 +1012,7 @@ mod chromium_backend {
 
     impl Drop for BrowserProcess {
         fn drop(&mut self) {
-            self.shutdown();
+            let _ = self.shutdown();
             self.remove_profile();
         }
     }
@@ -1083,6 +1131,7 @@ mod chromium_backend {
         }
 
         fn settle_compositor(&mut self, session: &str) -> MotionResult<()> {
+            trace("virtual-time advance command start");
             self.command(
                 "Emulation.setVirtualTimePolicy",
                 json!({
@@ -1092,7 +1141,9 @@ mod chromium_backend {
                 }),
                 Some(session),
             )?;
+            trace("virtual-time advance command complete; budget expiry wait start");
             self.wait_for_event("Emulation.virtualTimeBudgetExpired", Some(session))?;
+            trace("virtual-time budget expired");
             Ok(())
         }
 
@@ -1214,6 +1265,7 @@ mod chromium_backend {
             if let Some(session) = session {
                 message["sessionId"] = Value::String(session.to_owned());
             }
+            trace(format!("{method}: request observed"));
             self.send(message)
         }
     }
@@ -1279,6 +1331,35 @@ mod chromium_backend {
             cdp.settle_compositor("render-session").unwrap();
             assert!(cdp.pending_events.is_empty());
             server.join().unwrap();
+        }
+
+        #[test]
+        fn partial_frame_guard_only_preserves_a_published_marker_after_commit() {
+            let root = tempfile::tempdir().unwrap();
+            let cache = MotionCache::new(root.path());
+            let request = MotionRenderRequest::new(MotionSource::code("<x/>"), 30, 2, 8, 8);
+            let dir = cache.begin_render(&request).unwrap();
+            for index in 0..2 {
+                std::fs::write(MotionCache::frame_file(&dir, index), b"png").unwrap();
+            }
+            MotionCache::mark_complete(&dir).unwrap();
+            assert!(cache.is_cached(&request));
+
+            drop(PartialFrames::new(dir.clone()));
+            assert!(
+                !cache.is_cached(&request),
+                "an uncommitted guard must invalidate a published marker"
+            );
+
+            let dir = cache.begin_render(&request).unwrap();
+            for index in 0..2 {
+                std::fs::write(MotionCache::frame_file(&dir, index), b"png").unwrap();
+            }
+            MotionCache::mark_complete(&dir).unwrap();
+            let mut completed = PartialFrames::new(dir);
+            completed.commit();
+            drop(completed);
+            assert!(cache.is_cached(&request));
         }
     }
 }

@@ -2,6 +2,34 @@
 
 use std::io;
 use std::process::Command;
+use std::time::Duration;
+#[cfg(any(test, windows))]
+use std::time::Instant;
+
+#[cfg(any(test, windows))]
+fn wait_for_processes_to_exit(
+    timeout: Duration,
+    mut active_processes: impl FnMut() -> io::Result<u32>,
+    mut pause: impl FnMut(Duration),
+) -> io::Result<()> {
+    const POLL_INTERVAL: Duration = Duration::from_millis(1);
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(Instant::now);
+    loop {
+        if active_processes()? == 0 {
+            return Ok(());
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "process tree remained active after termination",
+            ));
+        }
+        pause(POLL_INTERVAL.min(deadline.saturating_duration_since(now)));
+    }
+}
 
 /// Configure a command before spawn so descendants can be terminated as a
 /// unit. Call [`ProcessTree::attach`] immediately after a successful spawn.
@@ -33,9 +61,10 @@ mod windows_containment {
         CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
     };
     use windows_sys::Win32::System::JobObjects::{
-        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
-        SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
+        JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+        TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
     use windows_sys::Win32::System::Threading::{
         OpenProcess, OpenThread, ResumeThread, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
@@ -173,6 +202,26 @@ mod windows_containment {
             Ok(())
         }
     }
+
+    pub(super) fn active_processes(job: HANDLE) -> io::Result<u32> {
+        let mut accounting = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+        // SAFETY: `job` is a live Job Object handle owned by the caller, and
+        // the output buffer exactly matches the requested information class.
+        if unsafe {
+            QueryInformationJobObject(
+                job,
+                JobObjectBasicAccountingInformation,
+                (&mut accounting as *mut JOBOBJECT_BASIC_ACCOUNTING_INFORMATION).cast(),
+                size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                ptr::null_mut(),
+            )
+        } == 0
+        {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(accounting.ActiveProcesses)
+        }
+    }
 }
 
 /// Owns the operating-system containment object for one spawned process tree.
@@ -258,6 +307,38 @@ impl ProcessTree {
         Ok(())
     }
 
+    /// Terminate the contained process tree and wait until the operating
+    /// system reports that no process remains active.
+    ///
+    /// On Windows, callers must first release any process handles they own:
+    /// Windows keeps `ActiveProcesses` nonzero until terminated process
+    /// references are released. The wait is bounded and returns a timeout
+    /// error instead of silently releasing an incompletely drained Job Object.
+    pub fn terminate_and_wait(&self, timeout: Duration) -> io::Result<()> {
+        self.terminate()?;
+        self.wait_for_exit(timeout)
+    }
+
+    /// Wait for a previously requested termination to finish.
+    pub fn wait_for_exit(&self, timeout: Duration) -> io::Result<()> {
+        if !self.armed {
+            return Ok(());
+        }
+        #[cfg(windows)]
+        {
+            wait_for_processes_to_exit(
+                timeout,
+                || windows_containment::active_processes(self.job),
+                std::thread::sleep,
+            )?;
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = timeout;
+        }
+        Ok(())
+    }
+
     /// Mark normal completion and release containment without termination.
     pub fn disarm(&mut self) {
         self.armed = false;
@@ -293,6 +374,8 @@ impl Drop for ProcessTree {
 #[cfg(test)]
 mod contract_tests {
     use super::*;
+    use std::collections::VecDeque;
+    use std::time::Duration;
 
     #[test]
     fn attach_rejects_process_ids_with_group_or_broadcast_semantics() {
@@ -307,6 +390,35 @@ mod contract_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn active_process_fence_waits_for_zero_without_returning_early() {
+        let mut counts = VecDeque::from([3, 1, 0]);
+        let mut pauses = 0;
+        wait_for_processes_to_exit(
+            Duration::from_secs(1),
+            || Ok(counts.pop_front().expect("bounded accounting query")),
+            |_| pauses += 1,
+        )
+        .expect("active process count reaches zero");
+        assert_eq!(pauses, 2);
+        assert!(counts.is_empty());
+    }
+
+    #[test]
+    fn active_process_fence_is_fail_closed_on_query_error_and_timeout() {
+        let query_error = wait_for_processes_to_exit(
+            Duration::from_secs(1),
+            || Err(io::Error::other("accounting unavailable")),
+            |_| {},
+        )
+        .expect_err("accounting errors must not be treated as process exit");
+        assert_eq!(query_error.kind(), io::ErrorKind::Other);
+
+        let timeout = wait_for_processes_to_exit(Duration::ZERO, || Ok(1), |_| {})
+            .expect_err("an active process at the deadline must fail closed");
+        assert_eq!(timeout.kind(), io::ErrorKind::TimedOut);
     }
 }
 
@@ -423,6 +535,7 @@ mod tests {
             }
         };
         assert!(parent_status.success());
+        drop(parent);
 
         // SAFETY: `grandchild_pid` was read from the just-spawned helper. The
         // requested access is query-only, and `TestProcessHandle` exclusively
@@ -435,25 +548,26 @@ mod tests {
             "grandchild exited before containment check"
         );
 
-        tree.terminate().expect("terminate contained job");
+        let mut exit_code = 0_u32;
+        // SAFETY: the held process handle is live and query-only.
+        assert_ne!(
+            unsafe { GetExitCodeProcess(grandchild.0, &mut exit_code) },
+            0
+        );
+        assert_eq!(exit_code, STILL_ACTIVE as u32);
+        // ActiveProcesses is not permitted to reach zero while this external
+        // process handle remains open. Release it before exercising the
+        // completion fence used by real browser shutdown.
+        drop(grandchild);
+
+        tree.terminate_and_wait(Duration::from_secs(5))
+            .expect("terminate and fully drain contained job");
+        assert_eq!(
+            windows_containment::active_processes(tree.job).expect("query drained Job Object"),
+            0,
+            "termination completion must be observable when the API returns"
+        );
         tree.disarm();
-        let exit_deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let mut exit_code = 0_u32;
-            // SAFETY: the held process handle stays valid for the loop.
-            assert_ne!(
-                unsafe { GetExitCodeProcess(grandchild.0, &mut exit_code) },
-                0
-            );
-            if exit_code != STILL_ACTIVE as u32 {
-                break;
-            }
-            assert!(
-                Instant::now() < exit_deadline,
-                "grandchild survived Job Object termination"
-            );
-            thread::sleep(Duration::from_millis(10));
-        }
         fs::remove_dir_all(&directory).expect("remove process-tree test directory");
     }
 }
