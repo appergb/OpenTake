@@ -149,6 +149,130 @@ class WindowsProductCiContractTests(unittest.TestCase):
         )
         self.assert_rejected(mutated, "complete Windows Chromium motion regression")
 
+    def test_product_has_exact_4k_resource_budget_gate(self) -> None:
+        job = _named_job_body(WORKFLOW, "windows-product")
+        self.assertIsNotNone(job)
+        assert job is not None
+        step = _named_step(_steps(job), "Windows Chromium 4K resource budget")
+        self.assertIsNotNone(step)
+        self.assertRegex(contract.MOTION_4K_STEP_SHA256, r"^[0-9a-f]{64}$")
+
+    def test_4k_budget_gate_cannot_delete_the_exact_test(self) -> None:
+        self.assert_job_mutation_rejected(
+            "windows-product",
+            "four_k_single_frame_opaque_and_transparent_budget_smoke",
+            "four_k_resource_test_was_skipped",
+            "complete Windows Chromium 4K resource budget",
+        )
+
+    def test_4k_budget_gate_rejects_a_write_host_test_lure(self) -> None:
+        self.assert_job_mutation_rejected(
+            "windows-product",
+            "$cargo = Start-Process @cargoProcess",
+            "Write-Host '$cargo = Start-Process @cargoProcess'",
+            "complete Windows Chromium 4K resource budget",
+        )
+
+    def test_4k_budget_gate_rejects_zero_sample_fail_open(self) -> None:
+        self.assert_job_mutation_rejected(
+            "windows-product",
+            "if ($sampleCount -eq 0) { $monitorErrors.Add('no new Chrome or Edge working-set samples were captured') }",
+            "if ($sampleCount -eq 0) { Write-Host 'no samples accepted' }",
+            "complete Windows Chromium 4K resource budget",
+        )
+
+    def test_4k_budget_gate_rejects_monitor_failure_fail_open(self) -> None:
+        self.assert_job_mutation_rejected(
+            "windows-product",
+            "$monitorExit = if ($monitorErrors.Count -eq 0) { 0 } else { 1 }",
+            "$monitorExit = 0",
+            "complete Windows Chromium 4K resource budget",
+        )
+
+    def test_4k_budget_gate_rejects_missing_elapsed_and_peak_limits(self) -> None:
+        mutations = (
+            (
+                "if ($elapsedSeconds -gt $elapsedLimitSeconds) {",
+                "if ($false) { # elapsed limit disabled",
+            ),
+            (
+                "if ($peakWorkingSetBytes -gt $peakLimitBytes) {",
+                "if ($false) { # peak limit disabled",
+            ),
+        )
+        for before, after in mutations:
+            with self.subTest(before=before):
+                self.assert_job_mutation_rejected(
+                    "windows-product",
+                    before,
+                    after,
+                    "complete Windows Chromium 4K resource budget",
+                )
+
+    def test_4k_budget_step_drift_breaks_the_frozen_digest(self) -> None:
+        self.assert_job_mutation_rejected(
+            "windows-product",
+            "schema = 'opentake-windows-motion-4k-resource-receipt-v1'",
+            "schema = 'opentake-windows-motion-4k-resource-receipt-v2'",
+            "exact Windows Chromium 4K resource gate",
+        )
+
+    def test_4k_budget_receipt_upload_contract_is_frozen(self) -> None:
+        job = _named_job_body(WORKFLOW, "windows-product")
+        self.assertIsNotNone(job)
+        assert job is not None
+        upload = _named_step(
+            _steps(job), "Upload Windows Chromium 4K resource receipt"
+        )
+        self.assertIsNotNone(upload)
+        self.assertRegex(contract.MOTION_4K_UPLOAD_STEP_SHA256, r"^[0-9a-f]{64}$")
+
+    def test_4k_budget_receipt_upload_must_always_run(self) -> None:
+        self.assert_job_mutation_rejected(
+            "windows-product",
+            "name: Upload Windows Chromium 4K resource receipt\n        if: always()",
+            "name: Upload Windows Chromium 4K resource receipt\n        if: success()",
+            "Windows Chromium 4K resource receipt artifact",
+        )
+
+    def test_4k_budget_receipt_upload_name_and_path_are_exact(self) -> None:
+        mutations = (
+            (
+                "name: windows-motion-4k-resource-${{ steps.bind.outputs.sha }}",
+                "name: windows-motion-4k-resource-mutable",
+            ),
+            (
+                "path: windows-motion-4k-resource-receipt.json",
+                "path: missing-motion-4k-resource-receipt.json",
+            ),
+        )
+        for before, after in mutations:
+            with self.subTest(before=before):
+                self.assert_job_mutation_rejected(
+                    "windows-product",
+                    before,
+                    after,
+                    "Windows Chromium 4K resource receipt artifact",
+                )
+
+    def test_4k_budget_receipt_upload_is_immediately_after_the_gate(self) -> None:
+        job = _named_job_body(WORKFLOW, "windows-product")
+        self.assertIsNotNone(job)
+        assert job is not None
+        steps = _steps(job)
+        upload = _named_step(steps, "Upload Windows Chromium 4K resource receipt")
+        web = _named_step(steps, "Web editor behavior suite")
+        self.assertIsNotNone(upload)
+        self.assertIsNotNone(web)
+        assert upload is not None and web is not None
+        mutated_job = job.replace(upload, "__MOTION_4K_UPLOAD__", 1)
+        mutated_job = mutated_job.replace(web, upload, 1)
+        mutated_job = mutated_job.replace("__MOTION_4K_UPLOAD__", web, 1)
+        self.assert_rejected(
+            WORKFLOW.replace(job, mutated_job, 1),
+            "Windows Chromium 4K resource gate order",
+        )
+
     def test_cancellation_gate_must_use_the_pinned_packaged_ffmpeg(self) -> None:
         mutated = WORKFLOW.replace(
             "          OPENTAKE_FFMPEG: ${{ github.workspace }}\\src-tauri\\binaries\\ffmpeg-x86_64-pc-windows-msvc.exe\n",
@@ -270,10 +394,20 @@ class WindowsProductCiContractTests(unittest.TestCase):
         self.assert_rejected(mutated, "checkout assertion publishes bind output")
 
     def test_receipt_env_must_consume_bind_output(self) -> None:
-        mutated = WORKFLOW.replace(
+        job = _named_job_body(WORKFLOW, "windows-product")
+        self.assertIsNotNone(job)
+        assert job is not None
+        marker = "      - name: Bind installers to the exact source SHA\n"
+        self.assertIn(marker, job)
+        prefix, receipt_and_upload = job.split(marker, 1)
+        self.assertIn("RECEIPT_SHA: ${{ steps.bind.outputs.sha }}", receipt_and_upload)
+        mutated_tail = receipt_and_upload.replace(
             "RECEIPT_SHA: ${{ steps.bind.outputs.sha }}", "RECEIPT_SHA: deadbeef", 1
         )
-        self.assert_rejected(mutated, "receipt consumes bind output")
+        mutated_job = prefix + marker + mutated_tail
+        self.assert_rejected(
+            WORKFLOW.replace(job, mutated_job, 1), "receipt consumes bind output"
+        )
 
     def test_receipt_must_be_written_and_uploaded(self) -> None:
         without_write = WORKFLOW.replace(

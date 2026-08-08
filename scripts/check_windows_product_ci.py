@@ -28,6 +28,14 @@ TARGET_SHA_EXPRESSION = (
     "TARGET_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || "
     "github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}"
 )
+MOTION_4K_STEP_NAME = "Windows Chromium 4K resource budget"
+MOTION_4K_STEP_SHA256 = (
+    "ec7b977f58edafbe7bed61ffe459329e4ba07fb1b5caa3b72c6fc7df920a30a8"
+)
+MOTION_4K_UPLOAD_STEP_NAME = "Upload Windows Chromium 4K resource receipt"
+MOTION_4K_UPLOAD_STEP_SHA256 = (
+    "545d855327556cca63cc0386e16c4bb38af3ebff3ce80fb6905dc41ce5a54c8c"
+)
 ACTION_PINS = MappingProxyType(
     {
         "actions/checkout": "11d5960a326750d5838078e36cf38b85af677262",
@@ -286,7 +294,7 @@ SHA_BOUND_JOB_CONTRACTS = (
         before_reassert_name="Re-assert immutable Windows product source before gates",
         after_reassert_name="Re-assert immutable Windows product source after gates",
         first_gate_name="Rust formatting",
-        job_sha256="e55c11b2d14037a8edc227bb7f2527f02ec7cec6e0c0e7194ee3bfaf6b7d8ed6",
+        job_sha256="9b8e3d5bc02d87b918ab1636b0083337bc60f4ccdd6ef7d3ee04a558943288d8",
         step_identities=(
             "name:Validate immutable SHA input",
             f"uses:{_pinned_action('actions/checkout')}",
@@ -303,6 +311,8 @@ SHA_BOUND_JOB_CONTRACTS = (
             "name:Rust formatting",
             "name:Rust workspace clippy",
             "name:Windows Chromium motion capture regression",
+            f"name:{MOTION_4K_STEP_NAME}",
+            f"name:{MOTION_4K_UPLOAD_STEP_NAME}",
             "name:Web editor behavior suite",
             "name:Rust workspace tests",
             "name:Minimal-feature Tauri clippy",
@@ -966,7 +976,10 @@ def _validate_structured_product(document: dict[str, object]) -> list[str]:
         step.get("continue-on-error") is True for step in steps
     ):
         errors.append("no ignored failures")
-    if any("if" in step for step in steps):
+    if any(
+        "if" in step and step.get("name") != MOTION_4K_UPLOAD_STEP_NAME
+        for step in steps
+    ):
         errors.append("required steps are unconditional")
 
     checkouts = _action_steps(job, "actions/checkout")
@@ -1058,6 +1071,99 @@ def _validate_structured_product(document: dict[str, object]) -> list[str]:
         )
     ):
         errors.append("complete Windows Chromium motion regression")
+
+    motion_4k = _structured_step(job, MOTION_4K_STEP_NAME)
+    motion_4k_env = (
+        _as_mapping(motion_4k.get("env")) if motion_4k is not None else None
+    )
+    motion_4k_script = _run_script(motion_4k)
+    motion_4k_lines = (
+        "$elapsedLimitSeconds = 180",
+        "$peakLimitBytes = 2GB",
+        "$sampleIntervalMilliseconds = 200",
+        "'four_k_single_frame_opaque_and_transparent_budget_smoke',",
+        "$cargo = Start-Process @cargoProcess",
+        "Start-Sleep -Milliseconds $sampleIntervalMilliseconds",
+        "if ($sampleCount -eq 0) { $monitorErrors.Add('no new Chrome or Edge working-set samples were captured') }",
+        "if ($elapsedSeconds -gt $elapsedLimitSeconds) {",
+        "if ($peakWorkingSetBytes -gt $peakLimitBytes) {",
+        "$monitorExit = if ($monitorErrors.Count -eq 0) { 0 } else { 1 }",
+        "$aggregateExit = if ($cargoExit -eq 0 -and $monitorExit -eq 0) { 0 } else { 1 }",
+        "$receiptJson | Set-Content -Encoding utf8NoBOM $receiptPath",
+        "if ($aggregateExit -ne 0) { throw 'Windows Chromium 4K resource budget failed' }",
+    )
+    motion_4k_fragments = (
+        "four_k_single_frame_opaque_and_transparent_budget_smoke",
+        "Get-Process -ErrorAction Stop",
+        "@('chrome', 'msedge')",
+        "working_set_bytes",
+        "taskkill.exe",
+        "schema = 'opentake-windows-motion-4k-resource-receipt-v1'",
+        "$sourceSha = [string]$env:RECEIPT_SHA",
+        "source_sha = $sourceSha.ToLowerInvariant()",
+        "sample_count = $sampleCount",
+        "process_selection = 'all chrome/msedge identities absent from the pre-test baseline'",
+        "peak_working_set_bytes = $peakWorkingSetBytes",
+        "peak_working_set_limit_bytes = $peakLimitBytes",
+        "elapsed_seconds = $elapsedSeconds",
+        "elapsed_limit_seconds = $elapsedLimitSeconds",
+        "cargo_exit = $cargoExit",
+        "monitor_exit = $monitorExit",
+        "aggregate_exit = $aggregateExit",
+        "OPENTAKE_WINDOWS_MOTION_4K_RECEIPT=$receiptJson",
+    )
+    if (
+        motion_4k is None
+        or motion_4k.get("shell") != "pwsh"
+        or motion_4k_env
+        != {
+            "OPENTAKE_MOTION_TRACE": "1",
+            "RECEIPT_SHA": "${{ steps.bind.outputs.sha }}",
+        }
+        or not _has_code_lines(motion_4k, motion_4k_lines)
+        or not all(fragment in motion_4k_script for fragment in motion_4k_fragments)
+        or motion_4k_script.count("Start-Sleep") != 1
+        or motion_4k_script.count(
+            "if ($peakWorkingSetBytes -gt $peakLimitBytes) {"
+        )
+        != 2
+        or re.search(r"(?i)\bretry\b", motion_4k_script) is not None
+    ):
+        errors.append("complete Windows Chromium 4K resource budget")
+    if motion_4k is None or _structured_digest(motion_4k) != MOTION_4K_STEP_SHA256:
+        errors.append("exact Windows Chromium 4K resource gate")
+
+    motion_4k_upload = _structured_step(job, MOTION_4K_UPLOAD_STEP_NAME)
+    motion_4k_upload_with = _with_mapping(motion_4k_upload)
+    if (
+        motion_4k_upload is None
+        or set(motion_4k_upload) != {"name", "if", "uses", "with"}
+        or motion_4k_upload.get("if") != "always()"
+        or motion_4k_upload.get("uses")
+        != _pinned_action("actions/upload-artifact")
+        or motion_4k_upload_with
+        != {
+            "name": "windows-motion-4k-resource-${{ steps.bind.outputs.sha }}",
+            "path": "windows-motion-4k-resource-receipt.json",
+            "if-no-files-found": "error",
+            "retention-days": 30,
+        }
+    ):
+        errors.append("Windows Chromium 4K resource receipt artifact")
+    if (
+        motion_4k_upload is None
+        or _structured_digest(motion_4k_upload) != MOTION_4K_UPLOAD_STEP_SHA256
+    ):
+        errors.append("exact Windows Chromium 4K resource receipt upload")
+    if not (
+        _step_position(job, "Windows Chromium motion capture regression") + 1
+        == _step_position(job, MOTION_4K_STEP_NAME)
+        and _step_position(job, MOTION_4K_STEP_NAME) + 1
+        == _step_position(job, MOTION_4K_UPLOAD_STEP_NAME)
+        and _step_position(job, MOTION_4K_UPLOAD_STEP_NAME) + 1
+        == _step_position(job, "Web editor behavior suite")
+    ):
+        errors.append("Windows Chromium 4K resource gate order")
 
     bundle = _structured_step(job, "Build native MSI and NSIS installers")
     if not _has_code_lines(

@@ -262,6 +262,218 @@ jobs:
             sandbox_progress_cancel_validated_mp4_result \
             -- --exact --nocapture --test-threads=1
 
+      - name: Windows Chromium 4K resource budget
+        shell: pwsh
+        env:
+          OPENTAKE_MOTION_TRACE: '1'
+          RECEIPT_SHA: ${{ steps.bind.outputs.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # macOS completes this focused test in 12.26s. 180s gives cold Windows CI
+          # nearly 15x headroom; 2 GiB bounds one 4K browser tree below runner capacity.
+          $elapsedLimitSeconds = 180
+          $peakLimitBytes = 2GB
+          $sampleIntervalMilliseconds = 200
+          $receiptPath = 'windows-motion-4k-resource-receipt.json'
+          $stdoutPath = Join-Path $env:RUNNER_TEMP 'opentake-motion-4k.stdout.log'
+          $stderrPath = Join-Path $env:RUNNER_TEMP 'opentake-motion-4k.stderr.log'
+          Remove-Item $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+
+          $cargoArguments = @(
+            'test', '-p', 'opentake-motion', '--features', 'chromium',
+            '--test', 'chromium',
+            'four_k_single_frame_opaque_and_transparent_budget_smoke',
+            '--', '--exact', '--nocapture', '--test-threads=1'
+          )
+          $cargoProcess = @{
+            FilePath = 'cargo.exe'
+            ArgumentList = $cargoArguments
+            NoNewWindow = $true
+            PassThru = $true
+            RedirectStandardOutput = $stdoutPath
+            RedirectStandardError = $stderrPath
+          }
+          $browserNames = @('chrome', 'msedge')
+          $baselineSignatures = @{}
+          $monitorErrors = [System.Collections.Generic.List[string]]::new()
+          $sampleCount = 0
+          $peakProcessCount = 0
+          [int64]$peakWorkingSetBytes = 0
+          $cargoExit = -1
+          $cargo = $null
+          $abortCargo = $false
+          $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+          function Get-BrowserWorkingSetSnapshot {
+            param([string[]]$Names)
+            try {
+              $processes = @(Get-Process -ErrorAction Stop | Where-Object {
+                $Names -contains $_.ProcessName.ToLowerInvariant()
+              })
+            } catch {
+              throw "browser process enumeration failed: $($_.Exception.Message)"
+            }
+            $snapshot = [System.Collections.Generic.List[object]]::new()
+            foreach ($process in $processes) {
+              try {
+                if ($process.HasExited) { continue }
+                $started = $process.StartTime.ToUniversalTime().Ticks
+                $workingSet = [int64]$process.WorkingSet64
+                $snapshot.Add([pscustomobject]@{
+                  signature = "$($process.ProcessName):$($process.Id):$started"
+                  working_set_bytes = $workingSet
+                })
+              } catch [System.InvalidOperationException] {
+                # A process may exit between enumeration and property reads.
+                continue
+              } catch {
+                throw "browser process inspection failed for pid $($process.Id): $($_.Exception.Message)"
+              }
+            }
+            return @($snapshot)
+          }
+
+          try {
+            foreach ($process in @(Get-BrowserWorkingSetSnapshot -Names $browserNames)) {
+              $baselineSignatures[$process.signature] = $true
+            }
+            $cargo = Start-Process @cargoProcess
+            while (-not $cargo.HasExited) {
+              if ($stopwatch.Elapsed.TotalSeconds -gt $elapsedLimitSeconds) {
+                $monitorErrors.Add("elapsed time exceeded ${elapsedLimitSeconds}s while cargo test was running")
+                $abortCargo = $true
+                break
+              }
+              try {
+                $newBrowserProcesses = @(
+                  Get-BrowserWorkingSetSnapshot -Names $browserNames | Where-Object {
+                    -not $baselineSignatures.ContainsKey($_.signature)
+                  }
+                )
+                if ($newBrowserProcesses.Count -gt 0) {
+                  [int64]$totalWorkingSetBytes = 0
+                  foreach ($process in $newBrowserProcesses) {
+                    $totalWorkingSetBytes += [int64]$process.working_set_bytes
+                  }
+                  $sampleCount += 1
+                  $peakProcessCount = [Math]::Max($peakProcessCount, $newBrowserProcesses.Count)
+                  $peakWorkingSetBytes = [Math]::Max($peakWorkingSetBytes, $totalWorkingSetBytes)
+                  if ($peakWorkingSetBytes -gt $peakLimitBytes) {
+                    $monitorErrors.Add("peak browser WorkingSet $peakWorkingSetBytes exceeded $peakLimitBytes bytes while cargo test was running")
+                    $abortCargo = $true
+                    break
+                  }
+                }
+              } catch {
+                $monitorErrors.Add($_.Exception.Message)
+                $abortCargo = $true
+                break
+              }
+              Start-Sleep -Milliseconds $sampleIntervalMilliseconds
+              $cargo.Refresh()
+            }
+
+            if ($abortCargo -and -not $cargo.HasExited) {
+              try {
+                $killer = Start-Process -FilePath 'taskkill.exe' `
+                  -ArgumentList @('/PID', $cargo.Id, '/T', '/F') `
+                  -NoNewWindow -Wait -PassThru
+                if ($killer.ExitCode -ne 0) {
+                  $monitorErrors.Add("taskkill failed with exit $($killer.ExitCode)")
+                }
+              } catch {
+                $monitorErrors.Add("cargo process-tree cleanup failed: $($_.Exception.Message)")
+              }
+            }
+            if ($null -ne $cargo) {
+              if (-not $cargo.WaitForExit(10000)) {
+                $monitorErrors.Add('cargo process did not exit after bounded cleanup')
+              } else {
+                $cargoExit = $cargo.ExitCode
+              }
+            }
+          } catch {
+            $monitorErrors.Add("cargo launch or monitor failure: $($_.Exception.Message)")
+          } finally {
+            $stopwatch.Stop()
+            try {
+              if ($null -ne $cargo -and -not $cargo.HasExited) {
+                $killer = Start-Process -FilePath 'taskkill.exe' `
+                  -ArgumentList @('/PID', $cargo.Id, '/T', '/F') `
+                  -NoNewWindow -Wait -PassThru
+                if ($killer.ExitCode -ne 0) {
+                  $monitorErrors.Add("final taskkill failed with exit $($killer.ExitCode)")
+                }
+              }
+            } catch {
+              $monitorErrors.Add("final cargo process-tree cleanup failed: $($_.Exception.Message)")
+            }
+            try {
+              if (Test-Path $stdoutPath -PathType Leaf) {
+                Get-Content $stdoutPath | Write-Output
+              }
+            } catch {
+              $monitorErrors.Add("cargo stdout collection failed: $($_.Exception.Message)")
+            }
+            try {
+              if (Test-Path $stderrPath -PathType Leaf) {
+                Get-Content $stderrPath | Write-Output
+              }
+            } catch {
+              $monitorErrors.Add("cargo stderr collection failed: $($_.Exception.Message)")
+            }
+          }
+
+          $elapsedSeconds = [Math]::Round($stopwatch.Elapsed.TotalSeconds, 3)
+          if ($sampleCount -eq 0) { $monitorErrors.Add('no new Chrome or Edge working-set samples were captured') }
+          if ($elapsedSeconds -gt $elapsedLimitSeconds) {
+            $monitorErrors.Add("elapsed time ${elapsedSeconds}s exceeded ${elapsedLimitSeconds}s")
+          }
+          if ($peakWorkingSetBytes -gt $peakLimitBytes) {
+            $monitorErrors.Add("peak browser WorkingSet $peakWorkingSetBytes exceeded $peakLimitBytes bytes")
+          }
+          if ($env:RECEIPT_SHA -notmatch '^[0-9a-fA-F]{40}$') {
+            $monitorErrors.Add('receipt source SHA is not a 40-hex commit')
+          }
+          $sourceSha = [string]$env:RECEIPT_SHA
+          $monitorExit = if ($monitorErrors.Count -eq 0) { 0 } else { 1 }
+          $aggregateExit = if ($cargoExit -eq 0 -and $monitorExit -eq 0) { 0 } else { 1 }
+          $receipt = [ordered]@{
+            schema = 'opentake-windows-motion-4k-resource-receipt-v1'
+            repository = '${{ github.repository }}'
+            run_id = '${{ github.run_id }}'
+            run_attempt = '${{ github.run_attempt }}'
+            runner_os = '${{ runner.os }}'
+            runner_arch = '${{ runner.arch }}'
+            source_sha = $sourceSha.ToLowerInvariant()
+            test = 'four_k_single_frame_opaque_and_transparent_budget_smoke'
+            process_selection = 'all chrome/msedge identities absent from the pre-test baseline'
+            sample_interval_ms = $sampleIntervalMilliseconds
+            sample_count = $sampleCount
+            peak_browser_process_count = $peakProcessCount
+            peak_working_set_bytes = $peakWorkingSetBytes
+            peak_working_set_limit_bytes = $peakLimitBytes
+            elapsed_seconds = $elapsedSeconds
+            elapsed_limit_seconds = $elapsedLimitSeconds
+            cargo_exit = $cargoExit
+            monitor_exit = $monitorExit
+            aggregate_exit = $aggregateExit
+            monitor_errors = @($monitorErrors)
+          }
+          $receiptJson = $receipt | ConvertTo-Json -Depth 6 -Compress
+          $receiptJson | Set-Content -Encoding utf8NoBOM $receiptPath
+          Write-Output "OPENTAKE_WINDOWS_MOTION_4K_RECEIPT=$receiptJson"
+          if ($aggregateExit -ne 0) { throw 'Windows Chromium 4K resource budget failed' }
+
+      - name: Upload Windows Chromium 4K resource receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-motion-4k-resource-${{ steps.bind.outputs.sha }}
+          path: windows-motion-4k-resource-receipt.json
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Web editor behavior suite
         run: pnpm -C web test
 
