@@ -8,6 +8,7 @@ description = "Native motion fallback: deterministic RGBA frame cache, sandbox, 
 
 [dependencies]
 opentake-domain = { workspace = true }
+opentake-process-tree = { workspace = true, optional = true }
 # DecodedFrame / SourceMetrics / FrameProvider — the render crate DEFINES the
 # clip-source contracts; we IMPLEMENT them so a motion clip is just another
 # texture source to the compositor (zero special handling).
@@ -26,9 +27,6 @@ thiserror = "1"
 base64 = { version = "0.22", optional = true }
 tungstenite = { version = "0.29", optional = true, default-features = false, features = ["handshake"] }
 
-[target.'cfg(unix)'.dependencies]
-libc = { version = "0.2", optional = true }
-
 [dev-dependencies]
 # Offline PNG round-trip for the stub renderer's frame-file checks (mirrors the
 # render crate's dev-dep; no network, no assets).
@@ -40,4 +38,4 @@ default = []
 # Gates the real headless-Chromium (CDP) backend behind a feature so neither the
 # default build nor CI tests require a Chromium binary. Browser discovery and
 # the fail-closed API compile unconditionally; live CDP wiring is feature-gated.
-chromium = ["dep:base64", "dep:libc", "dep:tungstenite"]
+chromium = ["dep:base64", "dep:opentake-process-tree", "dep:tungstenite"]

@@ -190,7 +190,7 @@ SPECIALIST_CONTRACTS = (
         label="security",
         receipt_label="security",
         receipt_step_sha256=(
-            "fba3fe1ca73b067454770fe798116c5798182724bffe4558a1d0eb2ad1401c5d"
+            "da95ac495c8c7f55a0e41f3d8ee6c957a6da1cafb75716969714d6204857b5a0"
         ),
         enforce_step_sha256=(
             "4ab2ff4776426b4ce82d0d858b154f13c798344b870535471b8b7d5974117cdc"
@@ -208,9 +208,9 @@ SPECIALIST_CONTRACTS = (
                 name="Race-free helper process-tree containment",
                 step_id="security-process-tree",
                 shell="pwsh",
-                step_sha256="dc35fee96b2bbcaa39449d9baa11062b39cb49f834fe8f05a44d947f5f0decad",
+                step_sha256="3e8fc4e3a4e41a30ae030c2e2b54540674ff6567366a95e80973eb1a09302a26",
                 receipt_id="process-tree",
-                receipt_command="cargo test -p opentake-media --lib process_tree::tests::windows_suspended_job_contains_fast_exit_descendant -- --exact --nocapture --test-threads=1",
+                receipt_command="cargo test -p opentake-process-tree --lib tests::windows_suspended_job_contains_fast_exit_descendant -- --exact --nocapture --test-threads=1",
             ),
             GateContract(
                 name="Verify portable Tauri test image imports",
@@ -318,7 +318,7 @@ SHA_BOUND_JOB_CONTRACTS = (
         before_reassert_name="Re-assert immutable Windows security source before gates",
         after_reassert_name="Re-assert immutable Windows security source after gates",
         first_gate_name="Portable FFmpeg cancellation lifecycle",
-        job_sha256="5ea53859a3df822e3e99eb6a36bf95e3919c21bfa564fcfa4a77bc168bc218ac",
+        job_sha256="d556b3d8c5d0c895b3e164194f2c6e3c046167938e901f9f287113b8d6ff5a96",
         step_identities=(
             "name:Validate immutable Windows security SHA input",
             f"uses:{_pinned_action('actions/checkout')}",

@@ -125,11 +125,23 @@ class WindowsProductCiContractTests(unittest.TestCase):
 
     def test_windows_process_tree_gate_must_cover_fast_parent_exit(self) -> None:
         mutated = WORKFLOW.replace(
-            "          process_tree::tests::windows_suspended_job_contains_fast_exit_descendant\n",
+            "          tests::windows_suspended_job_contains_fast_exit_descendant\n",
             "",
             1,
         )
         self.assert_rejected(mutated, "exact security gate contracts")
+
+    def test_windows_process_tree_gate_cannot_fall_back_to_old_zero_test_package(
+        self,
+    ) -> None:
+        self.assert_job_mutation_rejected(
+            "windows-security",
+            "cargo test -p opentake-process-tree --lib\n"
+            "          tests::windows_suspended_job_contains_fast_exit_descendant",
+            "cargo test -p opentake-media --lib\n"
+            "          process_tree::tests::windows_suspended_job_contains_fast_exit_descendant",
+            "exact security gate contracts",
+        )
 
     def test_windows_reparse_gate_must_cover_retained_external_source(self) -> None:
         mutated = WORKFLOW.replace(
@@ -406,8 +418,8 @@ class WindowsProductCiContractTests(unittest.TestCase):
     def test_security_gate_rejects_a_write_host_command_lure(self) -> None:
         self.assert_job_mutation_rejected(
             "windows-security",
-            "run: >-\n          cargo test -p opentake-media --lib\n          process_tree::tests::windows_suspended_job_contains_fast_exit_descendant\n          -- --exact --nocapture --test-threads=1",
-            "run: >-\n          Write-Host 'cargo test -p opentake-media --lib\n          process_tree::tests::windows_suspended_job_contains_fast_exit_descendant\n          -- --exact --nocapture --test-threads=1'",
+            "run: >-\n          cargo test -p opentake-process-tree --lib\n          tests::windows_suspended_job_contains_fast_exit_descendant\n          -- --exact --nocapture --test-threads=1",
+            "run: >-\n          Write-Host 'cargo test -p opentake-process-tree --lib\n          tests::windows_suspended_job_contains_fast_exit_descendant\n          -- --exact --nocapture --test-threads=1'",
             "exact security gate contracts",
         )
 
@@ -467,6 +479,16 @@ class WindowsProductCiContractTests(unittest.TestCase):
             "windows-security",
             "command = 'packaged FFmpeg -version; cargo test opentake-media Windows cancellation lifecycle'",
             "command = 'Write-Host cancellation tests skipped'",
+            "security receipt gate binding",
+        )
+
+    def test_security_receipt_cannot_claim_old_zero_test_process_tree_package(
+        self,
+    ) -> None:
+        self.assert_job_mutation_rejected(
+            "windows-security",
+            "command = 'cargo test -p opentake-process-tree --lib tests::windows_suspended_job_contains_fast_exit_descendant -- --exact --nocapture --test-threads=1'",
+            "command = 'cargo test -p opentake-media --lib process_tree::tests::windows_suspended_job_contains_fast_exit_descendant -- --exact --nocapture --test-threads=1'",
             "security receipt gate binding",
         )
 

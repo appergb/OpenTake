@@ -63,7 +63,9 @@ pub mod library;
 pub mod ort_worker;
 pub mod probe;
 #[doc(hidden)]
-pub mod process_tree;
+pub mod process_tree {
+    pub use opentake_process_tree::{configure_command, ProcessTree};
+}
 pub mod proxy;
 pub mod search;
 pub mod thumbnail;

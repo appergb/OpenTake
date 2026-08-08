@@ -497,6 +497,7 @@ mod chromium_backend {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use base64::Engine as _;
+    use opentake_process_tree::{configure_command, ProcessTree};
     use serde_json::{json, Value};
     use tungstenite::stream::MaybeTlsStream;
     use tungstenite::{Message, WebSocket};
@@ -813,6 +814,7 @@ mod chromium_backend {
     struct BrowserProcess {
         child: Child,
         profile: PathBuf,
+        tree: ProcessTree,
     }
 
     impl BrowserProcess {
@@ -853,11 +855,7 @@ mod chromium_backend {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped());
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::CommandExt;
-                command.process_group(0);
-            }
+            configure_command(&mut command);
             let mut child = command.spawn().map_err(|error| {
                 let _ = std::fs::remove_dir_all(&profile);
                 if error.kind() == std::io::ErrorKind::NotFound {
@@ -872,10 +870,28 @@ mod chromium_backend {
                     ))
                 }
             })?;
-            let stderr = child
-                .stderr
-                .take()
-                .ok_or_else(|| MotionError::render_failed("Chromium stderr was not captured"))?;
+            let tree = match ProcessTree::attach(child.id()) {
+                Ok(tree) => tree,
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = std::fs::remove_dir_all(&profile);
+                    return Err(MotionError::render_failed(format!(
+                        "failed to contain Chromium process tree: {error}"
+                    )));
+                }
+            };
+            let mut process = BrowserProcess {
+                child,
+                profile,
+                tree,
+            };
+            let Some(stderr) = process.child.stderr.take() else {
+                process.shutdown();
+                return Err(MotionError::render_failed(
+                    "Chromium stderr was not captured",
+                ));
+            };
             let (sender, receiver) = mpsc::channel();
             thread::spawn(move || {
                 for line in BufReader::new(stderr).lines() {
@@ -890,7 +906,6 @@ mod chromium_backend {
                 }
             });
 
-            let mut process = BrowserProcess { child, profile };
             loop {
                 if cancellation.is_cancelled() {
                     return Err(MotionError::Cancelled);
@@ -920,20 +935,12 @@ mod chromium_backend {
         }
 
         fn shutdown(&mut self) {
-            #[cfg(unix)]
-            {
-                // Chrome launches renderer and utility helpers. Terminate the
-                // isolated process group so a wedged author script cannot
-                // outlive the browser root and keep mutating its profile.
-                let process_group = -(self.child.id() as i32);
-                // SAFETY: launch places this child in a process group whose id
-                // is the child's pid; a negative pid targets that group only.
-                unsafe {
-                    libc::kill(process_group, libc::SIGKILL);
-                }
-            }
+            let tree_terminated = self.tree.terminate().is_ok();
             let _ = self.child.kill();
             let _ = self.child.wait();
+            if tree_terminated {
+                self.tree.disarm();
+            }
         }
 
         fn remove_profile(&self) {

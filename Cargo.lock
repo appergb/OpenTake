@@ -3769,6 +3769,7 @@ dependencies = [
  "libc",
  "ndarray",
  "opentake-domain",
+ "opentake-process-tree",
  "ort",
  "ort-tract",
  "reqwest 0.12.28",
@@ -3797,8 +3798,8 @@ dependencies = [
  "base64 0.22.1",
  "hex",
  "image",
- "libc",
  "opentake-domain",
+ "opentake-process-tree",
  "opentake-render",
  "serde",
  "serde_json",
@@ -3814,6 +3815,14 @@ version = "1.0.0-beta.2"
 dependencies = [
  "opentake-domain",
  "serde_json",
+]
+
+[[package]]
+name = "opentake-process-tree"
+version = "1.0.0-beta.2"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

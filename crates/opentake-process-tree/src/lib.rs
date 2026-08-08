@@ -86,6 +86,9 @@ mod windows_containment {
     fn open_primary_thread(process_id: u32) -> io::Result<OwnedHandle> {
         // The target was created suspended, so it can only have its original
         // primary thread while this snapshot is inspected.
+        // SAFETY: this call takes no borrowed pointers; the documented thread
+        // snapshot flag ignores the process-id argument. `OwnedHandle` checks
+        // the sentinel and assumes sole ownership of a successful result.
         let snapshot =
             OwnedHandle::from_snapshot(unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) })?;
         let mut entry = THREADENTRY32 {
@@ -134,6 +137,9 @@ mod windows_containment {
         // The process has not executed any user code, so even an OpenProcess or
         // assignment failure leaves no descendant to escape. The caller kills
         // and reaps the still-suspended immediate child on every attach error.
+        // SAFETY: `process_id` identifies that live suspended child; the access
+        // mask is sufficient for job assignment/termination, and a successful
+        // handle is transferred into the single-owner `OwnedHandle` wrapper.
         let process = OwnedHandle::from_nullable(unsafe {
             OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, process_id)
         })?;
@@ -186,7 +192,25 @@ pub struct ProcessTree {
 unsafe impl Send for ProcessTree {}
 
 impl ProcessTree {
+    /// Attach to a child spawned from a command prepared by
+    /// [`configure_command`].
+    ///
+    /// Call this immediately after spawn and before doing any other work with
+    /// the child. On Windows the configured child remains suspended until this
+    /// method assigns it to the Job Object; on Unix the configuration creates
+    /// the isolated process group stored here.
     pub fn attach(process_id: u32) -> io::Result<Self> {
+        // On Unix, negating these reserved identifiers would change the
+        // target from one isolated child process group to the caller's group
+        // (`kill(0, ...)`) or every permitted process (`kill(-1, ...)`). Keep
+        // the public cross-platform API fail-closed even if it is called with
+        // an identifier that did not come from `Child::id()`.
+        if process_id <= 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "process id must identify an isolated child process",
+            ));
+        }
         #[cfg(unix)]
         {
             let process_group = i32::try_from(process_id)
@@ -215,6 +239,10 @@ impl ProcessTree {
         #[cfg(unix)]
         {
             // A negative pid targets the entire child process group.
+            // SAFETY: `attach` rejects process groups 0 and 1, and the public
+            // launch contract requires this value to come from a child whose
+            // command was prepared by `configure_command`, which makes its PID
+            // the isolated process-group id. No pointers cross the FFI call.
             let result = unsafe { libc::kill(-self.process_group, libc::SIGKILL) };
             if result != 0 {
                 let error = io::Error::last_os_error();
@@ -251,11 +279,33 @@ impl Drop for ProcessTree {
         }
         #[cfg(windows)]
         if !self.job.is_null() {
-            // KILL_ON_JOB_CLOSE is a second fail-closed boundary.
+            // SAFETY: this value exclusively owns the non-null Job Object
+            // handle and closes it exactly once here; disarm nulls it after an
+            // earlier close. KILL_ON_JOB_CLOSE is a second fail-closed boundary.
             unsafe {
                 let _ = windows_sys::Win32::Foundation::CloseHandle(self.job);
             }
             self.job = std::ptr::null_mut();
+        }
+    }
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+
+    #[test]
+    fn attach_rejects_process_ids_with_group_or_broadcast_semantics() {
+        for process_id in [0, 1] {
+            match ProcessTree::attach(process_id) {
+                Err(error) => assert_eq!(error.kind(), io::ErrorKind::InvalidInput),
+                Ok(tree) => {
+                    // Leak an invalid regression value so its Drop cannot
+                    // exercise kill(0) or kill(-1) in the test runner.
+                    std::mem::forget(tree);
+                    panic!("reserved process id must be rejected before containment is armed");
+                }
+            }
         }
     }
 }
@@ -272,8 +322,7 @@ mod tests {
         GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
-    const TEST_NAME: &str =
-        "process_tree::tests::windows_suspended_job_contains_fast_exit_descendant";
+    const TEST_NAME: &str = "tests::windows_suspended_job_contains_fast_exit_descendant";
     const MODE_ENV: &str = "OPENTAKE_PROCESS_TREE_TEST_MODE";
     const DIR_ENV: &str = "OPENTAKE_PROCESS_TREE_TEST_DIR";
 
@@ -375,7 +424,9 @@ mod tests {
         };
         assert!(parent_status.success());
 
-        // Hold the actual process object, avoiding a PID-reuse false positive.
+        // SAFETY: `grandchild_pid` was read from the just-spawned helper. The
+        // requested access is query-only, and `TestProcessHandle` exclusively
+        // owns and closes a successful handle exactly once.
         let grandchild = TestProcessHandle(unsafe {
             OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, grandchild_pid)
         });

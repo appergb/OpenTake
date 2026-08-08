@@ -8,6 +8,7 @@ description = "Decode/probe/thumbnail/waveform/transcribe/semantic-search (ffmpe
 
 [dependencies]
 opentake-domain = { workspace = true }
+opentake-process-tree = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = "2"

@@ -449,8 +449,8 @@ jobs:
         id: security-process-tree
         shell: pwsh
         run: >-
-          cargo test -p opentake-media --lib
-          process_tree::tests::windows_suspended_job_contains_fast_exit_descendant
+          cargo test -p opentake-process-tree --lib
+          tests::windows_suspended_job_contains_fast_exit_descendant
           -- --exact --nocapture --test-threads=1
 
       - name: Verify portable Tauri test image imports
@@ -701,7 +701,7 @@ jobs:
             },
             [ordered]@{
               id = 'process-tree'
-              command = 'cargo test -p opentake-media --lib process_tree::tests::windows_suspended_job_contains_fast_exit_descendant -- --exact --nocapture --test-threads=1'
+              command = 'cargo test -p opentake-process-tree --lib tests::windows_suspended_job_contains_fast_exit_descendant -- --exact --nocapture --test-threads=1'
               result = '${{ steps.security-process-tree.outcome }}'
             },
             [ordered]@{

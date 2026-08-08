@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/opentake-domain",
+    "crates/opentake-process-tree",
     "crates/opentake-ops",
     "crates/opentake-project",
     "crates/opentake-render",
@@ -27,6 +28,7 @@ uuid = { version = "1", features = ["v4"] }
 velato = { version = "=0.5.0", features = ["wgpu"] }
 sentry = { version = "=0.49.0", default-features = false, features = ["backtrace", "panic", "ureq"] }
 opentake-domain = { path = "crates/opentake-domain" }
+opentake-process-tree = { path = "crates/opentake-process-tree" }
 opentake-ops = { path = "crates/opentake-ops" }
 opentake-project = { path = "crates/opentake-project" }
 opentake-render = { path = "crates/opentake-render" }
