@@ -58,6 +58,13 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assert_rejected(mutated, "Cargo, Tauri, and Web versions match tag")
 
+    def test_validation_must_bind_windows_installer_version(self) -> None:
+        mutated = self.mutate(
+            'if wix_version != "1.0.0.3":',
+            'if wix_version != "1.0.0.2":',
+        )
+        self.assert_rejected(mutated, "Cargo, Tauri, and Web versions match tag")
+
     def test_publish_must_depend_on_every_gate(self) -> None:
         mutated = self.mutate(
             "needs: [validate, quality, macos_arm64, windows_x64]",
@@ -386,7 +393,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assert_rejected(mutated, "verified prerelease publication")
 
-    def test_repository_metadata_is_beta2_and_release_notes_exist(self) -> None:
+    def test_repository_metadata_is_beta3_and_release_notes_exist(self) -> None:
         self.assertEqual([], contract.validate_repository_metadata(REPOSITORY_ROOT))
 
 
@@ -398,15 +405,21 @@ class ReleaseRepositoryMetadataTests(unittest.TestCase):
         (root / "web").mkdir()
         (root / "docs" / "releases").mkdir(parents=True)
         (root / "Cargo.toml").write_text(
-            '[workspace.package]\nversion = "1.0.0-beta.2"\n', encoding="utf-8"
+            '[workspace.package]\nversion = "1.0.0-beta.3"\n', encoding="utf-8"
         )
         (root / "src-tauri" / "tauri.conf.json").write_text(
-            json.dumps({"version": "1.0.0-beta.2"}), encoding="utf-8"
+            json.dumps(
+                {
+                    "version": "1.0.0-beta.3",
+                    "bundle": {"windows": {"wix": {"version": "1.0.0.3"}}},
+                }
+            ),
+            encoding="utf-8",
         )
         (root / "web" / "package.json").write_text(
-            json.dumps({"version": "1.0.0-beta.2"}), encoding="utf-8"
+            json.dumps({"version": "1.0.0-beta.3"}), encoding="utf-8"
         )
-        (root / "docs" / "releases" / "1.0.0-beta.2.md").write_text(
+        (root / "docs" / "releases" / "1.0.0-beta.3.md").write_text(
             "release notes\n", encoding="utf-8"
         )
         return temporary, root
@@ -425,7 +438,7 @@ class ReleaseRepositoryMetadataTests(unittest.TestCase):
     def test_release_notes_io_error_returns_a_contract_error(self) -> None:
         temporary, root = self.make_repository()
         self.addCleanup(temporary.cleanup)
-        notes = root / "docs" / "releases" / "1.0.0-beta.2.md"
+        notes = root / "docs" / "releases" / "1.0.0-beta.3.md"
         real_read_text = Path.read_text
 
         def fail_notes(path: Path, *args, **kwargs):
@@ -435,9 +448,26 @@ class ReleaseRepositoryMetadataTests(unittest.TestCase):
 
         with mock.patch.object(Path, "read_text", autospec=True, side_effect=fail_notes):
             self.assertEqual(
-                ["Beta 2 release notes exist"],
+                ["Beta 3 release notes exist"],
                 contract.validate_repository_metadata(root),
             )
+
+    def test_wrong_windows_installer_version_returns_a_contract_error(self) -> None:
+        temporary, root = self.make_repository()
+        self.addCleanup(temporary.cleanup)
+        (root / "src-tauri" / "tauri.conf.json").write_text(
+            json.dumps(
+                {
+                    "version": "1.0.0-beta.3",
+                    "bundle": {"windows": {"wix": {"version": "1.0.0.2"}}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            ["Windows installer version is 1.0.0.3"],
+            contract.validate_repository_metadata(root),
+        )
 
 
 class ReleaseDraftStateMachineTests(unittest.TestCase):
@@ -447,7 +477,7 @@ class ReleaseDraftStateMachineTests(unittest.TestCase):
                 "repository": {
                     "release": {
                         "databaseId": 123,
-                        "tagName": "v1.0.0-beta.2",
+                        "tagName": "v1.0.0-beta.3",
                         "tagCommit": {"oid": "a" * 40},
                         "isDraft": draft,
                         "isPrerelease": True,
@@ -469,13 +499,13 @@ class ReleaseDraftStateMachineTests(unittest.TestCase):
 
     def test_missing_release_plans_draft_creation(self) -> None:
         payload = {"data": {"repository": {"release": None}}}
-        plan = self.resolver()(payload, "v1.0.0-beta.2", "a" * 40)
+        plan = self.resolver()(payload, "v1.0.0-beta.3", "a" * 40)
         self.assertEqual("create", plan["action"])
         self.assertEqual([], plan["asset_node_ids"])
 
     def test_same_tag_draft_plans_refresh_with_existing_assets(self) -> None:
         plan = self.resolver()(
-            self.release_payload(draft=True), "v1.0.0-beta.2", "a" * 40
+            self.release_payload(draft=True), "v1.0.0-beta.3", "a" * 40
         )
         self.assertEqual("refresh", plan["action"])
         self.assertEqual(["RA_old"], plan["asset_node_ids"])
@@ -487,7 +517,7 @@ class ReleaseDraftStateMachineTests(unittest.TestCase):
             error_type, "release is already published; refusing to mutate it"
         ):
             self.resolver()(
-                self.release_payload(draft=False), "v1.0.0-beta.2", "a" * 40
+                self.release_payload(draft=False), "v1.0.0-beta.3", "a" * 40
             )
 
 
@@ -499,20 +529,20 @@ class RemoteTagResolutionTests(unittest.TestCase):
 
     def test_lightweight_tag_resolves_direct_commit(self) -> None:
         sha = "a" * 40
-        refs = f"{sha}\trefs/tags/v1.0.0-beta.2\n"
+        refs = f"{sha}\trefs/tags/v1.0.0-beta.3\n"
         self.assertEqual(
-            sha, self.resolver()(refs, "v1.0.0-beta.2")
+            sha, self.resolver()(refs, "v1.0.0-beta.3")
         )
 
     def test_annotated_tag_resolves_peeled_commit(self) -> None:
         tag_object = "b" * 40
         commit = "c" * 40
         refs = (
-            f"{tag_object}\trefs/tags/v1.0.0-beta.2\n"
-            f"{commit}\trefs/tags/v1.0.0-beta.2^{{}}\n"
+            f"{tag_object}\trefs/tags/v1.0.0-beta.3\n"
+            f"{commit}\trefs/tags/v1.0.0-beta.3^{{}}\n"
         )
         self.assertEqual(
-            commit, self.resolver()(refs, "v1.0.0-beta.2")
+            commit, self.resolver()(refs, "v1.0.0-beta.3")
         )
 
 
