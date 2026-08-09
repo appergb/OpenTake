@@ -274,7 +274,7 @@ jobs:
           $elapsedLimitSeconds = 180
           $peakLimitBytes = 2GB
           $sampleIntervalMilliseconds = 200
-          $receiptPath = 'windows-motion-4k-resource-receipt.json'
+          $receiptPath = Join-Path $env:RUNNER_TEMP 'windows-motion-4k-resource-receipt.json'
           $stdoutPath = Join-Path $env:RUNNER_TEMP 'opentake-motion-4k.stdout.log'
           $stderrPath = Join-Path $env:RUNNER_TEMP 'opentake-motion-4k.stderr.log'
           Remove-Item $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
@@ -470,7 +470,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: windows-motion-4k-resource-${{ steps.bind.outputs.sha }}
-          path: windows-motion-4k-resource-receipt.json
+          path: ${{ runner.temp }}/windows-motion-4k-resource-receipt.json
           if-no-files-found: error
           retention-days: 30
 

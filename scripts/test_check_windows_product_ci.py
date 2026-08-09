@@ -242,7 +242,7 @@ class WindowsProductCiContractTests(unittest.TestCase):
                 "name: windows-motion-4k-resource-mutable",
             ),
             (
-                "path: windows-motion-4k-resource-receipt.json",
+                "path: ${{ runner.temp }}/windows-motion-4k-resource-receipt.json",
                 "path: missing-motion-4k-resource-receipt.json",
             ),
         )
@@ -254,6 +254,34 @@ class WindowsProductCiContractTests(unittest.TestCase):
                     after,
                     "Windows Chromium 4K resource receipt artifact",
                 )
+
+    def test_4k_budget_receipt_is_written_outside_the_checkout(self) -> None:
+        document = contract.parse_workflow_yaml(WORKFLOW)
+        job = document["jobs"]["windows-product"]
+        gate = next(
+            step for step in job["steps"] if step.get("name") == contract.MOTION_4K_STEP_NAME
+        )
+        upload = next(
+            step
+            for step in job["steps"]
+            if step.get("name") == contract.MOTION_4K_UPLOAD_STEP_NAME
+        )
+        self.assertIn(
+            "$receiptPath = Join-Path $env:RUNNER_TEMP 'windows-motion-4k-resource-receipt.json'",
+            gate["run"],
+        )
+        self.assertEqual(
+            "${{ runner.temp }}/windows-motion-4k-resource-receipt.json",
+            upload["with"]["path"],
+        )
+
+    def test_4k_budget_receipt_repo_root_mutation_is_rejected(self) -> None:
+        self.assert_job_mutation_rejected(
+            "windows-product",
+            "$receiptPath = Join-Path $env:RUNNER_TEMP 'windows-motion-4k-resource-receipt.json'",
+            "$receiptPath = 'windows-motion-4k-resource-receipt.json'",
+            "Windows Chromium 4K receipt outside source tree",
+        )
 
     def test_4k_budget_receipt_upload_is_immediately_after_the_gate(self) -> None:
         job = _named_job_body(WORKFLOW, "windows-product")

@@ -30,11 +30,11 @@ TARGET_SHA_EXPRESSION = (
 )
 MOTION_4K_STEP_NAME = "Windows Chromium 4K resource budget"
 MOTION_4K_STEP_SHA256 = (
-    "ec7b977f58edafbe7bed61ffe459329e4ba07fb1b5caa3b72c6fc7df920a30a8"
+    "eff55bdd5884bdc6ca12f9b691f380fa232dc12b222a160432a1ac8c27ed50ac"
 )
 MOTION_4K_UPLOAD_STEP_NAME = "Upload Windows Chromium 4K resource receipt"
 MOTION_4K_UPLOAD_STEP_SHA256 = (
-    "545d855327556cca63cc0386e16c4bb38af3ebff3ce80fb6905dc41ce5a54c8c"
+    "129dd5a34d6c6582e4c6eda4b92a3e51deb24e9c136cc6bd9741ff6b16565863"
 )
 ACTION_PINS = MappingProxyType(
     {
@@ -294,7 +294,7 @@ SHA_BOUND_JOB_CONTRACTS = (
         before_reassert_name="Re-assert immutable Windows product source before gates",
         after_reassert_name="Re-assert immutable Windows product source after gates",
         first_gate_name="Rust formatting",
-        job_sha256="9b8e3d5bc02d87b918ab1636b0083337bc60f4ccdd6ef7d3ee04a558943288d8",
+        job_sha256="e5664d484775190143ea33abcfbf2a458950d3f11fd7a9f065b08b2ce5139b7a",
         step_identities=(
             "name:Validate immutable SHA input",
             f"uses:{_pinned_action('actions/checkout')}",
@@ -1077,10 +1077,15 @@ def _validate_structured_product(document: dict[str, object]) -> list[str]:
         _as_mapping(motion_4k.get("env")) if motion_4k is not None else None
     )
     motion_4k_script = _run_script(motion_4k)
+    motion_4k_receipt_path_line = (
+        "$receiptPath = Join-Path $env:RUNNER_TEMP "
+        "'windows-motion-4k-resource-receipt.json'"
+    )
     motion_4k_lines = (
         "$elapsedLimitSeconds = 180",
         "$peakLimitBytes = 2GB",
         "$sampleIntervalMilliseconds = 200",
+        motion_4k_receipt_path_line,
         "'four_k_single_frame_opaque_and_transparent_budget_smoke',",
         "$cargo = Start-Process @cargoProcess",
         "Start-Sleep -Milliseconds $sampleIntervalMilliseconds",
@@ -1130,6 +1135,8 @@ def _validate_structured_product(document: dict[str, object]) -> list[str]:
         or re.search(r"(?i)\bretry\b", motion_4k_script) is not None
     ):
         errors.append("complete Windows Chromium 4K resource budget")
+    if motion_4k_receipt_path_line not in _code_lines(motion_4k):
+        errors.append("Windows Chromium 4K receipt outside source tree")
     if motion_4k is None or _structured_digest(motion_4k) != MOTION_4K_STEP_SHA256:
         errors.append("exact Windows Chromium 4K resource gate")
 
@@ -1144,7 +1151,7 @@ def _validate_structured_product(document: dict[str, object]) -> list[str]:
         or motion_4k_upload_with
         != {
             "name": "windows-motion-4k-resource-${{ steps.bind.outputs.sha }}",
-            "path": "windows-motion-4k-resource-receipt.json",
+            "path": "${{ runner.temp }}/windows-motion-4k-resource-receipt.json",
             "if-no-files-found": "error",
             "retention-days": 30,
         }
