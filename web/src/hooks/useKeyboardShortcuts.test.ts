@@ -26,6 +26,32 @@ describe("keyboard transport Space shortcut", () => {
     expect(shouldHandleTransportSpaceKey(event(), "editor")).toBe(true);
   });
 
+  it("handles Space from every non-editable editor panel surface", () => {
+    for (const panel of ["media", "preview", "inspector", "timeline", "agent"]) {
+      const surface = document.createElement("section");
+      surface.dataset.panel = panel;
+      expect(
+        shouldHandleTransportSpaceKey(event({ target: surface }), "editor"),
+        panel,
+      ).toBe(true);
+    }
+
+    const contentEditable = document.createElement("div");
+    contentEditable.contentEditable = "true";
+    const plaintextEditable = document.createElement("div");
+    plaintextEditable.contentEditable = "plaintext-only";
+    for (const editable of [
+      document.createElement("input"),
+      document.createElement("textarea"),
+      contentEditable,
+      plaintextEditable,
+    ]) {
+      expect(
+        shouldHandleTransportSpaceKey(event({ target: editable }), "editor"),
+      ).toBe(false);
+    }
+  });
+
   it("does not suppress Space keyup outside the editor", () => {
     expect(shouldHandleTransportSpaceKey(event(), "home")).toBe(false);
   });
@@ -34,10 +60,13 @@ describe("keyboard transport Space shortcut", () => {
     expect(shouldHandleTransportSpaceKey(event({ metaKey: true }), "editor")).toBe(false);
   });
 
-  it("does not claim Space from native controls or media interaction surfaces", () => {
+  it("claims Space from media tiles and every non-text native control", () => {
     const button = document.createElement("button");
     const buttonLabel = document.createElement("span");
     button.append(buttonLabel);
+    const slider = document.createElement("input");
+    slider.type = "range";
+    const select = document.createElement("select");
     const mediaCard = document.createElement("div");
     mediaCard.dataset.mediaTile = "true";
     const context = {
@@ -48,9 +77,12 @@ describe("keyboard transport Space shortcut", () => {
       cropEditingActive: false,
     };
 
-    expect(shouldHandleTransportSpaceKey(event({ target: buttonLabel }), "editor")).toBe(false);
-    expect(shouldHandleTransportSpaceKey(event({ target: mediaCard }), "editor")).toBe(false);
-    expect(resolveDocumentedShortcut(event({ target: buttonLabel }), context)).toBeNull();
+    for (const control of [buttonLabel, slider, select, mediaCard]) {
+      expect(shouldHandleTransportSpaceKey(event({ target: control }), "editor")).toBe(true);
+      expect(resolveDocumentedShortcut(event({ target: control }), context)).toEqual({
+        type: "transport",
+      });
+    }
     expect(
       resolveDocumentedShortcut(event({ code: "Escape", target: buttonLabel }), context),
     ).toEqual({ type: "escape" });
@@ -106,6 +138,57 @@ describe("keyboard transport Space shortcut", () => {
 
     expect(handled).toBe(true);
     expect(toggles).toBe(0);
+  });
+
+  it("consumes native-control Space once without activating the local control", () => {
+    let toggles = 0;
+    let prevented = 0;
+    let stopped = 0;
+    const button = document.createElement("button");
+    const dispatch = (repeat: boolean) =>
+      handleTransportSpaceKeyDown(
+        event({
+          target: button,
+          repeat,
+          preventDefault: () => {
+            prevented += 1;
+          },
+          stopPropagation: () => {
+            stopped += 1;
+          },
+        }),
+        {
+          view: "editor",
+          previewMediaId: null,
+          timelinePlaybackAllowed: true,
+          requestMediaPreviewToggle: () => {},
+          togglePlay: () => {
+            toggles += 1;
+          },
+        },
+      );
+
+    expect(dispatch(false)).toBe(true);
+    expect(dispatch(true)).toBe(true);
+    expect({ toggles, prevented, stopped }).toEqual({
+      toggles: 1,
+      prevented: 2,
+      stopped: 2,
+    });
+  });
+
+  it("does not intercept Space while an IME composition is active", () => {
+    const composing = event({ isComposing: true });
+    const context = {
+      view: "editor" as const,
+      blocked: false,
+      focusedPanel: "preview" as const,
+      compatibilityReadOnly: false,
+      cropEditingActive: false,
+    };
+
+    expect(shouldHandleTransportSpaceKey(composing, "editor")).toBe(false);
+    expect(resolveDocumentedShortcut(composing, context)).toBeNull();
   });
 
   it("does not start timeline playback from Space when route is Unsupported", () => {

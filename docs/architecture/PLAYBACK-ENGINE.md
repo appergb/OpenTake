@@ -32,6 +32,23 @@ surface. Reverse and positive-speed media can remain on this route when no
 compositor-only content is present. This route has no libmpv dependency or
 transparent native-player hole.
 
+## Source-media preview route
+
+The source tab uses the Rust streaming engine whenever the packaged playback
+capability is available. `playback_start(mediaId)` projects the selected video
+into a private one-track timeline at the project fps, then reuses the same
+FFmpeg RGBA decode, compositor, cpal audio clock, exact publication, and
+identity-scoped pause/seek/stop lifecycle as timeline playback. The source
+asset is read directly; this route does not create a whole-file proxy or
+transcode by default.
+
+Paused source frames and paused seeks use `composite_frame(sourceMediaId)` so
+they also decode through FFmpeg instead of switching back to WebKit. A terminal
+frame remains painted, Play rewinds it to frame zero, and selecting another
+asset retires the previous source session before accepting its publications.
+The ordinary `<video>` source preview remains only for the browser shell and a
+minimal build where the native playback capability handshake is unavailable.
+
 ## Rust route and exact publication
 
 Rust continuously decodes, builds the RenderPlan, composites with wgpu, and
@@ -121,6 +138,13 @@ the same project retain valid caches.
   text/color/multi-track Rust project, then switched back across the project
   boundary without retaining the previous duration or playhead. Receipt:
   [playback-route-lifecycle-real-device-2026-08-01.md](../audit/2026-07-14/runtime-artifacts/automated/playback-route-lifecycle-real-device-2026-08-01.md).
+- 2026-08-09 source-preview regression: the production source projection and a
+  seeked native start at frame 1572 decoded the reported 2.5 GB HEVC Main10,
+  yuv420p10le, 3840x2160, ~100 Mbps + PCM asset for three seconds. It published
+  61 frames, advanced to frame 1662, kept the minimum non-black pixel ratio at
+  0.945, and observed zero neon-green corruption. The probe remains ignored by
+  the default workspace gate because it requires that external real-device
+  fixture.
 
 Artifact hashes and the separation between older installed-app evidence and
 fresh detached bundles are recorded in

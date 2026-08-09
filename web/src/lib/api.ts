@@ -1340,6 +1340,7 @@ export interface CompositeStillRequest {
   sessionGeneration: number;
   seekGeneration: number;
   sequenceId?: string;
+  sourceMediaId?: string;
 }
 
 export interface CancelCompositeStillRequest {
@@ -2075,12 +2076,14 @@ export async function onChatDone(
 export async function playbackStart(
   fromFrame: number,
   identity: PlaybackIdentity,
+  mediaId?: string,
 ): Promise<void> {
   await ensureTauri();
   if (invokeImpl)
     await invokeImpl<void>("playback_start", {
       fromFrame: Math.floor(fromFrame),
       identity,
+      mediaId,
     });
 }
 

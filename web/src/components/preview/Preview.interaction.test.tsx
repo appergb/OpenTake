@@ -5,7 +5,17 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { MediaItem } from "../../lib/types";
 import { useEditorUiStore } from "../../store/uiStore";
-import { BadgeMenu, exactTimelineFrame, PreviewTabs, ScrubBar } from "./Preview";
+import {
+  BadgeMenu,
+  exactTimelineFrame,
+  NativeSourcePlaybackSurface,
+  PreviewTabs,
+  retireSourcePlaybackStart,
+  ScrubBar,
+  sourceDurationFrames,
+  sourcePreviewFrame,
+  sourcePlaybackStartFrame,
+} from "./Preview";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
   .IS_REACT_ACT_ENVIRONMENT = true;
@@ -21,6 +31,44 @@ it("normalizes fractional playback ticks before exact frame stepping", () => {
   expect(exactTimelineFrame(26.4, 100)).toBe(26);
   expect(exactTimelineFrame(-0.6, 100)).toBe(0);
   expect(exactTimelineFrame(100.6, 100)).toBe(100);
+});
+
+it("rewinds a completed source preview and otherwise resumes its exact frame", () => {
+  expect(sourcePlaybackStartFrame(42, 100)).toBe(42);
+  expect(sourcePlaybackStartFrame(99, 100)).toBe(0);
+  expect(sourcePlaybackStartFrame(120, 100)).toBe(0);
+});
+
+it("keeps source still requests on the last decodable frame", () => {
+  expect(sourcePreviewFrame(42, 100)).toBe(42);
+  expect(sourcePreviewFrame(100, 100)).toBe(99);
+  expect(sourcePreviewFrame(120, 100)).toBe(99);
+});
+
+it("truncates fractional source durations at the terminal frame", () => {
+  expect(sourceDurationFrames(1.55, 30)).toBe(46);
+  expect(sourceDurationFrames(Number.NaN, 30)).toBe(0);
+});
+
+it("invalidates a pending source start before its deferred completion", async () => {
+  const generation = { current: 3 };
+  const starting = { current: true };
+  const pendingToken = generation.current;
+  let release!: () => void;
+  let committed = false;
+  const completion = new Promise<void>((resolve) => {
+    release = resolve;
+  }).then(() => {
+    if (pendingToken === generation.current) committed = true;
+  });
+
+  retireSourcePlaybackStart(generation, starting);
+  release();
+  await completion;
+
+  expect(generation.current).toBe(4);
+  expect(starting.current).toBe(false);
+  expect(committed).toBe(false);
 });
 
 beforeEach(() => {
@@ -159,6 +207,115 @@ it("gives preview tabs a connected tablist and roving keyboard behavior", async 
   );
   expect(useEditorUiStore.getState().previewMediaId).toBeNull();
   expect(document.activeElement).toBe(tabs[0]);
+});
+
+it("requests latest-only FFmpeg source stills for paused source seek", async () => {
+  const requestSourceFrame = vi.fn().mockResolvedValue({
+    width: 1280,
+    height: 720,
+    dataUrl: "data:image/png;base64,source",
+  });
+  const item: MediaItem = {
+    id: "main10",
+    name: "Main10",
+    type: "video",
+    duration: 210.7105,
+    width: 3840,
+    height: 2160,
+    hasAudio: true,
+    favorite: false,
+  };
+  const renderFrame = (frame: number) => (
+    <NativeSourcePlaybackSurface
+      item={item}
+      event={null}
+      endpoint="http://127.0.0.1/frame"
+      projectEpoch={3}
+      timelineVersion={7}
+      playing={false}
+      frame={frame}
+      previewQualityShortEdge={720}
+      onPlayingChange={vi.fn()}
+      onTerminalFailure={vi.fn()}
+      requestSourceFrame={requestSourceFrame}
+      cancelSourceFrame={vi.fn().mockResolvedValue(undefined)}
+    />
+  );
+
+  await act(async () => {
+    root.render(renderFrame(1_572));
+    await Promise.resolve();
+  });
+  await act(async () => {
+    root.render(renderFrame(1_600));
+    await Promise.resolve();
+  });
+
+  expect(requestSourceFrame.mock.calls.map(([request]) => request)).toEqual([
+    expect.objectContaining({ frame: 1_572, sourceMediaId: "main10" }),
+    expect.objectContaining({ frame: 1_600, sourceMediaId: "main10" }),
+  ]);
+  expect(requestSourceFrame).toHaveBeenLastCalledWith(
+    expect.objectContaining({ frame: 1_600, sourceMediaId: "main10" }),
+    1280,
+  );
+});
+
+it("drops the previous source still while the replacement source decodes", async () => {
+  const item = (id: string): MediaItem => ({
+    id,
+    name: id,
+    type: "video",
+    duration: 10,
+    width: 1920,
+    height: 1080,
+    hasAudio: true,
+    favorite: false,
+  });
+  const requestSourceFrame = vi.fn(
+    (request: { sourceMediaId?: string }) =>
+      request.sourceMediaId === "source-a"
+        ? Promise.resolve({
+            width: 1280,
+            height: 720,
+            dataUrl: "data:image/png;base64,source-a",
+          })
+        : new Promise<never>(() => undefined),
+  );
+  const renderSource = (id: string) => (
+    <NativeSourcePlaybackSurface
+      item={item(id)}
+      event={null}
+      endpoint="http://127.0.0.1/frame"
+      projectEpoch={3}
+      timelineVersion={7}
+      playing={false}
+      frame={12}
+      previewQualityShortEdge={720}
+      onPlayingChange={vi.fn()}
+      onTerminalFailure={vi.fn()}
+      requestSourceFrame={requestSourceFrame}
+      cancelSourceFrame={vi.fn().mockResolvedValue(undefined)}
+    />
+  );
+
+  await act(async () => {
+    root.render(renderSource("source-a"));
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(
+    container.querySelector<HTMLImageElement>("[data-testid='rust-idle-composite-still']")
+      ?.src,
+  ).toContain("source-a");
+
+  await act(async () => {
+    root.render(renderSource("source-b"));
+    await Promise.resolve();
+  });
+  expect(
+    container.querySelector<HTMLImageElement>("[data-testid='rust-idle-composite-still']"),
+  ).toBeNull();
 });
 
 it("moves focus through BadgeMenu listbox options and restores it on Escape", async () => {

@@ -34,8 +34,8 @@ use tauri::State;
 use opentake_core::{AppCore, EditCommand, ProjectRevision};
 use opentake_domain::{ClipType, LutReference, MediaSource, TextStyle, Timeline};
 use opentake_media::{
-    decode_frame_at, decode_frame_at_cancellable, interpolate_frame_pair,
-    FrameInterpolationFallback, FrameInterpolationMode, FrameRequest, MediaCancelToken,
+    decode_frame_at_cancellable, interpolate_frame_pair, FrameInterpolationFallback,
+    FrameInterpolationMode, FrameRequest, MediaCancelToken,
 };
 use opentake_ops::command::RenameEntry;
 use opentake_project::ProjectRoot;
@@ -84,6 +84,8 @@ pub struct CompositeFrameRequest {
     pub seek_generation: u64,
     #[serde(default)]
     pub sequence_id: Option<String>,
+    #[serde(default)]
+    pub source_media_id: Option<String>,
 }
 
 /// Lazily-acquired GPU device + compositor, cached across composite calls.
@@ -1022,14 +1024,20 @@ pub fn composite_frame(
         request.session_generation,
         request.seek_generation,
     )?;
-    let composite = composite_rgba(
-        &core,
-        &render,
-        request.frame,
-        max_size.unwrap_or(DEFAULT_PREVIEW_CAP),
-        &cancel,
-        request.sequence_id.as_deref(),
-    )?;
+    let preview_cap = max_size.unwrap_or(DEFAULT_PREVIEW_CAP);
+    let composite = match request.source_media_id.as_deref() {
+        Some(media_id) => {
+            decode_source_frame(&core, media_id, request.frame, preview_cap, &cancel)?
+        }
+        None => composite_rgba(
+            &core,
+            &render,
+            request.frame,
+            preview_cap,
+            &cancel,
+            request.sequence_id.as_deref(),
+        )?,
+    };
     if cancel.is_cancelled()
         || core.project_revision() != revision
         || !render.preview.is_current(
@@ -1142,7 +1150,7 @@ fn capture_frame_to_media_workflow(
     // Frame → RGBA. Timeline tab composites; video tab decodes the source frame.
     let composite = match source_media_id {
         None => composite_rgba(core, render, frame, 0, &MediaCancelToken::new(), None)?,
-        Some(id) => decode_source_frame(core, id, frame)?,
+        Some(id) => decode_source_frame(core, id, frame, 0, &MediaCancelToken::new())?,
     };
 
     // Write the PNG next to the media cache so a subsequent project save can copy
@@ -1187,7 +1195,13 @@ fn capture_frame_to_media_workflow(
 /// nil` raw-asset path). The frame → time uses the TIMELINE fps, matching
 /// upstream's `CMTime(value: frame, timescale: fps)` (fps = timeline fps for both
 /// tabs). Errors when the asset is unknown, not a video, or its source is offline.
-fn decode_source_frame(core: &AppCore, media_id: &str, frame: i32) -> Result<DecodedFrame, String> {
+fn decode_source_frame(
+    core: &AppCore,
+    media_id: &str,
+    frame: i32,
+    max_size: u32,
+    cancel: &MediaCancelToken,
+) -> Result<DecodedFrame, String> {
     let snapshot = core.runtime_snapshot();
     let timeline = snapshot.timeline;
     let manifest = snapshot.media;
@@ -1212,11 +1226,11 @@ fn decode_source_frame(core: &AppCore, media_id: &str, frame: i32) -> Result<Dec
     let fps = if timeline.fps > 0 { timeline.fps } else { 30 };
     let req = FrameRequest {
         time_secs: (frame.max(0) as f64) / fps as f64,
-        max_size: (0, 0), // full resolution
+        max_size: (max_size, max_size),
         ..FrameRequest::default()
     };
-    let (_, rgba) =
-        decode_frame_at(&path, &req).map_err(|e| format!("decode source frame: {e}"))?;
+    let (_, rgba) = decode_frame_at_cancellable(&path, &req, cancel)
+        .map_err(|e| format!("decode source frame: {e}"))?;
     Ok(DecodedFrame::new(rgba.width, rgba.height, rgba.rgba, false))
 }
 
@@ -1365,6 +1379,22 @@ fn project_frame_time_secs(source_frame: i64, timeline_fps: i32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn composite_request_can_target_a_single_source_asset() {
+        let request: CompositeFrameRequest = serde_json::from_value(serde_json::json!({
+            "frame": 1572,
+            "projectEpoch": 3,
+            "timelineVersion": 7,
+            "sessionId": "source-still",
+            "sessionGeneration": 1,
+            "seekGeneration": 4,
+            "sourceMediaId": "main10"
+        }))
+        .expect("source still request decodes");
+
+        assert_eq!(request.source_media_id.as_deref(), Some("main10"));
+    }
 
     #[test]
     fn preview_composite_cancel_floor_kills_old_work_but_not_its_successor() {

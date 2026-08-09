@@ -28,6 +28,7 @@ export interface RustFrameBufferProps {
   stillFrame?: number | null;
   requestCompositeStill: (request: CompositeStillRequest) => Promise<CompositeFrame | null>;
   cancelCompositeStill?: (request: CancelCompositeStillRequest) => Promise<void>;
+  onTransportPlayingChange?: (playing: boolean) => void;
   onTerminalFailure: () => void;
 }
 
@@ -135,6 +136,7 @@ export function RustFrameBuffer({
   stillFrame = null,
   requestCompositeStill,
   cancelCompositeStill,
+  onTransportPlayingChange,
   onTerminalFailure,
 }: RustFrameBufferProps) {
   const [state, setState] = useState<RustFrameBufferState>(createRustFrameBufferState);
@@ -242,7 +244,10 @@ export function RustFrameBuffer({
       afterPaint,
       isCurrentIdentity: (identity) =>
         samePlaybackIdentity(nativePlaybackController.currentIdentity(), identity),
-      setPlaying: (playing) => useEditorUiStore.getState().setPlaying(playing),
+      setPlaying: (playing) => {
+        if (onTransportPlayingChange) onTransportPlayingChange(playing);
+        else useEditorUiStore.getState().setPlaying(playing);
+      },
       stop: (identity) => nativePlaybackController.stop(identity),
       onTerminalFailure,
     });

@@ -24,7 +24,7 @@ use super::audio::{
 use super::engine::{
     BoundedReaper, FrameSink, PlaybackClock, PlaybackEngine, PlayheadEmitter, ReapPermit,
 };
-use super::project::{project_media_with_proxies, project_text};
+use super::project::{project_media_with_proxies, project_text, source_preview_timeline};
 use super::session::{
     PlaybackCommandError, PlaybackIdentity, ProjectTransition, SessionControl, SessionRegistry,
     StartDecision, StartTicket,
@@ -543,6 +543,7 @@ pub async fn playback_start(
     app: AppHandle,
     from_frame: i32,
     identity: PlaybackIdentity,
+    media_id: Option<String>,
 ) -> Result<(), PlaybackCommandError> {
     let identity = identity.validate()?;
     let snapshot = app.state::<AppCore>().runtime_snapshot();
@@ -577,9 +578,14 @@ pub async fn playback_start(
         server,
         project_dir,
     ) = {
-        let timeline = snapshot.timeline;
+        let root_timeline = snapshot.timeline;
         let manifest = snapshot.media;
         let project_dir = snapshot.project_dir;
+        let timeline = match media_id.as_deref() {
+            Some(media_id) => source_preview_timeline(&manifest, media_id, root_timeline.fps)
+                .map_err(PlaybackCommandError::engine)?,
+            None => root_timeline,
+        };
         let prefer_proxy = app.state::<crate::media::MediaProxyState>().enabled();
         let (sizes, media) = project_media_with_proxies(&manifest, &project_dir, prefer_proxy);
         let text = project_text(&timeline);

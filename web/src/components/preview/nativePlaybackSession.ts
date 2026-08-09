@@ -79,7 +79,11 @@ function validFrameEvent(event: PlaybackFrameEvent): boolean {
 }
 
 export interface NativePlaybackApi {
-  playbackStart(frame: number, identity: PlaybackIdentity): Promise<void>;
+  playbackStart(
+    frame: number,
+    identity: PlaybackIdentity,
+    mediaId?: string,
+  ): Promise<void>;
   playbackPause(identity: PlaybackIdentity, frame: number): Promise<void>;
   playbackSeek(identity: PlaybackIdentity, frame: number): Promise<void>;
   playbackStop(identity: PlaybackIdentity): Promise<void>;
@@ -91,6 +95,7 @@ export interface NativePlaybackController {
     frame: number,
     options?: {
       forceNewSession?: boolean;
+      mediaId?: string;
       onIdentity?: (identity: PlaybackIdentity) => void;
     },
   ): Promise<PlaybackIdentity>;
@@ -109,15 +114,22 @@ export function createNativePlaybackController(
   mintSessionId: () => string = createSessionId,
 ): NativePlaybackController {
   let current: PlaybackIdentity | null = null;
+  let currentMediaId: string | null = null;
   let paused = false;
   let lastSequence = -1;
+  let lifecycleGeneration = 0;
 
-  const stopIdentity = async (identity: PlaybackIdentity) => {
+  const stopIdentity = async (
+    identity: PlaybackIdentity,
+    invalidatePendingStart = true,
+  ) => {
     if (!samePlaybackIdentity(current, identity)) return;
+    if (invalidatePendingStart) lifecycleGeneration += 1;
     // Retire locally before awaiting IPC. A final backend frame can race the
     // stop command across the WebView bridge; keeping `current` alive until the
     // promise resolves lets that stale frame overwrite a newer scrub result.
     current = null;
+    currentMediaId = null;
     paused = false;
     lastSequence = -1;
     clearNativePlaybackPublication();
@@ -131,20 +143,55 @@ export function createNativePlaybackController(
 
   return {
     async start(revision, frame, options) {
-      const reusable = sameRevision(current, revision) && paused && !options?.forceNewSession;
-      if (!reusable && current) await stopIdentity(current);
+      const startGeneration = ++lifecycleGeneration;
+      const requestedMediaId = options?.mediaId ?? null;
+      const reusable =
+        sameRevision(current, revision) &&
+        paused &&
+        currentMediaId === requestedMediaId &&
+        !options?.forceNewSession;
+      if (!reusable && current) await stopIdentity(current, false);
+      if (startGeneration !== lifecycleGeneration) {
+        throw {
+          code: "superseded",
+          message: "native playback start was superseded",
+        } satisfies PlaybackCommandError;
+      }
       if (!reusable) {
         current = {
           ...revision,
           sessionId: mintSessionId(),
         };
+        currentMediaId = requestedMediaId;
         lastSequence = -1;
         clearNativePlaybackPublication();
       }
       const identity = current;
       if (!identity) throw new Error("native playback identity was not created");
       options?.onIdentity?.({ ...identity });
-      await playbackApi.playbackStart(Math.max(0, Math.floor(frame)), identity);
+      if (
+        startGeneration !== lifecycleGeneration ||
+        !samePlaybackIdentity(current, identity)
+      ) {
+        throw {
+          code: "superseded",
+          message: "native playback start was superseded",
+        } satisfies PlaybackCommandError;
+      }
+      await playbackApi.playbackStart(
+        Math.max(0, Math.floor(frame)),
+        identity,
+        requestedMediaId ?? undefined,
+      );
+      if (
+        startGeneration !== lifecycleGeneration ||
+        !samePlaybackIdentity(current, identity)
+      ) {
+        throw {
+          code: "superseded",
+          message: "native playback start was superseded",
+        } satisfies PlaybackCommandError;
+      }
       paused = false;
       return identity;
     },
@@ -211,7 +258,7 @@ function createSessionId(): string {
 }
 
 export const nativePlaybackController = createNativePlaybackController({
-  playbackStart: (frame, identity) => api.playbackStart(frame, identity),
+  playbackStart: (frame, identity, mediaId) => api.playbackStart(frame, identity, mediaId),
   playbackPause: (identity, frame) => api.playbackPause(identity, frame),
   playbackSeek: (identity, frame) => api.playbackSeek(identity, frame),
   playbackStop: (identity) => api.playbackStop(identity),

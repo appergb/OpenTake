@@ -65,8 +65,12 @@ import {
   type QualityPreset,
   type ZoomPreset,
 } from "../../lib/previewPresets";
-import type { MediaItem } from "../../lib/types";
-import { useNativePlaybackPublication } from "./nativePlaybackSession";
+import type { MediaItem, PlaybackIdentity } from "../../lib/types";
+import {
+  nativePlaybackController,
+  samePlaybackIdentity,
+  useNativePlaybackPublication,
+} from "./nativePlaybackSession";
 import {
   isRetryableRustPlaybackFailure,
   resolveTimelinePlaybackRoute,
@@ -81,6 +85,30 @@ export function exactTimelineFrame(frame: number, total: number): number {
   const safeTotal = Number.isFinite(total) ? Math.max(0, Math.round(total)) : 0;
   const rounded = Number.isFinite(frame) ? Math.round(frame) : 0;
   return Math.max(0, Math.min(safeTotal, rounded));
+}
+
+export function sourcePreviewFrame(frame: number, totalFrames: number): number {
+  const safeTotal = Math.max(1, Math.round(Number.isFinite(totalFrames) ? totalFrames : 1));
+  return exactTimelineFrame(frame, safeTotal - 1);
+}
+
+export function sourceDurationFrames(durationSeconds: number, fps: number): number {
+  if (!Number.isFinite(durationSeconds) || !Number.isFinite(fps)) return 0;
+  return Math.max(0, Math.trunc(Math.max(0, durationSeconds) * Math.max(1, fps)));
+}
+
+export function retireSourcePlaybackStart(
+  generation: { current: number },
+  starting: { current: boolean },
+): void {
+  generation.current += 1;
+  starting.current = false;
+}
+
+export function sourcePlaybackStartFrame(currentFrame: number, totalFrames: number): number {
+  const safeTotal = Math.max(1, Math.round(Number.isFinite(totalFrames) ? totalFrames : 1));
+  const current = sourcePreviewFrame(currentFrame, safeTotal);
+  return current >= safeTotal - 1 ? 0 : current;
 }
 
 export function Preview() {
@@ -106,6 +134,7 @@ export function Preview() {
     (s) => s.setWebkitPlaybackFailedRevision,
   );
   const setScrubbing = useEditorUiStore((s) => s.setScrubbing);
+  const setTimelinePlaying = useEditorUiStore((s) => s.setPlaying);
   const togglePlayTimeline = useEditorUiStore((s) => s.togglePlay);
   const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
   const selectedClipIds = useEditorUiStore((s) => s.selectedClipIds);
@@ -167,6 +196,11 @@ export function Preview() {
   const [mediaTime, setMediaTime] = useState(0);
   const [mediaDuration, setMediaDuration] = useState(0);
   const [mediaPlaying, setMediaPlaying] = useState(false);
+  const [sourcePlaybackIdentity, setSourcePlaybackIdentity] =
+    useState<PlaybackIdentity | null>(null);
+  const sourcePlaybackIdentityRef = useRef<PlaybackIdentity | null>(null);
+  const sourcePlaybackStartingRef = useRef(false);
+  const sourcePlaybackGenerationRef = useRef(0);
   const nativeFrameEvent = useNativePlaybackPublication();
   const rustPlaybackCapability = useRustPlaybackCapability();
   const previewFrameEndpoint = rustPlaybackCapability.endpoint;
@@ -176,9 +210,21 @@ export function Preview() {
   const canvasBoxRef = useRef<HTMLDivElement | null>(null);
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
   useEffect(() => {
+    retireSourcePlaybackStart(sourcePlaybackGenerationRef, sourcePlaybackStartingRef);
+    mediaRef.current?.pause();
+    mediaRef.current = null;
     setMediaTime(0);
-    setMediaDuration(0);
+    setMediaDuration(Math.max(0, previewItem?.duration ?? 0));
     setMediaPlaying(false);
+    const identity = sourcePlaybackIdentityRef.current;
+    sourcePlaybackIdentityRef.current = null;
+    setSourcePlaybackIdentity(null);
+    if (identity) void nativePlaybackController.stop(identity).catch(() => undefined);
+    return () => {
+      const current = sourcePlaybackIdentityRef.current;
+      sourcePlaybackIdentityRef.current = null;
+      if (current) void nativePlaybackController.stop(current).catch(() => undefined);
+    };
   }, [previewMediaId]);
   useEffect(() => {
     const el = stageRef.current;
@@ -218,10 +264,48 @@ export function Preview() {
   }, [mediaToggleCount]);
 
   const previewing = previewItem !== null;
+  const nativeSourcePreview =
+    previewItem?.type === "video" &&
+    !previewItem.missing &&
+    rustPlaybackCapability.available;
+  useEffect(() => {
+    retireSourcePlaybackStart(sourcePlaybackGenerationRef, sourcePlaybackStartingRef);
+    const identity = sourcePlaybackIdentityRef.current;
+    sourcePlaybackIdentityRef.current = null;
+    setSourcePlaybackIdentity(null);
+    setMediaPlaying(false);
+    if (identity) void nativePlaybackController.stop(identity).catch(() => undefined);
+  }, [projectEpoch, timelineVersion]);
+  useEffect(() => {
+    if (nativeSourcePreview) {
+      // Capability discovery can replace a briefly-mounted WebKit fallback.
+      // Never carry its playing state into a native surface with no session.
+      if (!sourcePlaybackIdentityRef.current) setMediaPlaying(false);
+      return;
+    }
+    retireSourcePlaybackStart(sourcePlaybackGenerationRef, sourcePlaybackStartingRef);
+    const identity = sourcePlaybackIdentityRef.current;
+    sourcePlaybackIdentityRef.current = null;
+    setSourcePlaybackIdentity(null);
+    if (identity) {
+      setMediaPlaying(false);
+      void nativePlaybackController.stop(identity).catch(() => undefined);
+    }
+  }, [nativeSourcePreview]);
   const timelineHasContent = !previewing && timeline.tracks.length > 0;
   const fps = timeline.fps;
+  const sourceNativeFrameEvent =
+    sourcePlaybackIdentity &&
+    nativeFrameEvent &&
+    samePlaybackIdentity(sourcePlaybackIdentity, nativeFrameEvent)
+      ? nativeFrameEvent
+      : null;
+  useEffect(() => {
+    if (!nativeSourcePreview || !sourceNativeFrameEvent) return;
+    setMediaTime(sourceNativeFrameEvent.frame / Math.max(1, fps));
+  }, [fps, nativeSourcePreview, sourceNativeFrameEvent]);
   const total = previewing
-    ? Math.max(0, Math.round(mediaDuration * fps))
+    ? sourceDurationFrames(mediaDuration, fps)
     : totalFrames(timeline);
   const activeShownFrame = previewing ? Math.round(mediaTime * fps) : activeFrame;
   const playing = previewing ? mediaPlaying : isPlaying;
@@ -249,10 +333,20 @@ export function Preview() {
   );
 
   const seekTo = (frame: number) => {
-    const clamped = Math.max(0, Math.min(total, frame));
+    const clamped = nativeSourcePreview
+      ? sourcePreviewFrame(frame, total)
+      : Math.max(0, Math.min(total, frame));
     if (previewing) {
       // A single media item has no clip edges to snap to.
-      if (mediaRef.current) mediaRef.current.currentTime = clamped / fps;
+      const time = clamped / Math.max(1, fps);
+      if (nativeSourcePreview) {
+        setMediaTime(time);
+        if (mediaPlaying && sourcePlaybackIdentity) {
+          void nativePlaybackController.seek(sourcePlaybackIdentity, clamped);
+        }
+      } else if (mediaRef.current) {
+        mediaRef.current.currentTime = time;
+      }
     } else {
       // Magnetize the scrub bar to clip start/end edges (~0.25s threshold) and
       // tick on engage, like dragging the playhead in the timeline.
@@ -266,9 +360,19 @@ export function Preview() {
   // They must not pass through clip-edge magnetism or a request for frame 1
   // near a clip starting at 0 would snap straight back to 0.
   const seekToExact = (frame: number) => {
-    const clamped = exactTimelineFrame(frame, total);
+    const clamped = nativeSourcePreview
+      ? sourcePreviewFrame(frame, total)
+      : exactTimelineFrame(frame, total);
     if (previewing) {
-      if (mediaRef.current) mediaRef.current.currentTime = clamped / fps;
+      const time = clamped / Math.max(1, fps);
+      if (nativeSourcePreview) {
+        setMediaTime(time);
+        if (mediaPlaying && sourcePlaybackIdentity) {
+          void nativePlaybackController.seek(sourcePlaybackIdentity, clamped);
+        }
+      } else if (mediaRef.current) {
+        mediaRef.current.currentTime = time;
+      }
     } else {
       setCurrentFrame(clamped);
     }
@@ -276,6 +380,69 @@ export function Preview() {
 
   const togglePlay = () => {
     if (previewing) {
+      if (nativeSourcePreview && previewItem) {
+        const identity = sourcePlaybackIdentityRef.current ?? sourcePlaybackIdentity;
+        if (mediaPlaying) {
+          setMediaPlaying(false);
+          if (sourcePlaybackStartingRef.current) {
+            retireSourcePlaybackStart(
+              sourcePlaybackGenerationRef,
+              sourcePlaybackStartingRef,
+            );
+            sourcePlaybackIdentityRef.current = null;
+            setSourcePlaybackIdentity(null);
+            if (identity) void nativePlaybackController.stop(identity).catch(() => undefined);
+          } else {
+            if (!identity) return;
+            void nativePlaybackController
+              .pause(identity, Math.max(0, Math.floor(mediaTime * Math.max(1, fps))))
+              .catch(() => setMediaPlaying(false));
+          }
+          return;
+        }
+
+        const totalFrames = Math.max(1, sourceDurationFrames(mediaDuration, fps));
+        const currentFrame = Math.max(0, Math.floor(mediaTime * Math.max(1, fps)));
+        const startFrame = sourcePlaybackStartFrame(currentFrame, totalFrames);
+        if (startFrame === 0 && currentFrame !== 0) setMediaTime(0);
+        setTimelinePlaying(false);
+        setMediaPlaying(true);
+        sourcePlaybackStartingRef.current = true;
+        const generation = sourcePlaybackGenerationRef.current;
+        void nativePlaybackController
+          .start({ projectEpoch, timelineVersion }, startFrame, {
+            mediaId: previewItem.id,
+            onIdentity: (started) => {
+              if (generation !== sourcePlaybackGenerationRef.current) {
+                void nativePlaybackController.stop(started).catch(() => undefined);
+                return;
+              }
+              sourcePlaybackIdentityRef.current = started;
+              setSourcePlaybackIdentity(started);
+            },
+          })
+          .then((started) => {
+            if (generation !== sourcePlaybackGenerationRef.current) {
+              void nativePlaybackController.stop(started).catch(() => undefined);
+              return;
+            }
+            sourcePlaybackIdentityRef.current = started;
+            setSourcePlaybackIdentity(started);
+          })
+          .catch(() => {
+            if (generation !== sourcePlaybackGenerationRef.current) return;
+            sourcePlaybackIdentityRef.current = null;
+            setSourcePlaybackIdentity(null);
+            setMediaPlaying(false);
+            pushToast(t("preview.terminalFrameFailed"));
+          })
+          .finally(() => {
+            if (generation === sourcePlaybackGenerationRef.current) {
+              sourcePlaybackStartingRef.current = false;
+            }
+          });
+        return;
+      }
       const el = mediaRef.current;
       if (!el) return;
       if (el.paused) void el.play();
@@ -330,6 +497,12 @@ export function Preview() {
   };
 
   const fittedCanvas = aspectFitBox(stageSize.width, stageSize.height, timeline.width, timeline.height);
+  const fittedSource = aspectFitBox(
+    stageSize.width,
+    stageSize.height,
+    previewItem?.width ?? 16,
+    previewItem?.height ?? 9,
+  );
   // The zoomed canvas box: the aspect-fit box physically resized by `canvasZoom`
   // (upstream `.frame(fitSize * zoom)`, PreviewContainerView.swift:20-22,43). The
   // box stays flex-centered in the stage; `canvasOffset` then translates it
@@ -423,7 +596,31 @@ export function Preview() {
           padding: 8,
         }}
       >
-        {previewItem ? (
+        {previewItem && nativeSourcePreview ? (
+          <NativeSourcePlaybackSurface
+            item={previewItem}
+            width={fittedSource?.width}
+            height={fittedSource?.height}
+            event={sourceNativeFrameEvent}
+            endpoint={previewFrameEndpoint}
+            projectEpoch={projectEpoch}
+            timelineVersion={timelineVersion}
+            playing={mediaPlaying}
+            frame={sourcePreviewFrame(
+              mediaTime * Math.max(1, fps),
+              Math.max(1, sourceDurationFrames(mediaDuration, fps)),
+            )}
+            previewQualityShortEdge={previewQualityShortEdge}
+            onPlayingChange={(playing) => {
+              setMediaPlaying(playing);
+              if (!playing && sourceNativeFrameEvent?.terminal) {
+                sourcePlaybackIdentityRef.current = null;
+                setSourcePlaybackIdentity(null);
+              }
+            }}
+            onTerminalFailure={() => pushToast(t("preview.terminalFrameFailed"))}
+          />
+        ) : previewItem ? (
           <MediaPreview
             item={previewItem}
             projectEpoch={projectEpoch}
@@ -598,6 +795,78 @@ export function Preview() {
   );
 }
 
+export function NativeSourcePlaybackSurface({
+  item,
+  width,
+  height,
+  event,
+  endpoint,
+  projectEpoch,
+  timelineVersion,
+  playing,
+  frame,
+  previewQualityShortEdge,
+  onPlayingChange,
+  onTerminalFailure,
+  requestSourceFrame = compositeFrame,
+  cancelSourceFrame = cancelCompositeFrame,
+}: {
+  item: MediaItem;
+  width?: number;
+  height?: number;
+  event: Parameters<typeof RustFrameBuffer>[0]["event"];
+  endpoint: string | null;
+  projectEpoch: number;
+  timelineVersion: number;
+  playing: boolean;
+  frame: number;
+  previewQualityShortEdge: number | null;
+  onPlayingChange: (playing: boolean) => void;
+  onTerminalFailure: () => void;
+  requestSourceFrame?: typeof compositeFrame;
+  cancelSourceFrame?: typeof cancelCompositeFrame;
+}) {
+  const requestSourceStill = useCallback(
+    (request: Parameters<typeof compositeFrame>[0]) =>
+      requestSourceFrame(
+        { ...request, sourceMediaId: item.id },
+        previewQualityMaxSize(
+          previewQualityShortEdge,
+          item.width ?? 1920,
+          item.height ?? 1080,
+        ),
+      ),
+    [item.height, item.id, item.width, previewQualityShortEdge, requestSourceFrame],
+  );
+
+  return (
+    <div
+      data-source-playback-surface="native"
+      style={{
+        position: "relative",
+        width: width ?? "100%",
+        height: height ?? "100%",
+        maxWidth: "100%",
+        maxHeight: "100%",
+      }}
+    >
+      <RustFrameBuffer
+        key={item.id}
+        event={event}
+        endpoint={endpoint}
+        projectEpoch={projectEpoch}
+        timelineVersion={timelineVersion}
+        engineDriving={playing}
+        stillFrame={playing ? null : frame}
+        requestCompositeStill={requestSourceStill}
+        cancelCompositeStill={cancelSourceFrame}
+        onTransportPlayingChange={onPlayingChange}
+        onTerminalFailure={onTerminalFailure}
+      />
+    </div>
+  );
+}
+
 function unsupportedReasonKey(reason: UnsupportedPlaybackReason): string {
   return `preview.unsupportedPlayback.${reason.code}`;
 }
@@ -709,6 +978,7 @@ export function MediaPreview({
         <Icon icon={Play} size={28} />
         <audio
           ref={(el) => {
+            if (!el) mediaRef.current?.pause();
             mediaRef.current = el;
           }}
           src={url}
@@ -731,6 +1001,7 @@ export function MediaPreview({
   return (
     <video
       ref={(el) => {
+        if (!el) mediaRef.current?.pause();
         mediaRef.current = el;
       }}
       src={url}

@@ -22,13 +22,26 @@ import { runApplicationMenuCommand } from "../components/shell/ViewMenu";
 
 /** Per-keypress zoom step for ⌘+ / ⌘- (剪映: Cmd + +/-). */
 const ZOOM_KEY_STEP = 1.3;
+const TEXT_INPUT_TYPES: ReadonlySet<string> = new Set([
+  "email",
+  "password",
+  "search",
+  "tel",
+  "text",
+  "url",
+]);
 
 function isTextEntry(target: EventTarget | null): boolean {
   if (typeof Element === "undefined" || !(target instanceof Element)) return false;
   const editable = target.closest<HTMLElement>(
-    'input, textarea, [contenteditable="true"], [contenteditable=""]',
+    "input, textarea, [contenteditable]",
   );
-  return Boolean(editable?.isContentEditable || editable?.matches("input, textarea"));
+  if (!editable) return false;
+  if (editable.isContentEditable || editable.matches("textarea")) return true;
+  return (
+    editable.matches("input") &&
+    TEXT_INPUT_TYPES.has((editable as HTMLInputElement).type)
+  );
 }
 
 function isNativeInteractionControl(target: EventTarget | null): boolean {
@@ -40,15 +53,9 @@ function isNativeInteractionControl(target: EventTarget | null): boolean {
   );
 }
 
-function isMediaInteractionSurface(target: EventTarget | null): boolean {
-  if (typeof Element === "undefined" || !(target instanceof Element)) return false;
-  return Boolean(target.closest('[data-media-tile="true"]'));
-}
-
 function nativeControlOwnsUnmodifiedKey(e: KeyboardEvent): boolean {
   if (!isNativeInteractionControl(e.target)) return false;
   return [
-    "Space",
     "Enter",
     "NumpadEnter",
     "ArrowLeft",
@@ -149,7 +156,7 @@ export function resolveDocumentedShortcut(
   e: KeyboardEvent,
   context: DocumentedShortcutContext,
 ): ResolvedShortcut | null {
-  if (context.view !== "editor" || context.blocked || isTextEntry(e.target)) {
+  if (context.view !== "editor" || context.blocked || e.isComposing || isTextEntry(e.target)) {
     return null;
   }
   const mod = e.metaKey || e.ctrlKey;
@@ -221,7 +228,7 @@ export function resolveDocumentedShortcut(
   } else if (!e.altKey && !nativeControlOwnsUnmodifiedKey(e)) {
     switch (e.code) {
       case "Space":
-        if (!e.shiftKey && !isMediaInteractionSurface(e.target)) {
+        if (!e.shiftKey) {
           command = { type: "transport" };
         }
         break;
@@ -305,9 +312,8 @@ export function shouldHandleTransportSpaceKey(e: KeyboardEvent, view: AppView): 
     !e.ctrlKey &&
     !e.altKey &&
     !e.shiftKey &&
-    !isTextEntry(e.target) &&
-    !isNativeInteractionControl(e.target) &&
-    !isMediaInteractionSurface(e.target)
+    !e.isComposing &&
+    !isTextEntry(e.target)
   );
 }
 
