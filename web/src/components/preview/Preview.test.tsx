@@ -435,6 +435,52 @@ describe("Preview timeline rendering", () => {
     expect(html).toContain("pointer-events:none");
   });
 
+  it("routes a source video through the native frame surface when available", () => {
+    store.ui.previewMediaId = "base";
+    store.media.items = [
+      {
+        id: "base",
+        name: "Main10",
+        type: "video",
+        duration: 210.7105,
+        width: 3840,
+        height: 2160,
+        hasAudio: true,
+        path: "/main10.mov",
+      },
+    ];
+
+    const html = renderToStaticMarkup(<Preview />);
+
+    expect(html).toContain('data-source-playback-surface="native"');
+    expect(html.match(/data-rust-frame-slot=/g)).toHaveLength(2);
+    expect(html).not.toContain("<video");
+    expect(html).not.toContain("asset:///main10.mov");
+  });
+
+  it("retains the WebKit source fallback when native playback is unavailable", () => {
+    store.playbackCapability = { checked: true, available: false, endpoint: null };
+    store.ui.previewMediaId = "base";
+    store.media.items = [
+      {
+        id: "base",
+        name: "portable",
+        type: "video",
+        duration: 3,
+        width: 1920,
+        height: 1080,
+        hasAudio: true,
+        path: "/portable.mp4",
+      },
+    ];
+
+    const html = renderToStaticMarkup(<Preview />);
+
+    expect(html).not.toContain('data-source-playback-surface="native"');
+    expect(html).toContain("<video");
+    expect(html).toContain("asset:///portable.mp4");
+  });
+
   // Note: only the NEGATIVE guard cases are provable here. `renderToStaticMarkup`
   // never runs `useEffect`, so the ResizeObserver that measures `stageSize` (and
   // therefore `fittedCanvas`, Preview.tsx:156) never fires — `fittedCanvas` is

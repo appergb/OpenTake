@@ -13,7 +13,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-use opentake_domain::{ClipType, MediaManifest, MediaSource, TextStyle, Timeline};
+use opentake_domain::{Clip, ClipType, MediaManifest, MediaSource, TextStyle, Timeline, Track};
 use opentake_render::SourceMetrics;
 
 /// Resolvable info for one media asset, projected from the manifest.
@@ -152,6 +152,59 @@ pub fn project_media_with_proxies(
         );
     }
     (sizes, media)
+}
+
+/// Build the one-track render graph used by the source-preview tab. Keeping the
+/// asset on the same FFmpeg -> RGBA -> compositor path as timeline playback
+/// avoids delegating HEVC Main10 / high-bitrate decode to the platform WebView.
+pub fn source_preview_timeline(
+    manifest: &MediaManifest,
+    media_id: &str,
+    project_fps: i32,
+) -> Result<Timeline, String> {
+    let entry = manifest
+        .entries
+        .iter()
+        .find(|entry| entry.id == media_id)
+        .ok_or_else(|| format!("source preview media not found: {media_id}"))?;
+    if entry.kind != ClipType::Video {
+        return Err(format!("source preview asset is not a video: {media_id}"));
+    }
+    if !entry.duration.is_finite() || entry.duration <= 0.0 {
+        return Err(format!(
+            "source preview asset has invalid duration: {}",
+            entry.duration
+        ));
+    }
+
+    let fps = project_fps.max(1);
+    let duration_frames = (entry.duration * f64::from(fps))
+        .trunc()
+        .clamp(1.0, f64::from(i32::MAX)) as i32;
+    let mut timeline = Timeline::new();
+    timeline.fps = fps;
+    timeline.width = entry
+        .source_width
+        .filter(|width| *width > 0)
+        .unwrap_or(1920);
+    timeline.height = entry
+        .source_height
+        .filter(|height| *height > 0)
+        .unwrap_or(1080);
+    timeline.settings_configured = true;
+
+    let mut track = Track::new(format!("source-preview-track-{media_id}"), ClipType::Video);
+    let mut clip = Clip::new(
+        format!("source-preview-clip-{media_id}"),
+        media_id,
+        0,
+        duration_frames,
+    );
+    clip.media_type = ClipType::Video;
+    clip.source_clip_type = ClipType::Video;
+    track.clips.push(clip);
+    timeline.tracks.push(track);
+    Ok(timeline)
 }
 
 #[cfg(test)]
@@ -320,5 +373,91 @@ mod tests {
         track.clips.push(clip);
         tl.tracks.push(track);
         assert!(project_text(&tl).is_empty());
+    }
+
+    #[test]
+    fn source_preview_builds_a_native_video_timeline_at_project_fps() {
+        let mut manifest = MediaManifest::new();
+        let mut main10 = entry(
+            "main10",
+            MediaSource::External {
+                absolute_path: "/media/main10.mov".into(),
+            },
+            Some((3840, 2160)),
+        );
+        main10.duration = 210.7105;
+        main10.source_fps = Some(30_000.0 / 1_001.0);
+        main10.has_audio = Some(true);
+        manifest.entries.push(main10);
+
+        let timeline = source_preview_timeline(&manifest, "main10", 30)
+            .expect("video source projects into native playback");
+
+        assert_eq!(
+            (timeline.width, timeline.height, timeline.fps),
+            (3840, 2160, 30)
+        );
+        assert_eq!(timeline.total_frames(), 6_321);
+        assert_eq!(timeline.tracks.len(), 1);
+        assert_eq!(timeline.tracks[0].kind, ClipType::Video);
+        let clip = &timeline.tracks[0].clips[0];
+        assert_eq!(clip.media_ref, "main10");
+        assert_eq!(clip.media_type, ClipType::Video);
+        assert_eq!(clip.source_clip_type, ClipType::Video);
+        assert_eq!(clip.duration_frames, 6_321);
+    }
+
+    #[test]
+    fn source_preview_truncates_fractional_terminal_frames() {
+        let mut manifest = MediaManifest::new();
+        let mut video = entry(
+            "fractional",
+            MediaSource::External {
+                absolute_path: "/media/fractional.mov".into(),
+            },
+            Some((1920, 1080)),
+        );
+        video.duration = 1.55;
+        manifest.entries.push(video);
+
+        let timeline = source_preview_timeline(&manifest, "fractional", 30)
+            .expect("fractional source projects into native playback");
+
+        assert_eq!(timeline.total_frames(), 46);
+        assert_eq!(timeline.tracks[0].clips[0].duration_frames, 46);
+    }
+
+    #[test]
+    fn source_preview_rejects_non_video_and_invalid_duration() {
+        let mut manifest = MediaManifest::new();
+        let mut audio = entry(
+            "audio",
+            MediaSource::External {
+                absolute_path: "/media/audio.wav".into(),
+            },
+            None,
+        );
+        audio.kind = ClipType::Audio;
+        manifest.entries.push(audio);
+
+        let mut invalid = entry(
+            "invalid",
+            MediaSource::External {
+                absolute_path: "/media/invalid.mov".into(),
+            },
+            Some((1920, 1080)),
+        );
+        invalid.duration = f64::NAN;
+        manifest.entries.push(invalid);
+
+        assert!(source_preview_timeline(&manifest, "audio", 30)
+            .unwrap_err()
+            .contains("not a video"));
+        assert!(source_preview_timeline(&manifest, "invalid", 30)
+            .unwrap_err()
+            .contains("duration"));
+        assert!(source_preview_timeline(&manifest, "missing", 30)
+            .unwrap_err()
+            .contains("not found"));
     }
 }

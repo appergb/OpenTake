@@ -109,6 +109,90 @@ describe("native playback identity", () => {
     expect(h.api.playbackStop).toHaveBeenCalledWith(current);
   });
 
+  it("does not resume a retained source session for a different media asset", async () => {
+    const h = harness();
+    const first = await h.controller.start(revision(4, 6), 0, { mediaId: "main10-a" });
+    await h.controller.pause(first, 12);
+
+    const second = await h.controller.start(revision(4, 6), 12, { mediaId: "main10-b" });
+
+    expect(second.sessionId).not.toBe(first.sessionId);
+    expect(h.api.playbackStop).toHaveBeenCalledWith(first);
+    expect(h.api.playbackStart).toHaveBeenLastCalledWith(12, second, "main10-b");
+  });
+
+  it("retains the exact source session across pause seek and resume", async () => {
+    const h = harness();
+    const first = await h.controller.start(revision(4, 6), 1_572, { mediaId: "main10" });
+    await h.controller.pause(first, 1_600);
+    const resumed = await h.controller.start(revision(4, 6), 1_600, { mediaId: "main10" });
+
+    expect(resumed.sessionId).toBe(first.sessionId);
+    expect(h.api.playbackStart).toHaveBeenLastCalledWith(1_600, first, "main10");
+  });
+
+  it("ignores an old source terminal event after switching media", async () => {
+    const h = harness();
+    const first = await h.controller.start(revision(4, 6), 0, { mediaId: "source-a" });
+    const second = await h.controller.start(revision(4, 6), 0, {
+      mediaId: "source-b",
+      forceNewSession: true,
+    });
+
+    h.emit({ ...first, frame: 299, sequence: 99, terminal: true });
+    expect(getNativePlaybackPublication()).toBeNull();
+
+    h.emit({ ...second, frame: 1, sequence: 1, terminal: false });
+    expect(getNativePlaybackPublication()).toMatchObject({
+      sessionId: second.sessionId,
+      frame: 1,
+      terminal: false,
+    });
+  });
+
+  it("lets the latest source start win while an older replacement awaits stop", async () => {
+    let finishStop!: () => void;
+    const api = {
+      playbackStart: vi.fn(async () => {}),
+      playbackPause: vi.fn(async () => {}),
+      playbackSeek: vi.fn(async () => {}),
+      playbackStop: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            finishStop = resolve;
+          }),
+      ),
+    };
+    let nextId = 0;
+    const controller = createNativePlaybackController(api, () => `source-${++nextId}`);
+    await controller.start(revision(4, 6), 0, { mediaId: "source-old" });
+
+    const older = controller.start(revision(4, 6), 0, { mediaId: "source-a" });
+    await Promise.resolve();
+    const latest = await controller.start(revision(4, 6), 0, { mediaId: "source-b" });
+    finishStop();
+
+    await expect(older).rejects.toMatchObject({ code: "superseded" });
+    expect(controller.currentIdentity()).toEqual(latest);
+    expect(api.playbackStart).toHaveBeenLastCalledWith(0, latest, "source-b");
+  });
+
+  it("does not dispatch a source start cancelled by its identity callback", async () => {
+    const h = harness();
+
+    await expect(
+      h.controller.start(revision(4, 6), 0, {
+        mediaId: "source-a",
+        onIdentity: (identity) => {
+          void h.controller.stop(identity);
+        },
+      }),
+    ).rejects.toMatchObject({ code: "superseded" });
+
+    expect(h.api.playbackStart).not.toHaveBeenCalled();
+    expect(h.controller.currentIdentity()).toBeNull();
+  });
+
   it("retires a stopped identity before the stop IPC resolves", async () => {
     let finishStop: (() => void) | undefined;
     const api = {

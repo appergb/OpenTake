@@ -85,12 +85,15 @@ jobs:
           }
           if versions != {version}:
               raise SystemExit(f"tag/version mismatch: {tag} != {sorted(versions)}")
+          wix_version = tauri["bundle"]["windows"]["wix"]["version"]
+          if wix_version != "1.0.0.3":
+              raise SystemExit(f"unexpected Windows installer version: {wix_version}")
           notes = Path("docs/releases") / f"{version}.md"
           if not notes.is_file() or not notes.read_text(encoding="utf-8").strip():
               raise SystemExit(f"release notes are missing or empty: {notes}")
           prerelease = "-" in version.split("+", 1)[0]
-          if version == "1.0.0-beta.2" and not prerelease:
-              raise SystemExit("OpenTake 1.0.0-beta.2 must remain a prerelease")
+          if version == "1.0.0-beta.3" and not prerelease:
+              raise SystemExit("OpenTake 1.0.0-beta.3 must remain a prerelease")
           if not prerelease:
               raise SystemExit("this release workflow publishes prereleases only")
 
@@ -636,6 +639,7 @@ jobs:
       RELEASE_SHA: ${{ needs.validate.outputs.source_sha }}
       RELEASE_VERSION: ${{ needs.validate.outputs.version }}
       NOTES_PATH: ${{ needs.validate.outputs.notes_path }}
+      PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

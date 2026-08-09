@@ -150,7 +150,7 @@ APPROVED_SIMPLE_RUNS = {
 }
 
 APPROVED_COMPLEX_RUN_SHA256 = {
-    ("validate", "Validate tag, source SHA, versions, and notes"): "114907da46e6f150a5ce50aa6ae26550e7f39e6f188f21f5320aedfc96e53b0b",
+    ("validate", "Validate tag, source SHA, versions, and notes"): "120a1dc8347fb5989f607f6965b1f9ce5167e934a41631d1ac0cee01e0b83876",
     ("validate", "Reassert exact source after validation"): "953657d26d2eda8490c18e7030c66ddb19aba64a5c8b19808da9a853fd1bfdd2",
     ("quality", "Assert exact checked-out SHA"): "ff0b148eecdf8603712586a6c4a05e752df0b36b5c97a366760f6cba10e58ddd",
     ("quality", "Free disk space"): "5848415c4d0e696f46965d62a2e17c8b7a0dd45ae600d28102af0b04108d9bf6",
@@ -186,11 +186,11 @@ APPROVED_COMPLEX_RUN_SHA256 = {
 }
 
 APPROVED_JOB_SHA256 = {
-    "validate": "d446090c0f2defabe5820b2908ce75d980a2a9194f815c69a662739af17722e9",
+    "validate": "386c4e21bdcc884a2246eea1d078b12378b25bfef52043e5e9520a2845f51142",
     "quality": "43599825f68088f3cc744220227267f77454e2c7ce389a52b8aee5a492491eec",
     "macos_arm64": "f913508e4f041614a967f680515cc0b8779800f0b2a7b4b6ff29f24f4bb1efd2",
     "windows_x64": "5f012278c20843ba1b38cffb27f3c614716bd92e3fec63a11885b41692be78b5",
-    "publish": "dd325630c78f236e972ca425ccc83018d12b4ec35a6b8a80d1af94990c8179a2",
+    "publish": "89192ac021d48cc8c8ef17b612a2da666d96c01d195c4e2b58eec24b2cc24d1b",
 }
 
 
@@ -769,6 +769,8 @@ def validate_workflow(workflow: str) -> list[str]:
             'web = json.loads(Path("web/package.json").read_text(encoding="utf-8"))',
             'notes = Path("docs/releases") / f"{version}.md"',
             'if versions != {version}:',
+            'wix_version = tauri["bundle"]["windows"]["wix"]["version"]',
+            'if wix_version != "1.0.0.3":',
         ),
     ):
         errors.append("Cargo, Tauri, and Web versions match tag")
@@ -776,11 +778,11 @@ def validate_workflow(workflow: str) -> list[str]:
         bind,
         (
             'if SEMVER_RE.fullmatch(tag) is None:',
-            'if version == "1.0.0-beta.2" and not prerelease:',
+            'if version == "1.0.0-beta.3" and not prerelease:',
             'emit("prerelease", "true")',
         ),
     ):
-        errors.append("Beta 2 is a SemVer prerelease")
+        errors.append("Beta 3 is a SemVer prerelease")
     if not _has_code_lines(bind, validate_order[1:5]):
         errors.append("validate binds exact clean checkout")
 
@@ -969,6 +971,9 @@ def validate_workflow(workflow: str) -> list[str]:
         return list(dict.fromkeys(errors))
     if publish.get("permissions") != {"contents": "write"}:
         errors.append("publish-only contents write permission")
+    publish_env = _as_mapping(publish.get("env"))
+    if publish_env is None or publish_env.get("PYTHONDONTWRITEBYTECODE") != "1":
+        errors.append("publish Python helpers cannot write bytecode into the checkout")
     initialize_publish = _structured_step(publish, "Initialize isolated publish root")
     download_macos = _structured_step(publish, "Download macOS artifact")
     download_windows = _structured_step(publish, "Download Windows artifact")
@@ -1123,14 +1128,19 @@ def validate_repository_metadata(repository_root: Path) -> list[str]:
             tauri["version"],
             web["version"],
         }
+        wix_version = tauri["bundle"]["windows"]["wix"]["version"]
         if not all(isinstance(version, str) for version in versions):
             raise TypeError("version metadata values must be strings")
+        if not isinstance(wix_version, str):
+            raise TypeError("Windows installer version must be a string")
     except (KeyError, OSError, TypeError, UnicodeError, ValueError):
         return ["readable Cargo, Tauri, and Web version metadata"]
 
-    if versions != {"1.0.0-beta.2"}:
-        errors.append("repository metadata is OpenTake 1.0.0-beta.2")
-    notes = repository_root / "docs" / "releases" / "1.0.0-beta.2.md"
+    if versions != {"1.0.0-beta.3"}:
+        errors.append("repository metadata is OpenTake 1.0.0-beta.3")
+    if wix_version != "1.0.0.3":
+        errors.append("Windows installer version is 1.0.0.3")
+    notes = repository_root / "docs" / "releases" / "1.0.0-beta.3.md"
     try:
         notes_missing = not notes.is_file() or not notes.read_text(
             encoding="utf-8"
@@ -1138,7 +1148,7 @@ def validate_repository_metadata(repository_root: Path) -> list[str]:
     except (OSError, UnicodeError):
         notes_missing = True
     if notes_missing:
-        errors.append("Beta 2 release notes exist")
+        errors.append("Beta 3 release notes exist")
     return errors
 
 

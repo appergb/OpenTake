@@ -31,10 +31,13 @@ use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use opentake_domain::{Clip, ClipType, Timeline, Track};
+use opentake_domain::{
+    Clip, ClipType, MediaManifest, MediaManifestEntry, MediaSource, Timeline, Track,
+};
 use opentake_render::{DecodedFrame, RenderSize};
+use opentake_tauri_lib::playback::project::source_preview_timeline;
 use opentake_tauri_lib::playback::{
-    audio::build_clock_paused, FrameSink, MediaInfo, PlaybackEngine, PlayheadEmitter,
+    audio::build_clock_paused, project_media, FrameSink, MediaInfo, PlaybackEngine, PlayheadEmitter,
 };
 
 #[derive(Clone, Debug)]
@@ -101,9 +104,19 @@ fn run_engine(
     sizes: HashMap<String, (u32, u32)>,
     secs: f64,
 ) -> (i32, i32, Option<DecodedFrame>, bool, FrameQuality) {
+    run_engine_from(timeline, media, sizes, 0, secs)
+}
+
+fn run_engine_from(
+    timeline: Timeline,
+    media: HashMap<String, MediaInfo>,
+    sizes: HashMap<String, (u32, u32)>,
+    start_frame: i32,
+    secs: f64,
+) -> (i32, i32, Option<DecodedFrame>, bool, FrameQuality) {
     let fps = timeline.fps;
-    let (clock, audio) =
-        build_clock_paused(&timeline, &media, fps, 0).expect("probe prepared audio clock");
+    let (clock, audio) = build_clock_paused(&timeline, &media, fps, start_frame)
+        .expect("probe prepared audio clock");
     let audio_active = audio.is_some();
     let sink = Arc::new(ProbeSink {
         frames: AtomicI32::new(0),
@@ -122,7 +135,7 @@ fn run_engine(
         clock,
         sink.clone(),
         emitter.clone(),
-        0,
+        start_frame,
     )
     .expect("engine ready (GPU acquire + first frame)");
     if let Some(audio) = audio.as_ref() {
@@ -130,7 +143,7 @@ fn run_engine(
             .prepare_resume()
             .expect("prepared audio callback resumes muted");
     }
-    engine.resume(0).expect("prepared engine resumes");
+    engine.resume(start_frame).expect("prepared engine resumes");
     if let Some(audio) = audio.as_ref() {
         audio.commit_resume();
     }
@@ -275,28 +288,32 @@ fn probe_main10_playback_has_no_black_or_green_frames() {
         "Main10 probe window exceeds source duration"
     );
 
-    let mut timeline = Timeline::new();
-    timeline.fps = 30;
-    timeline.width = 1920;
-    timeline.height = 1080;
-    let mut track = Track::new("t-v1", ClipType::Video);
-    let mut clip = video_clip("c-1", "m-1", 0, 300);
-    clip.trim_start_frame = trim_start_frame;
-    track.clips.push(clip);
-    timeline.tracks.push(track);
-
-    let mut media = HashMap::new();
-    media.insert(
-        "m-1".to_string(),
-        MediaInfo {
-            path: src,
-            straight_alpha: false,
+    let mut manifest = MediaManifest::new();
+    manifest.entries.push(MediaManifestEntry {
+        id: "m-1".into(),
+        name: "Main10.mov".into(),
+        kind: ClipType::Video,
+        source: MediaSource::External {
+            absolute_path: src.to_string_lossy().into_owned(),
         },
-    );
-    let mut sizes = HashMap::new();
-    sizes.insert("m-1".to_string(), source_size);
+        duration: probe.duration_secs,
+        generation_input: None,
+        source_width: Some(source_size.0 as i32),
+        source_height: Some(source_size.1 as i32),
+        source_fps: Some(source_fps),
+        has_audio: Some(true),
+        color: probe.color,
+        proxy: None,
+        folder_id: None,
+        cached_remote_url: None,
+        cached_remote_url_expires_at: None,
+    });
+    let timeline = source_preview_timeline(&manifest, "m-1", 30)
+        .expect("Main10 source projects through the production preview seam");
+    let (sizes, media) = project_media(&manifest, &None);
 
-    let (frames, playhead, _last, _audio_active, quality) = run_engine(timeline, media, sizes, 3.0);
+    let (frames, playhead, _last, _audio_active, quality) =
+        run_engine_from(timeline, media, sizes, trim_start_frame, 3.0);
     eprintln!(
         "[probe] Main10 frames={frames} playhead={playhead} min_nonblack={:.3} max_neon_green={:.3}",
         quality.min_nonblack_ratio, quality.max_neon_green_ratio
@@ -305,7 +322,10 @@ fn probe_main10_playback_has_no_black_or_green_frames() {
         frames > 1,
         "Main10 playback did not publish consecutive frames"
     );
-    assert!(playhead > 0, "Main10 playback playhead did not advance");
+    assert!(
+        playhead > trim_start_frame,
+        "Main10 source-preview seek did not advance: {playhead}"
+    );
     assert!(
         quality.min_nonblack_ratio > 0.01,
         "Main10 playback published a black frame (minimum nonblack ratio {:.4})",

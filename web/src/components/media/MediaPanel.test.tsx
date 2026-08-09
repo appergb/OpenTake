@@ -800,7 +800,7 @@ describe("media grid interaction consistency", () => {
     await act(async () => root.unmount());
   });
 
-  it("lets a focused media card own Space instead of toggling transport", async () => {
+  it("lets global transport own Space while a media card is focused", async () => {
     const requestMediaPreviewToggle = vi.fn();
     useEditorUiStore.setState({
       view: "editor",
@@ -855,7 +855,7 @@ describe("media grid interaction consistency", () => {
       ),
     );
 
-    expect(requestMediaPreviewToggle).not.toHaveBeenCalled();
+    expect(requestMediaPreviewToggle).toHaveBeenCalledOnce();
     expect(useEditorUiStore.getState().previewMediaId).toBe("asset-a");
     expect([...useEditorUiStore.getState().selectedMediaAssetIds]).toEqual(["asset-a"]);
     await act(async () => root.unmount());
