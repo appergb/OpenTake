@@ -163,13 +163,212 @@ mod live {
         );
     }
 
+    pub(super) fn browser_pool_reuses_session_probe() {
+        let profiles_before = live_profiles();
+        let root = tempfile::tempdir().unwrap();
+        let renderer = renderer(root.path());
+        let first_request = MotionRenderRequest::new(
+            MotionSource::code(
+                r#"<!doctype html><style>html,body{margin:0;width:100%;height:100%;background:rgb(12,34,56)}</style>"#,
+            ),
+            10,
+            1,
+            48,
+            32,
+        )
+        .with_transparent(false);
+        let second_request = MotionRenderRequest::new(
+            MotionSource::code(
+                r#"<!doctype html><style>html,body{margin:0;width:100%;height:100%;background:rgb(65,43,21)}</style>"#,
+            ),
+            10,
+            1,
+            48,
+            32,
+        )
+        .with_transparent(false);
+
+        let first = renderer.render(&first_request).unwrap();
+        let profiles_after_first = live_profiles();
+        assert_ne!(
+            first.content_hash,
+            opentake_motion::content_hash(&second_request)
+        );
+        assert_eq!(
+            profiles_after_first.difference(&profiles_before).count(),
+            1,
+            "the first cache miss must leave exactly one renderer-owned Chromium profile alive"
+        );
+
+        let second = renderer.render(&second_request).unwrap();
+        assert_ne!(first.content_hash, second.content_hash);
+        assert_eq!(
+            live_profiles(),
+            profiles_after_first,
+            "two distinct cache misses on one renderer must reuse the same Chromium process/profile"
+        );
+        assert!(renderer.cache().is_cached(&first_request));
+        assert!(renderer.cache().is_cached(&second_request));
+
+        drop(renderer);
+        assert_eq!(
+            live_profiles(),
+            profiles_before,
+            "dropping the renderer must remove its reusable Chromium profile"
+        );
+    }
+
+    pub(super) fn browser_pool_invalidation_probe() {
+        let profiles_before = live_profiles();
+        let root = tempfile::tempdir().unwrap();
+        let renderer = renderer(root.path());
+        let first_request =
+            request(r#"<!doctype html><style>html,body{background:rgb(1,2,3)}</style>"#)
+                .with_transparent(false);
+        renderer.render(&first_request).unwrap();
+        assert_eq!(
+            live_profiles().difference(&profiles_before).count(),
+            1,
+            "a successful render must retain one reusable browser"
+        );
+
+        let blocked_request =
+            request(r#"<img src="https://example.com/blocked.png">"#).with_transparent(false);
+        assert!(matches!(
+            renderer.render(&blocked_request),
+            Err(MotionError::Sandbox(_))
+        ));
+        assert_eq!(live_profiles(), profiles_before);
+        assert!(!renderer.cache().is_cached(&blocked_request));
+
+        let second_request =
+            request(r#"<!doctype html><style>html,body{background:rgb(4,5,6)}</style>"#)
+                .with_transparent(false);
+        renderer.render(&second_request).unwrap();
+        assert_eq!(
+            live_profiles().difference(&profiles_before).count(),
+            1,
+            "a later explicit render may launch a new browser after invalidation"
+        );
+
+        let cancellation = MotionCancellationToken::new();
+        cancellation.cancel();
+        let cancelled_request =
+            request(r#"<!doctype html><style>html,body{background:rgb(7,8,9)}</style>"#)
+                .with_transparent(false);
+        assert!(matches!(
+            renderer.render_with_cancellation(&cancelled_request, &cancellation),
+            Err(MotionError::Cancelled)
+        ));
+        assert_eq!(live_profiles(), profiles_before);
+        assert!(!renderer.cache().is_cached(&cancelled_request));
+    }
+
+    pub(super) fn concurrent_browser_pool_invalidation_probe() {
+        let profiles_before = live_profiles();
+        let root = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let origin = format!("http://{}", listener.local_addr().unwrap());
+        let (request_seen_tx, request_seen_rx) = std::sync::mpsc::channel();
+        let (release_response_tx, release_response_rx) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let accept_deadline = Instant::now() + Duration::from_secs(10);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            Instant::now() < accept_deadline,
+                            "the active render did not request its loopback barrier resource"
+                        );
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("loopback barrier accept failed: {error}"),
+                }
+            };
+            let mut request = [0u8; 2048];
+            let _ = stream.read(&mut request);
+            request_seen_tx.send(()).unwrap();
+            release_response_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the invalidating caller did not release the loopback response");
+            let svg = b"<svg xmlns='http://www.w3.org/2000/svg' width='2' height='2'><rect width='2' height='2' fill='red'/></svg>";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: image/svg+xml\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                svg.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(svg);
+        });
+        let renderer = HeadlessChromiumRenderer::new(
+            MotionCache::new(root.path()),
+            SandboxPolicy::offline_with_timeout(Duration::from_secs(60)).allow_origin(&origin),
+        )
+        .with_browser_path(browser());
+        let active_renderer = renderer.clone();
+        let active_request = MotionRenderRequest::new(
+            MotionSource::code(format!(
+                r#"<!doctype html><style>html,body{{margin:0;width:100%;height:100%;background:rgb(20,40,60)}}</style><img src="{origin}/barrier.svg">"#,
+            )),
+            10,
+            1,
+            48,
+            32,
+        )
+        .with_transparent(false);
+        let active_request_for_render = active_request.clone();
+        let active = thread::spawn(move || active_renderer.render(&active_request_for_render));
+
+        request_seen_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the active render did not reach the loopback barrier");
+        assert_eq!(live_profiles().difference(&profiles_before).count(), 1);
+        assert!(
+            !active.is_finished(),
+            "the first render must still own the browser lease when invalidation races it"
+        );
+
+        let cancelled_request =
+            request(r#"<!doctype html><style>body{background:rgb(70,80,90)}</style>"#)
+                .with_transparent(false);
+        let cancellation = MotionCancellationToken::new();
+        cancellation.cancel();
+        let cancelled = renderer.render_with_cancellation(&cancelled_request, &cancellation);
+        release_response_tx.send(()).unwrap();
+        assert!(matches!(cancelled, Err(MotionError::Cancelled)));
+        assert!(!renderer.cache().is_cached(&cancelled_request));
+
+        server.join().unwrap();
+        active.join().unwrap().unwrap();
+        assert!(renderer.cache().is_cached(&active_request));
+        assert_eq!(
+            live_profiles(),
+            profiles_before,
+            "a concurrent error must prevent the successful active lease from retaining Chromium"
+        );
+
+        let later_request =
+            request(r#"<!doctype html><style>body{background:rgb(90,80,70)}</style>"#)
+                .with_transparent(false);
+        renderer.render(&later_request).unwrap();
+        assert_eq!(
+            live_profiles().difference(&profiles_before).count(),
+            1,
+            "a later explicit render may launch one new browser after invalidation"
+        );
+        drop(renderer);
+        assert_eq!(live_profiles(), profiles_before);
+    }
+
     pub(super) fn four_k_budget_smoke() {
         const WIDTH: u32 = 3840;
         const HEIGHT: u32 = 2160;
 
-        let opaque_root = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let renderer = four_k_renderer(root.path());
         let opaque_started = Instant::now();
-        let opaque = four_k_renderer(opaque_root.path())
+        let opaque = renderer
             .render(
                 &MotionRenderRequest::new(
                     MotionSource::code(
@@ -195,9 +394,8 @@ mod live {
             opaque_elapsed.as_millis()
         );
 
-        let transparent_root = tempfile::tempdir().unwrap();
         let transparent_started = Instant::now();
-        let transparent = four_k_renderer(transparent_root.path())
+        let transparent = renderer
             .render(&MotionRenderRequest::new(
                 MotionSource::code(
                     r#"<!doctype html><style>html,body{margin:0;width:100%;height:100%;background:transparent}#fill{position:fixed;inset:-16px;background:rgba(10,20,30,.5)}</style><div id="fill"></div>"#,
@@ -598,6 +796,27 @@ fn host_wrapper_context_csp_and_guard_probe() {
     live::assert_gate_serializes_concurrent_callers();
     let _live_test_guard = live_test_guard();
     live::wrapper_probe();
+}
+
+#[cfg(feature = "chromium")]
+#[test]
+fn consecutive_cache_misses_reuse_one_chromium_session() {
+    let _live_test_guard = live_test_guard();
+    live::browser_pool_reuses_session_probe();
+}
+
+#[cfg(feature = "chromium")]
+#[test]
+fn browser_pool_invalidates_on_blocked_or_cancelled_render() {
+    let _live_test_guard = live_test_guard();
+    live::browser_pool_invalidation_probe();
+}
+
+#[cfg(feature = "chromium")]
+#[test]
+fn concurrent_error_invalidates_an_active_browser_lease() {
+    let _live_test_guard = live_test_guard();
+    live::concurrent_browser_pool_invalidation_probe();
 }
 
 #[cfg(feature = "chromium")]

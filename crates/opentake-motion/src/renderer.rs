@@ -357,7 +357,9 @@ impl Crc32 {
 ///
 /// The CDP wiring is gated behind the `chromium` cargo feature so the default
 /// build does not require a browser or websocket dependency. The live path
-/// locates Chrome/Chromium/Edge, uses a fresh disposable profile, injects a
+/// locates Chrome/Chromium/Edge and reuses one renderer-owned browser profile
+/// and process across successful renders. Each render gets a fresh root CDP
+/// connection, disposable browser context, and target. The backend injects a
 /// strict CSP, intercepts every request with `Fetch`, and kills the browser on
 /// cancellation, timeout, or protocol failure. Without the feature, [`render`]
 /// returns [`MotionError::RendererUnavailable`].
@@ -367,6 +369,8 @@ pub struct HeadlessChromiumRenderer {
     policy: SandboxPolicy,
     browser_path: Option<PathBuf>,
     cancellation: MotionCancellationToken,
+    #[cfg(feature = "chromium")]
+    browser_pool: Arc<chromium_backend::BrowserPool>,
 }
 
 impl HeadlessChromiumRenderer {
@@ -377,12 +381,18 @@ impl HeadlessChromiumRenderer {
             policy,
             browser_path: None,
             cancellation: MotionCancellationToken::new(),
+            #[cfg(feature = "chromium")]
+            browser_pool: Arc::new(chromium_backend::BrowserPool::new()),
         }
     }
 
     /// Override browser discovery. Useful for portable app bundles and for
     /// deterministic crash-path tests.
     pub fn with_browser_path(mut self, path: impl Into<PathBuf>) -> Self {
+        #[cfg(feature = "chromium")]
+        {
+            self.browser_pool = Arc::new(chromium_backend::BrowserPool::new());
+        }
         self.browser_path = Some(path.into());
         self
     }
@@ -482,25 +492,34 @@ impl HeadlessChromiumRenderer {
             .map(|i| i as f64 / req.fps as f64)
             .collect()
     }
-}
 
-impl MotionRenderer for HeadlessChromiumRenderer {
-    fn render(&self, req: &MotionRenderRequest) -> MotionResult<RenderedClip> {
-        // Always validate + apply the sandbox checks we own, even on the path
-        // that ends in "unavailable", so a caller wiring this up sees policy
-        // failures regardless of whether a browser is present.
-        req.validate()?;
-        if let MotionSource::Code { html_css_js } = &req.source {
-            self.policy.check_document_size(html_css_js)?;
+    /// Render with a token scoped to this call while retaining the renderer's
+    /// reusable Chromium process for later successful calls.
+    pub fn render_with_cancellation(
+        &self,
+        req: &MotionRenderRequest,
+        cancellation: &MotionCancellationToken,
+    ) -> MotionResult<RenderedClip> {
+        let validated = (|| {
+            req.validate()?;
+            if let MotionSource::Code { html_css_js } = &req.source {
+                self.policy.check_document_size(html_css_js)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = validated {
+            #[cfg(feature = "chromium")]
+            self.browser_pool.invalidate_idle();
+            return Err(error);
         }
 
         #[cfg(feature = "chromium")]
         {
-            chromium_backend::render(self, req)
+            chromium_backend::render(self, req, cancellation)
         }
         #[cfg(not(feature = "chromium"))]
         {
-            let _ = &self.cache;
+            let _ = (&self.cache, cancellation);
             Err(MotionError::renderer_unavailable(
                 "headless-Chromium backend is not compiled in; build with the \
                  `chromium` feature, or use StubRenderer for offline/deterministic rendering",
@@ -509,13 +528,19 @@ impl MotionRenderer for HeadlessChromiumRenderer {
     }
 }
 
+impl MotionRenderer for HeadlessChromiumRenderer {
+    fn render(&self, req: &MotionRenderRequest) -> MotionResult<RenderedClip> {
+        self.render_with_cancellation(req, &self.cancellation)
+    }
+}
+
 #[cfg(feature = "chromium")]
 mod chromium_backend {
     use std::io::{BufRead, BufReader, Cursor};
     use std::net::TcpStream;
     use std::process::{Child, Command, Stdio};
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::sync::mpsc;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{mpsc, Mutex, MutexGuard, TryLockError};
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -544,9 +569,8 @@ mod chromium_backend {
     fn browser_launch_args() -> &'static [&'static str] {
         &[
             "--headless=new",
-            "--use-gl=angle",
-            "--use-angle=swiftshader-webgl",
             "--remote-debugging-port=0",
+            "--remote-debugging-address=127.0.0.1",
             "--no-first-run",
             "--no-default-browser-check",
             "--disable-background-networking",
@@ -585,11 +609,191 @@ mod chromium_backend {
         drained
     }
 
+    pub(super) struct BrowserPool {
+        slot: Mutex<Option<LiveBrowser>>,
+        invalidation_pending: AtomicBool,
+    }
+
+    impl BrowserPool {
+        pub(super) fn new() -> Self {
+            Self {
+                slot: Mutex::new(None),
+                invalidation_pending: AtomicBool::new(false),
+            }
+        }
+
+        fn acquire<'a>(
+            &'a self,
+            executable: &Path,
+            deadline: Instant,
+            timeout: Duration,
+            cancellation: &MotionCancellationToken,
+        ) -> MotionResult<BrowserLease<'a>> {
+            let mut slot = loop {
+                match self.slot.try_lock() {
+                    Ok(slot) => break slot,
+                    Err(TryLockError::WouldBlock) => {
+                        check_abort_state(cancellation, deadline, timeout)?;
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(TryLockError::Poisoned(error)) => {
+                        drop(error.into_inner().take());
+                        self.slot.clear_poison();
+                        return Err(MotionError::render_failed(
+                            "Chromium browser pool lock was poisoned",
+                        ));
+                    }
+                }
+            };
+
+            let observed_invalidation = self.invalidation_pending.swap(false, Ordering::AcqRel);
+            let invalidated_browser = if observed_invalidation {
+                slot.take()
+            } else {
+                None
+            };
+            drop(invalidated_browser);
+
+            if slot
+                .as_ref()
+                .is_some_and(|browser| browser.executable != executable)
+            {
+                drop(slot.take());
+            }
+            if let Some(browser) = slot.as_mut() {
+                if let Some(status) = browser.process.try_wait()? {
+                    drop(slot.take());
+                    return Err(MotionError::render_failed(format!(
+                        "reusable Chromium exited before the next render: {status}"
+                    )));
+                }
+                trace("reusing live Chromium process");
+            } else {
+                let (process, websocket_url) =
+                    BrowserProcess::launch(executable, deadline, timeout, cancellation)?;
+                *slot = Some(LiveBrowser {
+                    process,
+                    websocket_url,
+                    executable: executable.to_path_buf(),
+                });
+                trace("browser launched and CDP endpoint is ready");
+            }
+
+            Ok(BrowserLease {
+                pool: self,
+                slot: Some(slot),
+                reusable: false,
+                observed_invalidation,
+            })
+        }
+
+        pub(super) fn invalidate_idle(&self) {
+            self.invalidation_pending.store(true, Ordering::Release);
+            self.drain_pending_invalidation();
+        }
+
+        fn drain_pending_invalidation(&self) {
+            if !self.invalidation_pending.load(Ordering::Acquire) {
+                return;
+            }
+
+            let mut slot = match self.slot.try_lock() {
+                Ok(slot) => slot,
+                Err(TryLockError::WouldBlock) => return,
+                Err(TryLockError::Poisoned(error)) => {
+                    let slot = error.into_inner();
+                    self.slot.clear_poison();
+                    slot
+                }
+            };
+            let browser = if self.invalidation_pending.swap(false, Ordering::AcqRel) {
+                slot.take()
+            } else {
+                None
+            };
+            drop(slot);
+            drop(browser);
+        }
+    }
+
+    impl std::fmt::Debug for BrowserPool {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter
+                .debug_struct("BrowserPool")
+                .finish_non_exhaustive()
+        }
+    }
+
+    struct LiveBrowser {
+        process: BrowserProcess,
+        websocket_url: String,
+        executable: PathBuf,
+    }
+
+    struct BrowserLease<'a> {
+        pool: &'a BrowserPool,
+        slot: Option<MutexGuard<'a, Option<LiveBrowser>>>,
+        reusable: bool,
+        observed_invalidation: bool,
+    }
+
+    impl BrowserLease<'_> {
+        fn websocket_url(&self) -> MotionResult<&str> {
+            self.slot
+                .as_ref()
+                .and_then(|slot| slot.as_ref())
+                .map(|browser| browser.websocket_url.as_str())
+                .ok_or_else(|| MotionError::render_failed("Chromium browser lease was empty"))
+        }
+
+        fn commit_reuse(&mut self) {
+            if self.observed_invalidation
+                || self.pool.invalidation_pending.swap(false, Ordering::AcqRel)
+            {
+                let browser = self.slot.as_mut().and_then(|slot| slot.take());
+                drop(browser);
+                return;
+            }
+            self.reusable = true;
+        }
+    }
+
+    impl Drop for BrowserLease<'_> {
+        fn drop(&mut self) {
+            let pending = self.pool.invalidation_pending.swap(false, Ordering::AcqRel);
+            let mut slot = self
+                .slot
+                .take()
+                .expect("Chromium browser lease guard is present until drop");
+            let browser = (!self.reusable || pending).then(|| slot.take()).flatten();
+            drop(slot);
+            drop(browser);
+
+            // Covers invalidation set after the final in-lock check but before
+            // the guard was released. A later acquirer also checks the pending
+            // bit before it can reuse the retained browser.
+            self.pool.drain_pending_invalidation();
+        }
+    }
+
     pub(super) fn render(
         renderer: &HeadlessChromiumRenderer,
         req: &MotionRenderRequest,
+        cancellation: &MotionCancellationToken,
     ) -> MotionResult<RenderedClip> {
-        if renderer.cancellation.is_cancelled() {
+        let result = render_inner(renderer, req, cancellation);
+        if result.is_err() {
+            renderer.browser_pool.invalidate_idle();
+        }
+        result
+    }
+
+    fn render_inner(
+        renderer: &HeadlessChromiumRenderer,
+        req: &MotionRenderRequest,
+        cancellation: &MotionCancellationToken,
+    ) -> MotionResult<RenderedClip> {
+        if cancellation.is_cancelled() {
             return Err(MotionError::Cancelled);
         }
 
@@ -628,21 +832,26 @@ mod chromium_backend {
             return Ok(clip_from_cache(req, hash, renderer.cache.dir_for(req)));
         }
 
-        let dir = renderer.cache.begin_render(req)?;
-        remove_partial_frames(&dir)?;
-        let mut partial = PartialFrames::new(dir.clone());
         let deadline = Instant::now()
             .checked_add(renderer.policy.timeout)
             .unwrap_or_else(Instant::now);
-        check_abort(renderer, deadline)?;
-
-        let (mut browser, websocket_url) = BrowserProcess::launch(
+        check_abort(cancellation, deadline, renderer.policy.timeout)?;
+        let mut browser = renderer.browser_pool.acquire(
             &browser_path,
             deadline,
             renderer.policy.timeout,
-            &renderer.cancellation,
+            cancellation,
         )?;
-        trace("browser launched and CDP endpoint is ready");
+        check_abort(cancellation, deadline, renderer.policy.timeout)?;
+        if renderer.cache.is_cached(req) {
+            browser.commit_reuse();
+            return Ok(clip_from_cache(req, hash, renderer.cache.dir_for(req)));
+        }
+
+        let dir = renderer.cache.begin_render(req)?;
+        remove_partial_frames(&dir)?;
+        let mut partial = PartialFrames::new(dir.clone());
+        let websocket_url = browser.websocket_url()?.to_owned();
         let (socket, _) = tungstenite::connect(websocket_url.as_str()).map_err(|error| {
             MotionError::render_failed(format!("failed to connect to Chromium CDP: {error}"))
         })?;
@@ -651,14 +860,19 @@ mod chromium_backend {
         let mut cdp = Cdp::new(
             socket,
             renderer.policy.clone(),
-            renderer.cancellation.clone(),
+            cancellation.clone(),
             deadline,
         );
         trace_gpu_backend_if_enabled(&mut cdp, trace_enabled())?;
 
+        let browser_context_id = cdp.create_browser_context()?;
         let target = cdp.command(
             "Target.createTarget",
-            json!({"url": "about:blank", "background": false}),
+            json!({
+                "url": "about:blank",
+                "background": false,
+                "browserContextId": browser_context_id
+            }),
             None,
         )?;
         let target_id = required_string(&target, "targetId")?;
@@ -763,7 +977,7 @@ mod chromium_backend {
             .into_iter()
             .enumerate()
         {
-            check_abort(renderer, deadline)?;
+            check_abort(cancellation, deadline, renderer.policy.timeout)?;
             trace(format!("frame {index}: seek start at {seconds:.17}s"));
             let expression = format!(
                 "(async () => {{ if (!window.OpenTake) throw new Error('OpenTake clock missing'); await window.OpenTake.seek({seconds:.17}); return window.OpenTake.currentTime(); }})()"
@@ -804,7 +1018,7 @@ mod chromium_backend {
                 req.height,
                 index,
             )?;
-            check_abort(renderer, deadline)?;
+            check_abort(cancellation, deadline, renderer.policy.timeout)?;
             cdp.ensure_no_blocked_url()?;
             trace(format!("frame {index}: compositor captured"));
             let path = MotionCache::frame_file(&dir, index);
@@ -813,10 +1027,17 @@ mod chromium_backend {
         }
 
         cdp.close_target(&target_id)?;
-        check_abort(renderer, deadline)?;
-        cdp.close_browser()?;
-        browser.wait_for_graceful_exit(Duration::from_secs(5))?;
-        publish_completed_render(renderer, deadline, &dir, &mut partial)?;
+        cdp.dispose_browser_context(&browser_context_id)?;
+        check_abort(cancellation, deadline, renderer.policy.timeout)?;
+        drop(cdp);
+        publish_completed_render(
+            cancellation,
+            renderer.policy.timeout,
+            deadline,
+            &dir,
+            &mut partial,
+        )?;
+        browser.commit_reuse();
 
         Ok(RenderedClip {
             content_hash: hash,
@@ -1070,8 +1291,12 @@ mod chromium_backend {
         Ok(())
     }
 
-    fn check_abort(renderer: &HeadlessChromiumRenderer, deadline: Instant) -> MotionResult<()> {
-        check_abort_state(&renderer.cancellation, deadline, renderer.policy.timeout)
+    fn check_abort(
+        cancellation: &MotionCancellationToken,
+        deadline: Instant,
+        timeout: Duration,
+    ) -> MotionResult<()> {
+        check_abort_state(cancellation, deadline, timeout)
     }
 
     fn check_abort_state(
@@ -1089,14 +1314,15 @@ mod chromium_backend {
     }
 
     fn publish_completed_render(
-        renderer: &HeadlessChromiumRenderer,
+        cancellation: &MotionCancellationToken,
+        timeout: Duration,
         deadline: Instant,
         dir: &Path,
         partial: &mut PartialFrames,
     ) -> MotionResult<()> {
-        check_abort(renderer, deadline)?;
+        check_abort(cancellation, deadline, timeout)?;
         MotionCache::mark_complete(dir)?;
-        if let Err(error) = check_abort(renderer, deadline) {
+        if let Err(error) = check_abort(cancellation, deadline, timeout) {
             MotionCache::remove_completion_marker(dir)?;
             return Err(error);
         }
@@ -1285,44 +1511,11 @@ mod chromium_backend {
             Ok(())
         }
 
-        fn wait_for_graceful_exit(&mut self, timeout: Duration) -> std::io::Result<()> {
-            if self.shutdown_complete {
-                return Ok(());
-            }
-            trace("browser graceful shutdown wait start");
-            let deadline = Instant::now()
-                .checked_add(timeout)
-                .unwrap_or_else(Instant::now);
-            loop {
-                let Some(child) = self.child.as_mut() else {
-                    return Err(std::io::Error::other(
-                        "Chromium child handle was missing before graceful shutdown",
-                    ));
-                };
-                if child.try_wait()?.is_some() {
-                    break;
-                }
-                let now = Instant::now();
-                if now >= deadline {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "Chromium did not exit after Browser.close",
-                    ));
-                }
-                thread::sleep(
-                    Duration::from_millis(20).min(deadline.saturating_duration_since(now)),
-                );
-            }
-
-            drop(self.child.take());
-            #[cfg(unix)]
-            self.tree.terminate()?;
-            self.tree
-                .wait_for_exit(deadline.saturating_duration_since(Instant::now()))?;
-            self.tree.disarm();
-            self.shutdown_complete = true;
-            trace("browser graceful shutdown complete");
-            Ok(())
+        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+            self.child
+                .as_mut()
+                .ok_or_else(|| std::io::Error::other("Chromium child handle is missing"))?
+                .try_wait()
         }
 
         fn remove_profile(&self) {
@@ -1903,12 +2096,31 @@ mod chromium_backend {
         }
 
         fn close_target(&mut self, target_id: &str) -> MotionResult<()> {
-            self.command("Target.closeTarget", json!({"targetId": target_id}), None)?;
+            let closed =
+                self.command("Target.closeTarget", json!({"targetId": target_id}), None)?;
+            if closed.get("success").and_then(Value::as_bool) != Some(true) {
+                return Err(MotionError::render_failed(
+                    "Chromium did not close the render target",
+                ));
+            }
             self.ensure_no_blocked_url()
         }
 
-        fn close_browser(&mut self) -> MotionResult<()> {
-            self.command("Browser.close", json!({}), None)?;
+        fn create_browser_context(&mut self) -> MotionResult<String> {
+            let created = self.command(
+                "Target.createBrowserContext",
+                json!({"disposeOnDetach": true}),
+                None,
+            )?;
+            required_string(&created, "browserContextId")
+        }
+
+        fn dispose_browser_context(&mut self, browser_context_id: &str) -> MotionResult<()> {
+            self.command(
+                "Target.disposeBrowserContext",
+                json!({"browserContextId": browser_context_id}),
+                None,
+            )?;
             self.ensure_no_blocked_url()
         }
 
@@ -2391,9 +2603,8 @@ mod chromium_backend {
         fn validate_browser_launch_args_contract(args: &[&str]) -> Result<(), String> {
             const EXPECTED: &[&str] = &[
                 "--headless=new",
-                "--use-gl=angle",
-                "--use-angle=swiftshader-webgl",
                 "--remote-debugging-port=0",
+                "--remote-debugging-address=127.0.0.1",
                 "--no-first-run",
                 "--no-default-browser-check",
                 "--disable-background-networking",
@@ -2448,19 +2659,52 @@ mod chromium_backend {
         }
 
         #[test]
-        fn browser_launch_args_select_swiftshader_without_disabling_gpu() {
+        fn pending_browser_invalidation_covers_idle_busy_and_handoff_interleavings() {
+            let pool = BrowserPool::new();
+
+            pool.invalidate_idle();
+            assert!(!pool.invalidation_pending.load(Ordering::Acquire));
+
+            let active_lease_seam = pool.slot.lock().unwrap();
+            pool.invalidate_idle();
+            assert!(pool.invalidation_pending.load(Ordering::Acquire));
+            drop(active_lease_seam);
+
+            pool.drain_pending_invalidation();
+            assert!(!pool.invalidation_pending.load(Ordering::Acquire));
+
+            pool.invalidate_idle();
+            assert!(!pool.invalidation_pending.load(Ordering::Acquire));
+        }
+
+        #[test]
+        fn acquire_observed_invalidation_taints_the_new_browser_lease() {
+            let pool = BrowserPool::new();
+            let slot = pool.slot.lock().unwrap();
+            pool.invalidation_pending.store(true, Ordering::Release);
+            let observed_invalidation = pool.invalidation_pending.swap(false, Ordering::AcqRel);
+            assert!(observed_invalidation);
+
+            let mut lease = BrowserLease {
+                pool: &pool,
+                slot: Some(slot),
+                reusable: false,
+                observed_invalidation,
+            };
+            lease.commit_reuse();
+            assert!(
+                !lease.reusable,
+                "an acquire overlapping invalidation must not retain a subsequently launched browser"
+            );
+        }
+
+        #[test]
+        fn browser_launch_args_bind_remote_debugging_to_loopback() {
             validate_browser_launch_args_contract(browser_launch_args()).unwrap();
         }
 
         #[test]
-        fn browser_launch_args_contract_rejects_overrides_and_disable_variants() {
-            let mut angle_override = browser_launch_args().to_vec();
-            angle_override.push("--use-angle=d3d11");
-            assert_eq!(
-                validate_browser_launch_args_contract(&angle_override).unwrap_err(),
-                "duplicate Chromium switch key: --use-angle"
-            );
-
+        fn browser_launch_args_contract_rejects_disable_gpu() {
             let mut disable_gpu = browser_launch_args().to_vec();
             disable_gpu.push("--disable-gpu=true");
             assert_eq!(
@@ -4107,12 +4351,15 @@ mod chromium_backend {
             let dir = cache.begin_render(&request).unwrap();
             complete_frames(&dir);
             let mut partial = PartialFrames::new(dir.clone());
-            let renderer = HeadlessChromiumRenderer::new(
-                cache.clone(),
-                SandboxPolicy::offline_with_timeout(Duration::from_secs(1)),
-            );
+            let cancellation = MotionCancellationToken::new();
             assert!(matches!(
-                publish_completed_render(&renderer, Instant::now(), &dir, &mut partial),
+                publish_completed_render(
+                    &cancellation,
+                    Duration::from_secs(1),
+                    Instant::now(),
+                    &dir,
+                    &mut partial
+                ),
                 Err(MotionError::Timeout(_))
             ));
             drop(partial);
@@ -4123,16 +4370,12 @@ mod chromium_backend {
             let cancelled_dir = cache.begin_render(&cancelled_request).unwrap();
             complete_frames(&cancelled_dir);
             let mut cancelled_partial = PartialFrames::new(cancelled_dir.clone());
-            let cancellation = MotionCancellationToken::new();
-            cancellation.cancel();
-            let cancelled_renderer = HeadlessChromiumRenderer::new(
-                cache.clone(),
-                SandboxPolicy::offline_with_timeout(Duration::from_secs(1)),
-            )
-            .with_cancellation_token(cancellation);
+            let cancelled = MotionCancellationToken::new();
+            cancelled.cancel();
             assert!(matches!(
                 publish_completed_render(
-                    &cancelled_renderer,
+                    &cancelled,
+                    Duration::from_secs(1),
                     Instant::now() + Duration::from_secs(1),
                     &cancelled_dir,
                     &mut cancelled_partial
@@ -4206,41 +4449,68 @@ mod chromium_backend {
         }
 
         #[test]
-        fn successful_browser_close_uses_the_root_cdp_session() {
-            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-            let (server_stream, _) = listener.accept().unwrap();
-            let client_socket = WebSocket::from_raw_socket(
-                MaybeTlsStream::Plain(client_stream),
-                Role::Client,
-                None,
-            );
-            let mut server_socket = WebSocket::from_raw_socket(server_stream, Role::Server, None);
+        fn target_close_rejects_a_false_success_result() {
+            let (mut cdp, mut server_socket) = fake_cdp_pair();
             let server = thread::spawn(move || {
-                let close = match server_socket.read().unwrap() {
-                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
-                    other => panic!("expected Browser.close request, got {other:?}"),
-                };
-                assert_eq!(
-                    close,
-                    json!({
-                        "id": 1,
-                        "method": "Browser.close",
-                        "params": {}
-                    })
-                );
+                let request = server_socket.read().unwrap();
+                assert!(matches!(request, Message::Text(_)));
                 server_socket
-                    .send(Message::text(json!({"id": 1, "result": {}}).to_string()))
+                    .send(Message::text(
+                        json!({"id": 1, "result": {"success": false}}).to_string(),
+                    ))
                     .unwrap();
             });
 
-            let mut cdp = Cdp::new(
-                client_socket,
-                SandboxPolicy::default(),
-                MotionCancellationToken::new(),
-                Instant::now() + Duration::from_secs(1),
-            );
-            cdp.close_browser().unwrap();
+            assert!(matches!(
+                cdp.close_target("render-target"),
+                Err(MotionError::RenderFailed(message))
+                    if message.contains("did not close the render target")
+            ));
+            server.join().unwrap();
+        }
+
+        #[test]
+        fn render_browser_context_is_disposable_and_root_scoped() {
+            let (mut cdp, mut server_socket) = fake_cdp_pair();
+            let server = thread::spawn(move || {
+                let create = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected createBrowserContext request, got {other:?}"),
+                };
+                assert_eq!(
+                    create,
+                    json!({
+                        "id": 1,
+                        "method": "Target.createBrowserContext",
+                        "params": {"disposeOnDetach": true}
+                    })
+                );
+                server_socket
+                    .send(Message::text(
+                        json!({"id": 1, "result": {"browserContextId": "context-1"}}).to_string(),
+                    ))
+                    .unwrap();
+
+                let dispose = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected disposeBrowserContext request, got {other:?}"),
+                };
+                assert_eq!(
+                    dispose,
+                    json!({
+                        "id": 2,
+                        "method": "Target.disposeBrowserContext",
+                        "params": {"browserContextId": "context-1"}
+                    })
+                );
+                server_socket
+                    .send(Message::text(json!({"id": 2, "result": {}}).to_string()))
+                    .unwrap();
+            });
+
+            let context_id = cdp.create_browser_context().unwrap();
+            assert_eq!(context_id, "context-1");
+            cdp.dispose_browser_context(&context_id).unwrap();
             server.join().unwrap();
         }
 
@@ -4309,13 +4579,13 @@ mod chromium_backend {
             let server = thread::spawn(move || {
                 let request = match server_socket.read().unwrap() {
                     Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
-                    other => panic!("expected Browser.close request, got {other:?}"),
+                    other => panic!("expected Target.getTargets request, got {other:?}"),
                 };
                 assert_eq!(
                     request,
                     json!({
                         "id": 1,
-                        "method": "Browser.close",
+                        "method": "Target.getTargets",
                         "params": {}
                     })
                 );
@@ -4325,7 +4595,7 @@ mod chromium_backend {
             });
 
             trace_gpu_backend_if_enabled(&mut cdp, false).unwrap();
-            cdp.close_browser().unwrap();
+            cdp.command("Target.getTargets", json!({}), None).unwrap();
             server.join().unwrap();
         }
 
@@ -4600,6 +4870,19 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[cfg(feature = "chromium")]
+    #[test]
+    fn changing_browser_path_detaches_the_reusable_pool() {
+        let tmp = tempfile::tempdir().unwrap();
+        let renderer =
+            HeadlessChromiumRenderer::new(MotionCache::new(tmp.path()), SandboxPolicy::default());
+        let shared = renderer.clone();
+        assert!(Arc::ptr_eq(&renderer.browser_pool, &shared.browser_pool));
+
+        let changed = shared.with_browser_path("different-browser");
+        assert!(!Arc::ptr_eq(&renderer.browser_pool, &changed.browser_pool));
     }
 
     #[test]

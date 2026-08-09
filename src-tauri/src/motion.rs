@@ -19,7 +19,7 @@ use opentake_core::{AppCore, MotionPlacement, ProbedMedia};
 use opentake_domain::{GenerationInput, GenerationJobStatus};
 use opentake_motion::{
     HeadlessChromiumRenderer, MotionCache, MotionCancellationToken, MotionError,
-    MotionRenderRequest, MotionRenderer, MotionSource, RenderedClip, SandboxPolicy,
+    MotionRenderRequest, MotionSource, RenderedClip, SandboxPolicy,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -33,7 +33,7 @@ const LEGACY_MOTION_MODEL: &str = "opentake.motion-html-v1";
 #[derive(Clone)]
 pub struct TauriMotionBridge {
     core: AppCore,
-    cache_root: std::path::PathBuf,
+    renderer: HeadlessChromiumRenderer,
     progress: Arc<dyn Fn(MotionProgress) + Send + Sync>,
 }
 
@@ -219,9 +219,16 @@ enum StoredMotionSource {
 
 impl TauriMotionBridge {
     pub fn new(core: AppCore, cache_root: impl Into<std::path::PathBuf>) -> Self {
+        let cache_root = cache_root.into();
         Self {
             core,
-            cache_root: cache_root.into(),
+            renderer: HeadlessChromiumRenderer::new(
+                MotionCache::new(cache_root.join("motion-frames")),
+                // Bounded but generous: a complex motion graphic on a slow or
+                // loaded machine can legitimately exceed a minute; 180s still
+                // fails closed rather than hanging forever.
+                SandboxPolicy::offline_with_timeout(Duration::from_secs(180)),
+            ),
             progress: Arc::new(|_| {}),
         }
     }
@@ -247,12 +254,6 @@ impl TauriMotionBridge {
             return Err(MotionBridgeError::new(
                 MotionBridgeErrorKind::CapabilityUnavailable,
                 "The current MP4 motion path is opaque; transparent motion output is not supported yet.",
-            ));
-        }
-        if cancel.is_cancelled() {
-            return Err(MotionBridgeError::new(
-                MotionBridgeErrorKind::Cancelled,
-                "motion render cancelled",
             ));
         }
         let snapshot = self.core.runtime_snapshot();
@@ -291,9 +292,10 @@ impl TauriMotionBridge {
         let request =
             MotionRenderRequest::new(MotionSource::code(html), fps, frames, width, height)
                 .with_transparent(false);
-        request.validate().map_err(map_motion_error)?;
-
         let render_cancel = MotionCancellationToken::new();
+        if cancel.is_cancelled() {
+            render_cancel.cancel();
+        }
         let monitor_cancel = render_cancel.clone();
         let media_cancel = cancel.clone();
         let done = Arc::new(AtomicBool::new(false));
@@ -307,16 +309,11 @@ impl TauriMotionBridge {
                 std::thread::sleep(Duration::from_millis(10));
             }
         });
-        let renderer = HeadlessChromiumRenderer::new(
-            MotionCache::new(self.cache_root.join("motion-frames")),
-            // Bounded but generous: a complex motion graphic on a slow or
-            // loaded machine can legitimately exceed a minute; 180s still
-            // fails closed rather than hanging forever.
-            SandboxPolicy::offline_with_timeout(Duration::from_secs(180)),
-        )
-        .with_cancellation_token(render_cancel);
         (self.progress)(MotionProgress::Rendering);
-        let rendered = renderer.render(&request).map_err(map_motion_error);
+        let rendered = self
+            .renderer
+            .render_with_cancellation(&request, &render_cancel)
+            .map_err(map_motion_error);
         done.store(true, Ordering::Release);
         let _ = monitor.join();
         let rendered = rendered?;
