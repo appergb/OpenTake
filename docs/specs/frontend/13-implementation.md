@@ -17,8 +17,10 @@
 ### 13.2 1:1 验收清单（逐项打勾）
 
 **A. 视觉（截图对拍，1600×1000）**
-- [ ] 五面板布局(default/media/vertical)的分栏比例、沟槽 5px、surface 圆角 6px、焦点环与上游一致。
+- [x] 五面板布局(default/media/vertical)的分栏比例、沟槽 5px、surface 圆角 6px、焦点环与上游一致。
 - [ ] 所有间距/字号/圆角/颜色取自令牌且与 §1 数值一致（抽查每面板 ≥5 处）。
+
+代码门禁已完成：完整表/CSS 投影和六表面代表值审计已自动化，所有生产组件的未定义 CSS 变量会直接使测试失败。此项保持未勾选，直到打包应用在固定视口/缩放/语言下完成逐面板实机取证。
 - [ ] Toolbar 按钮图标/分隔/缩放滑块(对数)外观一致。
 - [ ] 时间线:刻度间隔/次刻度/标签、轨道头(色条/标签/三图标/区分隔粗线)、clip(底色/左色条/标签/trim 手柄/波形/缩略图/音量橡皮筋/淡变/关键帧菱形)、playhead(红线+下三角)、磁吸黄虚线、marquee 白虚线、新轨黄线、razor 橙虚线 —— 逐项与上游同。
 - [ ] Inspector 四态、tab 下划线、AI Edit 渐变、各字段、关键帧泳道一致。
@@ -32,7 +34,11 @@
 - [ ] §9.4 razor/split/关键帧/淡变/音量全 8 条。
 - [ ] §9.5 playhead/scrub/缩放全 9 条（含光标锚定缩放、灵敏度常量）。
 - [ ] §9.6 快捷键全表逐键。
+
+代码门禁已完成：完整快捷键表由 `DOCUMENTED_SHORTCUT_ROWS`、`resolveDocumentedShortcut`、`APPLICATION_MENU_SPEC` 和两个 owning tests 共同约束，覆盖修饰键冲突、焦点/弹窗/只读态、repeat 与语义命令。此项保持未勾选，直到打包应用按表逐键完成实际验证并留存结果。
 - [ ] §9.7 hover/游标全表。
+
+代码门禁已完成：跨组件矩阵覆盖 enabled/disabled/active/dragging/focus 与完整时间线 cursor 投影，并验证 Transform/Crop/SplitPane/数字字段/图标按钮的语义状态。此项保持未勾选，直到打包应用完成鼠标、触控板、键盘及高对比度实际验证。
 - [ ] §9.8 右键菜单项与分组逐字（§5.10）。
 
 **C. 几何（单测）**
@@ -41,9 +47,28 @@
 - [ ] 磁吸 findSnap（含黏滞 1.5×、playhead 1.5× 阈值）行为一致。
 
 **D. 状态/契约**
-- [ ] 镜像只由 `timeline_changed`→`get_timeline` 更新；前端无任何直接改 timeline 的路径。
-- [ ] 每个编辑手势映射到正确 `edit_apply` 命令（§11.1）。
-- [ ] 持久化键（layoutPreset/三面板可见性/keyframes）跨会话保留。
+- [x] 镜像只由 `timeline_changed`→`get_timeline` 更新；前端无任何直接改 timeline 的路径。
+
+Timeline 镜像入口现为 project-identity/version 单调的整快照提交：接受时 clone + deep-freeze，
+旧 epoch/旧版本拒绝；事件承诺版本高于首次快照时会有界重取且绝不发布落后快照。静态检查
+拒绝组件/Store 的 clips/tracks/timing 直接写入，浏览器 fallback 也只通过命令后重取进入同一边界。
+竞态证据见 `sync.test.ts`，只读/隔离证据见
+`commandRouting.test.ts#project_store_has_no_timeline_mutator_and_refreshes_only_from_native_events`。
+- [x] 每个编辑手势映射到正确 `edit_apply` 命令（§11.1）。
+
+验收证据：`editActions.ts#EDIT_GESTURE_COMMAND_MATRIX` 穷举全部 41 个请求变体；
+`commandRouting.test.ts#every_edit_action_emits_exact_edit_request` 验证 action 的精确 DTO、
+no-op 与无直接镜像写入；`api.editApply.test.ts#edit_apply_forwards_exact_command_envelope`
+覆盖生产 IPC；Rust `commands.rs#every_frontend_edit_request_deserializes_to_intended_command`
+验证所有 camelCase DTO 到预期 `EditCommand` 的路由。
+- [x] 持久化键（layoutPreset/三面板可见性/keyframes）跨会话保留。
+
+持久化契约使用逐字段、带 schema 版本的键：`opentake.ui.v1.layoutPreset`、
+`opentake.ui.v1.agentPanelVisible`、`opentake.ui.v1.mediaPanelVisible`、
+`opentake.ui.v1.inspectorPanelVisible`、`opentake.ui.v1.keyframesPanelVisible`。首次读取时仅迁移
+通过严格校验的旧版无前缀键；非法/损坏值回落到 default / false / true / true / false，且不把
+损坏值写入新 schema。localStorage 不可用、读取抛错或写入失败时不得阻止当次 UI 更新。只持久化
+这五项全局 UI 偏好；工程 view、播放头、选择、最大化等工程/会话态在新 store 中必须恢复默认。
 
 ### 13.3 关键陷阱备忘（防止 1:1 偏差）
 

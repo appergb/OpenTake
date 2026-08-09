@@ -17,7 +17,7 @@
 `McpServer` 实现 rmcp 的 `ServerHandler`，持有一个 `Arc<Dispatcher>`（自带会话级 agent-undo 栈）+ 构造时快照的系统提示 `instructions`。
 
 - **`get_info`** — 广告 `instructions`（base 提示 + 激活插件，构造时由 [`assemble_system_prompt`](prompt.md) 生成）与 tools 能力；`server_info.name = "opentake"`，版本取 `CARGO_PKG_VERSION`。
-- **`list_tools`** — 返回全部 44 个工具 schema（`ToolName::ALL`，描述/Schema 来自 [`tools::descriptions`](dispatch-tools.md)）。
+- **`list_tools`** — 从最多 39 个基础工具（`ToolName::ALL`）按当前主机的媒体桥能力过滤，在授权可用时追加 4 个生成工具，并在桌面 Motion 渲染桥可用时追加 add/edit 两工具；描述/Schema 来自 [`tools::descriptions`](dispatch-tools.md)。
 - **`call_tool`** — 把工具调用交给 `Dispatcher::dispatch`。因为所有已接线工具是同步的，用 `tokio::task::spawn_blocking` 在阻塞线程池跑，避免堵住 async 运行时；结果经 [`convert::to_call_tool_result`](core-handle-convert.md) 转成 rmcp `CallToolResult`。
 - **`call`** — 与 `call_tool` 等价的同步入口，单独拆出以便**不构造传输 `RequestContext`** 就能单测一次工具派发。
 
@@ -63,7 +63,7 @@ MCP 客户端 → http://127.0.0.1:19789/mcp
 ## 完成状态
 
 - 已实现：`McpServer`（`get_info`/`list_tools`/`call_tool`/`call`）、`build_router`、`serve`、回环守卫、OAuth well-known。已被 `src-tauri/src/mcp.rs` 集成（`build_registry` + `server::serve`）。
-- 测试覆盖：列 44 工具、`get_info` 带提示与能力、`get_timeline` 成功、未知工具报错、回环守卫接受本地/拒绝远端。
+- 测试覆盖：`list_tools` 列全部可发布工具（默认无媒体桥主机 = `ToolName::ALL` 38 − 7 媒体桥门控 = 31，能力门控后按能力发布）、`get_info` 带提示与能力、`get_timeline` 成功、未知工具报错、回环守卫接受本地/拒绝远端。
 - 计划中：无独立缺口（依赖的工具 stub 见 [dispatch-tools.md](dispatch-tools.md)）。
 
 ---

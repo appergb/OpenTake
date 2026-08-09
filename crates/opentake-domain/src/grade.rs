@@ -22,6 +22,11 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Fixed GPU contract shared by editor validation and the compositor uniform.
+pub const MAX_MASKS_PER_CLIP: usize = 4;
+/// Maximum authored vertices in one pen/polygon mask.
+pub const MAX_POLYGON_MASK_POINTS: usize = 16;
+
 // ===========================================================================
 // Small numeric helpers (shared by the reference pixel math).
 // ===========================================================================
@@ -134,23 +139,132 @@ impl LiftGammaGain {
         self.lift.is_zero() && self.gamma.is_one() && self.gain.is_one()
     }
 
-    /// Apply one channel: `gain * (x + lift)` then `^(1/gamma)`. Matches the
-    /// classic lift/gamma/gain operator (gamma applied last, as a display power).
+    /// Apply one channel: `gain * (x + lift * (1 - x))^(1/gamma)`.
+    /// Lift rolls off toward highlights, gamma shapes mid-tones, and gain remains
+    /// an independent highlight multiplier.
     #[inline]
     fn apply_channel(x: f64, lift: f64, gamma: f64, gain: f64) -> f64 {
-        let v = gain * (x + lift);
+        let shaped = x + lift * (1.0 - x);
         if gamma > 0.0 && (gamma - 1.0).abs() > f64::EPSILON {
-            // `v` can be negative after lift; guard the power.
-            v.max(0.0).powf(1.0 / gamma)
+            // `shaped` can be negative after lift; guard fractional powers.
+            gain * shaped.max(0.0).powf(1.0 / gamma)
         } else {
-            v
+            gain * shaped
         }
     }
 }
 
+/// One feathered HSL qualifier applied after the primary color controls.
+/// Hue values are normalized turns, so the range wraps continuously across
+/// red (`0 == 1`) without a seam.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HslSecondary {
+    /// Center of the selected hue range in normalized turns (`0..=1`).
+    pub hue_center: f64,
+    /// Full width of the selected hue range (`0 < width <= 1`).
+    pub hue_width: f64,
+    /// Soft edge width measured inward from both range boundaries (`0..=0.5`).
+    pub feather: f64,
+    /// Hue rotation in normalized turns (`-0.5..=0.5`).
+    pub hue_shift: f64,
+    /// Relative saturation adjustment (`-1..=1`).
+    pub saturation: f64,
+    /// Additive lightness adjustment (`-1..=1`).
+    pub lightness: f64,
+}
+
+impl Default for HslSecondary {
+    fn default() -> Self {
+        Self {
+            hue_center: 0.0,
+            hue_width: 0.24,
+            feather: 0.08,
+            hue_shift: 0.0,
+            saturation: 0.0,
+            lightness: 0.0,
+        }
+    }
+}
+
+impl HslSecondary {
+    fn is_identity(&self) -> bool {
+        self.hue_shift == 0.0 && self.saturation == 0.0 && self.lightness == 0.0
+    }
+
+    fn weight(&self, hue: f64, saturation: f64) -> f64 {
+        // Achromatic pixels have no stable hue and must not be selected.
+        if saturation <= f64::EPSILON {
+            return 0.0;
+        }
+        let distance = ((hue - self.hue_center + 0.5).rem_euclid(1.0) - 0.5).abs();
+        let outer = self.hue_width * 0.5;
+        if distance > outer {
+            return 0.0;
+        }
+        if self.feather <= f64::EPSILON {
+            return 1.0;
+        }
+        let inner = (outer - self.feather).max(0.0);
+        1.0 - smoothstep01(inner, outer, distance)
+    }
+
+    fn apply(&self, r: f64, g: f64, b: f64) -> (f64, f64, f64) {
+        let (mut hue, mut saturation, mut lightness) = rgb_to_hsl(r, g, b);
+        let weight = self.weight(hue, saturation);
+        if weight <= f64::EPSILON {
+            return (r, g, b);
+        }
+        hue = (hue + self.hue_shift * weight).rem_euclid(1.0);
+        saturation = clamp01(saturation * (1.0 + self.saturation * weight));
+        lightness = clamp01(lightness + self.lightness * weight);
+        hsl_to_rgb(hue, saturation, lightness)
+    }
+}
+
+fn rgb_to_hsl(r: f64, g: f64, b: f64) -> (f64, f64, f64) {
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let delta = max - min;
+    let lightness = (max + min) * 0.5;
+    if delta <= f64::EPSILON {
+        return (0.0, 0.0, lightness);
+    }
+    let saturation = delta / (1.0 - (2.0 * lightness - 1.0).abs()).max(f64::EPSILON);
+    let sector = if max == r {
+        ((g - b) / delta).rem_euclid(6.0)
+    } else if max == g {
+        (b - r) / delta + 2.0
+    } else {
+        (r - g) / delta + 4.0
+    };
+    (sector / 6.0, saturation, lightness)
+}
+
+fn hsl_to_rgb(hue: f64, saturation: f64, lightness: f64) -> (f64, f64, f64) {
+    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+    let sector = hue.rem_euclid(1.0) * 6.0;
+    let x = chroma * (1.0 - (sector.rem_euclid(2.0) - 1.0).abs());
+    let (r1, g1, b1) = if sector < 1.0 {
+        (chroma, x, 0.0)
+    } else if sector < 2.0 {
+        (x, chroma, 0.0)
+    } else if sector < 3.0 {
+        (0.0, chroma, x)
+    } else if sector < 4.0 {
+        (0.0, x, chroma)
+    } else if sector < 5.0 {
+        (x, 0.0, chroma)
+    } else {
+        (chroma, 0.0, x)
+    };
+    let m = lightness - chroma * 0.5;
+    (r1 + m, g1 + m, b1 + m)
+}
+
 /// High-end floating-point color grade, applied in **linear light** in the order
 /// locked by the spec:
-/// `exposure -> white balance -> lift/gamma/gain -> contrast -> saturation`.
+/// `exposure -> white balance -> lift/gamma/gain -> contrast -> saturation -> HSL secondary`.
 ///
 /// Every field defaults to a no-op, so `ColorGrade::default()` is the identity
 /// transform (verified by [`ColorGrade::is_identity`] and a unit test).
@@ -176,7 +290,47 @@ pub struct ColorGrade {
     /// Saturation multiplier (identity `1`; `0` = greyscale, `>1` = boosted).
     #[serde(default = "default_one")]
     pub saturation: f64,
+    /// Optional feathered hue qualifier. Absence preserves legacy projects and
+    /// avoids uploading an active secondary block for identity grades.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hsl_secondary: Option<HslSecondary>,
 }
+
+/// Persisted provenance for an automatically generated reference color match.
+/// The grade remains fully editable; a later manual grade change clears this
+/// record so projects never claim an edited grade is still the sampled match.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ColorMatchInput {
+    pub reference_media_ref: String,
+    pub reference_frame: i32,
+    pub target_frame: i32,
+    pub algorithm: String,
+    pub algorithm_version: u32,
+    pub target_mean_linear: Rgb,
+    pub reference_mean_linear: Rgb,
+    pub delta_e_before: f64,
+    pub delta_e_after: f64,
+    pub target_luma_before: f64,
+    pub target_luma_after: f64,
+}
+
+/// Stable validation failure for authored color-grade parameters. The bounds
+/// mirror the Inspector controls and keep malformed persisted data out of the
+/// command and GPU paths.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ColorGradeValidationError {
+    pub field: &'static str,
+    pub rule: &'static str,
+}
+
+impl std::fmt::Display for ColorGradeValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} must be {}", self.field, self.rule)
+    }
+}
+
+impl std::error::Error for ColorGradeValidationError {}
 
 impl Default for ColorGrade {
     fn default() -> Self {
@@ -187,6 +341,7 @@ impl Default for ColorGrade {
             lift_gamma_gain: LiftGammaGain::default(),
             contrast: 0.0,
             saturation: 1.0,
+            hsl_secondary: None,
         }
     }
 }
@@ -204,6 +359,120 @@ impl ColorGrade {
             && self.lift_gamma_gain.is_identity()
             && self.contrast == 0.0
             && self.saturation == 1.0
+            && self
+                .hsl_secondary
+                .is_none_or(|secondary| secondary.is_identity())
+    }
+
+    /// Validate the persisted grade against the finite parameter ranges exposed
+    /// by the editor. Gamma is strictly positive because it is used as a power
+    /// denominator in both the CPU reference and WGSL shader.
+    pub fn validate(&self) -> Result<(), ColorGradeValidationError> {
+        fn inclusive(
+            field: &'static str,
+            value: f64,
+            range: std::ops::RangeInclusive<f64>,
+            rule: &'static str,
+        ) -> Result<(), ColorGradeValidationError> {
+            if !value.is_finite() || !range.contains(&value) {
+                return Err(ColorGradeValidationError { field, rule });
+            }
+            Ok(())
+        }
+
+        inclusive(
+            "exposure",
+            self.exposure,
+            -5.0..=5.0,
+            "finite and within [-5, 5]",
+        )?;
+        inclusive(
+            "temperature",
+            self.temperature,
+            -1.0..=1.0,
+            "finite and within [-1, 1]",
+        )?;
+        inclusive("tint", self.tint, -1.0..=1.0, "finite and within [-1, 1]")?;
+        for (field, value) in [
+            ("liftGammaGain.lift.r", self.lift_gamma_gain.lift.r),
+            ("liftGammaGain.lift.g", self.lift_gamma_gain.lift.g),
+            ("liftGammaGain.lift.b", self.lift_gamma_gain.lift.b),
+        ] {
+            inclusive(field, value, -1.0..=1.0, "finite and within [-1, 1]")?;
+        }
+        for (field, value) in [
+            ("liftGammaGain.gamma.r", self.lift_gamma_gain.gamma.r),
+            ("liftGammaGain.gamma.g", self.lift_gamma_gain.gamma.g),
+            ("liftGammaGain.gamma.b", self.lift_gamma_gain.gamma.b),
+        ] {
+            if !value.is_finite() || value <= 0.0 || value > 4.0 {
+                return Err(ColorGradeValidationError {
+                    field,
+                    rule: "finite and within (0, 4]",
+                });
+            }
+        }
+        for (field, value) in [
+            ("liftGammaGain.gain.r", self.lift_gamma_gain.gain.r),
+            ("liftGammaGain.gain.g", self.lift_gamma_gain.gain.g),
+            ("liftGammaGain.gain.b", self.lift_gamma_gain.gain.b),
+        ] {
+            inclusive(field, value, 0.0..=4.0, "finite and within [0, 4]")?;
+        }
+        inclusive(
+            "contrast",
+            self.contrast,
+            -1.0..=2.0,
+            "finite and within [-1, 2]",
+        )?;
+        inclusive(
+            "saturation",
+            self.saturation,
+            0.0..=3.0,
+            "finite and within [0, 3]",
+        )?;
+        if let Some(secondary) = self.hsl_secondary {
+            inclusive(
+                "hslSecondary.hueCenter",
+                secondary.hue_center,
+                0.0..=1.0,
+                "finite and within [0, 1]",
+            )?;
+            if !secondary.hue_width.is_finite()
+                || secondary.hue_width <= 0.0
+                || secondary.hue_width > 1.0
+            {
+                return Err(ColorGradeValidationError {
+                    field: "hslSecondary.hueWidth",
+                    rule: "finite and within (0, 1]",
+                });
+            }
+            inclusive(
+                "hslSecondary.feather",
+                secondary.feather,
+                0.0..=0.5,
+                "finite and within [0, 0.5]",
+            )?;
+            inclusive(
+                "hslSecondary.hueShift",
+                secondary.hue_shift,
+                -0.5..=0.5,
+                "finite and within [-0.5, 0.5]",
+            )?;
+            inclusive(
+                "hslSecondary.saturation",
+                secondary.saturation,
+                -1.0..=1.0,
+                "finite and within [-1, 1]",
+            )?;
+            inclusive(
+                "hslSecondary.lightness",
+                secondary.lightness,
+                -1.0..=1.0,
+                "finite and within [-1, 1]",
+            )?;
+        }
+        Ok(())
     }
 
     /// Per-channel white-balance gain derived from `temperature` / `tint`. A
@@ -264,6 +533,14 @@ impl ColorGrade {
             rr = l + (rr - l) * self.saturation;
             gg = l + (gg - l) * self.saturation;
             bb = l + (bb - l) * self.saturation;
+        }
+
+        // 6. Feathered HSL secondary qualifier.
+        if let Some(secondary) = self
+            .hsl_secondary
+            .filter(|secondary| !secondary.is_identity())
+        {
+            (rr, gg, bb) = secondary.apply(rr, gg, bb);
         }
 
         (clamp01(rr), clamp01(gg), clamp01(bb))
@@ -421,7 +698,7 @@ pub enum MaskShape {
 /// [`crate::transform::Point`] only to keep mask serialization self-contained and
 /// `Serialize`/`Deserialize`-derivable (the transform `Point` has hand-written
 /// (de)serialization elsewhere; here a plain derive is what we want).
-#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Point2 {
     #[serde(default)]
@@ -433,6 +710,56 @@ pub struct Point2 {
 impl Point2 {
     pub fn new(x: f64, y: f64) -> Self {
         Point2 { x, y }
+    }
+}
+
+/// Optional whole-mask transform applied around the canvas center after the
+/// shape's own geometry. Shape coordinates remain editable and portable while
+/// offset/scale/rotation can move the complete mask non-destructively.
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaskTransform {
+    #[serde(default)]
+    pub offset: Point2,
+    #[serde(default = "default_mask_scale")]
+    pub scale: Point2,
+    #[serde(default)]
+    pub rotation_degrees: f64,
+}
+
+fn default_mask_scale() -> Point2 {
+    Point2::new(1.0, 1.0)
+}
+
+impl Default for MaskTransform {
+    fn default() -> Self {
+        MaskTransform {
+            offset: Point2::new(0.0, 0.0),
+            scale: default_mask_scale(),
+            rotation_degrees: 0.0,
+        }
+    }
+}
+
+impl MaskTransform {
+    pub fn is_identity(&self) -> bool {
+        self.offset.x == 0.0
+            && self.offset.y == 0.0
+            && self.scale.x == 1.0
+            && self.scale.y == 1.0
+            && self.rotation_degrees == 0.0
+    }
+
+    fn inverse_point(&self, x: f64, y: f64) -> (f64, f64) {
+        let sx = self.scale.x.abs().max(f64::EPSILON);
+        let sy = self.scale.y.abs().max(f64::EPSILON);
+        let radians = self.rotation_degrees.to_radians();
+        let (sin, cos) = radians.sin_cos();
+        let dx = x - 0.5 - self.offset.x;
+        let dy = y - 0.5 - self.offset.y;
+        let unrotated_x = cos * dx + sin * dy;
+        let unrotated_y = -sin * dx + cos * dy;
+        (unrotated_x / sx + 0.5, unrotated_y / sy + 0.5)
     }
 }
 
@@ -452,6 +779,9 @@ pub struct Mask {
     /// Invert coverage (mask out the inside instead of the outside).
     #[serde(default)]
     pub invert: bool,
+    /// Non-destructive whole-mask translation, scale, and rotation.
+    #[serde(default, skip_serializing_if = "MaskTransform::is_identity")]
+    pub transform: MaskTransform,
 }
 
 fn default_mask_shape() -> MaskShape {
@@ -468,6 +798,7 @@ impl Default for Mask {
             shape: default_mask_shape(),
             feather: 0.0,
             invert: false,
+            transform: MaskTransform::default(),
         }
     }
 }
@@ -478,6 +809,7 @@ impl Mask {
     /// polygon variant returns the unsigned distance with an inside/outside sign
     /// from an even-odd test (an exact polygon SDF is overkill for feathering).
     pub fn signed_distance(&self, x: f64, y: f64) -> f64 {
+        let (x, y) = self.transform.inverse_point(x, y);
         match &self.shape {
             MaskShape::Linear { point, normal } => {
                 // Signed distance along the (assumed unit-ish) normal. We
@@ -590,20 +922,129 @@ fn point_segment_dist2(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> 
 // Effect (generic named-parameter effect chain)
 // ===========================================================================
 
-/// A generic named pixel effect with a flat parameter map — the extensible chain
-/// the spec calls for (`Clip.effects: Vec<Effect>`, each = one wgpu pass). The
-/// `name` selects a shader/kernel; `params` are its named scalar inputs and
-/// `enabled` lets a clip carry a disabled effect without removing it.
-///
-/// Concrete effects (blur, glow, sharpen, ...) are deferred (see module TODO);
-/// this type and its serde/round-trip are the stable contract that ops + agent
-/// tools target now, and the render layer can grow per-name handling
-/// incrementally without further domain changes.
+/// Maximum authored effects evaluated for one clip. A fixed bound keeps the
+/// persisted contract aligned with the portable GPU uniform layout.
+pub const MAX_EFFECTS_PER_CLIP: usize = 8;
+
+/// One persisted scalar in an advertised effect's closed schema.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct EffectParameterDescriptor {
+    pub name: &'static str,
+    pub default: f64,
+    pub min: f64,
+    pub max: f64,
+}
+
+/// An effect available to the editor, agent tools, preview, and export.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct EffectDescriptor {
+    pub name: &'static str,
+    pub parameters: &'static [EffectParameterDescriptor],
+}
+
+const AMOUNT_PARAMETER: [EffectParameterDescriptor; 1] = [EffectParameterDescriptor {
+    name: "amount",
+    default: 1.0,
+    min: 0.0,
+    max: 1.0,
+}];
+
+const EFFECT_REGISTRY: [EffectDescriptor; 3] = [
+    EffectDescriptor {
+        name: "grayscale",
+        parameters: &AMOUNT_PARAMETER,
+    },
+    EffectDescriptor {
+        name: "sepia",
+        parameters: &AMOUNT_PARAMETER,
+    },
+    EffectDescriptor {
+        name: "invert",
+        parameters: &AMOUNT_PARAMETER,
+    },
+];
+
+/// The complete effect list advertised by every product surface.
+pub fn effect_registry() -> &'static [EffectDescriptor] {
+    &EFFECT_REGISTRY
+}
+
+/// Typed rejection for invalid persisted effect data.
+#[derive(Clone, PartialEq, Debug)]
+pub enum EffectValidationError {
+    TooManyEffects {
+        count: usize,
+        limit: usize,
+    },
+    UnknownEffect {
+        name: String,
+    },
+    UnknownParameter {
+        effect: String,
+        parameter: String,
+    },
+    NonFiniteParameter {
+        effect: String,
+        parameter: String,
+    },
+    ParameterOutOfRange {
+        effect: String,
+        parameter: String,
+        value: f64,
+        min: f64,
+        max: f64,
+    },
+}
+
+impl std::fmt::Display for EffectValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooManyEffects { count, limit } => {
+                write!(f, "effect chain contains {count} entries; limit is {limit}")
+            }
+            Self::UnknownEffect { name } => write!(f, "unknown effect `{name}`"),
+            Self::UnknownParameter { effect, parameter } => {
+                write!(f, "unknown parameter `{parameter}` for effect `{effect}`")
+            }
+            Self::NonFiniteParameter { effect, parameter } => write!(
+                f,
+                "parameter `{parameter}` for effect `{effect}` must be finite"
+            ),
+            Self::ParameterOutOfRange {
+                effect,
+                parameter,
+                value,
+                min,
+                max,
+            } => write!(
+                f,
+                "parameter `{parameter}` for effect `{effect}` is {value}; expected {min}..={max}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for EffectValidationError {}
+
+/// Validate a complete authored chain before an edit or render boundary.
+pub fn validate_effect_chain(effects: &[Effect]) -> Result<(), EffectValidationError> {
+    if effects.len() > MAX_EFFECTS_PER_CLIP {
+        return Err(EffectValidationError::TooManyEffects {
+            count: effects.len(),
+            limit: MAX_EFFECTS_PER_CLIP,
+        });
+    }
+    effects.iter().try_for_each(Effect::validate)
+}
+
+/// A named pixel effect with a flat parameter map. Names and parameters remain
+/// string-keyed for stable JSON compatibility, but every edit and render path
+/// validates them against [`effect_registry`] rather than silently ignoring an
+/// unknown value.
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Effect {
-    /// Effect identifier (e.g. `"gaussianBlur"`). Free-form; the render layer maps
-    /// known names to passes and ignores unknown ones.
+    /// Identifier from [`effect_registry`].
     pub name: String,
     /// Named scalar parameters. Insertion-stable ordering is not required; the
     /// render layer reads by key.
@@ -637,6 +1078,60 @@ impl Effect {
     /// Read a parameter, or `default` when absent.
     pub fn param(&self, key: &str, default: f64) -> f64 {
         self.params.get(key).copied().unwrap_or(default)
+    }
+
+    /// Validate this persisted value against the advertised closed schema.
+    pub fn validate(&self) -> Result<(), EffectValidationError> {
+        let descriptor = effect_registry()
+            .iter()
+            .find(|candidate| candidate.name == self.name)
+            .ok_or_else(|| EffectValidationError::UnknownEffect {
+                name: self.name.clone(),
+            })?;
+        for (name, value) in &self.params {
+            let parameter = descriptor
+                .parameters
+                .iter()
+                .find(|candidate| candidate.name == name)
+                .ok_or_else(|| EffectValidationError::UnknownParameter {
+                    effect: self.name.clone(),
+                    parameter: name.clone(),
+                })?;
+            if !value.is_finite() {
+                return Err(EffectValidationError::NonFiniteParameter {
+                    effect: self.name.clone(),
+                    parameter: name.clone(),
+                });
+            }
+            if *value < parameter.min || *value > parameter.max {
+                return Err(EffectValidationError::ParameterOutOfRange {
+                    effect: self.name.clone(),
+                    parameter: name.clone(),
+                    value: *value,
+                    min: parameter.min,
+                    max: parameter.max,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Read a registered scalar using its schema default.
+    pub fn registered_param(&self, key: &str) -> Result<f64, EffectValidationError> {
+        self.validate()?;
+        let descriptor = effect_registry()
+            .iter()
+            .find(|candidate| candidate.name == self.name)
+            .expect("validated effect is registered");
+        let parameter = descriptor
+            .parameters
+            .iter()
+            .find(|candidate| candidate.name == key)
+            .ok_or_else(|| EffectValidationError::UnknownParameter {
+                effect: self.name.clone(),
+                parameter: key.to_owned(),
+            })?;
+        Ok(self.param(key, parameter.default))
     }
 }
 
@@ -748,6 +1243,21 @@ mod tests {
         let (r, gg, _) = g.apply_linear(0.4, 0.4, 0.0);
         approx(r, 0.2); // 0.4 * 0.5
         approx(gg, 0.4); // unchanged
+
+        // The authored color-wheel contract is:
+        // gain * (x + lift * (1 - x)) ^ (1 / gamma). Lift therefore rolls off
+        // toward the highlights instead of adding the same offset everywhere,
+        // and gain remains an independent highlight multiplier outside gamma.
+        let combined = ColorGrade {
+            lift_gamma_gain: LiftGammaGain {
+                lift: Rgb::new(0.1, 0.0, 0.0),
+                gamma: Rgb::new(2.0, 1.0, 1.0),
+                gain: Rgb::new(0.8, 1.0, 1.0),
+            },
+            ..Default::default()
+        };
+        let (combined_r, _, _) = combined.apply_linear(0.25, 0.0, 0.0);
+        approx(combined_r, 0.8 * 0.325_f64.sqrt());
     }
 
     #[test]
@@ -761,6 +1271,32 @@ mod tests {
         };
         let (r, _, _) = g.apply_linear(0.0, 0.0, 0.0);
         approx(r, 0.1);
+        let (white, _, _) = g.apply_linear(1.0, 0.0, 0.0);
+        approx(white, 1.0);
+    }
+
+    #[test]
+    fn color_grade_rejects_non_finite_and_zero_gamma() {
+        let zero_gamma = ColorGrade {
+            lift_gamma_gain: LiftGammaGain {
+                gamma: Rgb::new(0.0, 1.0, 1.0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            zero_gamma.validate().unwrap_err().to_string(),
+            "liftGammaGain.gamma.r must be finite and within (0, 4]"
+        );
+
+        let non_finite = ColorGrade {
+            exposure: f64::NAN,
+            ..Default::default()
+        };
+        assert_eq!(
+            non_finite.validate().unwrap_err().to_string(),
+            "exposure must be finite and within [-5, 5]"
+        );
     }
 
     // --- ColorGrade serde ---
@@ -778,9 +1314,18 @@ mod tests {
             },
             contrast: 0.3,
             saturation: 1.2,
+            hsl_secondary: Some(HslSecondary {
+                hue_center: 0.98,
+                hue_width: 0.2,
+                feather: 0.05,
+                hue_shift: 0.1,
+                saturation: -0.2,
+                lightness: 0.05,
+            }),
         };
         let json = serde_json::to_string(&g).unwrap();
         assert!(json.contains("\"liftGammaGain\""));
+        assert!(json.contains("\"hslSecondary\""));
         assert!(json.contains("\"exposure\":0.5"));
         let back: ColorGrade = serde_json::from_str(&json).unwrap();
         assert_eq!(g, back);
@@ -790,6 +1335,42 @@ mod tests {
     fn color_grade_decodes_missing_fields_as_identity() {
         let g: ColorGrade = serde_json::from_str("{}").unwrap();
         assert!(g.is_identity());
+    }
+
+    #[test]
+    fn hsl_secondary_wraps_red_and_isolates_other_hues() {
+        let grade = ColorGrade {
+            hsl_secondary: Some(HslSecondary {
+                hue_center: 0.98,
+                hue_width: 0.16,
+                feather: 0.04,
+                hue_shift: 0.2,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        grade.validate().unwrap();
+        let red = grade.apply_linear(1.0, 0.0, 0.0);
+        assert!(
+            red.1 > 0.2 || red.2 > 0.2,
+            "wrapped red must rotate: {red:?}"
+        );
+        let green = grade.apply_linear(0.0, 1.0, 0.0);
+        approx(green.0, 0.0);
+        approx(green.1, 1.0);
+        approx(green.2, 0.0);
+
+        let invalid = ColorGrade {
+            hsl_secondary: Some(HslSecondary {
+                hue_width: 0.0,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            invalid.validate().unwrap_err().to_string(),
+            "hslSecondary.hueWidth must be finite and within (0, 1]"
+        );
     }
 
     #[test]
@@ -901,6 +1482,7 @@ mod tests {
             },
             feather: 0.0,
             invert: false,
+            ..Mask::default()
         };
         approx(m.coverage(0.5, 0.5), 1.0); // center
         approx(m.coverage(0.5, 0.9), 0.0); // outside radius
@@ -915,6 +1497,7 @@ mod tests {
             },
             feather: 0.0,
             invert: true,
+            ..Mask::default()
         };
         approx(m.coverage(0.5, 0.5), 0.0); // center now masked out
         approx(m.coverage(0.5, 0.9), 1.0); // outside now covered
@@ -929,6 +1512,7 @@ mod tests {
             },
             feather: 0.1,
             invert: false,
+            ..Mask::default()
         };
         // Exactly on the boundary -> ~0.5 coverage.
         let c = m.coverage(0.7, 0.5);
@@ -947,6 +1531,7 @@ mod tests {
             },
             feather: 0.0,
             invert: false,
+            ..Mask::default()
         };
         approx(m.coverage(0.8, 0.5), 1.0); // +normal side covered
         approx(m.coverage(0.2, 0.5), 0.0); // -normal side not
@@ -964,6 +1549,7 @@ mod tests {
             },
             feather: 0.0,
             invert: false,
+            ..Mask::default()
         };
         approx(m.coverage(0.5, 0.3), 1.0); // inside the triangle
         approx(m.coverage(0.05, 0.05), 0.0); // outside (a corner region)
@@ -977,6 +1563,7 @@ mod tests {
             },
             feather: 0.0,
             invert: false,
+            ..Mask::default()
         };
         approx(m.coverage(0.5, 0.5), 0.0);
     }
@@ -990,6 +1577,7 @@ mod tests {
             },
             feather: 0.05,
             invert: true,
+            ..Mask::default()
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"kind\":\"circle\""));
@@ -1007,6 +1595,7 @@ mod tests {
             },
             feather: 0.0,
             invert: false,
+            ..Mask::default()
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"kind\":\"linear\""));
@@ -1026,6 +1615,7 @@ mod tests {
             },
             feather: 0.0,
             invert: false,
+            ..Mask::default()
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains("\"kind\":\"poly\""));
@@ -1033,28 +1623,68 @@ mod tests {
         assert_eq!(m, back);
     }
 
+    #[test]
+    fn mask_transform_is_non_destructive_and_roundtrips() {
+        let base = Mask {
+            shape: MaskShape::Circle {
+                center: Point2::new(0.5, 0.5),
+                radius: Point2::new(0.1, 0.2),
+            },
+            ..Mask::default()
+        };
+        let transformed = Mask {
+            transform: MaskTransform {
+                offset: Point2::new(0.2, -0.1),
+                scale: Point2::new(2.0, 0.5),
+                rotation_degrees: 90.0,
+            },
+            ..base.clone()
+        };
+
+        // The authored shape stays unchanged while its whole-mask transform
+        // moves the local center (0.5, 0.5) to display point (0.7, 0.4).
+        assert_eq!(transformed.shape, base.shape);
+        approx(transformed.coverage(0.7, 0.4), 1.0);
+        approx(transformed.coverage(0.5, 0.5), 0.0);
+
+        let json = serde_json::to_string(&transformed).unwrap();
+        assert!(json.contains("\"transform\""));
+        assert!(json.contains("\"rotationDegrees\":90.0"));
+        assert_eq!(serde_json::from_str::<Mask>(&json).unwrap(), transformed);
+
+        // Legacy/default projects do not gain noisy transform payloads and
+        // deserialize to the identity transform.
+        let default_json = serde_json::to_string(&base).unwrap();
+        assert!(!default_json.contains("\"transform\""));
+        let legacy: Mask = serde_json::from_str(
+            r#"{"shape":{"kind":"circle","center":{"x":0.5,"y":0.5},"radius":{"x":0.1,"y":0.2}},"feather":0.0,"invert":false}"#,
+        )
+        .unwrap();
+        assert!(legacy.transform.is_identity());
+    }
+
     // --- Effect ---
 
     #[test]
     fn effect_new_is_enabled_no_params() {
-        let e = Effect::new("gaussianBlur");
-        assert_eq!(e.name, "gaussianBlur");
+        let e = Effect::new("grayscale");
+        assert_eq!(e.name, "grayscale");
         assert!(e.enabled);
         assert!(e.params.is_empty());
-        approx(e.param("radius", 3.0), 3.0); // default fallback
+        approx(e.registered_param("amount").unwrap(), 1.0);
     }
 
     #[test]
     fn effect_with_param_and_read() {
-        let e = Effect::new("glow").with_param("intensity", 0.8);
-        approx(e.param("intensity", 0.0), 0.8);
+        let e = Effect::new("sepia").with_param("amount", 0.8);
+        approx(e.registered_param("amount").unwrap(), 0.8);
     }
 
     #[test]
     fn effect_roundtrip_with_params() {
-        let e = Effect::new("sharpen").with_param("amount", 0.5);
+        let e = Effect::new("invert").with_param("amount", 0.5);
         let json = serde_json::to_string(&e).unwrap();
-        assert!(json.contains("\"name\":\"sharpen\""));
+        assert!(json.contains("\"name\":\"invert\""));
         assert!(json.contains("\"amount\":0.5"));
         let back: Effect = serde_json::from_str(&json).unwrap();
         assert_eq!(e, back);

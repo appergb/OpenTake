@@ -14,7 +14,8 @@
 //! master clock, the MJPEG sink, and the Tauri event emitter without touching the
 //! loop.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -24,7 +25,7 @@ use std::time::{Duration, Instant};
 use opentake_domain::Timeline;
 use opentake_media::MediaCancelToken;
 use opentake_render::{
-    build_render_plan, Compositor, DecodedFrame, RenderDevice, RenderPlan, RenderSize,
+    try_build_render_plan, Compositor, DecodedFrame, RenderDevice, RenderPlan, RenderSize,
 };
 
 use super::project::{ManifestMetrics, MediaInfo, TextInfo};
@@ -300,6 +301,7 @@ impl RenderLoop {
             sizes,
             render_size,
             MediaCancelToken::new(),
+            None,
         )
     }
 
@@ -310,17 +312,32 @@ impl RenderLoop {
         sizes: HashMap<String, (u32, u32)>,
         render_size: RenderSize,
         cancel: MediaCancelToken,
+        project_dir: Option<PathBuf>,
     ) -> Result<Self, String> {
         let dev = RenderDevice::try_new().map_err(|e| format!("no GPU device: {e}"))?;
         let compositor = Compositor::new(&dev.device);
-        let metrics = ManifestMetrics { sizes };
-        let plan = build_render_plan(&timeline, render_size, &metrics);
-        let state = PlaybackResolverState::new(
+        let straight_alpha = media
+            .iter()
+            .filter(|(_, info)| info.straight_alpha)
+            .map(|(id, _)| id.clone())
+            .collect::<HashSet<_>>();
+        let metrics = ManifestMetrics {
+            sizes,
+            straight_alpha,
+        };
+        let plan = try_build_render_plan(&timeline, render_size, &metrics)
+            .map_err(|error| format!("invalid timeline graph: {error}"))?;
+        let project_root = project_dir
+            .map(opentake_project::ProjectRoot::open)
+            .transpose()
+            .map_err(|error| format!("open project LUT storage: {error}"))?;
+        let state = PlaybackResolverState::new_with_project_root(
             media,
             text,
             plan.fps,
             (render_size.width, render_size.height),
             cancel,
+            project_root,
         );
         Ok(RenderLoop {
             device: dev.device,
@@ -347,7 +364,8 @@ impl RenderLoop {
         let frame_plan = self.plan.frame(&self.timeline, target);
         let mut resolver = StreamingResolver::new(&self.device, &self.queue, &mut self.state);
         resolver.sync_active(&frame_plan)?;
-        self.compositor
+        let composite = self
+            .compositor
             .render_to_rgba(
                 &self.device,
                 &self.queue,
@@ -355,7 +373,14 @@ impl RenderLoop {
                 &frame_plan,
                 &mut resolver,
             )
-            .map_err(|e| format!("composite render failed at frame {target}: {e}"))
+            .map_err(|e| format!("composite render failed at frame {target}: {e}"));
+        drop(resolver);
+        if let Some(error) = self.state.take_materialization_error() {
+            return Err(format!(
+                "Lottie materialization failed at frame {target}: {error}"
+            ));
+        }
+        composite
     }
 
     /// Restart all decode streams (used on seek): the next `render_frame` re-spawns
@@ -398,6 +423,7 @@ impl PlaybackEngine {
             clock,
             sink,
             emitter,
+            None,
             None,
             None,
             MediaCancelToken::new(),
@@ -452,6 +478,35 @@ impl PlaybackEngine {
         start_frame: i32,
         cancel: MediaCancelToken,
     ) -> Result<Self, String> {
+        Self::spawn_ready_cancellable_with_project(
+            timeline,
+            media,
+            text,
+            sizes,
+            render_size,
+            clock,
+            sink,
+            emitter,
+            start_frame,
+            cancel,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_ready_cancellable_with_project(
+        timeline: Timeline,
+        media: HashMap<String, MediaInfo>,
+        text: HashMap<String, TextInfo>,
+        sizes: HashMap<String, (u32, u32)>,
+        render_size: RenderSize,
+        clock: Arc<dyn PlaybackClock>,
+        sink: Arc<dyn FrameSink>,
+        emitter: Arc<dyn PlayheadEmitter>,
+        start_frame: i32,
+        cancel: MediaCancelToken,
+        project_dir: Option<PathBuf>,
+    ) -> Result<Self, String> {
         let (ready_tx, ready_rx) = mpsc::channel();
         let engine = Self::spawn_internal(
             timeline,
@@ -462,6 +517,7 @@ impl PlaybackEngine {
             clock,
             sink,
             emitter,
+            project_dir,
             Some(start_frame.max(0)),
             Some(ready_tx),
             cancel,
@@ -489,6 +545,7 @@ impl PlaybackEngine {
         clock: Arc<dyn PlaybackClock>,
         sink: Arc<dyn FrameSink>,
         emitter: Arc<dyn PlayheadEmitter>,
+        project_dir: Option<PathBuf>,
         initial_frame: Option<i32>,
         startup: Option<mpsc::Sender<Result<(), String>>>,
         cancel: MediaCancelToken,
@@ -509,6 +566,7 @@ impl PlaybackEngine {
                     clock,
                     sink,
                     emitter,
+                    project_dir,
                     rx,
                     render_seek_mailbox,
                     initial_frame,
@@ -656,23 +714,31 @@ fn run_render_thread(
     clock: Arc<dyn PlaybackClock>,
     sink: Arc<dyn FrameSink>,
     emitter: Arc<dyn PlayheadEmitter>,
+    project_dir: Option<PathBuf>,
     rx: mpsc::Receiver<PlaybackCmd>,
     seek_mailbox: Arc<SeekMailbox>,
     initial_frame: Option<i32>,
     mut startup: Option<mpsc::Sender<Result<(), String>>>,
     cancel: MediaCancelToken,
 ) {
-    let mut render_loop =
-        match RenderLoop::new_with_cancel(timeline, media, text, sizes, render_size, cancel) {
-            Ok(rl) => rl,
-            Err(e) => {
-                if let Some(tx) = startup.take() {
-                    let _ = tx.send(Err(e.clone()));
-                }
-                eprintln!("[playback] {e}");
-                return;
+    let mut render_loop = match RenderLoop::new_with_cancel(
+        timeline,
+        media,
+        text,
+        sizes,
+        render_size,
+        cancel,
+        project_dir,
+    ) {
+        Ok(rl) => rl,
+        Err(e) => {
+            if let Some(tx) = startup.take() {
+                let _ = tx.send(Err(e.clone()));
             }
-        };
+            eprintln!("[playback] {e}");
+            return;
+        }
+    };
     let total = render_loop.total_frames();
     let fps = render_loop.fps();
     if total <= 0 {

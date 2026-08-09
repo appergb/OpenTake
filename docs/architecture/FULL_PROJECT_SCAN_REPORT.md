@@ -94,10 +94,10 @@
 - Shell 好 (short_id、encode_timeline、context_signal、dispatch 管道、描述 verbatim port)。
 
 **问题/风险**:
-- 大量 stub (dispatch.rs:177-189 + 注释): InspectMedia/GetTranscript/InspectTimeline/SearchMedia/Generate*/Upscale/Import/AddCaptions/Motion。
-- CoreHandle 窄，未暴露 media/render。
-- 细节: rippleDeleteRanges 不完整、batch folders 未实现、canGenerate 硬编码 false、undo scoping 弱。
-- 严重性: **高** (AI 协作核心缺失 → transcript-driven 编辑等 workflow 不可用)。
+- 最多 39 个基础工具均已脱离 `not yet implemented` 分支，并按主机媒体桥能力 fail-closed 过滤；`inspect_media` 与 `remove_filler_words` 已通过 Tauri `MediaBridge` 接入抽帧/本地转写与词级项目帧分析。
+- 生成/超分四个工具已接共享生产 GenerationBridge；Motion 两工具已接 Motion Canvas 3.17.2 + 本地 fallback 生产桥，并仅在 Chromium/FFmpeg 能力可用时动态发布。Lottie 源检查与时间线合成均已接共享 Velato/Vello 路径。
+- 生成作业已具备成本授权、耐久占位/日志、进度、取消、部分成功、失败码、重试与重启恢复；结果下载受协议/地址/大小/重定向约束并在探测后原子导入。
+- 严重性: **中**（生成、Motion 与 Lottie 检查主竖切已闭合；高级 AI workflow 与付费真实账号冒烟仍属发布验证项）。
 
 **测试**: mcp_http.rs (传输) 存在；全工具执行弱。
 
@@ -122,7 +122,7 @@
 **问题/风险**:
 - Import: thumbnails 永远 None (media.rs:79，“placeholder”)、无进度/反馈、扩展静默丢弃、folder 浏览不全。
 - Export: H.264 spine 好，但 H265/ProRes 未接、无进度/取消。
-- Gen: 占位部分，但 agent 路径 stub。
+- Gen: image/video/audio/upscale 已从 MCP/Chat 走生产桥并有无付费网络的 provider 合约与应用集成测试；时间线视频源音频生成已预留渲染路径，但当前内置目录没有 `inputs:["video"]` 的音频模型，因此按能力拒绝。
 - Bundle 细微差异 (chat 目录名)。
 - 严重性: **中高** (工作流断裂)。
 
@@ -142,7 +142,7 @@
 
 **Critical**:
 1. 预览不反映真实合成 (DOM 主导 + GPU 合成 infrastructure 已就绪但未接入 Preview.tsx) → [BUGS.md](BUGS.md#d1-预览未接入-gpu-合成高)
-2. Agent/MCP 工具大量 stub (inspect/transcript/search/generate/captions/import 等) → [BUGS.md](BUGS.md#d2-agentmcp-工具-1240-为-stub高)
+2. Agent/MCP Lottie 生产检查已关闭；剩余 Agent 目标按完成度计划继续验收。
 3. Media thumbnails 永远 None、import 无反馈/进度 → [BUGS.md](BUGS.md#d3-media-缩略图始终返回-none中)
 
 **High**:

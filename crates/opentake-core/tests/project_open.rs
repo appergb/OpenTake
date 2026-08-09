@@ -60,6 +60,8 @@ fn manifest_entry(id: &str, generation_input: Option<GenerationInput>) -> MediaM
         source_height: None,
         source_fps: None,
         has_audio: Some(true),
+        color: None,
+        proxy: None,
         folder_id: None,
         cached_remote_url: None,
         cached_remote_url_expires_at: None,

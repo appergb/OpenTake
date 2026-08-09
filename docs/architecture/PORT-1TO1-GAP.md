@@ -114,6 +114,10 @@
 | P2-11 | isDocumentEdited 脏标记前端反馈 | core 用 `version != last_saved_version` 派生 dirty 传前端,标题栏显示未保存态;驱动防抖保存与退出 flush | `session.rs:251` |
 | P2-12 | 两套窗口尺寸 | 单窗不强求双窗,可设 minWidth 760 避免主页空旷 | `tauri.conf.json:21-26` |
 
+P2-3 已由 `src-tauri/src/home.rs` 与 Home 卡片闭环：桌面端注册表以原子 JSON 持久化最近工程，启动同步只更新 `missing` 而不丢弃缺失条目；Reveal 和废纸篓命令只接受已注册的绝对 `.opentake` 路径。macOS 使用 `NSFileManager.trashItem`，Windows 使用系统回收站 API，Linux 使用 `gio trash`；仅在系统操作成功后才持久化移除。卡片提供缺失态、右键/按钮操作、从最近中移除、废纸篓二次确认、pending 与可重试错误状态。
+
+P1-1、P2-1 与 P2-2 已按独立所有者闭环：`useAutosave` 保持 1.5 秒防抖，原生 CloseRequested 在隐藏窗口前同步 flush；成功保存只刷新最近工程的 `modifiedAt`/`thumbnailPath`，不会改动表示打开排序的 `openedAt`。原生注册表从工程包持久化的 `project.json` 修改时间与 `thumbnail.jpg` 刷新元数据，Home 卡片显示 16:9 封面和本地化相对修改时间（路径仅作 tooltip），缺失工程保留最后元数据并停止加载封面。
+
 ---
 
 ## 二、实现批次顺序（每批一个功能分支：写 → 审 → 修 → CI 绿 → 合并）
@@ -175,6 +179,7 @@
 
 ### 批次 9 ｜ `feat/p2-samples-polish`（打磨）
 - P2-4 Sample 区、P2-12 窗口尺寸、剩余 P2 项。
+- **2026-08-01 代码门禁**:Sample 区已接入三个内置离线工程;物化成功、失败原子回滚、Home 路由成功/失败均有可执行测试。发布级 Web 门禁同时覆盖面板键盘聚焦、时间线 clip 的 24px 可访问代理、统一 `:focus-visible`、`prefers-reduced-motion` 与 `forced-colors`。打包桌面端的逐项视觉、键盘和核心编辑流证据仍必须在顺序 GUI 验证阶段留存后方可判定本批发布就绪。
 
 ---
 

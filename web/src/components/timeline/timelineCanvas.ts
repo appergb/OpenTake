@@ -257,6 +257,32 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
         isDuplicate,
         visibleX: { min: scrollLeft, max: visRight },
       });
+      const transition = clip.transitionOut;
+      const incoming = transition
+        ? track.clips.find((candidate) => candidate.id === transition.toClipId)
+        : undefined;
+      if (
+        transition?.kind === "crossDissolve" &&
+        (!transition.fromClipId || transition.fromClipId === clip.id) &&
+        incoming &&
+        clip.startFrame + clip.durationFrames === incoming.startFrame
+      ) {
+        // Compact bow-tie marker centered on the cut. It is purely visual; the
+        // Transition tab owns editing and the renderer owns frame blending.
+        const cutX = rect.x + rect.width;
+        const centerY = rect.y + rect.height / 2;
+        const half = Math.min(7, Math.max(4, rect.height / 4));
+        ctx.beginPath();
+        ctx.moveTo(cutX - half, centerY - half);
+        ctx.lineTo(cutX, centerY);
+        ctx.lineTo(cutX - half, centerY + half);
+        ctx.lineTo(cutX + half, centerY + half);
+        ctx.lineTo(cutX, centerY);
+        ctx.lineTo(cutX + half, centerY - half);
+        ctx.closePath();
+        ctx.fillStyle = RANGE.edge;
+        ctx.fill();
+      }
     }
   }
 

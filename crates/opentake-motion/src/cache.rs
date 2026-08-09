@@ -10,12 +10,18 @@
 //! [`MotionCache`] is the thin directory wrapper that maps a key to a folder and
 //! reports hit/miss; the renderer writes frames into that folder.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
 use crate::error::MotionResult;
 use crate::source::{MotionRenderRequest, MotionSource, ParamValue};
+
+const COMPLETION_MARKER_FILE: &str = ".opentake-motion-complete-v4";
+static COMPLETION_MARKER_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Compute the content hash (lowercase hex SHA-256) for a render request.
 ///
@@ -130,12 +136,13 @@ impl MotionCache {
     }
 
     /// Whether a complete render for this request is already cached. "Complete"
-    /// means the directory exists and holds exactly `duration_frames` frame
-    /// files — a partial render (crash mid-way) is treated as a miss so it gets
-    /// recomputed rather than served truncated.
+    /// means the directory holds the exact expected frame set and an atomically
+    /// published completion marker. A render that produced every frame but
+    /// failed during browser shutdown therefore remains a miss.
     pub fn is_cached(&self, req: &MotionRenderRequest) -> bool {
         let dir = self.dir_for(req);
-        count_frame_files(&dir) == Some(req.duration_frames as usize)
+        completion_marker(&dir).is_file()
+            && has_exact_frame_files(&dir, req.duration_frames as usize)
     }
 
     /// Create the cache directory for a request, returning its path.
@@ -145,11 +152,70 @@ impl MotionCache {
         Ok(dir)
     }
 
+    /// Prepare a cache directory for a fresh render. Removing the marker first
+    /// makes every subsequent write fail-closed until completion is published.
+    pub(crate) fn begin_render(&self, req: &MotionRenderRequest) -> MotionResult<PathBuf> {
+        let dir = self.ensure_dir(req)?;
+        Self::remove_completion_marker(&dir)?;
+        Ok(dir)
+    }
+
+    /// Publish render completion with a write-sync-rename sequence so readers
+    /// can never observe a partially written marker.
+    pub(crate) fn mark_complete(dir: &Path) -> MotionResult<()> {
+        let marker = completion_marker(dir);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let counter = COMPLETION_MARKER_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let temporary = dir.join(format!(
+            ".opentake-motion-complete-{pid}-{nanos}-{counter}.tmp",
+            pid = std::process::id()
+        ));
+
+        let result = (|| -> std::io::Result<()> {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)?;
+            file.write_all(b"opentake-motion-cache/v4\n")?;
+            file.sync_all()?;
+            drop(file);
+            match std::fs::rename(&temporary, &marker) {
+                Ok(()) => Ok(()),
+                // Another identical renderer may have published the same key
+                // concurrently. Its atomic marker is equivalent completion.
+                Err(_) if marker.is_file() => Ok(()),
+                Err(error) => Err(error),
+            }
+        })();
+        let _ = std::fs::remove_file(&temporary);
+        result.map_err(Into::into)
+    }
+
+    pub(crate) fn remove_completion_marker(dir: &Path) -> MotionResult<()> {
+        match std::fs::remove_file(completion_marker(dir)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// The expected per-frame file path inside a render dir: zero-padded so
     /// lexical order == playback order (`frame_00000.png`).
     pub fn frame_file(dir: &Path, frame_index: usize) -> PathBuf {
         dir.join(format!("frame_{frame_index:05}.png"))
     }
+}
+
+fn completion_marker(dir: &Path) -> PathBuf {
+    dir.join(COMPLETION_MARKER_FILE)
+}
+
+fn has_exact_frame_files(dir: &Path, expected: usize) -> bool {
+    count_frame_files(dir) == Some(expected)
+        && (0..expected).all(|index| MotionCache::frame_file(dir, index).is_file())
 }
 
 /// Count `frame_*.png` files in a directory, or `None` if it doesn't exist.
@@ -323,8 +389,70 @@ mod tests {
         std::fs::write(MotionCache::frame_file(&dir, 1), b"x").unwrap();
         assert!(!cache.is_cached(&req));
 
-        // All three -> hit.
+        // All three without a completion marker are still a miss: a renderer
+        // may have produced every frame and then failed during shutdown.
         std::fs::write(MotionCache::frame_file(&dir, 2), b"x").unwrap();
+        assert!(!cache.is_cached(&req));
+
+        MotionCache::mark_complete(&dir).unwrap();
         assert!(cache.is_cached(&req));
+        assert!(
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .all(|entry| !entry.file_name().to_string_lossy().ends_with(".tmp")),
+            "atomic publication must not leave a temporary marker"
+        );
+
+        // Beginning a new render invalidates completion before any frame is
+        // touched, so a later renderer failure cannot reuse stale frames.
+        assert_eq!(cache.begin_render(&req).unwrap(), dir);
+        assert!(!cache.is_cached(&req));
+    }
+
+    #[test]
+    fn completion_marker_requires_the_exact_expected_frame_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = MotionCache::new(tmp.path());
+        let req = MotionRenderRequest::new(MotionSource::code("<x/>"), 30, 2, 64, 64);
+        let dir = cache.ensure_dir(&req).unwrap();
+
+        MotionCache::mark_complete(&dir).unwrap();
+        assert!(!cache.is_cached(&req), "a marker alone is not a cache hit");
+
+        std::fs::write(MotionCache::frame_file(&dir, 0), b"x").unwrap();
+        std::fs::write(MotionCache::frame_file(&dir, 999), b"x").unwrap();
+        assert!(!cache.is_cached(&req), "wrong frame names are not complete");
+
+        std::fs::write(MotionCache::frame_file(&dir, 1), b"x").unwrap();
+        assert!(!cache.is_cached(&req), "extra frame files are not complete");
+    }
+
+    #[test]
+    fn completion_marker_schema_rejects_legacy_rendered_frames() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = MotionCache::new(tmp.path());
+        let req = MotionRenderRequest::new(MotionSource::code("<x/>"), 30, 2, 64, 64);
+        let dir = cache.ensure_dir(&req).unwrap();
+        for index in 0..2 {
+            std::fs::write(MotionCache::frame_file(&dir, index), b"legacy").unwrap();
+        }
+        std::fs::write(
+            dir.join(".opentake-motion-complete-v3"),
+            b"opentake-motion-cache/v3\n",
+        )
+        .unwrap();
+
+        assert!(
+            !cache.is_cached(&req),
+            "a legacy capture marker must not validate the current renderer output"
+        );
+        MotionCache::mark_complete(&dir).unwrap();
+        assert!(cache.is_cached(&req));
+        assert_eq!(
+            cache.dir_for(&req),
+            dir,
+            "cache directory contract is stable"
+        );
     }
 }

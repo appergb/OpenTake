@@ -10,6 +10,7 @@ export const BG = {
   surface: "rgb(22,22,22)",
   raised: "rgb(30,30,30)",
   prominent: "rgb(44,44,44)",
+  placeholder: "rgb(30,30,30)",
   previewCanvas: "#000",
 } as const;
 
@@ -18,6 +19,13 @@ export const BORDER = {
   primary: "rgba(255,255,255,0.16)",
   subtle: "rgba(255,255,255,0.12)",
   divider: "rgba(255,255,255,0.44)",
+} as const;
+
+export const BORDER_WIDTH = {
+  hairline: 0.5,
+  thin: 1,
+  medium: 1.5,
+  thick: 2,
 } as const;
 
 /** §1.3 Text colors. */
@@ -32,7 +40,9 @@ export const TEXT = {
 export const ACCENT = {
   timecode: "rgb(242,153,51)",
   primary: "rgb(245,239,228)",
+  spotlight: "rgb(255,69,69)",
   error: "rgb(229,79,79)",
+  glassTint: "rgba(245,239,228,0.05)",
   // System colors upstream uses directly in the timeline.
   systemRed: "rgb(255,59,48)",
   systemYellow: "rgb(255,204,0)",
@@ -41,13 +51,13 @@ export const ACCENT = {
 } as const;
 
 /** §1.5 Track colors keyed by ClipType. */
-export const TRACK_COLOR: Record<string, string> = {
+export const TRACK_COLOR = {
   video: "rgb(0,145,194)",
   audio: "rgb(88,168,34)",
   image: "rgb(183,45,210)",
   text: "rgb(183,45,210)",
   lottie: "rgb(224,168,0)",
-};
+} as const;
 
 /** §1.7 Spacing (px). */
 export const SPACE = {
@@ -86,6 +96,59 @@ export const FS = {
   mdLg: 14,
   lg: 15,
   xl: 18,
+  title1: 22,
+  title2: 28,
+  display: 36,
+} as const;
+
+export const FONT_WEIGHT = {
+  light: 300,
+  regular: 400,
+  medium: 500,
+  semibold: 600,
+  bold: 700,
+} as const;
+
+export const TRACKING = {
+  tight: -0.5,
+  normal: 0,
+  wide: 1.5,
+} as const;
+
+export const ICON_SIZE = {
+  xxs: 12,
+  xs: 14,
+  sm: 18,
+  smMd: 20,
+  md: 22,
+  mdLg: 24,
+  lg: 26,
+  lgXl: 28,
+  xl: 30,
+} as const;
+
+export const OPACITY = {
+  opaque: 1,
+  subtle: 0.04,
+  hint: 0.06,
+  faint: 0.08,
+  soft: 0.1,
+  muted: 0.15,
+  moderate: 0.25,
+  medium: 0.35,
+  strong: 0.55,
+  prominent: 0.8,
+} as const;
+
+export const SHADOW = {
+  sm: "0 0.5px 1px rgba(0,0,0,0.3)",
+  md: "0 2px 4px rgba(0,0,0,0.3)",
+  lg: "0 8px 24px rgba(0,0,0,0.25)",
+} as const;
+
+export const ANIM = {
+  hoverMs: 150,
+  transitionMs: 200,
 } as const;
 
 export const FONT_UI =
@@ -97,6 +160,27 @@ export const FONT_MONO = 'ui-monospace, "SF Mono", Menlo, Consolas, monospace';
  * upstream literal — do not approximate.
  */
 export const LAYOUT = {
+  panelHeaderHeight: 28,
+  toolbarHeight: 38,
+  panelGap: 5,
+  tabRailWidth: 38,
+  contextRowHeight: 22,
+  projectCardWidth: 150,
+  projectCardHeight: 120,
+  captionPreviewMaxHeight: 150,
+  toolImagePreviewMaxHeight: 50,
+  captionDefaultFontSize: 48,
+  captionMinFontSize: 12,
+  captionMaxFontSize: 300,
+  captionCenterSnapThreshold: 0.02,
+  captionDefaultCenterY: 0.9,
+  generationReferenceTileWidth: 80,
+  generationReferenceTileHeight: 56,
+  keyframeRowHeight: 22,
+  keyframeRulerHeight: 18,
+  keyframeStripHeight: 14,
+  keyframeHeaderHeight: 32,
+  keyframeDiamondSize: 8,
   rulerHeight: 24, // Constants.swift:46
   dropZoneHeight: 60, // :47
   trackHeaderWidth: 100, // :48

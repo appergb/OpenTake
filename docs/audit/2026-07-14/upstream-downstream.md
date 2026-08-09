@@ -259,3 +259,5 @@ Integrated heads with an empty fork-main tree delta: **1**.
 |  M | web/src/styles/global.css | integrated | integrated | Canonical UI or state delta associated with the earlier playback convergence work. | Audited target path web/src/styles/global.css at tree d992a0e3a7657d4d9b6ca66afb977433ca6b5e6a | none | none | true | `6cea8117201e65ac804350a267723a512ac666fcf6e4c2d210ef24990bbbb2e8` | regular | 2705 | `35105a71a4f9351dc28d2cb63b9308f5966b53a02609643b4cb5f20d35aeda3a` |
 
 Tracked patch hashes are computed from binary-safe `git diff HEAD -- <path>` bytes. Regular worktree files receive content hashes and byte counts; missing files and non-regular entries do not expose content. Symlinks, if present, expose only a hash of the link target bytes.
+
+Injected legacy reference: doc-00110a2e259a7a44

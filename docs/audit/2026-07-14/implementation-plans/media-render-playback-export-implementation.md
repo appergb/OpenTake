@@ -31,33 +31,47 @@
   - Add deterministic media fixtures and golden frame, audio, timeline, or export assertions for every named capability and boundary; the affected render/media suites must pass.
   - Run the packaged preview/export path on representative media and retain exact output or runtime evidence before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-render/tests/composite_acceptance.rs#capcut_children_close_one_composite_acceptance` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-render --test composite_acceptance capcut_children_close_one_composite_acceptance -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `docs/architecture/CAPCUT-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-render --test composite_acceptance capcut_children_close_one_composite_acceptance -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `node --test tools/completion-audit.test.mjs`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Completion evidence (2026-07-31): the reviewed GPU test first failed on the
+polygon fixture (`pixel=(0,0) expected=0 actual=255`) while polygon masks were
+still encoded as a no-op, preserving the required RED receipt. The completed
+slice adds bounded polygon uniforms, CPU/GPU-matched transform geometry,
+Inspector creation/edit/delete controls, an on-canvas point editor, persistence,
+and command-routed undo/redo with explicit capacity validation. Both exact
+owning GPU tests pass; Web's 89 files / 805 tests, production build,
+`cargo fmt --check`, workspace Clippy with `-D warnings`, and
+`cargo test --workspace --no-fail-fast` pass. The ad-hoc-signed packaged macOS
+app also passes creation, point drag/add/delete, transform, feather, invert,
+undo/redo, save/reopen, preview capture, and 120-frame H.264 export. Preview and
+export frame 60 score SSIM 0.999753 and PSNR 62.854540 dB. Full receipt:
+`docs/audit/2026-07-14/runtime-artifacts/automated/mask-rendering-2026-07-31.md`.
 
 ### Task 2: MR-nested-timeline (implementation-slice-b8f61feebde4e2ab)
 
@@ -82,33 +96,39 @@
   - Add deterministic media fixtures and golden frame, audio, timeline, or export assertions for every named capability and boundary; the affected render/media suites must pass.
   - Run the packaged preview/export path on representative media and retain exact output or runtime evidence before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-render/tests/nested_timeline.rs#nested_edits_preview_and_export_same_frames` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-render --test nested_timeline nested_edits_preview_and_export_same_frames -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-domain/src/clip.rs`, `crates/opentake-render/src/plan/build.rs#build_frame_plan`, `docs/architecture/CAPCUT-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-render --test nested_timeline nested_edits_preview_and_export_same_frames -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Completion evidence (2026-07-31):
+`runtime-artifacts/automated/nested-timeline-compound-real-device-2026-07-31.md`.
+The historical parent failed because the owning targets were absent; the exact
+focused tests, full Rust/Web gates, strict local package verification, packaged
+create/edit/reopen/preview, and 231-frame H.264/AAC export now pass.
 
 ### Task 3: MR-optical-flow (implementation-slice-c85c1acc35668396)
 
@@ -133,33 +153,40 @@
   - Convert a 24 fps motion fixture to 60 fps with exactly the expected output-frame count and unchanged first/last timestamps.
   - Add pixel/temporal regression tests plus a deterministic unsupported-device fallback; preview and export must select the same interpolation mode.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-render/tests/optical_flow.rs#two_frame_fixture_is_deterministic_and_matches_preview_export` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-render --test optical_flow two_frame_fixture_is_deterministic_and_matches_preview_export -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-render/src/gpu/compositor.rs#TextureResolver`, `crates/opentake-media/src/decode/frame.rs`, `docs/architecture/CAPCUT-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-render --test optical_flow two_frame_fixture_is_deterministic_and_matches_preview_export -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Completion evidence (2026-07-31):
+`runtime-artifacts/automated/optical-flow-24-to-60-real-device-2026-07-31.md`.
+The historical owning target failed before the backend existed; the exact
+focused tests, opposing-local-motion regression, full Rust gates, strict local
+package verification, packaged 60 fps preview, and 120-frame H.264 export now
+pass with matching frame-1 motion bounds and SSIM 0.999515.
 
 ### Task 4: MR-mask-rendering (implementation-slice-dacb1d7732ff3450)
 
@@ -187,32 +214,32 @@
   - Expose mask creation, point editing, delete, and undo/redo in Inspector/Preview without mutating source media.
   - Add GPU pixel fixtures for all three shapes at feather 0 and nonzero feather; preview and exported boundary frames must match within the project pixel-diff tolerance.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-render/tests/gpu_effects.rs#circle_mask_clips_to_center` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-render/tests/gpu_effects.rs#linear_circle_and_polygon_masks_match_cpu_reference_in_preview_and_export` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-render --test gpu_effects circle_mask_clips_to_center -- --exact`
   - Run: `cargo test -p opentake-render --test gpu_effects linear_circle_and_polygon_masks_match_cpu_reference_in_preview_and_export -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-domain/src/grade.rs#Mask`, `crates/opentake-render/src/plan/build.rs`, `crates/opentake-render/src/gpu/compositor.rs#pack_masks`, `crates/opentake-render/src/gpu/shader.wgsl`, `docs/architecture/CAPCUT-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-render --test gpu_effects circle_mask_clips_to_center -- --exact`
   - Run: `cargo test -p opentake-render --test gpu_effects linear_circle_and_polygon_masks_match_cpu_reference_in_preview_and_export -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
@@ -242,29 +269,29 @@
   - Expose analyze, strength/crop adjustment, cancellation, apply, reset, and undo without overwriting source media.
   - For a synthetic jitter fixture, demonstrate lower frame-to-frame tracked displacement, no uncovered pixels, and preview/export transform parity.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-render/tests/stabilization.rs#synthetic_shake_produces_editable_undoable_preview_export_solution` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-render --test stabilization synthetic_shake_produces_editable_undoable_preview_export_solution -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-media/src/analysis/stabilization.rs`, `crates/opentake-ops/src/command.rs`, `crates/opentake-render/src/plan/build.rs`, `docs/architecture/CAPCUT-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-render --test stabilization synthetic_shake_produces_editable_undoable_preview_export_solution -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
@@ -294,33 +321,35 @@
   - Expose add/reorder/parameter-change/remove operations through undoable Inspector commands.
   - Add one pixel fixture per advertised effect/filter and assert preview/export parity at default and non-default parameters.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-render/tests/gpu_effects.rs#advertised_effect_registry_has_preview_export_golden_fixtures` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-render --test gpu_effects advertised_effect_registry_has_preview_export_golden_fixtures -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-domain/src/grade.rs#Effect`, `crates/opentake-render/src/plan/types.rs#LayerDraw`, `crates/opentake-render/src/gpu/compositor.rs`, `docs/architecture/CAPCUT-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-render --test gpu_effects advertised_effect_registry_has_preview_export_golden_fixtures -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Runtime and packaged-app evidence: `docs/audit/2026-07-14/runtime-artifacts/automated/generic-effects-real-device-2026-07-31.md`.
 
 ### Task 7: MR-transitions (implementation-slice-36596c6aa0eb94d6)
 
@@ -358,33 +387,35 @@
   - Enable the transitions media surface.
   - Add pixel/runtime tests for preview/export parity and undo.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-render/tests/transitions.rs#adjacent_clip_transition_is_editable_undoable_and_matches_preview_export` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-render --test transitions adjacent_clip_transition_is_editable_undoable_and_matches_preview_export -- --exact`
 
   Expected: FAIL because one or more of the 2 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-domain/src/transition.rs`, `crates/opentake-render/src/plan/build.rs`, `crates/opentake-render/src/gpu/compositor.rs`, `docs/architecture/CAPCUT-GAP.md`, `docs/architecture/HANDOFF-2026-07.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-render --test transitions adjacent_clip_transition_is_editable_undoable_and_matches_preview_export -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Runtime and packaged-app evidence: `docs/audit/2026-07-14/runtime-artifacts/automated/transition-real-device-2026-07-31.md`.
 
 ### Task 8: MR-lgg-proof (implementation-slice-4c614d7762698953)
 
@@ -415,36 +446,38 @@
   - Visible/returned assertion: assert the exact success payload for the valid case and a stable typed error for the invalid case, including zero partial side effects and no leaked internal path or credential.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-render/tests/completion_2016fc49884f6dc7.rs#completion_2016fc49884f6dc7_lift_gamma_and_gain_controls_are_represented_and.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-domain/src/grade.rs#lift_gamma_gain_gain_scales` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-render/tests/gpu_effects.rs#lift_gamma_gain_matches_cpu_reference` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-domain lift_gamma_gain_gain_scales`
   - Run: `cargo test -p opentake-render --test gpu_effects lift_gamma_gain_matches_cpu_reference -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-domain/src/grade.rs#ColorGrade`, `crates/opentake-render/src/gpu/compositor.rs#grade_blocks`, `crates/opentake-render/src/gpu/shader.wgsl`, `docs/architecture/CAPCUT-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-domain lift_gamma_gain_gain_scales`
   - Run: `cargo test -p opentake-render --test gpu_effects lift_gamma_gain_matches_cpu_reference -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Runtime and packaged-app evidence: `docs/audit/2026-07-14/runtime-artifacts/automated/lgg-real-device-2026-07-31.md`.
 
 ### Task 9: MR-hsl-secondary (implementation-slice-0e1b61977fdbc412)
 
@@ -463,39 +496,41 @@
 
 - Candidate/source: `doc-9edde6aa1ce22995` at `docs/architecture/CAPCUT-GAP.md:139` (requirement)
 - Expected behavior: HSL secondary controls are editable and rendered.
-- Resolution: `reviewed-mapping-report:MR-hsl-secondary` — No tracked HSL-secondary representation or render path was found.
+- Resolution: `implemented-and-verified:MR-hsl-secondary` — A bounded feathered HSL qualifier now persists through `ColorGrade`, renders through the shared CPU/WGSL chain, and is editable/resettable through the transactional Inspector path. Real GPU chart isolation and packaged preview/playback/export evidence are recorded below.
 - Exact acceptance contract:
   - Persist bounded hue-range, feather, hue, saturation, and lightness adjustments in the grade model.
   - Expose range selection and parameter edits with reset and undo/redo in Inspector.
   - Use a color-chart fixture to verify selected hues change while pixels outside the feathered range remain within the project pixel-diff tolerance in preview and export.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-render/tests/gpu_effects.rs#hsl_secondary_hue_boundary_feather_and_isolation` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-render --test gpu_effects hsl_secondary_hue_boundary_feather_and_isolation -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-domain/src/grade.rs`, `crates/opentake-render/src/gpu/shader.wgsl`, `docs/architecture/CAPCUT-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-render --test gpu_effects hsl_secondary_hue_boundary_feather_and_isolation -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Runtime and packaged-app evidence: `docs/audit/2026-07-14/runtime-artifacts/automated/hsl-secondary-real-device-2026-07-31.md`.
 
 ### Task 10: MR-lut (implementation-slice-10ed256c8194fc18)
 
@@ -514,39 +549,41 @@
 
 - Candidate/source: `doc-0b8b56b94a928929` at `docs/architecture/CAPCUT-GAP.md:145` (requirement)
 - Expected behavior: Validated 3D LUT files can be imported, previewed, and exported.
-- Resolution: `reviewed-mapping-report:MR-lut` — No validated LUT import, persisted reference, GPU 3D texture or preview/export path exists.
+- Resolution: `implemented-and-verified:MR-lut` — Validated 17/33-point `.cube` tables now publish into content-addressed project storage, persist as path-free clip references, and render through one shared 3D-texture path for preview, playback, inspection, and export. Transactional Inspector editing, real-GPU identity/known-transform parity, save/reopen, and complete packaged export evidence are recorded below.
 - Exact acceptance contract:
   - Parse and validate .cube LUT metadata, domain bounds, and 17- and 33-point tables; reject malformed or oversized input with typed errors.
   - Import, select, set intensity, remove, and undo LUT changes without copying arbitrary files outside project-managed storage.
   - Compare identity and known-transform LUT fixtures in GPU preview and export using the existing pixel-diff threshold, including save/reopen.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-render/tests/lut.rs#malformed_and_oversized_luts_fail_closed_and_valid_lut_matches_preview_export` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-render --test lut malformed_and_oversized_luts_fail_closed_and_valid_lut_matches_preview_export -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-domain/src/lut.rs`, `crates/opentake-render/src/gpu/compositor.rs`, `docs/architecture/CAPCUT-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-render --test lut malformed_and_oversized_luts_fail_closed_and_valid_lut_matches_preview_export -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Runtime and packaged-app evidence: `docs/audit/2026-07-14/runtime-artifacts/automated/lut-real-device-2026-07-31.md`.
 
 ### Task 11: MR-loudness (implementation-slice-e668f03cd9c414d2)
 
@@ -567,39 +604,41 @@
 
 - Candidate/source: `doc-30e9287b5c8858dd` at `docs/architecture/CAPCUT-GAP.md:161` (requirement)
 - Expected behavior: Audio loudness normalization targets and verifies a configured LUFS value.
-- Resolution: `reviewed-mapping-report:MR-loudness` — PCM, playback and export owners exist, but no loudness analysis or normalization target path exists.
+- Resolution: `implemented-and-verified:MR-loudness` — shared PCM analysis, undoable persistence, Inspector controls, native preview and export now form one verified vertical slice.
 - Exact acceptance contract:
   - Persist a target integrated loudness and true-peak ceiling as an undoable audio operation.
   - Expose analyze/apply/reset with progress and typed errors for silent or unreadable audio.
   - On speech and music fixtures, exported integrated loudness must be within ±1 LU of the configured target without exceeding the configured true-peak ceiling; preview gain must use the same computed adjustment.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-media/tests/loudness.rs#normalization_reaches_configured_lufs_within_tolerance` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-media --test loudness normalization_reaches_configured_lufs_within_tolerance -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-media/src/decode/pcm.rs#extract_pcm`, `crates/opentake-media/src/analysis/loudness.rs`, `src-tauri/src/playback/audio.rs`, `src-tauri/src/export.rs`, `docs/architecture/CAPCUT-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-media --test loudness normalization_reaches_configured_lufs_within_tolerance -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS. The focused runner first failed to compile before the loudness owner existed, then passed with the known FFmpeg-cross-checked fixture and deterministic speech/music fixtures. The complete Rust workspace passed (environment-only integrations remain ignored), warnings-denied workspace Clippy, formatting and diff checks passed; the Web suite passed 90 files / 814 tests and the production build passed with only the pre-existing chunk/dynamic-import warnings. The rebuilt ad-hoc-signed macOS app verified analyze/apply/reanalyze/reset, undo/redo, native playback, writable save/reopen persistence and a typed silent-audio error. Independent FFmpeg measurements of the exported AAC deliverables were `-16.07 LUFS / -1.15 dBTP` for speech and `-16.02 LUFS / -1.74 dBTP` for music. Runtime evidence: [`loudness-real-device-2026-08-01.md`](../runtime-artifacts/automated/loudness-real-device-2026-08-01.md).
 
 ### Task 12: MR-denoise (implementation-slice-3d159672cfd1fc67)
 
@@ -627,7 +666,7 @@
   - Expose preview toggle, apply/reset, cancellation, and undo/redo in the Audio Inspector.
   - On a speech-plus-noise fixture, assert at least 3 dB SNR improvement with no clipping, and verify preview/export use identical denoise parameters.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-media/tests/denoise.rs#deterministic_noise_fixture_and_bypass` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
   - `src-tauri/src/playback/audio.rs#denoise_preview_uses_shared_processing_owner` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
@@ -635,7 +674,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-media --test denoise deterministic_noise_fixture_and_bypass -- --exact`
   - Run: `cargo test -p opentake-tauri --no-default-features --features playback-engine denoise_preview_uses_shared_processing_owner`
@@ -643,11 +682,11 @@
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-media/src/analysis/denoise.rs`, `src-tauri/src/playback/audio.rs`, `src-tauri/src/export.rs`, `docs/architecture/CAPCUT-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-media --test denoise deterministic_noise_fixture_and_bypass -- --exact`
   - Run: `cargo test -p opentake-tauri --no-default-features --features playback-engine denoise_preview_uses_shared_processing_owner`
@@ -655,11 +694,13 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS. The reviewed owning tests first failed because no shared denoise owner existed, then passed after the domain contract, pure-Rust spectral processor, playback/export integration, command/undo path, cancellable Tauri job and Inspector controls were connected. A second RED regression caught a rare STFT boundary peak (`input=0.388362`, `output=1.000000`); the edge crossfade and no-new-peak bound fixed it. The complete Rust workspace, warnings-denied Clippy, formatting and diff checks passed; the Web suite passed 91 files / 818 tests and the production build passed with only the pre-existing chunk/dynamic-import warnings. In the rebuilt ad-hoc-signed macOS app, adaptive and voice modes, strength, preview toggle, apply/reset, cancellation, undo/redo, native playback, save/reopen persistence, and export with preview disabled were exercised. The deterministic speech-plus-noise fixture improved from `10.414 dB` to `16.2872 dB` SDR (`+5.8732 dB`), while the exported AAC peak remained `-8.645 dB`. Runtime evidence: [`denoise-real-device-2026-08-01.md`](../runtime-artifacts/automated/denoise-real-device-2026-08-01.md).
 
 ### Task 13: MR-stems (implementation-slice-9139657f9c8c7ff5)
 
@@ -679,39 +720,41 @@
 
 - Candidate/source: `doc-8a0fdfbeaab482c5` at `docs/architecture/CAPCUT-GAP.md:176` (requirement)
 - Expected behavior: Separate vocals/music/stems locally or through an explicitly configured generation provider.
-- Resolution: `reviewed-mapping-report:MR-stems` — No stem separation implementation was found; results must re-enter the shared media import and provenance path.
+- Resolution: `reviewed-mapping-report:MR-stems` — Completed for the explicitly scoped local centre/side extractor: both results re-enter the shared media import and provenance path; broader semantic separation remains tracked as a separate partial gap.
 - Exact acceptance contract:
   - Implementation: Implement an asynchronous stem-separation job with model installation/integrity checks, progress/cancel, derived-asset import, privacy/error UX, and audio-quality/integration fixtures; document local versus hosted execution.
   - Add deterministic media fixtures and golden frame, audio, timeline, or export assertions for every named capability and boundary; the affected render/media suites must pass.
   - Run the packaged preview/export path on representative media and retain exact output or runtime evidence before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-media/tests/stems.rs#local_or_explicit_provider_selection_cancellation_provenance_and_cleanup` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-media --test stems local_or_explicit_provider_selection_cancellation_provenance_and_cleanup -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-media/src/analysis/stems.rs`, `crates/opentake-gen/src/stems.rs`, `crates/opentake-core/src/session.rs`, `docs/architecture/CAPCUT-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-media --test stems local_or_explicit_provider_selection_cancellation_provenance_and_cleanup -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS. The reviewed owning test first failed because no stem owner existed, then passed after adding the bundled `opentake-center-v1` integrity-checked local profile, cancellable progress reporting, atomic two-output publication, explicit hosted-provider/privacy policy, atomic derived-asset import and source/model provenance. A packaged-runtime defect review then produced three additional RED regressions: selecting a generated source entered a Zustand selector update loop, project-relative derived media did not expose its resolved preview path, and the original side-channel accompaniment cancelled in the current mono export mixdown. Stable selectors, resolved DTO paths and dual-mono stem publication fixed those failures. The rebuilt ad-hoc-signed macOS app exercised local privacy copy, hosted consent/configuration fail-closed behavior, successful separation, save/reopen provenance, direct preview, timeline playback, independent vocals/accompaniment export, and cancellation of a 1,800-second job with no derived manifest entries or partial files. The local profile is deliberately a deterministic centre/side extractor for centred voice/dialogue, not semantic Demucs/MDX separation; hosted transport remains unavailable until an adapter is configured. Architecture and execution boundaries are documented in [`STEM-SEPARATION.md`](../../../architecture/STEM-SEPARATION.md). Runtime evidence: [`stems-real-device-2026-08-01.md`](../runtime-artifacts/automated/stems-real-device-2026-08-01.md).
 
 ### Task 14: MR-linked-audio-complete (implementation-slice-cbce9a4174a73347)
 
@@ -741,36 +784,40 @@
   - Visible/returned assertion: assert the exact returned status plus deterministic frame/audio/container properties or typed unsupported/error output, and verify preview/export parity when both paths are named.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-render/tests/completion_1c3d81a8b3ab2d59.rs#completion_1c3d81a8b3ab2d59_do_not_create_a_linked_audio_track_when_probe_pr.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-agent/src/mcp/dispatch.rs#add_clips_does_not_link_audio_when_source_has_no_audio` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-agent/src/mcp/dispatch.rs#insert_clips_does_not_link_audio_when_source_has_no_audio` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and adjudicate the inherited baseline**
 
   - Run: `cargo test -p opentake-agent add_clips_does_not_link_audio_when_source_has_no_audio`
   - Run: `cargo test -p opentake-agent insert_clips_does_not_link_audio_when_source_has_no_audio`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Result: The current baseline was already GREEN, not RED. The two exact owning tests entered history in `a2f34cb` with the Agent linked-audio fix, while the zero-channel probe regression entered in `9920468`. No artificial failure was introduced merely to recreate historical RED; the current acceptance run executed both Agent tests and the probe regression directly.
+
+- [x] **Step 3: Verify the existing vertical slice and update its acceptance record**
 
   Modify only `crates/opentake-agent/src/mcp/dispatch.rs`, `crates/opentake-ops/src/ops/place.rs`, `docs/architecture/EDITING-ENGINE-PLAN.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-agent add_clips_does_not_link_audio_when_source_has_no_audio`
   - Run: `cargo test -p opentake-agent insert_clips_does_not_link_audio_when_source_has_no_audio`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS. `cargo test -p opentake-agent does_not_link_audio_when_source_has_no_audio` executed both exact add/insert tests with 2/2 passing, and `cargo test -p opentake-media video_with_zero_channel_audio_has_no_audio` executed the probe test with 1/1 passing. The complete workspace gate had already passed on the same executable source immediately before this documentation-only reclassification. In the rebuilt release `.app`, an isolated project imported a five-second H.264 file with no audio stream, persisted `hasAudio:false`, created only a V1 clip with no `linkGroupId`, played normally, and exported 150 frames. Independent FFprobe inspection of the exported MP4 found one H.264 1280×720/30 fps stream and no audio stream. Runtime evidence: [`linked-audio-real-device-2026-08-01.md`](../runtime-artifacts/automated/linked-audio-real-device-2026-08-01.md).
 
 ### Task 15: MR-hdr-proxy-account-composite (implementation-slice-d2a7a5861f5ebc9b)
 
@@ -793,23 +840,23 @@
   - Implement proxy creation, switching, relink, and persistence.
   - Finish account/provider session integration and cover offline/reopen behavior.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-render/tests/composite_acceptance.rs#hdr_proxy_account_children_close_one_composite_acceptance` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-render --test composite_acceptance hdr_proxy_account_children_close_one_composite_acceptance -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `docs/architecture/HANDOFF-2026-07.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-render --test composite_acceptance hdr_proxy_account_children_close_one_composite_acceptance -- --exact`
 
@@ -820,6 +867,23 @@
   Run: `node --test tools/completion-audit.test.mjs`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Current result (2026-08-01): product verification is GREEN (`cargo test
+  --workspace --no-fail-fast`, workspace Clippy with `-D warnings`, Rust fmt,
+  Web 93 files / 824 tests, and the production build). The exact completion
+  audit ran 206 tests with 205 passing; its only failure is the protected
+  `repository-files.json` inventory omitting previously tracked files. This
+  step remains unchecked until that user-owned inventory is reconciled rather
+  than overwritten by this slice.
+
+Functional completion evidence (2026-08-01): the owning composite test first
+failed because the target did not exist, then passed after separate HDR, proxy,
+and account children were implemented and verified. Packaged macOS testing
+found and fixed bundled-FFmpeg HDR black output, missing asset-protocol scope
+for proxies, and a final no-follow ancestor-directory boundary. The latest
+ad-hoc-signed app and its DMG copy pass strict deep verification; packaged GUI
+remove/recreate/persist/playback and original-only export pass. Full receipt:
+`../runtime-artifacts/automated/hdr-proxy-account-real-device-2026-08-01.md`.
 
 ### Task 16: MR-bounded-audio-streaming (implementation-slice-d1864a5db0605004)
 
@@ -846,36 +910,44 @@
   - Handle seek, pause, resume, underrun, and cancellation.
   - Add long-duration memory and A/V sync runtime tests.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `src-tauri/src/playback/audio.rs#large_mix_observes_cancellation_between_chunks` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `src-tauri/src/playback/audio.rs#long_timeline_mix_has_constant_peak_allocation_and_matches_short_reference` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-tauri large_mix_observes_cancellation_between_chunks`
   - Run: `cargo test -p opentake-tauri long_timeline_mix_has_constant_peak_allocation_and_matches_short_reference`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `src-tauri/src/playback/audio.rs#mix_timeline_stereo`, `src-tauri/src/export.rs#mix_timeline_audio`, `crates/opentake-media/src/encode/mod.rs#VideoEncoder`, `docs/architecture/HANDOFF-2026-07.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-tauri large_mix_observes_cancellation_between_chunks`
   - Run: `cargo test -p opentake-tauri long_timeline_mix_has_constant_peak_allocation_and_matches_short_reference`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Completed 2026-08-01. The reviewed RED first failed because
+`mix_stereo_windows` did not exist. Playback now uses a bounded 2-second/4-slot
+generation queue; seek, pause/resume, underrun, cancellation, and teardown are
+covered. Export and save-as-WAV stream the same bounded windows to file-backed
+output. Both reviewed focused tests, the workspace gate, strict Clippy, Web
+tests/build, and packaged macOS playback/export/WAV probes pass. Full receipt:
+`../runtime-artifacts/automated/bounded-audio-streaming-real-device-2026-08-01.md`.
 
 ### Task 17: MR-renderer-debt-composite (implementation-slice-827681eebfb87194)
 
@@ -1034,7 +1106,7 @@
   - Visible/returned assertion: assert the exact returned status plus deterministic frame/audio/container properties or typed unsupported/error output, and verify preview/export parity when both paths are named.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-project/tests/completion_428f02e756802f9f.rs#completion_428f02e756802f9f_the_playback_subsystem_implements_project_source.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/preview/playbackRoute.test.ts#routes plain forward video to WebKit` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `web/src/components/preview/nativePlaybackSession.test.ts#publishes only increasing matching frame sequences` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -1043,7 +1115,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/preview/playbackRoute.test.ts -t "routes plain forward video to WebKit"`
   - Run: `pnpm -C web test -- --run src/components/preview/nativePlaybackSession.test.ts -t "publishes only increasing matching frame sequences"`
@@ -1052,11 +1124,16 @@
 
   Expected: FAIL because one or more of the 6 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Reconciliation note (2026-08-01): this slice was implemented and reviewed in
+  the historical commits already named by `PLAYBACK-ENGINE.md` before this
+  generated checklist existed. The current baseline therefore produced GREEN;
+  no approved implementation was reverted merely to manufacture a new RED.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/preview/playbackRoute.ts#resolveTimelinePlaybackRoute`, `web/src/components/preview/nativePlaybackSession.ts`, `web/src/components/preview/rustFrameBuffer.ts`, `src-tauri/src/playback/engine.rs#PlaybackEngine`, `src-tauri/src/playback/resolver.rs#PlaybackResolverState`, `docs/architecture/PLAYBACK-ENGINE.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/preview/playbackRoute.test.ts -t "routes plain forward video to WebKit"`
   - Run: `pnpm -C web test -- --run src/components/preview/nativePlaybackSession.test.ts -t "publishes only increasing matching frame sequences"`
@@ -1065,11 +1142,19 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Verified 2026-08-01 as a reconciliation-only slice: all four exact owning tests
+pass on the current implementation; the complete Web suite is 93 files / 824
+tests, and the Task16 workspace gate already passed without an intervening code
+change. The final packaged application advanced and paused both WebKit and Rust
+routes, then reopened the WebKit project at its own zero playhead and 60-second
+duration after the Rust project boundary. Full receipt:
+`../runtime-artifacts/automated/playback-route-lifecycle-real-device-2026-08-01.md`.
 
 ### Task 19: MR-release-readiness-composite (implementation-slice-dd9855c810140649)
 
@@ -1196,36 +1281,45 @@
   - Visible/returned assertion: assert the exact success payload for the valid case and a stable typed error for the invalid case, including zero partial side effects and no leaked internal path or credential.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-project/tests/completion_9900e773f8c063a8.rs#completion_9900e773f8c063a8_decode_both_proxy_id_and_upstream_id_job_shapes_.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-gen/src/job.rs#deserializes_proxy_shape_with_id` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-gen/src/job.rs#deserializes_upstream_shape_with_underscore_id` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-gen deserializes_proxy_shape_with_id`
   - Run: `cargo test -p opentake-gen deserializes_upstream_shape_with_underscore_id`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Reconciliation note (2026-08-01): the serde alias/default implementation and
+  both named tests predate this generated checklist, so the current baseline was
+  already GREEN. The proxy-shape owner was extended to assert all four absent
+  optional fields rather than reverting valid code to manufacture RED.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-gen/src/job.rs#GenerationJob`, `docs/modules/opentake-gen/client-transport.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-gen deserializes_proxy_shape_with_id`
   - Run: `cargo test -p opentake-gen deserializes_upstream_shape_with_underscore_id`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Verified 2026-08-01. Both exact job-shape tests and the complete
+`opentake-gen` package pass; formatting and diff checks pass. The immediately
+preceding unchanged-code workspace gate passed in Task16.
 
 ### Task 22: MR-cli-sidecar-boundary-complete (implementation-slice-bdb1294b5e15ccf0)
 
@@ -1272,36 +1366,52 @@
   - Visible/returned assertion: assert the returned project/error variant, exact post-operation files and decoded state, and save-then-reopen equality or the specified fail-closed no-write result.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-project/tests/completion_fd42ddbda4988918.rs#completion_fd42ddbda4988918_use_the_ffmpeg_ffprobe_sidecar_boundary_rather_t.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-media/src/ff.rs#env_override_is_respected_for_ffmpeg` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-media/src/ff.rs#default_ffprobe_is_ffprobe` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-media env_override_is_respected_for_ffmpeg`
   - Run: `cargo test -p opentake-media default_ffprobe_is_ffprobe`
 
   Expected: FAIL because one or more of the 2 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  RED recorded 2026-08-01: the corrected owning tests failed to compile because
+  the pure `resolve_cli_path` decision boundary did not exist.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-media/src/ff.rs#ffmpeg_path`, `crates/opentake-media/src/ff.rs#ffprobe_path`, `crates/opentake-media/Cargo.toml`, `docs/modules/opentake-media/OVERVIEW.md`, `docs/modules/opentake-media/probe-ff.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-media env_override_is_respected_for_ffmpeg`
   - Run: `cargo test -p opentake-media default_ffprobe_is_ffprobe`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Completed 2026-08-01. The resolver now has a deterministic tested priority of
+environment override, regular non-symlink packaged sidecar, then PATH. Exact
+owners and package regressions pass. The final macOS app contains runnable
+FFmpeg/ffprobe 6.0 and has no dynamic libav link; its current `--enable-nonfree`
+configuration remains a distribution-license blocker outside this boundary.
+Receipt: `../runtime-artifacts/automated/cli-sidecar-boundary-real-device-2026-08-01.md`.
+
+Superseded later on 2026-08-01: Apple Silicon now uses archive-and-binary
+checksum-pinned FFmpeg/ffprobe 7.0 GPL builds. The provisioner rejects
+`--enable-nonfree` and unredistributable license output before replacement, and
+the complete `opentake-media` suite passes against the replacement pair. See
+`../runtime-artifacts/automated/ffmpeg-license-replacement-2026-08-01.md`.
 
 ### Task 23: MR-motion-decoder-injection-complete (implementation-slice-ee5b0fb9f6f3c487)
 
@@ -1346,36 +1456,45 @@
   - Visible/returned assertion: assert the returned project/error variant, exact post-operation files and decoded state, and save-then-reopen equality or the specified fail-closed no-write result.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-project/tests/completion_c837d207c03a37cb.rs#completion_c837d207c03a37cb_inject_frame_decoding_into_motionclipsource_with.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-motion/src/integration.rs#decoded_frame_returns_rgba_of_right_shape` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-motion/tests/pipeline.rs#full_pipeline_render_cache_and_ingest` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-motion decoded_frame_returns_rgba_of_right_shape`
   - Run: `cargo test -p opentake-motion --test pipeline full_pipeline_render_cache_and_ingest -- --exact`
 
   Expected: FAIL because one or more of the 2 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Reconciliation note (2026-08-01): the closure-injection implementation and
+  both named owners predate this generated checklist, so the current baseline
+  is already GREEN; valid code was not reverted to manufacture RED.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-motion/src/integration.rs#MotionClipSource::new`, `docs/modules/opentake-motion/OVERVIEW.md`, `docs/modules/opentake-motion/integration.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-motion decoded_frame_returns_rgba_of_right_shape`
   - Run: `cargo test -p opentake-motion --test pipeline full_pipeline_render_cache_and_ingest -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Verified 2026-08-01. Both exact owners, all 58 motion tests, formatting, and
+warnings-denied motion Clippy pass. Production dependencies contain no image or
+ffmpeg decoder; `image` remains test-only. This closes decoder injection only,
+not the separately owned desktop motion/Lottie materialization.
 
 ### Task 24: MR-native-chromium (implementation-slice-1687c4455b65f8a6)
 
@@ -1401,36 +1520,58 @@
   - Enforce request interception allowlists, CSP, document limits, cancellation, timeout, deterministic clock, and no ambient filesystem/network access.
   - Integration tests render a fixed animation twice byte-identically and cover blocked network, timeout, crash, malformed source, and cancellation.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-motion/src/renderer.rs#chromium_skeleton_reports_unavailable_not_panic` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-motion/tests/chromium.rs#virtual_time_network_csp_timeout_cleanup_and_frame_identity` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-motion chromium_skeleton_reports_unavailable_not_panic`
   - Run: `cargo test -p opentake-motion --test chromium virtual_time_network_csp_timeout_cleanup_and_frame_identity -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  RED recorded 2026-08-01 with `--features chromium`: the planned test failed
+  to compile because cancellation, browser discovery/path injection, and the
+  live backend did not exist. The feature flag is required to exercise the live
+  owner; the unfeatured command intentionally verifies only fail-closed
+  `RendererUnavailable` behavior.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-motion/src/renderer.rs#HeadlessChromiumRenderer::render`, `crates/opentake-motion/src/integration.rs#MotionClipSource`, `docs/modules/opentake-motion/OVERVIEW.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-motion chromium_skeleton_reports_unavailable_not_panic`
   - Run: `cargo test -p opentake-motion --test chromium virtual_time_network_csp_timeout_cleanup_and_frame_identity -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+  GREEN verified 2026-08-01 against Google Chrome 150.0.7871.187. The live
+  exact owner rendered a fixed animation twice byte-identically, advanced
+  visible virtual-time frames, decoded a real browser PNG through
+  `MotionClipSource`, allowed an exact loopback origin, blocked a disallowed
+  origin, fused a runaway script, handled process crash and malformed source,
+  cancelled an in-flight render, removed partial frames, and left no browser
+  profile. The existing owner passes both default and feature-enabled builds.
+
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01. Formatting, default and feature-enabled warnings-denied
+  Clippy, all 59 feature-enabled motion tests, and the full workspace Rust suite
+  pass. The first workspace attempt stopped only because generated debug
+  artifacts filled the disk; after deleting `target/debug/deps` and
+  `target/debug/incremental` (release bundle preserved), the identical command
+  passed. Runtime receipt:
+  `runtime-artifacts/automated/headless-chromium-real-device-2026-08-01.md`.
 
 ### Task 25: MR-motion-missing-frame-complete (implementation-slice-f16a70f238444e28)
 
@@ -1458,33 +1599,48 @@
   - Visible/returned assertion: assert the exact success payload for the valid case and a stable typed error for the invalid case, including zero partial side effects and no leaked internal path or credential.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-project/tests/completion_379e138c3e674f1b.rs#completion_379e138c3e674f1b_treat_a_missing_corrupt_decoded_motion_frame_as_.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-motion/src/integration.rs#missing_decoder_result_is_none` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-motion missing_decoder_result_is_none`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Reconciliation note (2026-08-01): `MotionClipSource::frame` already returned
+  the injected decoder's `None` unchanged, so the baseline owner was GREEN.
+  The owner was strengthened to use one valid PNG, one actually corrupted PNG,
+  and one actually deleted frame and still remained GREEN; valid code was not
+  reverted to manufacture RED.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-motion/src/integration.rs#MotionClipSource::frame`, `docs/modules/opentake-motion/integration.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-motion missing_decoder_result_is_none`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+  Verified 2026-08-01. The valid frame decodes at `6x4`; corrupt and missing
+  frames both return `None`; decoder calls do not recreate the missing file,
+  rewrite the corrupt bytes, or change the cache directory entry count.
+
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01. Focused owner, warnings-denied motion Clippy,
+  formatting, and the full workspace Rust suite pass. Evidence:
+  code:`crates/opentake-motion/src/integration.rs#MotionClipSource::frame` and
+  test:`crates/opentake-motion/src/integration.rs#missing_decoder_result_is_none`.
 
 ### Task 26: MR-motion-sandbox-complete (implementation-slice-70b5cbcce858ecde)
 
@@ -1546,36 +1702,50 @@
   - Visible/returned assertion: assert the returned project/error variant, exact post-operation files and decoded state, and save-then-reopen equality or the specified fail-closed no-write result.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-project/tests/completion_3a71829a7b489aae.rs#completion_3a71829a7b489aae_apply_sandbox_document_size_checks_before_both_s.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-motion/src/sandbox.rs#document_size_ceiling_enforced` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-motion/src/renderer.rs#chromium_applies_sandbox_size_before_unavailable` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-motion document_size_ceiling_enforced`
   - Run: `cargo test -p opentake-motion chromium_applies_sandbox_size_before_unavailable`
 
   Expected: FAIL because one or more of the 3 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Reconciliation note (2026-08-01): both checks predated this generated plan,
+  so the baseline owners were already GREEN. Owners were extended with exact
+  byte/UTF-8 boundaries, both renderer paths, both Chromium feature modes, and
+  zero cache-directory side effects; valid code was not reverted to manufacture
+  RED.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-motion/src/renderer.rs#StubRenderer::render`, `crates/opentake-motion/src/renderer.rs#HeadlessChromiumRenderer::render`, `crates/opentake-motion/src/sandbox.rs#SandboxPolicy::check_document_size`, `docs/modules/opentake-motion/renderer.md`, `docs/modules/opentake-motion/sandbox.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-motion document_size_ceiling_enforced`
   - Run: `cargo test -p opentake-motion chromium_applies_sandbox_size_before_unavailable`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+  Verified 2026-08-01. Equality at the byte ceiling passes; one byte over and a
+  multi-byte UTF-8 overflow fail. Stub, unfeatured Chromium, and feature-enabled
+  Chromium all return `Sandbox` before creating a content-hash directory.
+
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01. Both focused owners in default mode, the Chromium owner
+  with the live feature, feature-enabled warnings-denied Clippy, formatting, and
+  the full workspace Rust suite pass.
 
 ### Task 27: MR-motion-png-complete (implementation-slice-329d3a7fb3b066f7)
 
@@ -1604,36 +1774,51 @@
   - Visible/returned assertion: assert the returned project/error variant, exact post-operation files and decoded state, and save-then-reopen equality or the specified fail-closed no-write result.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-project/tests/completion_2071153f8053805d.rs#completion_2071153f8053805d_emit_deterministic_rgba_png_frames_from_the_stub.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-motion/src/renderer.rs#stub_output_is_deterministic` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-motion/src/renderer.rs#stub_png_decodes_with_correct_dimensions_and_alpha` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-motion stub_output_is_deterministic`
   - Run: `cargo test -p opentake-motion stub_png_decodes_with_correct_dimensions_and_alpha`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Reconciliation note (2026-08-01): the dependency-free encoder and both
+  owners predated this generated plan, so baseline was already GREEN. Owners
+  were strengthened with PNG magic, exact RGBA, direct byte identity, and a
+  multi-block stored-deflate boundary; valid code was not reverted to
+  manufacture RED.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-motion/src/renderer.rs#encode_solid_rgba_png`, `docs/modules/opentake-motion/renderer.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-motion stub_output_is_deterministic`
   - Run: `cargo test -p opentake-motion stub_png_decodes_with_correct_dimensions_and_alpha`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+  Verified 2026-08-01. Separate cache roots emit byte-identical PNGs; the real
+  decoder confirms dimensions/alpha and exact corner RGBA for a `200x100`
+  image whose scanlines cross the 65,535-byte deflate block boundary. `image`
+  remains dev-only in `opentake-motion/Cargo.toml`.
+
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01. Both focused owners, warnings-denied motion Clippy,
+  formatting, and the full workspace Rust suite pass. `image` is listed only
+  under `opentake-motion` dev-dependencies.
 
 ### Task 28: MR-project-serde-complete (implementation-slice-9c460dd3f289f9bd)
 
@@ -1663,36 +1848,45 @@
   - Visible/returned assertion: assert the returned project/error variant, exact post-operation files and decoded state, and save-then-reopen equality or the specified fail-closed no-write result.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-agent/tests/completion_f2992815147bed14.rs#completion_f2992815147bed14_decode_persisted_project_domain_models_compatibl.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-project/tests/upstream_compat.rs#applies_clip_defaults_for_omitted_fields` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-project/tests/upstream_compat.rs#migrates_generation_log_legacy_cost_and_version` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and reconcile the baseline state**
 
   - Run: `cargo test -p opentake-project --test upstream_compat applies_clip_defaults_for_omitted_fields -- --exact`
   - Run: `cargo test -p opentake-project --test upstream_compat migrates_generation_log_legacy_cost_and_version -- --exact`
 
-  Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
+  Reconciled 2026-08-01: both strengthened owners remained GREEN before the
+  documentation-only implementation pass. The existing deserializers already
+  satisfied the candidate contract, so no artificial production regression
+  was introduced solely to manufacture RED.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-project/src/bundle.rs#Project::open_from_root`, `crates/opentake-domain/src/media.rs#MediaManifest::deserialize`, `docs/modules/opentake-project/OVERVIEW.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-project --test upstream_compat applies_clip_defaults_for_omitted_fields -- --exact`
   - Run: `cargo test -p opentake-project --test upstream_compat migrates_generation_log_legacy_cost_and_version -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01. Both focused owners pass with save/reopen equality,
+  explicit and absent manifest-version assertions, legacy generation-cost
+  migration, and stable synthesized IDs. Formatting, warnings-denied Clippy
+  for `opentake-project` and `opentake-domain`, and the full workspace Rust
+  suite pass.
 
 ### Task 29: MR-mask-effect-mixed-duplicate (implementation-slice-35e4fa716888cc28)
 
@@ -1716,33 +1910,43 @@
   - Implement an explicit registry/pass pipeline for every shipped Effect name; reject unsupported names at the command boundary rather than silently passing metadata.
   - GPU/pixel-diff tests cover polygon inside/outside/edge/feather/invert, multiple masks, effect order, disabled effects, preview/export parity, and headless skip semantics.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-render/tests/composite_acceptance.rs#mask_and_effect_records_have_separate_child_owners` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-render --test composite_acceptance mask_and_effect_records_have_separate_child_owners -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-render/src/gpu/compositor.rs`, `docs/modules/opentake-render/OVERVIEW.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-render --test composite_acceptance mask_and_effect_records_have_separate_child_owners -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01. The parent owner first failed on the stale module claim
+  that polygon masks and generic effects were no-op metadata, then passed after
+  the documentation and defensive compositor contract were corrected. Both
+  real-GPU child owners pass, including all three mask shapes, hard/feathered
+  and inverted coverage, multiple-mask intersection, every registered effect,
+  disabled effects, ordered chains, and byte-identical preview/export output.
+  The parent also proves mask/point overflow and unknown effects fail before
+  mutation. Formatting, warnings-denied render Clippy, and the full workspace
+  Rust suite pass.
 
 ### Task 30: MR-text-parity (implementation-slice-f92ff19f85ab4082)
 
@@ -1768,7 +1972,7 @@
   - Add a pinned upstream comparison fixture for wrapping, fallback fonts, shadow padding, stroke width, size, and alignment across Chinese/Latin text.
   - Pass deterministic structural/pixel thresholds on macOS and the headless fallback while preserving non-crashing no-font behavior.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-render/tests/gpu_text.rs#rasterize_is_deterministic_ssim_one` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-render/tests/gpu_text.rs#natural_size_shadow_padding_matches_upstream` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -1776,7 +1980,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-render --test gpu_text rasterize_is_deterministic_ssim_one -- --exact`
   - Run: `cargo test -p opentake-render --test gpu_text natural_size_shadow_padding_matches_upstream -- --exact`
@@ -1784,11 +1988,11 @@
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-render/src/gpu/text_engine.rs#CosmicTextRasterizer`, `crates/opentake-render/src/plan/types.rs#TextureSource::Text`, `docs/modules/opentake-render/text-rasterizer.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-render --test gpu_text rasterize_is_deterministic_ssim_one -- --exact`
   - Run: `cargo test -p opentake-render --test gpu_text natural_size_shadow_padding_matches_upstream -- --exact`
@@ -1796,11 +2000,22 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01. The new owner first failed to compile because the
+  explicit no-font constructor did not exist; after adding it, the real empty
+  font database exposed cosmic-text's `no default font found` panic. The
+  production rasterizer now branches before shaping and returns the correctly
+  sized transparent premultiplied frame while preserving background/border
+  rendering. The pinned structural matrix passes for missing-family fallback,
+  Chinese/Latin text, wrapping, alignment, 12px-per-side shadow padding, and
+  1/2/4px border scaling at 540p/1080p/2160p. All eight text integration tests,
+  warnings-denied render Clippy, formatting, and the full workspace Rust suite
+  pass on macOS with real system fonts.
 
 ### Task 31: MR-media-principles-headings (implementation-slice-726e8186554da9b6)
 
@@ -1843,33 +2058,47 @@
   - Visible/returned assertion: assert the exact returned status plus deterministic frame/audio/container properties or typed unsupported/error output, and verify preview/export parity when both paths are named.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-render/tests/completion_3336fb8bef6f3a49.rs#completion_3336fb8bef6f3a49_media_code_follows_cross_platform_frame_time_cac.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-render/tests/composite_acceptance.rs#media_principles_headings_reference_exact_child_capabilities` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-render --test composite_acceptance media_principles_headings_reference_exact_child_capabilities -- --exact`
 
   Expected: FAIL because one or more of the 2 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `docs/specs/media/0-principles.md`, `docs/specs/media/9-domain-contract.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-render --test composite_acceptance media_principles_headings_reference_exact_child_capabilities -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `node --test tools/completion-audit.test.mjs`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01. The aggregate owner first failed because neither
+  principle heading bound itself to executable children. Both documents now
+  reference the exact real-media probe, RGBA decode, 16 kHz PCM, waveform,
+  encode/reprobe, and export-pause owners; every child passes against local
+  generated fixtures. The compliance document now describes the actual FFmpeg
+  subprocess-sidecar architecture and explicitly retains the bundled
+  `--enable-nonfree` binary as a Beta release blocker. The focused aggregate,
+  formatting, and completion-audit Node gate pass.
+
+  Superseded later on 2026-08-01: the Apple Silicon pair is now a pinned GPL
+  7.0 build without `--enable-nonfree`, guarded by a fail-closed license check.
+  Native checks for other packaged targets and final package evidence remain
+  part of release readiness.
 
 ### Task 32: MR-bounded-index-runtime (implementation-slice-603290a188109040)
 
@@ -1931,36 +2160,49 @@
   - Deduplicate duplicate requests, persist completed state atomically, invalidate changed media/model, and resume interrupted work after restart.
   - Test duplicate enqueue, source change, model upgrade, export pause/resume, cancellation, crash/restart, failure retry, and final index/transcript equality.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-media/src/index_coordinator.rs#export_pause_ref_counts` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `src-tauri/src/search.rs#bounded_single_worker_cancels_skips_stale_and_yields_to_playback_export` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-media export_pause_ref_counts`
   - Run: `cargo test -p opentake-tauri bounded_single_worker_cancels_skips_stale_and_yields_to_playback_export`
 
   Expected: FAIL because one or more of the 4 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `src-tauri/src/search.rs#search_index_start`, `src-tauri/src/search.rs#index_assets`, `crates/opentake-media/src/index_coordinator.rs#ExportPause`, `crates/opentake-media/src/ort_worker/mod.rs#OrtModel`, `docs/specs/media/10-acceptance.md`, `docs/specs/media/7-ort-worker.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-media export_pause_ref_counts`
   - Run: `cargo test -p opentake-tauri bounded_single_worker_cancels_skips_stale_and_yields_to_playback_export`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01. The owning tests first failed because the shared
+  pressure primitive had no balanced guard/wait protocol and no bounded worker
+  existed. Production `search_index_start` now submits one source/model-keyed
+  job to a process-wide capacity-8 `OrtWorker`; that job uses a lazy typed model
+  registry and serially performs missing visual and transcript work, checking
+  cancellation and playback/export pressure at every asset boundary. The
+  executor proves single-worker execution, live-key result dedupe, priority
+  FIFO, a four-interactive-job starvation bound, queue-full rejection,
+  queued/running cancellation, model-error and panic recovery, immediate failure
+  retry, balanced nested pressure wakeup, source/model invalidation, restart,
+  and clean shutdown with zero active jobs. Both focused owners, rustfmt,
+  all-feature clippy with `-D warnings`, and the full workspace suite pass.
 
 ### Task 33: MR-packaged-ffmpeg (implementation-slice-ddfcf34d5292a998)
 
@@ -1986,33 +2228,54 @@
   - Resolve packaged sidecar paths without relying on developer PATH.
   - Run installed-app probe/decode/encode smoke tests on macOS and Windows.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `scripts/tests/packaged-sidecars-test.rb#packaged_macos_windows_sidecars_resolve_and_execute` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `ruby scripts/tests/packaged-sidecars-test.rb --name "packaged_macos_windows_sidecars_resolve_and_execute"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-media/src/ff.rs#ffmpeg_path`, `crates/opentake-media/src/ff.rs#ffprobe_path`, `src-tauri/tauri.conf.json`, `docs/specs/media/2-ffmpeg.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `ruby scripts/tests/packaged-sidecars-test.rb --name "packaged_macos_windows_sidecars_resolve_and_execute"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Reconciled 2026-08-01 from the tracked RED/GREEN receipt and reverified on
+  the current descendant. The original owner failed before the immutable
+  sidecar lock existed, then passed after checksum/version-pinned macOS arm64,
+  macOS x64, and Windows x64 supplies plus both platform `externalBin` configs
+  were added. Current macOS arm64 source binaries pass verify-only and the
+  empty-`PATH` probe/decode/encode smoke; the exact release `.app` sibling pair
+  passes the same installed-package owner and nested codesign verification.
+  GitHub Actions run `30614001607`, exact SHA
+  `9eeeb6ffe3088a16f19946ceb7db5e90090356ac`, remains a successful ancestor
+  receipt: its Windows full-product job built MSI/NSIS, silently installed NSIS,
+  and passed the installed-directory empty-`PATH` smoke. Current packaged-path
+  tests, Windows CI/config contracts, rustfmt, and the full workspace suite pass.
+  This closes sidecar resolution/execution only; the separately tracked
+  `--enable-nonfree` licensing replacement and Developer-ID/notarization gates
+  remain Beta-release blockers.
+
+  Superseded later on 2026-08-01 for Apple Silicon: the licensing replacement
+  is complete and the media suite passes against the new pair. Developer-ID/
+  notarization and native Windows/macOS Intel final-package evidence remain
+  separate release gates.
 
 ### Task 34: MR-ffmpeg-contract-complete (implementation-slice-2edbd096c204bad4)
 
@@ -2091,7 +2354,7 @@
   - Visible/returned assertion: assert the returned project/error variant, exact post-operation files and decoded state, and save-then-reopen equality or the specified fail-closed no-write result.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-project/tests/completion_376576e91988107c.rs#completion_376576e91988107c_the_named_ffmpeg_probe_decode_pcm_encode_contrac.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-media/tests/ffmpeg_integration.rs#probe_reports_dimensions_fps_and_audio` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-media/tests/ffmpeg_integration.rs#decode_frame_returns_rgba_of_expected_size` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -2100,7 +2363,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and reconcile the historical baseline**
 
   - Run: `cargo test -p opentake-media --test ffmpeg_integration probe_reports_dimensions_fps_and_audio -- --exact`
   - Run: `cargo test -p opentake-media --test ffmpeg_integration decode_frame_returns_rgba_of_expected_size -- --exact`
@@ -2109,11 +2372,11 @@
 
   Expected: FAIL because one or more of the 4 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-media/src/probe.rs#probe`, `crates/opentake-media/src/decode/frame.rs#decode_frame_at`, `crates/opentake-media/src/decode/pcm.rs#extract_pcm`, `crates/opentake-media/src/encode/mod.rs#VideoEncoder`, `docs/specs/media/2-ffmpeg.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-media --test ffmpeg_integration probe_reports_dimensions_fps_and_audio -- --exact`
   - Run: `cargo test -p opentake-media --test ffmpeg_integration decode_frame_returns_rgba_of_expected_size -- --exact`
@@ -2122,11 +2385,22 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Reconciled 2026-08-01 as an already-integrated baseline. Git history shows
+  all four named owning fixtures and their production paths landed together in
+  `d9b2812`; its parent does not contain the tests, so there is no honest
+  test-present/implementation-missing RED command to replay. On the current
+  descendant, each exact owner independently passes against generated local
+  media: probe returns dimensions/FPS/audio, frame decode returns the expected
+  RGBA shape, PCM extraction returns 16 kHz mono, and encoded output re-probes
+  as playable video. The checksum-pinned packaged sidecars also pass the
+  empty-`PATH` installed-app smoke, and rustfmt plus the full workspace suite
+  pass. No production change was required for this reconciliation.
 
 ### Task 35: MR-media-facade (implementation-slice-3adf63f547b1f57b)
 
@@ -2205,36 +2479,47 @@
   - Visible/returned assertion: assert the returned project/error variant, exact post-operation files and decoded state, and save-then-reopen equality or the specified fail-closed no-write result.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-project/tests/completion_94ba8c5254bc852d.rs#completion_94ba8c5254bc852d_the_media_facade_exposes_probe_decode_encode_sea.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-media/src/lib.rs#crate_public_types_are_reachable` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-media/tests/facade_contract.rs#all_services_are_reachable_only_through_facade_and_dependencies_stay_acyclic` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-media crate_public_types_are_reachable`
   - Run: `cargo test -p opentake-media --test facade_contract all_services_are_reachable_only_through_facade_and_dependencies_stay_acyclic -- --exact`
 
   Expected: FAIL because one or more of the 4 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-media/src/lib.rs#MediaEngine`, `crates/opentake-media/src/probe.rs`, `crates/opentake-media/src/decode/mod.rs`, `crates/opentake-media/src/encode/mod.rs`, `crates/opentake-media/src/search/mod.rs`, `crates/opentake-media/src/transcribe/mod.rs`, `docs/specs/media/8-coordinator.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-media crate_public_types_are_reachable`
   - Run: `cargo test -p opentake-media --test facade_contract all_services_are_reachable_only_through_facade_and_dependencies_stay_acyclic -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01. The planned facade contract first failed to compile
+  because `MediaEngine` had no decode, PCM extraction, encoder-construction,
+  or visual-ranking methods. The minimal implementation now owns those four
+  boundaries while retaining the existing probe, transcript, and spoken-search
+  services. The owning integration test generates a deterministic 32x18 A/V
+  fixture and passes probe -> frame decode -> 16 kHz mono PCM -> fixture
+  transcriber -> H.264 encode -> re-probe through `MediaEngine`; it also ranks
+  a persisted visual index and asserts the workspace dependency DAG remains
+  acyclic. Both exact owning tests pass, strict all-feature Clippy is clean,
+  rustfmt is clean, and the full workspace suite passes.
 
 ### Task 36: MR-image-lottie-materialization (implementation-slice-a90703f04ca7e8c5)
 
@@ -2260,33 +2545,45 @@
   - Define cache invalidation and device-loss behavior.
   - Add pixel, lifecycle, and export tests.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `src-tauri/src/playback/resolver.rs#lottie_cache_lifecycle_frame_modulo_and_preview_export_parity` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-tauri lottie_cache_lifecycle_frame_modulo_and_preview_export_parity`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `src-tauri/src/render.rs#MediaResolver::resolve`, `src-tauri/src/export.rs#MediaResolver::resolve`, `src-tauri/src/playback/resolver.rs#StreamingResolver::resolve`, `docs/specs/media/8-coordinator.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-tauri lottie_cache_lifecycle_frame_modulo_and_preview_export_parity`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+**Verified 2026-08-01:** RED was reproduced because the declared
+`LottieMaterializer` production boundary did not exist and all three product
+resolvers skipped Lottie. The shared Velato/Vello materializer now renders
+bounded, content-hashed textures on the existing wgpu device; preview,
+dedicated playback, and export own caches at their documented lifetimes and
+surface unsupported/invalid documents as explicit failures. The owning GPU
+pixel test passes and proves frame modulo, content invalidation, preview/export
+byte parity, and device-context rebuild behavior. `cargo fmt --all -- --check`,
+`cargo clippy -p opentake-tauri --all-targets --all-features -- -D warnings`,
+the focused owning test, and
+`CARGO_INCREMENTAL=0 cargo test --workspace --no-fail-fast --quiet` all pass.
 
 ### Task 37: MR-interchange-export-complete (implementation-slice-efcc28e98cc9b40e)
 
@@ -2322,7 +2619,7 @@
   - Visible/returned assertion: assert the exact returned status plus deterministic frame/audio/container properties or typed unsupported/error output, and verify preview/export parity when both paths are named.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-project/tests/completion_9ae7ed1acecc8998.rs#completion_9ae7ed1acecc8998_projects_export_interoperable_fcpxml_otio_and_ed.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/shell/TitleBar.visual.test.ts#offers all four interchange formats with their extensions and commands` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-project/src/fcpxml_modern_tests.rs#document_has_fcpxml_header_and_version` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -2331,7 +2628,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and reconcile the historical baseline**
 
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.visual.test.ts -t "offers all four interchange formats with their extensions and commands"`
   - Run: `cargo test -p opentake-project document_has_fcpxml_header_and_version`
@@ -2340,11 +2637,11 @@
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-project/src/fcpxml.rs#export_xmeml`, `crates/opentake-project/src/fcpxml_modern.rs#export_fcpxml`, `crates/opentake-project/src/otio.rs#export_otio`, `crates/opentake-project/src/edl.rs#export_edl`, `src-tauri/src/commands.rs`, `web/src/components/shell/TitleBar.tsx#TitleBar`, `docs/需求与问题汇总.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.visual.test.ts -t "offers all four interchange formats with their extensions and commands"`
   - Run: `cargo test -p opentake-project document_has_fcpxml_header_and_version`
@@ -2353,11 +2650,25 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Reconciled 2026-08-01 as an already-integrated baseline. Git history shows
+  the EDL, OTIO and modern FCPXML writers and their format tests landed together
+  in `5713d22`, followed by the four-format title-bar route in `3d09eb6`; there
+  is therefore no honest test-present/implementation-missing RED command to
+  replay. The four declared owners pass on the current descendant, the exact
+  title-bar interaction suite covers success, failure, cancellation, extension
+  completion and all four Tauri routes, and the full workspace suite passes.
+  Existing packaged-app evidence additionally parsed both XML outputs with
+  `xmllint`, parsed OTIO with `jq`, verified the corrected three-event EDL, and
+  proved deterministic re-export. The historical requirement source now records
+  the shipped formats and their explicit degradation boundary; no production
+  code change was required for this reconciliation. Runtime evidence:
+  [`interchange-export-real-device-2026-07-30.md`](../runtime-artifacts/automated/interchange-export-real-device-2026-07-30.md).
 
 ### Task 38: control-acceptance (implementation-slice-5148c914ccdac250)
 
@@ -2449,7 +2760,7 @@
   - Visible/accessibility/return path: success=choose export resolution: setQuality controls export preset; accessibility={"focus":"Custom Dropdown focus behavior depends on its implementation","label":"Visible child text/title or caller-provided label; verify at runtime","shortcut":"None declared on this control"}; returnPath=["Success/cancel closes to the editor; failure keeps the dialog open. Trigger focus restoration is not implemented/tested."].
   - Outcome matrix: {"success":"choose export resolution: setQuality controls export preset","pending":"Not applicable — this activation only changes local/caller state and starts no Promise, API, Tauri command, or Rust work.","empty":"Required empty/no-selection behavior is the render/handler guard in web/src/components/shell/ExportDialog.tsx:462; the candidate-specific interaction test must assert that exact guard.","disabled":"No explicit disabled prop on this candidate.","cancel":"Cancellation/dismissal follows the exact guard in setQuality controls export preset; no broader cancellation behavior is assumed.","retry":"Not applicable as an error-recovery state — the synchronous local action can simply be activated again.","failure":"Not applicable — this immediate activation calls no API/Tauri/Rust boundary, so there is no backend rejection path."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/shell/ExportDialog.interaction.test.tsx#control-580ab884755388a9 dismiss Export by clicking the backdrop` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
   - `web/src/components/shell/ExportDialog.interaction.test.tsx#control-6064916ed05a1362 close Export from its header` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
@@ -2459,7 +2770,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/shell/ExportDialog.interaction.test.tsx -t "control-580ab884755388a9 dismiss Export by clicking the backdrop"`
   - Run: `pnpm -C web test -- --run src/components/shell/ExportDialog.interaction.test.tsx -t "control-6064916ed05a1362 close Export from its header"`
@@ -2469,11 +2780,11 @@
 
   Expected: FAIL because one or more of the 5 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/shell/ExportDialog.tsx`, `web/src/components/shell/ExportDialog.tsx#ExportDialog` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/shell/ExportDialog.interaction.test.tsx -t "control-580ab884755388a9 dismiss Export by clicking the backdrop"`
   - Run: `pnpm -C web test -- --run src/components/shell/ExportDialog.interaction.test.tsx -t "control-6064916ed05a1362 close Export from its header"`
@@ -2483,11 +2794,21 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01. RED was reproduced because the five declared DOM
+  owning tests did not exist. The new interaction runner exercises idle and
+  busy backdrop behavior, the header close guard, stale-error cleanup through
+  mode selection, codec-to-container routing, and resolution-to-request
+  routing against the real Zustand component state. All five focused tests
+  pass; the full Web suite passes 94 files / 829 tests, and the TypeScript plus
+  production Vite build passes with only the pre-existing chunk/dynamic-import
+  advisories. The production component already met the declared behavior, so
+  no component change was required.
 
 ### Task 39: control-acceptance (implementation-slice-c6fbd815566d6b64)
 
@@ -2518,33 +2839,43 @@
   - Visible/accessibility/return path: success=cancel/close Export: idle closes; active video calls cancelExport(operationId); accessibility={"focus":"Native keyboard-focusable control","label":"Visible child text/title or caller-provided label; verify at runtime","shortcut":"None declared on this control"}; returnPath=["Success/cancel closes to the editor; failure keeps the dialog open. Trigger focus restoration is not implemented/tested."].
   - Outcome matrix: {"success":"cancel/close Export: idle closes; active video calls cancelExport(operationId)","pending":"Pending behavior is the concrete busy/phase/disabled state in web/src/components/shell/ExportDialog.tsx:569; no additional state is inferred beyond the source.","empty":"Required empty/no-selection behavior is the render/handler guard in web/src/components/shell/ExportDialog.tsx:569; the candidate-specific interaction test must assert that exact guard.","disabled":"No explicit disabled prop on this candidate.","cancel":"Cancellation/dismissal follows the exact guard in idle closes; active video calls cancelExport(operationId); no broader cancellation behavior is assumed.","retry":"Retry is another activation after the source-defined pending guard clears; no separate retry command exists unless named in idle closes; active video calls cancelExport(operationId).","failure":"Failure behavior is limited to the catch/void-call behavior visible in web/src/components/shell/ExportDialog.tsx:569; the missing DOM test must prove whether it is surfaced or silent."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/shell/ExportDialog.interaction.test.tsx#control-af586bdec82ebcc7 cancel/close Export` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/shell/ExportDialog.interaction.test.tsx -t "control-af586bdec82ebcc7 cancel/close Export"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/shell/ExportDialog.tsx`, `web/src/components/shell/ExportDialog.tsx#onCancel`, `web/src/lib/api.ts#cancelExport`, `src-tauri/src/export.rs#cancel_export`, `web/src/components/shell/ExportDialog.tsx#ExportDialog` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/shell/ExportDialog.interaction.test.tsx -t "control-af586bdec82ebcc7 cancel/close Export"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01. The declared owner was absent, and its first execution
+  exposed an unhandled rejection when `cancel_export` failed: the dialog showed
+  neither the backend error nor failure feedback. `onCancel` now retains the
+  active dialog, renders the concrete rejection, and pushes the standard export
+  failure toast while preserving idle close and generation-safe cancellation
+  with the exact active operation id. The focused test passes, the full Web
+  suite passes 94 files / 830 tests, the production Web build passes with only
+  the pre-existing chunk/dynamic-import advisories, rustfmt is clean, and the
+  full Rust workspace suite passes.
 
 ### Task 40: control-acceptance (implementation-slice-73d069e581678e52)
 
@@ -2577,33 +2908,44 @@
   - Visible/accessibility/return path: success=start video export: save dialog -> busy/progress -> success/cancel/failure -> cleanup; accessibility={"focus":"Native keyboard-focusable control","label":"Visible child text/title or caller-provided label; verify at runtime","shortcut":"None declared on this control"}; returnPath=["Success/cancel closes to the editor; failure keeps the dialog open. Trigger focus restoration is not implemented/tested."].
   - Outcome matrix: {"success":"start video export: save dialog -> busy/progress -> success/cancel/failure -> cleanup","pending":"Pending behavior is the concrete busy/phase/disabled state in web/src/components/shell/ExportDialog.tsx:587; no additional state is inferred beyond the source.","empty":"Required empty/no-selection behavior is the render/handler guard in web/src/components/shell/ExportDialog.tsx:587; the candidate-specific interaction test must assert that exact guard.","disabled":"Disabled when {busy}.","cancel":"Cancellation/dismissal follows the exact guard in save dialog -> busy/progress -> success/cancel/failure -> cleanup; no broader cancellation behavior is assumed.","retry":"Retry is another activation after the source-defined pending guard clears; no separate retry command exists unless named in save dialog -> busy/progress -> success/cancel/failure -> cleanup.","failure":"Failure behavior is limited to the catch/void-call behavior visible in web/src/components/shell/ExportDialog.tsx:587; the missing DOM test must prove whether it is surfaced or silent."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/shell/ExportDialog.interaction.test.tsx#control-543cacc54290eeba start video export` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/shell/ExportDialog.interaction.test.tsx -t "control-543cacc54290eeba start video export"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/shell/ExportDialog.tsx`, `web/src/components/shell/ExportDialog.tsx#onExport`, `web/src/lib/api.ts#getDefaultProjectDir`, `src-tauri/src/commands.rs`, `web/src/lib/api.ts#exportVideo`, `src-tauri/src/export.rs#export_video`, `web/src/components/shell/ExportDialog.tsx#ExportDialog` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/shell/ExportDialog.interaction.test.tsx -t "control-543cacc54290eeba start video export"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01. The declared transaction owner was absent. The new DOM
+  test drives the real component through native-save cancellation, unsaved
+  project default-directory lookup, exact extension/request dispatch, scoped
+  progress delivery, success, backend cancellation, failure, retry readiness,
+  and listener cleanup. It passes together with all seven ExportDialog owners;
+  the full Web suite passes 94 files / 831 tests, the production Web build
+  passes with only the pre-existing chunk/dynamic-import advisories, and the
+  unchanged Rust boundary remains green under the full workspace gate run for
+  the immediately preceding cancellation slice. No production change was
+  required for this slice.
 
 ### Task 41: control-acceptance (implementation-slice-010eea5507e6b9ca)
 
@@ -2634,33 +2976,43 @@
   - Visible/accessibility/return path: success=cancel Save Clip as Media: when current progress is cancellable and not cancelling, set cancelling=true and call cancelExport(current.operationId); rejection restores cancelling=false and pushes a failure toast; accessibility={"focus":"Native keyboard-focusable control","label":"Visible child text/title or caller-provided label; verify at runtime","shortcut":"None declared on this control"}; returnPath=["The non-modal status stays in the editor and disappears when store progress clears."].
   - Outcome matrix: {"success":"cancel Save Clip as Media: when current progress is cancellable and not cancelling, set cancelling=true and call cancelExport(current.operationId); rejection restores cancelling=false and pushes a failure toast","pending":"Pending behavior is the concrete busy/phase/disabled state in web/src/components/shell/SaveAsProgress.tsx:42; no additional state is inferred beyond the source.","empty":"Required empty/no-selection behavior is the render/handler guard in web/src/components/shell/SaveAsProgress.tsx:42; the candidate-specific interaction test must assert that exact guard.","disabled":"Disabled when {!progress.cancellable || progress.cancelling}.","cancel":"Cancellation/dismissal follows the exact guard in when current progress is cancellable and not cancelling, set cancelling=true and call cancelExport(current.operationId); rejection restores cancelling=false and pushes a failure toast; no broader cancellation behavior is assumed.","retry":"Retry is another activation after the source-defined pending guard clears; no separate retry command exists unless named in when current progress is cancellable and not cancelling, set cancelling=true and call cancelExport(current.operationId); rejection restores cancelling=false and pushes a failure toast.","failure":"Failure behavior is limited to the catch/void-call behavior visible in web/src/components/shell/SaveAsProgress.tsx:42; the missing DOM test must prove whether it is surfaced or silent."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/shell/SaveAsProgress.interaction.test.tsx#control-b0b920085e77d039 cancel Save Clip as Media` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/shell/SaveAsProgress.interaction.test.tsx -t "control-b0b920085e77d039 cancel Save Clip as Media"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/shell/SaveAsProgress.tsx`, `web/src/store/editActions.ts#cancelSaveAsMedia`, `web/src/lib/api.ts#cancelExport`, `src-tauri/src/export.rs#cancel_export`, `web/src/components/shell/SaveAsProgress.tsx#SaveAsProgress` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/shell/SaveAsProgress.interaction.test.tsx -t "control-b0b920085e77d039 cancel Save Clip as Media"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01. RED was reproduced because the declared DOM owner did
+  not exist. The new real-store interaction test proves visible progress,
+  disabled preparation state, exact operation-id cancellation, immediate
+  cancelling/duplicate-click protection, and rejection recovery with the
+  concrete failure toast. The focused owner passes; the full Web suite passes
+  95 files / 832 tests, and the production Web build passes with only the
+  pre-existing chunk/dynamic-import advisories. The Rust cancellation boundary
+  is unchanged and passed the full workspace gate in the immediately preceding
+  cancellation slice. No production change was required for this slice.
 
 ## Shared capability references
 

@@ -1,5 +1,9 @@
 # 剪辑引擎实现现状与规划(EDITING-ENGINE-PLAN)
 
+> **2026-08-03 状态注记：**本文是剪辑引擎的测绘文档。剪辑「算法核」（`ops/*` + `engines/*`）
+> 已 1:1 写通并随 Beta 1 交付；本文所述「前端接线层缺口」已收口（时间线手势单事务、原子分割 /
+> Transform、撤销/重做）。Beta 2 范围与发布门槛见 `docs/releases/1.0.0-beta.2.md`。
+
 > 目标:把剪辑(片段增删改移 + 链接音频 + 吸附 + 右键/快捷键)按上游 `palmier-pro` **1:1 写通**。
 > 本文是「现状测绘 + 1:1 差距 + 收口计划」,与 [PORT-1TO1-GAP.md](PORT-1TO1-GAP.md)、[ROADMAP.md](ROADMAP.md) 配套。
 > 渲染/播放管线另见 issue [#142](https://github.com/appergb/OpenTake/issues/142) 与 `memory/opentake-render-pipeline-rewrite`。
@@ -31,6 +35,7 @@
 - 加入「带音频的视频」时,会在视频轨下方生成一条**独立的链接 audio clip**(共享 `linkGroupId`),trim/move 联动。
 - 门控条件(前端 `editActions.ts` `addLinkedAudio = item.type==="video" && item.hasAudio` → 后端 `place.rs` `should_link` 4 条件含 `spec.has_audio`)与上游 `EditorViewModel.swift:341` `shouldLink = addLinkedAudio && targetIsVideo && asset.type==.video && asset.hasAudio` **逐字一致**。
 - **无音频视频** → `has_audio=false` → 不建音轨(`probe.rs` 的 `channels==0` 守卫;`channels` 缺失保守保留,因 ffprobe 对真实音频必报 channels,且纯音频文件不能误杀)。
+- **验收结果(2026-08-01)**:Agent 的 `add_clips` / `insert_clips` owning tests 均证明 `has_audio=false` 时只保留视频 Clip 且 `link_group_id=None`；零声道 probe 测试也通过。重建的 release `.app` 在独立工程中导入一个确定性的 5 秒 H.264 无音轨文件，素材清单持久化 `hasAudio:false`，双击后时间线只出现 V1（无 A1/A2），播放推进正常；导出为 1280×720/150 帧 H.264 后 FFprobe 仍只报告视频流。详见 `docs/audit/2026-07-14/runtime-artifacts/automated/linked-audio-real-device-2026-08-01.md`。
 
 ### ⚠️ 待用户定夺(1:1 偏离决策)
 用户反馈「带音频的视频应把音频显示在视频片段内,而非独立 A1/A2 轨」。这与上游设计(独立链接音轨)**相悖**。两条路:

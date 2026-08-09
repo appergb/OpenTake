@@ -699,7 +699,10 @@ export function volumeAt(clip: Clip, frame: number): number {
   const kfGain = trackIsActive(clip.volumeTrack)
     ? linearFromDb(sampleScalarTrack(clip.volumeTrack, keyframeOffset(clip, frame), 0.0))
     : 1.0;
-  return clip.volume * kfGain * fadeMultiplier(clip, frame);
+  const loudnessGain = clip.loudnessNormalization
+    ? 10 ** (Math.max(-120, Math.min(60, clip.loudnessNormalization.gainDb)) / 20)
+    : 1.0;
+  return clip.volume * kfGain * loudnessGain * fadeMultiplier(clip, frame);
 }
 
 /**
@@ -812,14 +815,42 @@ export function linkOffsetForClip(timeline: Timeline, clipId: string): number | 
   return offset;
 }
 
+/** Resolve one logical clip selection. A linked source video and its extracted
+ * audio companion are selected together by timeline gestures, but represent one
+ * user-facing clip for Inspector and on-canvas editing. Genuine marquee
+ * selections, mixed link groups, or groups with multiple visual clips remain
+ * multi-select and return `null`. */
+export function findLogicalSingleClip(
+  timeline: Timeline,
+  selectedClipIds: Set<string> | undefined,
+): Clip | null {
+  if (!selectedClipIds || selectedClipIds.size === 0) return null;
+  const selected = timeline.tracks.flatMap((track) =>
+    track.clips.filter((candidate) => selectedClipIds.has(candidate.id)),
+  );
+  if (selected.length !== selectedClipIds.size) return null;
+  if (selected.length === 1) return selected[0];
+
+  const linkGroupId = selected[0]?.linkGroupId;
+  if (!linkGroupId || selected.some((candidate) => candidate.linkGroupId !== linkGroupId)) {
+    return null;
+  }
+  const primary = selected.filter(
+    (candidate) => candidate.mediaType !== "audio" && candidate.mediaType !== "text",
+  );
+  const companionsAreAudio = selected
+    .filter((candidate) => candidate.id !== primary[0]?.id)
+    .every((candidate) => candidate.mediaType === "audio");
+  return primary.length === 1 && companionsAreAudio ? primary[0] : null;
+}
+
 /**
  * The single clip the on-canvas Transform overlay should target, or `null` if
  * it shouldn't render. Adapts upstream `TransformOverlayView.selectedClip`
  * (TransformOverlayView.swift:304-313), which scans every non-audio track for
- * ANY selected clip and returns the first match (so it can render even with
- * other clips also selected). OpenTake tightens this to exactly one clip
- * selected total, per the feature's "single visual clip selected" scope —
- * still a strict subset of when upstream would show the overlay, never wider.
+ * ANY selected clip and returns the first match. OpenTake accepts one logical
+ * selection, including a source video plus its selected linked-audio companion,
+ * while still refusing genuine marquee selections.
  * `track.type !== "audio"` mirrors upstream's `track.type != .audio` (covers
  * video/image/text/lottie — any non-audio track), not `clip.mediaType`.
  * `selectedClipIds` is optional so callers (and test mocks of the UI store)
@@ -829,12 +860,12 @@ export function findSelectedVisualClip(
   timeline: Timeline,
   selectedClipIds: Set<string> | undefined,
 ): Clip | null {
-  if (!selectedClipIds || selectedClipIds.size !== 1) return null;
-  const [id] = selectedClipIds;
+  const selected = findLogicalSingleClip(timeline, selectedClipIds);
+  if (!selected) return null;
   for (const track of timeline.tracks) {
     if (track.type === "audio") continue;
     for (const c of track.clips) {
-      if (c.id === id) return c;
+      if (c.id === selected.id) return c;
     }
   }
   return null;
@@ -849,20 +880,20 @@ export function findSelectedVisualClip(
  * to crop) and, walking every non-audio track's clips, returns `null` outright
  * if MORE THAN ONE matching (selected, non-text, non-audio-track) clip is
  * found, rather than "first match wins". As with `findSelectedVisualClip`,
- * OpenTake tightens upstream's `!selectedClipIds.isEmpty` to exactly one clip
- * selected total (a strict subset, never wider than upstream).
+ * A linked-audio companion is treated as part of one logical visual selection;
+ * unrelated multi-selection remains rejected.
  */
 export function findCropEditingClip(
   timeline: Timeline,
   selectedClipIds: Set<string> | undefined,
 ): Clip | null {
-  if (!selectedClipIds || selectedClipIds.size !== 1) return null;
-  const [id] = selectedClipIds;
+  const selected = findLogicalSingleClip(timeline, selectedClipIds);
+  if (!selected) return null;
   let match: Clip | null = null;
   for (const track of timeline.tracks) {
     if (track.type === "audio") continue;
     for (const c of track.clips) {
-      if (c.id === id && c.mediaType !== "text") {
+      if (c.id === selected.id && c.mediaType !== "text") {
         if (match !== null) return null;
         match = c;
       }

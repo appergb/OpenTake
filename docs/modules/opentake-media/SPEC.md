@@ -776,7 +776,7 @@ impl OrtModel {
     pub fn run(&self, inputs: &[(&str, TensorRef<'_>)]) -> Result<HashMap<String, OwnedTensor>>;
 }
 
-pub enum ExecutionProvider { Cpu, CoreML, Cuda, DirectMl, Tensorrt } // 按平台可用性回退到 Cpu
+pub enum ExecutionProvider { Cpu, CoreML, Cuda, DirectMl, Tensorrt } // Windows 使用纯 Rust tract Cpu；其他平台按可用性回退 Cpu
 ```
 
 ### 7.2 worker(序列化 GPU/重负载,导出期让路)
@@ -792,7 +792,7 @@ impl OrtWorker {
 pub struct OrtModelRegistry { /* 按 key 懒加载并缓存 OrtModel,避免重复 load */ }
 ```
 - **张量辅助**(`ort_worker/tensor.rs`):`ndarray ↔ ort::Value`、NCHW/NHWC 转换、mean/std 归一、`Array4<f32>` ↔ 图像。SigLIP 预处理(§5.2)即复用这里。
-- **EP 回退**:首选平台 EP(CoreML/CUDA/DirectML),不可用回退 CPU,日志 `tracing::warn`。
+- **EP 回退**:macOS 首选 CoreML；Linux 使用 CPU；Windows 使用不依赖原生 DLL 的纯 Rust tract CPU 后端。
 - **复用点**:`OrtEmbedder`(§5.7)内部即一个 `OrtModel`(image)+ 一个 `OrtModel`(text);进阶特性各自定义自己的预处理/后处理,共用 `OrtModel::run` + `OrtWorker` 调度。
 
 > 本 crate 只交付**框架 + SigLIP2 使用者**;具体进阶模型(Real-ESRGAN 等)在各自 Phase 8+ PR 落地,复用本接口。记此以明确「worker 通用接口」的交付边界 = §7.1/§7.2 + 至少一个真实使用者(SigLIP2)。

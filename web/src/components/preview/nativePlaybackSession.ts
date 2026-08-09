@@ -195,7 +195,10 @@ export function createNativePlaybackController(
       publishNativePlaybackFrame(event);
     },
     shouldFallback(error) {
-      return api.decodePlaybackCommandError(error)?.code === "engine";
+      return (
+        api.decodePlaybackCommandError(error)?.code === "engine" ||
+        api.isPlaybackCommandUnavailable(error)
+      );
     },
   };
 }

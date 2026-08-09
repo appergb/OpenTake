@@ -16,18 +16,27 @@ import { MEDIA_DND_TYPE } from "../media/MediaPanel";
 import { useMediaStore } from "../../store/mediaStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useProjectStore } from "../../store/projectStore";
-import { addMediaToTimeline } from "../../store/editActions";
+import {
+  addMediaToTimeline,
+  reportMediaPlacementFailure,
+} from "../../store/editActions";
 import { useT } from "../../i18n";
 
 export function TimelineRegion() {
   const t = useT();
   const [dragOver, setDragOver] = useState(false);
   const setPreviewMedia = useEditorUiStore((s) => s.setPreviewMedia);
+  const activeNestedSequenceId = useEditorUiStore((s) => s.activeNestedSequenceId);
+  const exitNestedSequence = useEditorUiStore((s) => s.exitNestedSequence);
+  const rootTimeline = useProjectStore((s) => s.timeline);
+  const activeSequence = rootTimeline.nestedSequences?.find(
+    (sequence) => sequence.id === activeNestedSequenceId,
+  );
   // The full-region "drop to add" overlay is only an affordance for an EMPTY
   // timeline. Once tracks exist, TimelineContainer paints a precise drop ghost
   // (exact track + frame span), so the whole-region highlight is suppressed to
   // avoid masking it.
-  const hasTracks = useProjectStore((s) => s.timeline.tracks.length > 0);
+  const hasTracks = (activeSequence?.timeline ?? rootTimeline).tracks.length > 0;
 
   const hasMediaPayload = (e: React.DragEvent) =>
     e.dataTransfer.types.includes(MEDIA_DND_TYPE);
@@ -51,12 +60,35 @@ export function TimelineRegion() {
     setDragOver(false);
     const id = e.dataTransfer.getData(MEDIA_DND_TYPE);
     const item = useMediaStore.getState().items.find((m) => m.id === id);
-    if (item) void addMediaToTimeline(item);
+    if (item) void addMediaToTimeline(item).catch(reportMediaPlacementFailure);
   };
 
   return (
     <PanelShell panel="timeline">
       <Toolbar />
+      {activeSequence && (
+        <div
+          role="navigation"
+          aria-label={t("timeline.compoundBreadcrumb")}
+          style={{
+            height: 30,
+            display: "flex",
+            alignItems: "center",
+            gap: 8,
+            padding: "0 10px",
+            borderBottom: "var(--bw-thin) solid var(--border-subtle)",
+            background: "var(--bg-secondary)",
+            color: "var(--text-secondary)",
+            fontSize: "var(--fs-sm)",
+          }}
+        >
+          <button type="button" className="toolbar-button" onClick={exitNestedSequence}>
+            ← {t("timeline.main")}
+          </button>
+          <span aria-hidden="true">/</span>
+          <strong style={{ color: "var(--text-primary)" }}>{activeSequence.name}</strong>
+        </div>
+      )}
       <div
         style={{ position: "relative", flex: 1, minHeight: 0 }}
         // Focusing the editing area returns the preview to the Timeline tab

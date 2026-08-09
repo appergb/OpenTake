@@ -2,7 +2,7 @@
 //!
 //! Ports PalmierPro's AVFoundation / DSWaveformImage / macOS-Speech / CoreML
 //! media stack to cross-platform Rust:
-//! - **probe / decode / encode**: system ffmpeg CLI via [`ff`] (no libav* link).
+//! - **probe / decode / encode**: packaged/development ffmpeg CLI via [`ff`] (no libav* link).
 //! - **thumbnails**: seek-decode + JPEG sprite-grid disk cache.
 //! - **waveform**: Symphonia PCM decode → RMS downsample → normalized buckets.
 //! - **transcribe**: `Transcriber` trait (+ data model, locale, cache, search);
@@ -20,15 +20,40 @@
 //! ## Why ffmpeg over the CLI
 //! The local toolchain is ffmpeg 8.1 (libavcodec 62), which the C-binding crates
 //! (`ffmpeg-next` / `ffmpeg-the-third`) do not support, and `pkg-config` is
-//! absent. `ffmpeg-sidecar` drives the binaries on `PATH` — zero native linkage
-//! and a clean cross-platform build — so it is the chosen backend (SPEC §1.2,
+//! absent. `ffmpeg-sidecar` drives checksum-pinned packaged binaries (or PATH in
+//! development only) — zero native linkage and a clean cross-platform build —
+//! so it is the chosen backend (SPEC §1.2,
 //! "若 ffmpeg-next 不支持 8.x … 改用 ffmpeg-sidecar").
 
 mod ff;
 
+#[cfg(all(feature = "ort-backend", target_os = "windows"))]
+pub(crate) fn initialize_ort_backend() {
+    static INITIALIZE: std::sync::Once = std::sync::Once::new();
+    INITIALIZE.call_once(|| {
+        assert!(
+            ort::set_api(ort_tract::api()),
+            "ort API was initialized before the Windows tract backend"
+        );
+    });
+}
+
+#[cfg(all(feature = "ort-backend", not(target_os = "windows")))]
+pub(crate) fn initialize_ort_backend() {}
+
+#[cfg(all(test, feature = "ort-backend", target_os = "windows"))]
+mod windows_ort_backend_tests {
+    #[test]
+    fn tract_backend_initializes_before_ort_session_use() {
+        crate::initialize_ort_backend();
+        ort::session::Session::builder().expect("tract must provide the ort session API");
+    }
+}
+
 pub mod analysis;
 pub mod cache_key;
 pub mod cancel;
+pub mod color;
 pub mod decode;
 pub mod encode;
 pub mod error;
@@ -37,6 +62,11 @@ pub mod index_coordinator;
 pub mod library;
 pub mod ort_worker;
 pub mod probe;
+#[doc(hidden)]
+pub mod process_tree {
+    pub use opentake_process_tree::{configure_command, ProcessTree};
+}
+pub mod proxy;
 pub mod search;
 pub mod thumbnail;
 pub mod timecode;
@@ -45,19 +75,95 @@ pub mod waveform;
 
 use std::path::{Path, PathBuf};
 
+/// Materialize an exact visible source range as an uploadable MP4. This is used
+/// by generation/upscale when `sourceClipId` is supplied, so provider uploads
+/// receive the clip's trimmed source window instead of the complete asset.
+pub fn trim_video_range(
+    source: &Path,
+    destination: &Path,
+    start_seconds: f64,
+    end_seconds: f64,
+    cancel: &MediaCancelToken,
+) -> Result<()> {
+    if !start_seconds.is_finite()
+        || !end_seconds.is_finite()
+        || start_seconds < 0.0
+        || end_seconds <= start_seconds
+    {
+        return Err(MediaError::Ffmpeg(
+            "invalid trimmed generation source range".to_string(),
+        ));
+    }
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let duration = end_seconds - start_seconds;
+    let mut child = std::process::Command::new(ff::ffmpeg_path())
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y"])
+        .arg("-ss")
+        .arg(format!("{start_seconds:.6}"))
+        .arg("-i")
+        .arg(source)
+        .arg("-t")
+        .arg(format!("{duration:.6}"))
+        .args([
+            "-map",
+            "0:v:0",
+            "-map",
+            "0:a?",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "18",
+            "-c:a",
+            "aac",
+            "-movflags",
+            "+faststart",
+        ])
+        .arg(destination)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|error| MediaError::Ffmpeg(format!("trim source spawn: {error}")))?;
+    loop {
+        if cancel.is_cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = std::fs::remove_file(destination);
+            return Err(MediaError::Cancelled);
+        }
+        if let Some(status) = child.try_wait()? {
+            if !status.success() || !destination.is_file() {
+                let _ = std::fs::remove_file(destination);
+                return Err(MediaError::Ffmpeg(
+                    "trimmed generation source could not be materialized".to_string(),
+                ));
+            }
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 // --- flat re-exports of the public API ---
 
 pub use cancel::MediaCancelToken;
 pub use error::{MediaError, Result};
 pub use frame::RgbaFrame;
 
-pub use probe::{probe, MediaProbe};
+pub use color::{hdr_decode_input_args, hdr_tonemap_filter};
+pub use probe::{parse_probe, probe, MediaProbe};
+pub use proxy::{create_proxy, file_sha256, ProxyProgressCallback, ProxyRequest, ProxyResult};
 
 pub use decode::{
-    decode_frame_at, decode_frame_at_cancellable, decode_frames_at, decode_frames_at_cancellable,
-    decode_pcm_interleaved, decode_pcm_interleaved_cancellable, extract_pcm,
-    extract_pcm_cancellable, extract_pcm_cancellable_with_progress, FrameRequest, PcmBuffer,
-    PcmFormat, PcmProgressCallback, PcmSpec, StreamDecodeControl, StreamVideoFrame, VideoStream,
+    convert_frame_rate, decode_frame_at, decode_frame_at_cancellable, decode_frames_at,
+    decode_frames_at_cancellable, decode_pcm_interleaved, decode_pcm_interleaved_cancellable,
+    extract_pcm, extract_pcm_cancellable, extract_pcm_cancellable_with_progress,
+    interpolate_frame_pair, FrameInterpolationFallback, FrameInterpolationMode,
+    FrameInterpolationResult, FrameRateSample, FrameRequest, PcmBuffer, PcmFormat,
+    PcmProgressCallback, PcmSpec, StreamDecodeControl, StreamVideoFrame, VideoStream,
     VideoStreamRequest, DEFAULT_VIDEO_STREAM_QUEUE_CAPACITY,
 };
 
@@ -96,8 +202,8 @@ pub use transcribe::{
 pub use transcribe::whisper::WhisperTranscriber;
 
 pub use search::{
-    rank as search_visual_ranked, AssetIndex, CancelToken, Embedder, EmbedderSpec, Hit,
-    SamplerOptions,
+    rank as search_visual_ranked, AssetIndex, CancelToken, Embedder, EmbedderSpec, Header, Hit,
+    Row, SamplerOptions,
 };
 
 pub use index_coordinator::{work_needed, ExportPause, IndexProgress, WorkNeeded};
@@ -107,7 +213,10 @@ pub use ort_worker::ExecutionProvider;
 /// ffmpeg/ffprobe availability probes (re-exported for integration tests and
 /// host-capability checks).
 pub mod ffmpeg_status {
-    pub use crate::ff::{ffmpeg_available, ffprobe_available};
+    pub use crate::ff::{
+        ffmpeg_available, ffmpeg_path, ffprobe_available, packaged_sidecar_beside,
+        packaged_sidecar_path,
+    };
 }
 
 /// Facade bundling the media engine's roots for `opentake-core` (SPEC §8.4).
@@ -147,6 +256,44 @@ impl MediaEngine {
     /// Probe through an already-open regular-file handle.
     pub fn probe_file(&self, file: &std::fs::File) -> Result<MediaProbe> {
         probe::probe_file(file)
+    }
+
+    /// Probe a retained file while bounding and cancelling the ffprobe process
+    /// tree.
+    pub fn probe_file_cancellable(
+        &self,
+        file: &std::fs::File,
+        cancel: &MediaCancelToken,
+        timeout: std::time::Duration,
+    ) -> Result<MediaProbe> {
+        probe::probe_file_cancellable(file, cancel, timeout)
+    }
+
+    /// Decode the nearest source frame for preview/render materialization.
+    pub fn decode_frame(&self, path: &Path, request: &FrameRequest) -> Result<(f64, RgbaFrame)> {
+        decode::decode_frame_at(path, request)
+    }
+
+    /// Decode the first audio track into the requested PCM contract.
+    pub fn extract_pcm(
+        &self,
+        path: &Path,
+        spec: &PcmSpec,
+        range: Option<(f64, f64)>,
+    ) -> Result<PcmBuffer> {
+        decode::extract_pcm(path, spec, range)
+    }
+
+    /// Start the streaming encoder used by the render/export adapter.
+    pub fn video_encoder(
+        &self,
+        output: &Path,
+        width: u32,
+        height: u32,
+        fps: i32,
+        preset: &ExportPreset,
+    ) -> Result<VideoEncoder> {
+        encode::VideoEncoder::new(output, width, height, fps, preset)
     }
 
     /// Generate (and cache) a video thumbnail sequence.
@@ -189,6 +336,20 @@ impl MediaEngine {
         limit: usize,
     ) -> Vec<SpokenHit> {
         transcribe::search::search(&self.cache_root, query, assets, limit)
+    }
+
+    /// Rank one encoded visual query against caller-owned current index
+    /// snapshots. Model loading/text encoding stay in the bounded worker; this
+    /// facade owns the deterministic index/ranking boundary.
+    pub fn search_visual(
+        &self,
+        query_vector: &[f32],
+        indexes: &[(String, AssetIndex)],
+        limit: usize,
+        relative_cutoff: f32,
+        min_score: Option<f32>,
+    ) -> Vec<Hit> {
+        search::rank(query_vector, indexes, limit, relative_cutoff, min_score)
     }
 
     /// The shared export-pause signal; `opentake-render` calls `begin`/`end`
@@ -307,6 +468,13 @@ mod tests {
         let _: Option<Hit> = None;
         let _ = PcmFormat::F32;
         let _ = VideoCodec::H264;
+
+        // The high-level facade owns every service family as methods; callers
+        // do not need to assemble the flat modules themselves.
+        let _ = MediaEngine::decode_frame;
+        let _ = MediaEngine::extract_pcm;
+        let _ = MediaEngine::video_encoder;
+        let _ = MediaEngine::search_visual;
     }
 
     // --- extract_audio codec selection (Issue #39 review #3) ---
@@ -456,5 +624,40 @@ mod tests {
             "output has video stream(s): {}",
             v_streams.trim()
         );
+    }
+
+    #[test]
+    fn trim_video_range_materializes_only_visible_window_and_honors_cancel() {
+        use std::process::Command;
+        if !ff::ffmpeg_available() || !ff::ffprobe_available() {
+            eprintln!("skipping: ffmpeg/ffprobe unavailable");
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.mp4");
+        let trimmed = temp.path().join("trimmed.mp4");
+        let generated = Command::new(ff::ffmpeg_path())
+            .args(["-hide_banner", "-loglevel", "error", "-y"])
+            .args(["-f", "lavfi", "-i", "color=size=64x48:rate=24:duration=3"])
+            .args(["-c:v", "libx264", "-pix_fmt", "yuv420p"])
+            .arg(&source)
+            .output()
+            .unwrap();
+        assert!(generated.status.success());
+        let source_before = std::fs::read(&source).unwrap();
+
+        trim_video_range(&source, &trimmed, 0.75, 1.75, &MediaCancelToken::new()).unwrap();
+        let trimmed_probe = probe(&trimmed).unwrap();
+        assert!((trimmed_probe.duration_secs - 1.0).abs() < 0.2);
+        assert_eq!(std::fs::read(&source).unwrap(), source_before);
+
+        let cancelled_path = temp.path().join("cancelled.mp4");
+        let cancel = MediaCancelToken::new();
+        cancel.cancel();
+        assert!(matches!(
+            trim_video_range(&source, &cancelled_path, 0.0, 2.0, &cancel),
+            Err(MediaError::Cancelled)
+        ));
+        assert!(!cancelled_path.exists());
     }
 }

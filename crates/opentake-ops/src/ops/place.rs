@@ -74,7 +74,17 @@ pub fn place_clip(
     linked_audio_track_index: Option<usize>,
     ids: &dyn IdGen,
 ) -> Vec<String> {
-    if track_index >= timeline.tracks.len() {
+    if track_index >= timeline.tracks.len()
+        || !spec_arithmetic_is_safe(spec)
+        || !timeline.tracks[track_index]
+            .kind
+            .is_compatible(spec.media_type)
+        || timeline
+            .tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .any(|clip| !clip_arithmetic_is_safe(clip))
+    {
         return Vec::new();
     }
     let target_is_video = timeline.tracks[track_index].kind == ClipType::Video;
@@ -140,6 +150,56 @@ pub fn place_clip(
         out.push(audio_id);
     }
     out
+}
+
+fn spec_arithmetic_is_safe(spec: &PlaceSpec) -> bool {
+    let trim_start = spec.trim_start_frame.unwrap_or(0);
+    let trim_end = spec.trim_end_frame.unwrap_or(0);
+    if spec.start_frame < 0
+        || spec.duration_frames < 1
+        || (!matches!(spec.media_type, ClipType::Image | ClipType::Text)
+            && (trim_start < 0 || trim_end < 0))
+        || spec.start_frame.checked_add(spec.duration_frames).is_none()
+        || spec
+            .duration_frames
+            .checked_add(trim_start)
+            .and_then(|value| value.checked_add(trim_end))
+            .is_none()
+        || trim_start.checked_add(spec.duration_frames).is_none()
+        || trim_end.checked_add(spec.duration_frames).is_none()
+    {
+        return false;
+    }
+    true
+}
+
+fn clip_arithmetic_is_safe(clip: &Clip) -> bool {
+    if clip.start_frame < 0
+        || clip.duration_frames < 1
+        || (!matches!(clip.media_type, ClipType::Image | ClipType::Text)
+            && (clip.trim_start_frame < 0 || clip.trim_end_frame < 0))
+        || !clip.speed.is_finite()
+        || clip.speed <= 0.0
+        || clip.start_frame.checked_add(clip.duration_frames).is_none()
+    {
+        return false;
+    }
+    let consumed = (clip.duration_frames as f64 * clip.speed).round();
+    if !(0.0..=i32::MAX as f64).contains(&consumed) {
+        return false;
+    }
+    let consumed = consumed as i32;
+    clip.duration_frames
+        .checked_add(clip.trim_start_frame)
+        .and_then(|value| value.checked_add(clip.trim_end_frame))
+        .is_some()
+        && clip.trim_start_frame.checked_add(consumed).is_some()
+        && clip.trim_end_frame.checked_add(consumed).is_some()
+        && clip
+            .trim_start_frame
+            .checked_add(consumed)
+            .and_then(|value| value.checked_add(clip.trim_end_frame))
+            .is_some()
 }
 
 #[cfg(test)]

@@ -17,7 +17,8 @@
 
 | 文档 | 内容 |
 |---|---|
-| [HANDOFF-2026-07.md](HANDOFF-2026-07.md) | ★ **当前权威 TODO / 交接文档**：issue 盘点 + 未完成清单 + 每项怎么写（2026-07-04 逐项核对） |
+| [../releases/1.0.0-beta.2.md](../releases/1.0.0-beta.2.md) | **当前 Beta 2 范围、11 阶段验收顺序与发布门槛** |
+| [HANDOFF-2026-07.md](HANDOFF-2026-07.md) | 2026-07-04 交接时点快照；保留作历史参考，不是当前 TODO 真值 |
 | [ROADMAP.md](ROADMAP.md) | 分阶段路线图（Phase 0 脚手架 → Motion Canvas 插件） |
 | [EDITING-ENGINE-PLAN.md](EDITING-ENGINE-PLAN.md) | 剪辑引擎现况与规划：已移植的 ops 层 + 待收口 gap |
 | [PORT-1TO1-GAP.md](PORT-1TO1-GAP.md) | 1:1 复刻差距与实现计划（P0/P1/P2 逐项）。⚠️ 历史参考，以更新的 DOS / 模块文档为准 |

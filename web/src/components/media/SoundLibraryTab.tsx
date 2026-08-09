@@ -9,6 +9,7 @@ import { AudioWaveform, Plus } from "lucide-react";
 import { useLibraryStore, selectEntries, sourceName } from "../../store/libraryStore";
 import { useT } from "../../i18n";
 import { Icon } from "../ui/Icon";
+import type { LibraryImport } from "../../lib/libraryApi";
 
 export function SoundLibraryTab({ query }: { query: string }) {
   const t = useT();
@@ -75,7 +76,7 @@ function SoundRow({
   onImport,
 }: {
   name: string;
-  onImport: () => Promise<string | null>;
+  onImport: () => Promise<LibraryImport | null>;
 }) {
   const t = useT();
   const [busy, setBusy] = useState(false);
@@ -86,7 +87,7 @@ function SoundRow({
     setBusy(true);
     const added = await onImport();
     setBusy(false);
-    setFeedback(added ? t("media.sound.added", { name: added }) : t("media.sound.failed"));
+    setFeedback(added ? t("media.sound.added", { name: added.name }) : t("media.sound.failed"));
     setTimeout(() => setFeedback(null), 1500);
   };
 
@@ -129,7 +130,7 @@ function SoundRow({
             display: "inline-flex",
             alignItems: "center",
             gap: 4,
-            height: 22,
+            height: 24,
             padding: "0 8px",
             borderRadius: "var(--radius-sm)",
             border: "none",

@@ -621,11 +621,14 @@ impl ProjectMediaCapability {
             use cap_std::fs::OpenOptionsExt;
             use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
             use windows_sys::Win32::Storage::FileSystem::{
-                DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+                DELETE, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
             };
             options
                 .access_mode(GENERIC_READ | GENERIC_WRITE | DELETE)
-                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+                // Keep the retained import compatible with a whole-bundle
+                // rename on Windows while preserving identity validation and
+                // handle-relative rollback after a namespace move.
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
         }
         let file = self
             .media
@@ -933,6 +936,7 @@ fn probe_or_default_file(
             height: p.height.map(|h| h as i32),
             fps: p.fps,
             has_audio: p.has_audio,
+            color: p.color,
         },
         Err(_) => ProbedMedia::default(),
     }

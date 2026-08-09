@@ -13,30 +13,254 @@
 //! - [`serve`] binds the loopback listener and runs the server.
 
 use std::borrow::Cow;
-use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, RwLock};
+use std::fmt::Write as _;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Implementation, ListToolsResult, PaginatedRequestParams,
-    ServerCapabilities, ServerInfo, Tool,
+    CallToolRequestParams, CallToolResult, ErrorCode, Implementation, ListToolsResult,
+    PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData as McpError, RoleServer, ServerHandler};
 use serde_json::{Map, Value};
+use subtle::ConstantTimeEq;
+use tokio_util::sync::CancellationToken;
 
+use crate::chat::ChatTurnGate;
+use crate::mcp::advanced::AdvancedWorkflowBridge;
 use crate::mcp::convert::to_call_tool_result;
 use crate::mcp::core_handle::CoreHandle;
-use crate::mcp::dispatch::Dispatcher;
+use crate::mcp::dispatch::{dispatch_admission_class, DispatchAdmissionClass, Dispatcher};
+use crate::mcp::generation::GenerationBridge;
 use crate::mcp::media_bridge::{MediaBridge, MCP_REQUEST_BODY_MAX};
+use crate::mcp::motion::MotionBridge;
 use crate::plugin::registry::PluginRegistry;
 use crate::prompt::assemble::assemble_system_prompt;
 use crate::tools::descriptions::{description, input_schema};
+use crate::tools::errors::first_non_finite_json_number_path;
+#[cfg(test)]
 use crate::tools::names::ToolName;
 use crate::tools::panic_boundary::with_redacted_dispatch_panic;
+
+const MCP_MAX_CONCURRENT_DISPATCHES: usize = 8;
 
 /// Default loopback bind address for the MCP server (`agent-SPEC.md` §8.4).
 pub const DEFAULT_ADDR: &str = "127.0.0.1:19789";
 pub const MCP_PORT: u16 = 19789;
+static NEXT_MCP_UNDO_SCOPE: AtomicU64 = AtomicU64::new(1);
+
+fn next_mcp_undo_scope() -> Arc<str> {
+    format!(
+        "opentake:mcp:{}:{}",
+        std::process::id(),
+        NEXT_MCP_UNDO_SCOPE.fetch_add(1, Ordering::Relaxed)
+    )
+    .into()
+}
+
+fn turn_inactive_error() -> McpError {
+    McpError::new(
+        ErrorCode(-32000),
+        "OpenTake turn is no longer active",
+        Some(serde_json::json!({
+            "code": "OPENTAKE_TURN_CANCELLED"
+        })),
+    )
+}
+
+#[derive(Clone)]
+enum DispatchAuthority {
+    Direct,
+    Gated {
+        gate: Arc<dyn ChatTurnGate>,
+        activity: Arc<DispatchActivity>,
+        undo_scope: Arc<str>,
+    },
+}
+
+impl DispatchAuthority {
+    fn try_enter(&self) -> Result<Option<DispatchPermit>, McpError> {
+        match self {
+            Self::Direct => Ok(None),
+            Self::Gated { activity, .. } => activity
+                .try_enter()
+                .map(Some)
+                .ok_or_else(turn_inactive_error),
+        }
+    }
+
+    fn dispatch(
+        &self,
+        dispatcher: &Dispatcher,
+        name: &str,
+        args: Value,
+        request_cancel: &opentake_media::MediaCancelToken,
+    ) -> Option<crate::tools::result::ToolResult> {
+        match self {
+            Self::Direct => Some(dispatcher.dispatch_cancellable(name, args, request_cancel)),
+            Self::Gated {
+                gate, undo_scope, ..
+            } => {
+                gate.dispatch_cancellable_scoped(dispatcher, name, args, undo_scope, request_cancel)
+            }
+        }
+    }
+
+    fn request_cancel(&self) {
+        if let Self::Gated { gate, .. } = self {
+            gate.request_cancel();
+        }
+    }
+}
+
+struct DispatchActivity {
+    state: Mutex<DispatchActivityState>,
+    changed: tokio::sync::Notify,
+}
+
+struct DispatchActivityState {
+    accepting: bool,
+    active: usize,
+}
+
+impl DispatchActivity {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(DispatchActivityState {
+                accepting: true,
+                active: 0,
+            }),
+            changed: tokio::sync::Notify::new(),
+        })
+    }
+
+    fn try_enter(self: &Arc<Self>) -> Option<DispatchPermit> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.accepting {
+            return None;
+        }
+        state.active = state.active.saturating_add(1);
+        Some(DispatchPermit {
+            activity: self.clone(),
+        })
+    }
+
+    fn stop_accepting(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.accepting = false;
+        if state.active == 0 {
+            self.changed.notify_one();
+        }
+    }
+
+    async fn wait_zero(&self) {
+        loop {
+            let changed = self.changed.notified();
+            let active = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .active;
+            if active == 0 {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    #[cfg(test)]
+    fn active(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .active
+    }
+}
+
+struct DispatchPermit {
+    activity: Arc<DispatchActivity>,
+}
+
+impl Drop for DispatchPermit {
+    fn drop(&mut self) {
+        let mut state = self
+            .activity
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.active = state.active.saturating_sub(1);
+        if state.active == 0 {
+            self.activity.changed.notify_one();
+        }
+    }
+}
+
+#[derive(Clone)]
+struct DispatchAdmission {
+    total: Arc<tokio::sync::Semaphore>,
+    mutation: Arc<tokio::sync::Semaphore>,
+}
+
+struct DispatchAdmissionPermit {
+    _total: tokio::sync::OwnedSemaphorePermit,
+    _mutation: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl DispatchAdmission {
+    fn new() -> Self {
+        Self::with_total_limit(MCP_MAX_CONCURRENT_DISPATCHES)
+    }
+
+    fn with_total_limit(total_limit: usize) -> Self {
+        Self {
+            total: Arc::new(tokio::sync::Semaphore::new(total_limit.max(1))),
+            mutation: Arc::new(tokio::sync::Semaphore::new(1)),
+        }
+    }
+
+    fn try_enter(
+        &self,
+        class: DispatchAdmissionClass,
+    ) -> Result<DispatchAdmissionPermit, McpError> {
+        let total = self
+            .total
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| dispatch_busy_error())?;
+        let mutation = match class {
+            DispatchAdmissionClass::ReadOnly => None,
+            DispatchAdmissionClass::Mutation => Some(
+                self.mutation
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| dispatch_busy_error())?,
+            ),
+        };
+        Ok(DispatchAdmissionPermit {
+            _total: total,
+            _mutation: mutation,
+        })
+    }
+}
+
+fn dispatch_busy_error() -> McpError {
+    McpError::new(
+        ErrorCode(-32001),
+        "OpenTake MCP endpoint is busy",
+        Some(serde_json::json!({
+            "code": "OPENTAKE_MCP_BUSY",
+            "retryable": true
+        })),
+    )
+}
 
 fn map_dispatch_join_error(error: tokio::task::JoinError) -> McpError {
     tracing::error!(
@@ -53,6 +277,8 @@ fn map_dispatch_join_error(error: tokio::task::JoinError) -> McpError {
 pub struct McpServer {
     dispatcher: Arc<Dispatcher>,
     instructions: String,
+    authority: DispatchAuthority,
+    admission: DispatchAdmission,
 }
 
 impl McpServer {
@@ -69,21 +295,107 @@ impl McpServer {
         registry: Arc<RwLock<PluginRegistry>>,
         bridge: Option<Arc<dyn MediaBridge>>,
     ) -> Self {
+        Self::with_bridges(handle, registry, bridge, None)
+    }
+
+    pub fn with_bridges(
+        handle: Arc<dyn CoreHandle>,
+        registry: Arc<RwLock<PluginRegistry>>,
+        bridge: Option<Arc<dyn MediaBridge>>,
+        generation_bridge: Option<Arc<dyn GenerationBridge>>,
+    ) -> Self {
+        Self::with_capability_bridges(handle, registry, bridge, generation_bridge, None)
+    }
+
+    pub fn with_capability_bridges(
+        handle: Arc<dyn CoreHandle>,
+        registry: Arc<RwLock<PluginRegistry>>,
+        bridge: Option<Arc<dyn MediaBridge>>,
+        generation_bridge: Option<Arc<dyn GenerationBridge>>,
+        motion_bridge: Option<Arc<dyn MotionBridge>>,
+    ) -> Self {
+        Self::with_all_capability_bridges(
+            handle,
+            registry,
+            bridge,
+            generation_bridge,
+            motion_bridge,
+            None,
+        )
+    }
+
+    pub fn with_all_capability_bridges(
+        handle: Arc<dyn CoreHandle>,
+        registry: Arc<RwLock<PluginRegistry>>,
+        bridge: Option<Arc<dyn MediaBridge>>,
+        generation_bridge: Option<Arc<dyn GenerationBridge>>,
+        motion_bridge: Option<Arc<dyn MotionBridge>>,
+        advanced_bridge: Option<Arc<dyn AdvancedWorkflowBridge>>,
+    ) -> Self {
+        Self::with_all_capability_bridges_and_admission(
+            handle,
+            registry,
+            bridge,
+            generation_bridge,
+            motion_bridge,
+            advanced_bridge,
+            DispatchAdmission::new(),
+        )
+    }
+
+    fn with_all_capability_bridges_and_admission(
+        handle: Arc<dyn CoreHandle>,
+        registry: Arc<RwLock<PluginRegistry>>,
+        bridge: Option<Arc<dyn MediaBridge>>,
+        generation_bridge: Option<Arc<dyn GenerationBridge>>,
+        motion_bridge: Option<Arc<dyn MotionBridge>>,
+        advanced_bridge: Option<Arc<dyn AdvancedWorkflowBridge>>,
+        admission: DispatchAdmission,
+    ) -> Self {
         let instructions = registry
             .read()
             .map(|r| assemble_system_prompt(&r, "default"))
             .unwrap_or_default();
         McpServer {
-            dispatcher: Arc::new(Dispatcher::with_bridge(handle, registry, bridge)),
+            dispatcher: Arc::new(Dispatcher::with_all_capability_bridges(
+                handle,
+                registry,
+                bridge,
+                generation_bridge,
+                motion_bridge,
+                advanced_bridge,
+            )),
             instructions,
+            authority: DispatchAuthority::Direct,
+            admission,
         }
     }
 
-    /// All tool schemas (1:1 with [`ToolName::ALL`]).
-    fn tools() -> Vec<Tool> {
-        ToolName::ALL
-            .iter()
-            .map(|&t| {
+    fn from_gated_dispatcher(
+        dispatcher: Arc<Dispatcher>,
+        instructions: String,
+        gate: Arc<dyn ChatTurnGate>,
+        activity: Arc<DispatchActivity>,
+        admission: DispatchAdmission,
+    ) -> Self {
+        Self {
+            dispatcher,
+            instructions,
+            authority: DispatchAuthority::Gated {
+                gate,
+                activity,
+                undo_scope: next_mcp_undo_scope(),
+            },
+            admission,
+        }
+    }
+
+    /// Tool schemas for capabilities live in this exact host session.
+    fn tools(&self) -> Vec<Tool> {
+        self.dispatcher
+            .advertised_tools()
+            .into_iter()
+            .map(|t| {
                 let obj = input_schema(t)
                     .as_object()
                     .cloned()
@@ -105,6 +417,53 @@ impl McpServer {
             .unwrap_or(Value::Object(Map::new()));
         to_call_tool_result(self.dispatcher.dispatch(name, args))
     }
+
+    async fn dispatch_tool(
+        &self,
+        name: String,
+        args: Value,
+        request_cancelled: CancellationToken,
+    ) -> Result<CallToolResult, McpError> {
+        if request_cancelled.is_cancelled()
+            && matches!(&self.authority, DispatchAuthority::Gated { .. })
+        {
+            self.authority.request_cancel();
+            return Err(turn_inactive_error());
+        }
+        let admission_permit = self
+            .admission
+            .try_enter(dispatch_admission_class(&name, &args))?;
+        let permit = self.authority.try_enter()?;
+        let dispatcher = self.dispatcher.clone();
+        let authority = self.authority.clone();
+        let cancel = opentake_media::MediaCancelToken::new();
+        let worker_cancel = cancel.clone();
+        let worker_authority = authority.clone();
+        let mut worker = tokio::task::spawn_blocking(move || {
+            let _admission_permit = admission_permit;
+            let _permit = permit;
+            with_redacted_dispatch_panic(|| {
+                worker_authority
+                    .dispatch(&dispatcher, &name, args, &worker_cancel)
+                    .map(to_call_tool_result)
+                    .ok_or_else(turn_inactive_error)
+            })
+        });
+        let joined = tokio::select! {
+            result = &mut worker => result,
+            () = request_cancelled.cancelled() => {
+                cancel.cancel();
+                authority.request_cancel();
+                worker.await
+            }
+        }
+        .map_err(map_dispatch_join_error)?;
+        if request_cancelled.is_cancelled() {
+            cancel.cancel();
+            authority.request_cancel();
+        }
+        joined
+    }
 }
 
 impl ServerHandler for McpServer {
@@ -120,7 +479,7 @@ impl ServerHandler for McpServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         Ok(ListToolsResult {
-            tools: Self::tools(),
+            tools: self.tools(),
             next_cursor: None,
             meta: None,
         })
@@ -131,31 +490,15 @@ impl ServerHandler for McpServer {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let dispatcher = self.dispatcher.clone();
         let name = request.name.to_string();
         let args = request
             .arguments
             .map(Value::Object)
             .unwrap_or(Value::Object(Map::new()));
-        let cancel = opentake_media::MediaCancelToken::new();
-        let worker_cancel = cancel.clone();
         // rmcp cancels `context.ct` for the protocol's explicit
         // `notifications/cancelled`. This does not claim raw TCP disconnect
         // detection; it is the MCP cancellation semantic exposed by rmcp.
-        let mut worker = tokio::task::spawn_blocking(move || {
-            with_redacted_dispatch_panic(|| {
-                to_call_tool_result(dispatcher.dispatch_cancellable(&name, args, &worker_cancel))
-            })
-        });
-        let result = tokio::select! {
-            result = &mut worker => result,
-            () = context.ct.cancelled() => {
-                cancel.cancel();
-                worker.await
-            }
-        }
-        .map_err(map_dispatch_join_error);
-        result
+        self.dispatch_tool(name, args, context.ct).await
     }
 }
 
@@ -269,6 +612,47 @@ async fn localhost_guard(
     }
 }
 
+fn bearer_token_matches(headers: &axum::http::HeaderMap, expected: &str) -> bool {
+    let mut values = headers.get_all(axum::http::header::AUTHORIZATION).iter();
+    let Some(value) = values.next() else {
+        return false;
+    };
+    if values.next().is_some() {
+        return false;
+    }
+    let Ok(value) = value.to_str() else {
+        return false;
+    };
+    let Some((scheme, supplied)) = value.split_once(' ') else {
+        return false;
+    };
+    scheme.eq_ignore_ascii_case("bearer")
+        && supplied.len() == expected.len()
+        && bool::from(supplied.as_bytes().ct_eq(expected.as_bytes()))
+}
+
+/// Authenticate every route on a per-turn endpoint before any MCP session is
+/// created. The fixed-size token is compared in constant time after its public
+/// length and scheme have been validated.
+async fn ephemeral_bearer_guard(
+    axum::extract::State(expected): axum::extract::State<Arc<str>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    if bearer_token_matches(request.headers(), &expected) {
+        next.run(request).await
+    } else {
+        (
+            axum::http::StatusCode::UNAUTHORIZED,
+            [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
+            "OpenTake MCP authentication required",
+        )
+            .into_response()
+    }
+}
+
 /// Reject explicit protocol versions that the linked rmcp SDK cannot serve.
 /// Missing versions retain rmcp's backwards-compatible negotiation behavior.
 async fn protocol_version_guard(
@@ -368,6 +752,43 @@ async fn content_type_guard(
     next.run(request).await
 }
 
+/// Buffer the already bounded MCP request once so non-standard JSON numeric
+/// tokens and exponent overflow can be rejected with the tool-relative path
+/// before rmcp's JSON decoder loses that context.
+async fn finite_number_guard(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    if request.method() != axum::http::Method::POST || request.uri().path() != "/mcp" {
+        return next.run(request).await;
+    }
+    let (parts, body) = request.into_parts();
+    let bytes = match axum::body::to_bytes(body, MCP_REQUEST_BODY_MAX).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                "OpenTake MCP request body is too large",
+            )
+                .into_response();
+        }
+    };
+    if let Some(path) = first_non_finite_json_number_path(&bytes) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            format!("{path}: value must be finite"),
+        )
+            .into_response();
+    }
+    next.run(axum::http::Request::from_parts(
+        parts,
+        axum::body::Body::from(bytes),
+    ))
+    .await
+}
+
 /// Minimal OAuth protected-resource metadata: the server requires no auth (it is
 /// loopback-only), so it advertises no authorization servers.
 async fn oauth_protected_resource() -> axum::Json<Value> {
@@ -416,6 +837,54 @@ pub fn build_router_with_bridge_for_port(
     bridge: Option<Arc<dyn MediaBridge>>,
     expected_port: u16,
 ) -> axum::Router {
+    build_router_with_bridges_for_port(handle, registry, bridge, None, expected_port)
+}
+
+pub fn build_router_with_bridges_for_port(
+    handle: Arc<dyn CoreHandle>,
+    registry: Arc<RwLock<PluginRegistry>>,
+    bridge: Option<Arc<dyn MediaBridge>>,
+    generation_bridge: Option<Arc<dyn GenerationBridge>>,
+    expected_port: u16,
+) -> axum::Router {
+    build_router_with_capability_bridges_for_port(
+        handle,
+        registry,
+        bridge,
+        generation_bridge,
+        None,
+        expected_port,
+    )
+}
+
+pub fn build_router_with_capability_bridges_for_port(
+    handle: Arc<dyn CoreHandle>,
+    registry: Arc<RwLock<PluginRegistry>>,
+    bridge: Option<Arc<dyn MediaBridge>>,
+    generation_bridge: Option<Arc<dyn GenerationBridge>>,
+    motion_bridge: Option<Arc<dyn MotionBridge>>,
+    expected_port: u16,
+) -> axum::Router {
+    build_router_with_all_capability_bridges_for_port(
+        handle,
+        registry,
+        bridge,
+        generation_bridge,
+        motion_bridge,
+        None,
+        expected_port,
+    )
+}
+
+pub fn build_router_with_all_capability_bridges_for_port(
+    handle: Arc<dyn CoreHandle>,
+    registry: Arc<RwLock<PluginRegistry>>,
+    bridge: Option<Arc<dyn MediaBridge>>,
+    generation_bridge: Option<Arc<dyn GenerationBridge>>,
+    motion_bridge: Option<Arc<dyn MotionBridge>>,
+    advanced_bridge: Option<Arc<dyn AdvancedWorkflowBridge>>,
+    expected_port: u16,
+) -> axum::Router {
     use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
     use rmcp::transport::streamable_http_server::{
         StreamableHttpServerConfig, StreamableHttpService,
@@ -423,12 +892,17 @@ pub fn build_router_with_bridge_for_port(
     use tower::ServiceBuilder;
     use tower_http::limit::RequestBodyLimitLayer;
 
+    let admission = DispatchAdmission::new();
     let service = StreamableHttpService::new(
         move || {
-            Ok(McpServer::with_bridge(
+            Ok(McpServer::with_all_capability_bridges_and_admission(
                 handle.clone(),
                 registry.clone(),
                 bridge.clone(),
+                generation_bridge.clone(),
+                motion_bridge.clone(),
+                advanced_bridge.clone(),
+                admission.clone(),
             ))
         },
         Arc::new(LocalSessionManager::default()),
@@ -444,12 +918,281 @@ pub fn build_router_with_bridge_for_port(
             axum::routing::get(oauth_protected_resource),
         )
         .route_service("/mcp", service)
+        .layer(axum::middleware::from_fn(finite_number_guard))
         .layer(axum::middleware::from_fn(content_type_guard))
         .layer(axum::middleware::from_fn(protocol_version_guard))
         .layer(axum::middleware::from_fn_with_state(
             expected_port,
             localhost_guard,
         ))
+}
+
+fn build_gated_router_for_port(
+    dispatcher: Arc<Dispatcher>,
+    instructions: String,
+    gate: Arc<dyn ChatTurnGate>,
+    activity: Arc<DispatchActivity>,
+    shutdown: CancellationToken,
+    expected_port: u16,
+    bearer_token: Option<Arc<str>>,
+) -> axum::Router {
+    use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+    use rmcp::transport::streamable_http_server::{
+        StreamableHttpServerConfig, StreamableHttpService,
+    };
+    use tower::ServiceBuilder;
+    use tower_http::limit::RequestBodyLimitLayer;
+
+    let mut config = StreamableHttpServerConfig::default();
+    config.cancellation_token = shutdown;
+    let admission = DispatchAdmission::new();
+    let service = StreamableHttpService::new(
+        move || {
+            Ok(McpServer::from_gated_dispatcher(
+                dispatcher.clone(),
+                instructions.clone(),
+                gate.clone(),
+                activity.clone(),
+                admission.clone(),
+            ))
+        },
+        Arc::new(LocalSessionManager::default()),
+        config,
+    );
+    let service = ServiceBuilder::new()
+        .layer(RequestBodyLimitLayer::new(MCP_REQUEST_BODY_MAX))
+        .service(service);
+
+    let router = axum::Router::new()
+        .route(
+            "/.well-known/oauth-protected-resource",
+            axum::routing::get(oauth_protected_resource),
+        )
+        .route_service("/mcp", service)
+        .layer(axum::middleware::from_fn(finite_number_guard))
+        .layer(axum::middleware::from_fn(content_type_guard))
+        .layer(axum::middleware::from_fn(protocol_version_guard))
+        .layer(axum::middleware::from_fn_with_state(
+            expected_port,
+            localhost_guard,
+        ));
+    match bearer_token {
+        Some(token) => router.layer(axum::middleware::from_fn_with_state(
+            token,
+            ephemeral_bearer_guard,
+        )),
+        None => router,
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum EphemeralMcpError {
+    #[error("could not bind the private OpenTake MCP endpoint")]
+    Bind(#[source] std::io::Error),
+    #[error("the private OpenTake MCP endpoint failed")]
+    Serve(#[source] std::io::Error),
+    #[error("the private OpenTake MCP endpoint task failed")]
+    Join,
+    #[error("could not create private OpenTake MCP credentials")]
+    Entropy(#[source] getrandom::Error),
+}
+
+struct CancelTokenOnDrop(CancellationToken);
+
+impl Drop for CancelTokenOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
+/// A project-authorized MCP endpoint owned by exactly one in-app Agent turn.
+/// Call [`Self::close`] before releasing the turn so blocking tool work cannot
+/// outlive its project identity.
+#[must_use = "the endpoint must be closed before its Agent turn is released"]
+pub struct EphemeralMcpEndpoint {
+    addr: SocketAddr,
+    url: String,
+    bearer_token: Arc<str>,
+    shutdown: CancellationToken,
+    activity: Arc<DispatchActivity>,
+    cancel_gate: Arc<dyn ChatTurnGate>,
+    stopped: CancellationToken,
+    join: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
+    closed: bool,
+}
+
+impl EphemeralMcpEndpoint {
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Per-turn bearer credential. It is intentionally absent from the URL and
+    /// has no `Debug` representation; callers should place it only in a child
+    /// process environment variable.
+    pub fn bearer_token(&self) -> &str {
+        &self.bearer_token
+    }
+
+    /// Completes if the listener exits before the owner begins normal cleanup.
+    pub async fn stopped(&self) {
+        self.stopped.cancelled().await;
+    }
+
+    /// Stop admission first, terminate transport sessions, then wait for every
+    /// blocking dispatcher call before joining the listener task.
+    pub async fn close(mut self) -> Result<(), EphemeralMcpError> {
+        self.activity.stop_accepting();
+        self.shutdown.cancel();
+        self.activity.wait_zero().await;
+        let result = match self.join.as_mut() {
+            Some(join) => match join.await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(EphemeralMcpError::Serve(error)),
+                Err(error) => {
+                    tracing::error!(
+                        target: "opentake::mcp::private",
+                        task_cancelled = error.is_cancelled(),
+                        task_panic = error.is_panic(),
+                        "private MCP listener task failed"
+                    );
+                    Err(EphemeralMcpError::Join)
+                }
+            },
+            None => Err(EphemeralMcpError::Join),
+        };
+        self.join.take();
+        self.closed = true;
+        result
+    }
+}
+
+impl Drop for EphemeralMcpEndpoint {
+    fn drop(&mut self) {
+        if self.closed {
+            return;
+        }
+        self.activity.stop_accepting();
+        self.cancel_gate.request_cancel();
+        self.shutdown.cancel();
+        if let Some(join) = self.join.take() {
+            join.abort();
+        }
+    }
+}
+
+/// Bind a per-turn project-authorized MCP server on a fresh IPv4 loopback port.
+pub async fn bind_ephemeral_gated(
+    dispatcher: Arc<Dispatcher>,
+    registry: Arc<RwLock<PluginRegistry>>,
+    gate: Arc<dyn ChatTurnGate>,
+) -> Result<EphemeralMcpEndpoint, EphemeralMcpError> {
+    bind_ephemeral_gated_on(
+        SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
+        dispatcher,
+        registry,
+        gate,
+    )
+    .await
+}
+
+async fn bind_ephemeral_gated_on(
+    addr: SocketAddr,
+    dispatcher: Arc<Dispatcher>,
+    registry: Arc<RwLock<PluginRegistry>>,
+    gate: Arc<dyn ChatTurnGate>,
+) -> Result<EphemeralMcpEndpoint, EphemeralMcpError> {
+    if !addr.ip().is_loopback() {
+        return Err(EphemeralMcpError::Bind(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "private MCP endpoint requires a loopback address",
+        )));
+    }
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(EphemeralMcpError::Bind)?;
+    let bound_addr = listener.local_addr().map_err(EphemeralMcpError::Bind)?;
+    let mut secret = [0_u8; 32];
+    getrandom::fill(&mut secret).map_err(EphemeralMcpError::Entropy)?;
+    let mut encoded_secret = String::with_capacity(secret.len() * 2);
+    for byte in secret {
+        write!(&mut encoded_secret, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    let bearer_token: Arc<str> = encoded_secret.into();
+    let instructions = registry
+        .read()
+        .map(|registry| assemble_system_prompt(&registry, "default"))
+        .unwrap_or_default();
+    let activity = DispatchActivity::new();
+    let shutdown = CancellationToken::new();
+    let stopped = CancellationToken::new();
+    let cancel_gate = gate.clone();
+    let router = build_gated_router_for_port(
+        dispatcher,
+        instructions,
+        gate,
+        activity.clone(),
+        shutdown.clone(),
+        bound_addr.port(),
+        Some(bearer_token.clone()),
+    );
+    let listener_shutdown = shutdown.clone();
+    let listener_stopped = stopped.clone();
+    let join = tokio::spawn(async move {
+        let _stopped = CancelTokenOnDrop(listener_stopped);
+        axum::serve(listener, router)
+            .with_graceful_shutdown(listener_shutdown.cancelled_owned())
+            .await
+    });
+    Ok(EphemeralMcpEndpoint {
+        addr: bound_addr,
+        url: format!("http://{bound_addr}/mcp"),
+        bearer_token,
+        shutdown,
+        activity,
+        cancel_gate,
+        stopped,
+        join: Some(join),
+        closed: false,
+    })
+}
+
+/// Serve a long-lived loopback MCP endpoint over an already-constructed shared
+/// dispatcher. Every call still passes through `gate`; unlike the direct legacy
+/// constructors this cannot silently create a second undo/plugin/capability
+/// universe beside the in-app Agent.
+pub async fn serve_gated_dispatcher(
+    addr: SocketAddr,
+    dispatcher: Arc<Dispatcher>,
+    registry: Arc<RwLock<PluginRegistry>>,
+    gate: Arc<dyn ChatTurnGate>,
+) -> std::io::Result<()> {
+    if !addr.ip().is_loopback() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("MCP server requires a loopback bind address, got {addr}"),
+        ));
+    }
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    let bound_addr = listener.local_addr()?;
+    let instructions = registry
+        .read()
+        .map(|registry| assemble_system_prompt(&registry, "default"))
+        .unwrap_or_default();
+    let router = build_gated_router_for_port(
+        dispatcher,
+        instructions,
+        gate,
+        DispatchActivity::new(),
+        CancellationToken::new(),
+        bound_addr.port(),
+        None,
+    );
+    tracing::info!("MCP server listening on http://{bound_addr}/mcp");
+    axum::serve(listener, router).await
 }
 
 /// Bind `addr` (loopback) and serve the MCP router with no media bridge. See
@@ -470,6 +1213,48 @@ pub async fn serve_with_bridge(
     registry: Arc<RwLock<PluginRegistry>>,
     bridge: Option<Arc<dyn MediaBridge>>,
 ) -> std::io::Result<()> {
+    serve_with_bridges(addr, handle, registry, bridge, None).await
+}
+
+pub async fn serve_with_bridges(
+    addr: SocketAddr,
+    handle: Arc<dyn CoreHandle>,
+    registry: Arc<RwLock<PluginRegistry>>,
+    bridge: Option<Arc<dyn MediaBridge>>,
+    generation_bridge: Option<Arc<dyn GenerationBridge>>,
+) -> std::io::Result<()> {
+    serve_with_capability_bridges(addr, handle, registry, bridge, generation_bridge, None).await
+}
+
+pub async fn serve_with_capability_bridges(
+    addr: SocketAddr,
+    handle: Arc<dyn CoreHandle>,
+    registry: Arc<RwLock<PluginRegistry>>,
+    bridge: Option<Arc<dyn MediaBridge>>,
+    generation_bridge: Option<Arc<dyn GenerationBridge>>,
+    motion_bridge: Option<Arc<dyn MotionBridge>>,
+) -> std::io::Result<()> {
+    serve_with_all_capability_bridges(
+        addr,
+        handle,
+        registry,
+        bridge,
+        generation_bridge,
+        motion_bridge,
+        None,
+    )
+    .await
+}
+
+pub async fn serve_with_all_capability_bridges(
+    addr: SocketAddr,
+    handle: Arc<dyn CoreHandle>,
+    registry: Arc<RwLock<PluginRegistry>>,
+    bridge: Option<Arc<dyn MediaBridge>>,
+    generation_bridge: Option<Arc<dyn GenerationBridge>>,
+    motion_bridge: Option<Arc<dyn MotionBridge>>,
+    advanced_bridge: Option<Arc<dyn AdvancedWorkflowBridge>>,
+) -> std::io::Result<()> {
     if !addr.ip().is_loopback() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -478,7 +1263,15 @@ pub async fn serve_with_bridge(
     }
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound_addr = listener.local_addr()?;
-    let router = build_router_with_bridge_for_port(handle, registry, bridge, bound_addr.port());
+    let router = build_router_with_all_capability_bridges_for_port(
+        handle,
+        registry,
+        bridge,
+        generation_bridge,
+        motion_bridge,
+        advanced_bridge,
+        bound_addr.port(),
+    );
     tracing::info!("MCP server listening on http://{bound_addr}/mcp");
     axum::serve(listener, router).await
 }
@@ -487,10 +1280,13 @@ pub async fn serve_with_bridge(
 mod tests {
     use super::*;
     use crate::mcp::core_handle::CoreHandle;
+    use crate::tools::result::ToolResult;
     use opentake_core::AppCore;
     use opentake_domain::{ClipType, MediaManifest, Timeline};
     use opentake_ops::command::{EditCommand, EditResult};
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Condvar;
 
     struct TestHandle {
         core: AppCore,
@@ -526,17 +1322,209 @@ mod tests {
         McpServer::new(Arc::new(TestHandle::new()), registry)
     }
 
+    struct CountingGate {
+        dispatches: AtomicUsize,
+        cancellations: AtomicUsize,
+        allow: AtomicBool,
+    }
+
+    impl CountingGate {
+        fn new(allow: bool) -> Self {
+            Self {
+                dispatches: AtomicUsize::new(0),
+                cancellations: AtomicUsize::new(0),
+                allow: AtomicBool::new(allow),
+            }
+        }
+    }
+
+    impl ChatTurnGate for CountingGate {
+        fn timeline(&self, dispatcher: &Dispatcher) -> Option<Timeline> {
+            Some(dispatcher.timeline())
+        }
+
+        fn dispatch(
+            &self,
+            _dispatcher: &Dispatcher,
+            _name: &str,
+            _args: Value,
+        ) -> Option<ToolResult> {
+            self.dispatches.fetch_add(1, Ordering::SeqCst);
+            self.allow
+                .load(Ordering::SeqCst)
+                .then(|| ToolResult::ok("gated"))
+        }
+
+        fn request_cancel(&self) {
+            self.cancellations.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct BlockingGate {
+        entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        cancellation_seen: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        released: Mutex<bool>,
+        release_changed: Condvar,
+    }
+
+    impl BlockingGate {
+        fn new(
+            entered: tokio::sync::oneshot::Sender<()>,
+            cancellation_seen: tokio::sync::oneshot::Sender<()>,
+        ) -> Self {
+            Self {
+                entered: Mutex::new(Some(entered)),
+                cancellation_seen: Mutex::new(Some(cancellation_seen)),
+                released: Mutex::new(false),
+                release_changed: Condvar::new(),
+            }
+        }
+
+        fn release(&self) {
+            *self
+                .released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            self.release_changed.notify_all();
+        }
+    }
+
+    impl ChatTurnGate for BlockingGate {
+        fn timeline(&self, dispatcher: &Dispatcher) -> Option<Timeline> {
+            Some(dispatcher.timeline())
+        }
+
+        fn dispatch(
+            &self,
+            _dispatcher: &Dispatcher,
+            _name: &str,
+            _args: Value,
+        ) -> Option<ToolResult> {
+            if let Some(entered) = self
+                .entered
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                let _ = entered.send(());
+            }
+            let mut released = self
+                .released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while !*released {
+                released = self
+                    .release_changed
+                    .wait(released)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            Some(ToolResult::ok("released"))
+        }
+
+        fn request_cancel(&self) {
+            if let Some(seen) = self
+                .cancellation_seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                let _ = seen.send(());
+            }
+        }
+    }
+
+    struct RecordingBlockingGate {
+        blocked_name: Option<&'static str>,
+        entered: tokio::sync::mpsc::UnboundedSender<String>,
+        released: Mutex<bool>,
+        release_changed: Condvar,
+    }
+
+    impl RecordingBlockingGate {
+        fn new(
+            blocked_name: Option<&'static str>,
+            entered: tokio::sync::mpsc::UnboundedSender<String>,
+        ) -> Self {
+            Self {
+                blocked_name,
+                entered,
+                released: Mutex::new(false),
+                release_changed: Condvar::new(),
+            }
+        }
+
+        fn release(&self) {
+            *self
+                .released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            self.release_changed.notify_all();
+        }
+    }
+
+    impl ChatTurnGate for RecordingBlockingGate {
+        fn timeline(&self, dispatcher: &Dispatcher) -> Option<Timeline> {
+            Some(dispatcher.timeline())
+        }
+
+        fn dispatch(
+            &self,
+            _dispatcher: &Dispatcher,
+            name: &str,
+            _args: Value,
+        ) -> Option<ToolResult> {
+            let _ = self.entered.send(name.to_string());
+            if self.blocked_name.is_none() || self.blocked_name == Some(name) {
+                let mut released = self
+                    .released
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                while !*released {
+                    released = self
+                        .release_changed
+                        .wait(released)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+            }
+            Some(ToolResult::ok("admitted"))
+        }
+    }
+
+    fn gated_server(gate: Arc<dyn ChatTurnGate>, activity: Arc<DispatchActivity>) -> McpServer {
+        let registry = Arc::new(RwLock::new(PluginRegistry::with_builtins()));
+        let dispatcher = Arc::new(Dispatcher::new(Arc::new(TestHandle::new()), registry));
+        McpServer::from_gated_dispatcher(
+            dispatcher,
+            String::new(),
+            gate,
+            activity,
+            DispatchAdmission::new(),
+        )
+    }
+
+    fn gated_server_with_shared_admission(
+        dispatcher: Arc<Dispatcher>,
+        gate: Arc<dyn ChatTurnGate>,
+        activity: Arc<DispatchActivity>,
+        admission: DispatchAdmission,
+    ) -> McpServer {
+        McpServer::from_gated_dispatcher(dispatcher, String::new(), gate, activity, admission)
+    }
+
     #[test]
-    fn lists_all_44_tools() {
-        assert_eq!(McpServer::tools().len(), ToolName::ALL.len());
-        // Names round-trip to the wire names.
-        let names: Vec<String> = McpServer::tools()
+    fn lists_every_advertised_tool() {
+        let server = server();
+        let expected = ToolName::ALL
             .iter()
-            .map(|t| t.name.to_string())
-            .collect();
+            .filter(|tool| !tool.requires_media_bridge())
+            .count();
+        assert_eq!(server.tools().len(), expected);
+        // Names round-trip to the wire names.
+        let names: Vec<String> = server.tools().iter().map(|t| t.name.to_string()).collect();
         assert!(names.contains(&"add_clips".to_string()));
         assert!(names.contains(&"detect_beats".to_string()));
         assert!(names.contains(&"activate_workflow".to_string()));
+        assert!(!names.contains(&"remove_filler_words".to_string()));
     }
 
     #[test]
@@ -616,6 +1604,453 @@ mod tests {
         let wire = serde_json::to_string(&error).unwrap();
         assert!(wire.contains("tool dispatch task failed"));
         assert!(!wire.contains("oauth-super-secret-token"));
+    }
+
+    #[tokio::test]
+    async fn gated_dispatch_never_bypasses_gate_and_fails_closed() {
+        let gate = Arc::new(CountingGate::new(true));
+        let server = gated_server(gate.clone(), DispatchActivity::new());
+        let result = server
+            .dispatch_tool(
+                "get_timeline".into(),
+                serde_json::json!({}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("authorized gate result");
+        assert_ne!(result.is_error, Some(true));
+        assert_eq!(gate.dispatches.load(Ordering::SeqCst), 1);
+
+        gate.allow.store(false, Ordering::SeqCst);
+        let error = server
+            .dispatch_tool(
+                "get_timeline".into(),
+                serde_json::json!({}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("stale gate must fail closed");
+        let wire = serde_json::to_string(&error).unwrap();
+        assert!(wire.contains("OPENTAKE_TURN_CANCELLED"), "{wire}");
+        assert_eq!(gate.dispatches.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn protocol_cancel_requests_whole_turn_and_awaits_worker() {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let gate = Arc::new(BlockingGate::new(entered_tx, cancel_tx));
+        let activity = DispatchActivity::new();
+        let server = Arc::new(gated_server(gate.clone(), activity.clone()));
+        let request_cancel = CancellationToken::new();
+        let worker_server = server.clone();
+        let worker_cancel = request_cancel.clone();
+        let task = tokio::spawn(async move {
+            worker_server
+                .dispatch_tool("get_timeline".into(), serde_json::json!({}), worker_cancel)
+                .await
+        });
+
+        entered_rx.await.expect("worker entered the gate");
+        assert_eq!(activity.active(), 1);
+        request_cancel.cancel();
+        cancel_rx.await.expect("whole-turn cancellation requested");
+        assert!(!task.is_finished(), "blocking worker must still be awaited");
+        assert_eq!(activity.active(), 1);
+
+        gate.release();
+        task.await
+            .expect("dispatch task joined")
+            .expect("tool result");
+        assert_eq!(activity.active(), 0);
+    }
+
+    #[tokio::test]
+    async fn stopping_admission_rejects_new_calls_and_waits_for_active_permit() {
+        let activity = DispatchActivity::new();
+        let permit = activity.try_enter().expect("first dispatch admitted");
+        activity.stop_accepting();
+        assert!(
+            activity.try_enter().is_none(),
+            "new dispatch must be rejected"
+        );
+
+        let waiter_activity = activity.clone();
+        let (drained_tx, mut drained_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            waiter_activity.wait_zero().await;
+            let _ = drained_tx.send(());
+        });
+        assert!(
+            matches!(
+                drained_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "drain must wait for the active permit"
+        );
+        drop(permit);
+        drained_rx.await.expect("drain completed after permit drop");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn endpoint_total_admission_caps_concurrent_read_workers() {
+        let registry = Arc::new(RwLock::new(PluginRegistry::with_builtins()));
+        let dispatcher = Arc::new(Dispatcher::new(Arc::new(TestHandle::new()), registry));
+        let activity = DispatchActivity::new();
+        let admission = DispatchAdmission::with_total_limit(2);
+        let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+        let gate = Arc::new(RecordingBlockingGate::new(None, entered_tx));
+
+        let first = Arc::new(gated_server_with_shared_admission(
+            dispatcher.clone(),
+            gate.clone(),
+            activity.clone(),
+            admission.clone(),
+        ));
+        let second = Arc::new(gated_server_with_shared_admission(
+            dispatcher.clone(),
+            gate.clone(),
+            activity.clone(),
+            admission.clone(),
+        ));
+        let third = gated_server_with_shared_admission(
+            dispatcher,
+            gate.clone(),
+            activity.clone(),
+            admission,
+        );
+        let first_task = tokio::spawn(async move {
+            first
+                .dispatch_tool(
+                    "get_timeline".into(),
+                    serde_json::json!({}),
+                    CancellationToken::new(),
+                )
+                .await
+        });
+        let second_task = tokio::spawn(async move {
+            second
+                .dispatch_tool(
+                    "get_media".into(),
+                    serde_json::json!({}),
+                    CancellationToken::new(),
+                )
+                .await
+        });
+        let mut entered = vec![
+            entered_rx.recv().await.expect("first read entered"),
+            entered_rx.recv().await.expect("second read entered"),
+        ];
+        entered.sort();
+        assert_eq!(entered, ["get_media", "get_timeline"]);
+
+        let error = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            third.dispatch_tool(
+                "list_folders".into(),
+                serde_json::json!({}),
+                CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("over-cap call must fail immediately")
+        .expect_err("third read must be rejected while capacity is full");
+        let wire = serde_json::to_string(&error).expect("encode busy error");
+        assert!(wire.contains("OPENTAKE_MCP_BUSY"), "{wire}");
+        assert!(entered_rx.try_recv().is_err(), "busy call reached the gate");
+        assert_eq!(activity.active(), 2);
+
+        gate.release();
+        first_task
+            .await
+            .expect("first task joined")
+            .expect("first read completed");
+        second_task
+            .await
+            .expect("second task joined")
+            .expect("second read completed");
+        assert_eq!(activity.active(), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn endpoint_serializes_mutations_without_blocking_admitted_reads() {
+        let registry = Arc::new(RwLock::new(PluginRegistry::with_builtins()));
+        let dispatcher = Arc::new(Dispatcher::new(Arc::new(TestHandle::new()), registry));
+        let activity = DispatchActivity::new();
+        let admission = DispatchAdmission::with_total_limit(2);
+        let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+        let gate = Arc::new(RecordingBlockingGate::new(Some("add_clips"), entered_tx));
+        let mutation_server = Arc::new(gated_server_with_shared_admission(
+            dispatcher.clone(),
+            gate.clone(),
+            activity.clone(),
+            admission.clone(),
+        ));
+        let competing_mutation = gated_server_with_shared_admission(
+            dispatcher.clone(),
+            gate.clone(),
+            activity.clone(),
+            admission.clone(),
+        );
+        let read_server = gated_server_with_shared_admission(
+            dispatcher,
+            gate.clone(),
+            activity.clone(),
+            admission,
+        );
+
+        let mutation_task = tokio::spawn(async move {
+            mutation_server
+                .dispatch_tool(
+                    "add_clips".into(),
+                    serde_json::json!({}),
+                    CancellationToken::new(),
+                )
+                .await
+        });
+        assert_eq!(
+            entered_rx.recv().await.as_deref(),
+            Some("add_clips"),
+            "first mutation entered"
+        );
+
+        let error = competing_mutation
+            .dispatch_tool(
+                "remove_clips".into(),
+                serde_json::json!({}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect_err("a second mutation must fail busy");
+        let wire = serde_json::to_string(&error).expect("encode busy error");
+        assert!(wire.contains("OPENTAKE_MCP_BUSY"), "{wire}");
+        assert!(entered_rx.try_recv().is_err(), "busy mutation reached gate");
+
+        let read = read_server
+            .dispatch_tool(
+                "get_timeline".into(),
+                serde_json::json!({}),
+                CancellationToken::new(),
+            )
+            .await
+            .expect("read admitted beside mutation");
+        assert_ne!(read.is_error, Some(true));
+        assert_eq!(entered_rx.recv().await.as_deref(), Some("get_timeline"));
+
+        gate.release();
+        mutation_task
+            .await
+            .expect("mutation task joined")
+            .expect("first mutation completed");
+        assert_eq!(activity.active(), 0);
+    }
+
+    #[tokio::test]
+    async fn ephemeral_endpoint_uses_dynamic_port_and_closes_listener() {
+        let registry = Arc::new(RwLock::new(PluginRegistry::with_builtins()));
+        let dispatcher = Arc::new(Dispatcher::new(
+            Arc::new(TestHandle::new()),
+            registry.clone(),
+        ));
+        let gate = Arc::new(CountingGate::new(true));
+        let endpoint = bind_ephemeral_gated(dispatcher, registry, gate.clone())
+            .await
+            .expect("bind private endpoint");
+        let addr = endpoint.addr();
+        assert_ne!(addr.port(), 0);
+        assert_eq!(endpoint.url(), format!("http://{addr}/mcp"));
+        assert_eq!(endpoint.bearer_token().len(), 64);
+        let stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("listener accepts while active");
+        drop(stream);
+        endpoint.close().await.expect("close private endpoint");
+        assert_eq!(gate.cancellations.load(Ordering::SeqCst), 0);
+        assert!(tokio::net::TcpStream::connect(addr).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn dropping_ephemeral_endpoint_cancels_gate_and_aborts_listener() {
+        let registry = Arc::new(RwLock::new(PluginRegistry::with_builtins()));
+        let dispatcher = Arc::new(Dispatcher::new(
+            Arc::new(TestHandle::new()),
+            registry.clone(),
+        ));
+        let gate = Arc::new(CountingGate::new(true));
+        let endpoint = bind_ephemeral_gated(dispatcher, registry, gate.clone())
+            .await
+            .expect("bind private endpoint");
+        let addr = endpoint.addr();
+        drop(endpoint);
+
+        assert_eq!(gate.cancellations.load(Ordering::SeqCst), 1);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if tokio::net::TcpStream::connect(addr).await.is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropped endpoint listener must terminate");
+    }
+
+    #[tokio::test]
+    async fn stopped_guard_fires_when_its_listener_task_panics() {
+        let stopped = CancellationToken::new();
+        let task_token = stopped.clone();
+        let task = tokio::spawn(async move {
+            let _stopped = CancelTokenOnDrop(task_token);
+            panic!("simulated private listener panic");
+        });
+        assert!(task.await.expect_err("task must panic").is_panic());
+        assert!(stopped.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn ephemeral_http_route_dispatches_only_through_the_gate() {
+        let registry = Arc::new(RwLock::new(PluginRegistry::with_builtins()));
+        let dispatcher = Arc::new(Dispatcher::new(
+            Arc::new(TestHandle::new()),
+            registry.clone(),
+        ));
+        let gate = Arc::new(CountingGate::new(true));
+        let endpoint = bind_ephemeral_gated(dispatcher, registry, gate.clone())
+            .await
+            .expect("bind gated endpoint");
+        let client = reqwest::Client::new();
+        let initialize_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": { "name": "gated-test", "version": "0" }
+            }
+        });
+        let missing = client
+            .post(endpoint.url())
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .json(&initialize_body)
+            .send()
+            .await
+            .expect("unauthenticated initialize request");
+        assert_eq!(missing.status(), reqwest::StatusCode::UNAUTHORIZED);
+        let wrong = client
+            .post(endpoint.url())
+            .bearer_auth("0".repeat(64))
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .json(&initialize_body)
+            .send()
+            .await
+            .expect("wrong-token initialize request");
+        assert_eq!(wrong.status(), reqwest::StatusCode::UNAUTHORIZED);
+        let initialize = client
+            .post(endpoint.url())
+            .bearer_auth(endpoint.bearer_token())
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .json(&initialize_body)
+            .send()
+            .await
+            .expect("initialize request");
+        assert!(initialize.status().is_success());
+        let session = initialize
+            .headers()
+            .get("mcp-session-id")
+            .expect("stateful session")
+            .clone();
+
+        let call = |id| {
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": { "name": "get_timeline", "arguments": {} }
+            })
+        };
+        let allowed = client
+            .post(endpoint.url())
+            .bearer_auth(endpoint.bearer_token())
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-session-id", session.clone())
+            .header("mcp-protocol-version", "2025-06-18")
+            .json(&call(2))
+            .send()
+            .await
+            .expect("allowed tool call");
+        assert!(allowed.status().is_success());
+        assert!(allowed.text().await.unwrap().contains("gated"));
+        assert_eq!(gate.dispatches.load(Ordering::SeqCst), 1);
+
+        gate.allow.store(false, Ordering::SeqCst);
+        let denied = client
+            .post(endpoint.url())
+            .bearer_auth(endpoint.bearer_token())
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-session-id", session)
+            .header("mcp-protocol-version", "2025-06-18")
+            .json(&call(3))
+            .send()
+            .await
+            .expect("denied tool call");
+        assert!(denied.status().is_success());
+        assert!(denied
+            .text()
+            .await
+            .unwrap()
+            .contains("OPENTAKE_TURN_CANCELLED"));
+        assert_eq!(gate.dispatches.load(Ordering::SeqCst), 2);
+        endpoint.close().await.expect("close gated endpoint");
+    }
+
+    #[tokio::test]
+    async fn ephemeral_bearer_token_is_unique_and_expires_with_its_turn() {
+        let registry = Arc::new(RwLock::new(PluginRegistry::with_builtins()));
+        let dispatcher = Arc::new(Dispatcher::new(
+            Arc::new(TestHandle::new()),
+            registry.clone(),
+        ));
+        let first = bind_ephemeral_gated(
+            dispatcher.clone(),
+            registry.clone(),
+            Arc::new(CountingGate::new(true)),
+        )
+        .await
+        .expect("bind first endpoint");
+        let expired = first.bearer_token().to_owned();
+        first.close().await.expect("close first endpoint");
+
+        let second = bind_ephemeral_gated(dispatcher, registry, Arc::new(CountingGate::new(true)))
+            .await
+            .expect("bind second endpoint");
+        assert_ne!(expired, second.bearer_token());
+        let response = reqwest::Client::new()
+            .post(second.url())
+            .bearer_auth(expired)
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": { "name": "expired-test", "version": "0" }
+                }
+            }))
+            .send()
+            .await
+            .expect("send expired credential");
+        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+        second.close().await.expect("close second endpoint");
     }
 
     #[test]

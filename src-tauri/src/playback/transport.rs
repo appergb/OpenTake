@@ -103,11 +103,18 @@ impl LatestFrameStore {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         latest.as_ref().and_then(|latest| {
+            // The store keeps only the newest published frame. The front end
+            // issues one `<img>` request per `playback_frame` event; on a slow
+            // render (4K/multitrack) the engine publishes faster than the
+            // event→IPC→React→DOM→HTTP round trip, so an exact frame+sequence
+            // match would 204 for almost every frame and freeze the preview.
+            // Serve the newest frame for any query of the same session that is
+            // not newer than what has been published (a future frame means the
+            // request raced ahead of its own event and must be dropped).
             (latest.identity.project_epoch == query.project_epoch
                 && latest.identity.timeline_version == query.timeline_version
                 && latest.identity.session_id == query.session_id
-                && latest.frame == query.frame
-                && latest.sequence == query.sequence)
+                && query.frame <= latest.frame)
                 .then(|| latest.jpeg.clone())
         })
     }
@@ -702,6 +709,7 @@ mod tests {
             super::super::session::PlaybackIdentity::new(3, 5, "current").expect("valid identity");
         latest.publish(identity.clone(), 18, 4, false, Bytes::from_static(b"jpeg"));
 
+        // Session, project epoch and timeline version stay hard boundaries.
         assert!(latest
             .lookup(&FrameQuery::new(3, 5, "stale", 18, 4))
             .is_none());
@@ -711,12 +719,61 @@ mod tests {
         assert!(latest
             .lookup(&FrameQuery::new(3, 4, "current", 18, 4))
             .is_none());
+        // A request that raced ahead of its own publication is dropped.
         assert!(latest
-            .lookup(&FrameQuery::new(3, 5, "current", 18, 3))
+            .lookup(&FrameQuery::new(3, 5, "current", 19, 4))
             .is_none());
+        // Exact frame matches serve; a stale sequence within the same session
+        // and an older frame both resolve to the newest published frame, so a
+        // slow front-end round trip cannot freeze the preview on a fast engine.
         assert_eq!(
             latest.lookup(&FrameQuery::new(3, 5, "current", 18, 4)),
             Some(Bytes::from_static(b"jpeg"))
         );
+        assert_eq!(
+            latest.lookup(&FrameQuery::new(3, 5, "current", 18, 3)),
+            Some(Bytes::from_static(b"jpeg"))
+        );
+        assert_eq!(
+            latest.lookup(&FrameQuery::new(3, 5, "current", 17, 1)),
+            Some(Bytes::from_static(b"jpeg"))
+        );
+    }
+
+    #[test]
+    fn slow_consumer_keeps_receiving_the_newest_published_frame() {
+        // A 4K/multitrack render that falls behind publishes several frames
+        // before the front end's request for the first one arrives. Every
+        // request must still resolve to the current newest frame, otherwise the
+        // preview freezes on the idle still (the reported bug).
+        let latest = LatestFrameStore::default();
+        let identity = super::super::session::PlaybackIdentity::new(1, 2, "session-9")
+            .expect("valid identity");
+        for frame in 0..60 {
+            latest.publish(
+                identity.clone(),
+                frame,
+                frame as u64 + 1,
+                false,
+                Bytes::from_static(b"jpeg"),
+            );
+        }
+        for requested in 0..60 {
+            assert_eq!(
+                latest.lookup(&FrameQuery::new(
+                    1,
+                    2,
+                    "session-9",
+                    requested,
+                    requested as u64 + 1
+                )),
+                Some(Bytes::from_static(b"jpeg")),
+                "stale frame {requested} must resolve to the newest published frame"
+            );
+        }
+        // Future frames still race ahead of publication and are rejected.
+        assert!(latest
+            .lookup(&FrameQuery::new(1, 2, "session-9", 60, 61))
+            .is_none());
     }
 }

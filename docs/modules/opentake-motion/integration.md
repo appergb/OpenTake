@@ -12,6 +12,10 @@
 关键分工：**`opentake-render` 定义** `SourceMetrics` / `FrameProvider` 两个 trait 与 `DecodedFrame` 类型；本模块**实现**它们于 `RenderedClip` 之上。合成器问 clip 的自然尺寸（渲染画布），并按需拉取解码后的 RGBA 帧。
 
 > 完成状态：`MotionClipSource` 适配器**已实现并全测**；但合成器**尚未真正接入** motion 帧序列（v1 走 Motion Canvas 视频导入，native frame-sequence source 属后续，见 [OVERVIEW.md](OVERVIEW.md) §5）。
+>
+> 2026-08-01 复核：两个精确拥有者、完整 motion 包 58 项测试和
+> warnings-denied Clippy 通过；生产 `Cargo.toml` 仍只把 `image` 放在
+> `dev-dependencies`。
 
 ---
 
@@ -19,7 +23,7 @@
 
 帧文件→RGBA 的解码**刻意不**在本 crate 硬接某个 PNG 库。帧可能来自：
 - `StubRenderer`（自制 stored-block PNG），
-- 未来 native headless-Chromium fallback（标准 PNG），
+- native headless-Chromium fallback（标准 PNG），
 - Motion Canvas 图片序列输出，
 - 未来裸 RGBA 快路径。
 
@@ -29,7 +33,7 @@
 pub type FrameDecoder<'a> = dyn Fn(&Path) -> Option<DecodedFrame> + 'a;
 ```
 
-解码器对缺失/损坏文件返回 `None`——合成器把该帧当"缺帧"处理（与视频解码失败同语义）。
+解码器对缺失/损坏文件返回 `None`——合成器把该帧当"缺帧"处理（与视频解码失败同语义）；`MotionClipSource` 不修复、不替换也不改写帧缓存。精确拥有者同时覆盖有效 PNG、实际删除的文件和实际损坏的 PNG，并断言调用前后目录/坏文件不变。
 
 ---
 
@@ -65,7 +69,7 @@ RenderedClip (磁盘 PNG 帧)
             └─ opentake-render 合成器纹理层（未来接入）
 ```
 
-测试覆盖：`natural_size` = 渲染画布、`needs_premultiply` 跟透明、`decoded_frame` 返回正确形状 RGBA、过末端钳位仍解码、解码器失败返回 `None`、负 `source_frame` 映射到首帧。
+测试覆盖：`natural_size` = 渲染画布、`needs_premultiply` 跟透明、`decoded_frame` 返回正确形状 RGBA、过末端钳位仍解码、解码器失败返回 `None`、负 `source_frame` 映射到首帧；feature-gated live 验收还把真实 Chromium PNG 通过注入的 decoder 送入 `MotionClipSource`，验证尺寸与 RGBA 长度。
 
 ---
 

@@ -149,7 +149,7 @@ pub fn rank(query: &[f32], indexes, limit, relative_cutoff, min_score) -> Vec<Hi
 
 ## 通用推理面 `ort_worker/`
 
-- `mod.rs`：`ExecutionProvider`（Cpu/CoreML/Cuda/DirectMl/TensorRt，`platform_default()` 按平台选 CoreML/DirectMl/Cpu）+ `IoTensor`/`IoSpec`（输入输出张量描述）+ `OrtModel`（`Session` 的 Mutex 包装，feature `ort-backend`）。
+- `mod.rs`：`ExecutionProvider`（Cpu/CoreML/Cuda/DirectMl/TensorRt，`platform_default()` 在 macOS 选 CoreML、Windows/Linux 选 CPU；Windows 由纯 Rust tract 执行）+ `IoTensor`/`IoSpec`（输入输出张量描述）+ `OrtModel`（`Session` 的 Mutex 包装，feature `ort-backend`）。
 - `tensor.rs`：`frame_to_hwc`（RGBA→HWC f32 [0,1] 丢 alpha）、`hwc_to_nchw_normalized`（按 mean/std 归一）、`mean_pool`（token 级输出平均）。
 - 用途：SigLIP2 与后续超分/抠像/追踪/补帧的统一 ONNX 推理通道（[ADVANCED-FEATURES.md](../../architecture/ADVANCED-FEATURES.md) §B/§54）。
 

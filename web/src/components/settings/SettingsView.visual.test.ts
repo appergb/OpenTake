@@ -21,8 +21,10 @@ describe("SettingsView minimal embedded visual direction", () => {
   });
 
   it("uses a wide settings window with a left sidebar", () => {
-    expect(settingsSource).toContain("width: 960");
-    expect(settingsSource).toContain("height: 620");
+    expect(settingsSource).toContain("maxWidth: 960");
+    expect(settingsSource).toContain("maxHeight: 620");
+    expect(settingsSource).toContain('width: "100%"');
+    expect(settingsSource).toContain('height: "100%"');
     expect(settingsSource).toContain("SettingsSidebar");
     expect(settingsSource).toContain("settingsSidebarStyle");
   });
@@ -38,5 +40,19 @@ describe("SettingsView minimal embedded visual direction", () => {
     expect(settingsSource).toContain('id: "account"');
     expect(settingsSource).toContain('labelKey: "settings.section.account"');
     expect(settingsSource).toContain("return <AccountPane />");
+  });
+
+  it("supports official Codex ChatGPT login without rendering an API-key field", () => {
+    expect(settingsSource).toContain('{ id: "codex", label: "Codex / ChatGPT" }');
+    expect(settingsSource).toContain("codexAuthStatus");
+    expect(settingsSource).toContain("codexLoginStart");
+    expect(settingsSource).toContain("codexLogout");
+    expect(settingsSource).toContain("isCodex ? (");
+  });
+
+  it("registers the storage pane with its own sidebar entry", () => {
+    expect(settingsSource).toContain('id: "storage"');
+    expect(settingsSource).toContain('labelKey: "settings.section.storage"');
+    expect(settingsSource).toContain("return <StoragePane />");
   });
 });

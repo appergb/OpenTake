@@ -57,6 +57,15 @@ No FFT is required for v1. If a future version adds spectral flux, it must be do
 - trim clip boundaries to nearest beat when within a small tolerance;
 - return a proposal when confidence is low.
 
+Implemented v1 write boundary: `write` defaults to `false`. The preview payload
+contains deterministic `cutFrames` and `placements` and performs no edit. With
+`write=true`, every requested visual root is aligned to a detected beat; each
+linked A/V partner is expanded with the same frame delta and the complete move
+set is applied once as `EditCommand::MoveClips`. Missing/nonvisual clips,
+insufficient beats, and negative linked placements are rejected before the
+command boundary. The BGM analysis source is never included in the move set
+unless it is itself an explicitly linked partner of a selected visual clip.
+
 It must apply edits only through the shared path:
 
 `TimelineContainer/Inspector/Toolbar` -> `web/src/store/editActions.ts` -> `web/src/lib/api.ts editApply()` -> `src-tauri/src/commands.rs edit_apply` -> `AppCore::apply()` -> `opentake-ops::EditCommand` -> `ops/*` -> `timeline_changed` -> `sync.ts`.
@@ -81,3 +90,19 @@ See [acceptance tests](acceptance-tests.md). Minimum cases:
 - Low-energy speech track is not over-detected as montage beats.
 - `auto_cut_to_beats(write=false)` emits no `timeline_changed`.
 - Linked visual/audio pairs stay in the same `linkGroupId` alignment after auto cut.
+
+Completion evidence (2026-07-31):
+
+- `crates/opentake-media/src/analysis/beat.rs#pulse_audio_detects_beat_frame_with_strength`
+  verifies a real normalized pulse, while
+  `#low_energy_speech_is_not_overdetected` verifies the absolute energy floor.
+- `crates/opentake-agent/src/mcp/dispatch.rs#auto_cut_to_beats_write_false_is_read_only`
+  proves preview mode emits no command or timeline change.
+- `crates/opentake-agent/src/mcp/dispatch.rs#auto_cut_to_beats_write_true_is_one_atomic_command_and_preserves_links`
+  proves a rejected request is a no-op and a valid request emits exactly one
+  `MoveClips` command while retaining linked A/V identity and alignment.
+- `web/src/store/editActions.test.ts#accepts one atomic request and refuses a multi-command pseudo-transaction`
+  prevents the frontend automation adapter from representing several IPC edits
+  as one transaction.
+- The five source-bound `tools/completion-tests/doc-*.test.mjs` owners execute
+  these focused boundaries and reject zero-test filters.

@@ -1,8 +1,10 @@
 use std::collections::BTreeSet;
 
 use opentake_domain::{
-    AnimPair, ChromaKey, Clip, ClipType, ColorGrade, Crop, Effect, Fill, Interpolation, Keyframe,
-    KeyframeTrack, Mask, Rgba, Shadow, TextAlignment, TextStyle, Track, Transform,
+    AnimPair, AudioDenoise, CaptionTranslationInput, ChromaKey, Clip, ClipType, ColorGrade, Crop,
+    DenoiseMode, Effect, Fill, Interpolation, Keyframe, KeyframeTrack, LoudnessNormalization,
+    LutReference, Mask, Rgba, Shadow, StabilizationKeyframe, StabilizationTrack, TextAlignment,
+    TextStyle, Track, Transform, Transition, TransitionKind,
 };
 use serde::Serialize;
 
@@ -73,8 +75,16 @@ fn full_clip() -> Clip {
     };
     clip.link_group_id = Some("link".to_owned());
     clip.caption_group_id = Some("caption".to_owned());
+    clip.nested_sequence_id = Some("sequence".to_owned());
     clip.text_content = Some("text".to_owned());
     clip.text_style = Some(full_text_style());
+    clip.caption_translation_input = Some(CaptionTranslationInput {
+        source_text: "source".into(),
+        source_locale: "en-US".into(),
+        target_locale: "zh-CN".into(),
+        provider: "wire".into(),
+        model: "wire-v1".into(),
+    });
     clip.opacity_track = Some(KeyframeTrack::from_keyframes(vec![
         Keyframe::with_interpolation(0, 0.5, Interpolation::Linear),
     ]));
@@ -97,10 +107,50 @@ fn full_clip() -> Clip {
         },
     )]));
     clip.volume_track = Some(KeyframeTrack::from_keyframes(vec![Keyframe::new(0, 0.9)]));
+    clip.loudness_normalization = Some(LoudnessNormalization {
+        target_lufs: -16.0,
+        true_peak_ceiling_dbtp: -1.0,
+        input_integrated_lufs: -24.0,
+        input_true_peak_dbtp: -12.0,
+        gain_db: 8.0,
+        output_integrated_lufs: -16.0,
+        output_true_peak_dbtp: -2.0,
+    });
+    clip.audio_denoise = Some(AudioDenoise {
+        mode: DenoiseMode::Voice,
+        strength: 0.75,
+        preview_enabled: true,
+    });
     clip.color_grade = Some(ColorGrade::default());
+    clip.lut = Some(
+        LutReference::new("0123456789abcdef".repeat(4), "Wire schema LUT", 0.75)
+            .expect("wire LUT reference is valid"),
+    );
     clip.chroma_key = Some(ChromaKey::default());
     clip.masks = vec![Mask::default()];
     clip.effects = vec![Effect::new("wire").with_param("amount", 1.0)];
+    clip.stabilization = Some(StabilizationTrack {
+        model: "wire".to_owned(),
+        model_version: 1,
+        source_identity: "asset".to_owned(),
+        strength: 0.75,
+        crop_margin: 0.02,
+        keyframes: vec![
+            StabilizationKeyframe::default(),
+            StabilizationKeyframe {
+                frame: 1,
+                translation_x: 0.01,
+                translation_y: -0.01,
+                rotation_degrees: 0.5,
+            },
+        ],
+    });
+    clip.transition_out = Some(Transition {
+        from_clip_id: "clip".to_owned(),
+        to_clip_id: "next".to_owned(),
+        kind: TransitionKind::CrossDissolve,
+        duration_frames: 5,
+    });
     clip.reversed = true;
     clip
 }

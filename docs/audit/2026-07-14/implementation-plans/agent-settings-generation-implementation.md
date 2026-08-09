@@ -12,6 +12,23 @@
 
 ### Task 1: advertised-mcp-tool-reachability + AG-advertised-tool-surface-acceptance (implementation-slice-6a8f42f312c40661)
 
+**2026-08-01 completion:** The production base catalog contains 39 real dispatch
+paths and is filtered per host session: seven media/transcript tools require the
+desktop `MediaBridge`; four generation/upscale tools are appended only with
+compatible managed or BYOK authorization; Motion add/edit are appended only
+when the Chromium/FFmpeg production bridge is ready. `inspect_media` now covers
+image/video/audio/Lottie: Lottie uses the shared Velato/Vello renderer, samples
+the requested source-time window over neutral gray, and returns authoritative
+canvas, frame-rate, duration, and encoded-frame metadata. `inspect_timeline`
+uses that same materializer rather than silently omitting Lottie layers. The
+focused RED reproduced the former typed-unavailable result; the GREEN GPU test,
+advertised-tool matrix, hidden-tool fail-closed test, Clippy, formatting, and
+full workspace regression all pass. Motion rendering/import/undo/save/reopen is
+owned by and completed in Task 4. Native evidence is retained in
+`docs/audit/2026-07-14/runtime-artifacts/automated/agent-lottie-inspect-real-device-2026-08-01.md`.
+
+**2026-08-01 superseding progress:** Script-to-video now persists a hash/provenance-bearing reviewed plan before placement, exposes a multi-segment editor with retry/cancel/apply/undo, atomically builds visual/narration tracks and exact transition boundaries, and passes real save/reopen plus H.264/AAC export. The remaining open capability implementations are avatar and voice clone; the talking-head and packaged-GUI closure work described above remains separately tracked.
+
 **Covered records:**
 - `requirement-1c40dd077c50436b` (requirement)
 - `requirement-5676fb351f12a534` (requirement)
@@ -45,7 +62,7 @@
 - Modify: `docs/specs/agent/10-implementation.md`
 - Modify: `docs/specs/agent/2-tools.md`
 - Modify: `docs/superpowers/specs/2026-07-10-opentake-full-convergence-design.md`
-- Test (existing-owned): `crates/opentake-agent/src/mcp/dispatch.rs#stub_tool_reports_not_implemented`
+- Test (existing-owned): `crates/opentake-agent/src/mcp/dispatch.rs#hidden_tool_is_rejected_as_unadvertised`
 - Test (reviewed-planned): `crates/opentake-agent/tests/advertised_tool_acceptance.rs#every_advertised_tool_is_live_or_absent`
 
 **Candidate-bound contracts:**
@@ -221,32 +238,32 @@
   - Contract tests enumerate the advertised and dispatched tool sets bidirectionally, and integration tests invoke every high-risk write/generation path.
   - Agent/MCP runtime receipts and independent review pass on the exact tree.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
-  - `crates/opentake-agent/src/mcp/dispatch.rs#stub_tool_reports_not_implemented` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
+  - `crates/opentake-agent/src/mcp/dispatch.rs#hidden_tool_is_rejected_as_unadvertised` (existing-owned) — Exact named test records the fail-closed compatibility-name boundary.
   - `crates/opentake-agent/tests/advertised_tool_acceptance.rs#every_advertised_tool_is_live_or_absent` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
-  - Run: `cargo test -p opentake-agent stub_tool_reports_not_implemented`
+  - Run: `cargo test -p opentake-agent hidden_tool_is_rejected_as_unadvertised`
   - Run: `cargo test -p opentake-agent --test advertised_tool_acceptance every_advertised_tool_is_live_or_absent -- --exact`
 
   Expected: FAIL because one or more of the 17 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-agent/src/chat/loop.rs#tool_catalog`, `crates/opentake-agent/src/mcp/dispatch.rs#Dispatcher::dispatch`, `crates/opentake-agent/src/mcp/dispatch.rs#dispatch`, `crates/opentake-agent/src/tools/names.rs#ToolName::ALL`, `CLAUDE.md`, `docs/architecture/BUGS.md`, `docs/architecture/FULL_PROJECT_SCAN_REPORT.md`, `docs/architecture/HANDOFF-2026-07.md`, `docs/architecture/ROADMAP.md`, `docs/architecture/editing-automation/EDITING-AUTOMATION/agent-editing-suggestions.md`, `docs/specs/agent/10-implementation.md`, `docs/specs/agent/2-tools.md`, `docs/superpowers/specs/2026-07-10-opentake-full-convergence-design.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-agent stub_tool_reports_not_implemented`
   - Run: `cargo test -p opentake-agent --test advertised_tool_acceptance every_advertised_tool_is_live_or_absent -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
@@ -446,7 +463,7 @@
   - Add mocked-provider and application integration tests for every named authorization, placeholder, progress, cancellation, finalization, persistence, and failure branch; the affected suites must pass without paid network calls.
   - Exercise the production MCP or UI path with a deterministic local/mock provider and retain exact manifest, job-state, command-result, and runtime evidence before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-agent/tests/generation_dispatch.rs#placeholder_persist_finalize_all_results_and_failures` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
   - `crates/opentake-agent/tests/generation_dispatch.rs#placeholder_persists_and_every_terminal_result_finalizes_once` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
@@ -455,20 +472,20 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Record the RED-evidence disposition**
 
   - Run: `cargo test -p opentake-agent --test generation_dispatch placeholder_persist_finalize_all_results_and_failures -- --exact`
   - Run: `cargo test -p opentake-agent --test generation_dispatch placeholder_persists_and_every_terminal_result_finalizes_once -- --exact`
   - Run: `cargo test -p opentake-gen upscale_uses_first_upload_as_source`
   - Run: `cargo test -p opentake-gen byok_submit_then_watch_to_succeeded`
 
-  Expected: FAIL because one or more of the 15 candidate-bound contracts are not yet satisfied.
+  Historical RED output for the four exact planned tests was not retained before the audit-recovery branch began, so it is not fabricated here. Gap-driven regression tests added during implementation did reproduce failures before the fixes (video data-result acceptance and partial-finalization transition coverage); the retained GREEN commands and runtime artifact are the auditable completion evidence.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-agent/src/mcp/dispatch.rs#run_body`, `crates/opentake-agent/src/mcp/generation.rs#GenerationDispatcher`, `crates/opentake-gen/src/build_params.rs#build_image_params`, `crates/opentake-gen/src/build_params.rs#build_upscale_params`, `crates/opentake-gen/src/build_params.rs#build_video_params`, `crates/opentake-gen/src/client.rs#GenClient`, `crates/opentake-gen/src/client.rs#GenClient::submit`, `crates/opentake-gen/src/client.rs#GenClient::submit_byok`, `crates/opentake-gen/src/client.rs#GenClient::watch`, `src-tauri/src/generation.rs#GenerationBridge`, `web/src/components/agent/AgentPanel.tsx#AgentPanel`, `docs/architecture/BUGS.md`, `docs/architecture/CAPCUT-GAP.md`, `docs/architecture/FULL_PROJECT_SCAN_REPORT.md`, `docs/architecture/HANDOFF-2026-07.md`, `docs/architecture/MODULE-PORT-MAP.md`, `docs/architecture/ROADMAP.md`, `docs/modules/opentake-agent/SPEC.md`, `docs/specs/agent/2-tools.md`, `docs/upstream-analysis/04-MCP与Agent工具.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-agent --test generation_dispatch placeholder_persist_finalize_all_results_and_failures -- --exact`
   - Run: `cargo test -p opentake-agent --test generation_dispatch placeholder_persists_and_every_terminal_result_finalizes_once -- --exact`
@@ -477,13 +494,19 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
 
+Completion evidence (2026-07-29): the four named focused tests pass; `generation::tests` covers configured image/video/audio/upscale production dispatch, authorization, N ordering, cancel, restart, retry, auth/rate-limit mapping, safe result URLs and exact 2x; `generation_persistence` covers durable logs/costs/restart and ready+cancelled partial terminal state. Full `cargo fmt`, Clippy `-D warnings`, workspace tests, web production build, 703 web tests, and `git diff --check` pass. Exact commands and asserted artifact state are recorded in `runtime-artifacts/automated/generation-finalization-2026-07-29.md`.
+
 ### Task 3: advanced-ai-workflows (implementation-slice-aec7c23c8d96431e)
+
+**2026-08-01 decomposition note (not closed):** This umbrella combines ten independent product capabilities and cannot be completed by editing only `ToolName::ALL` plus one document. Work is proceeding as independently verified vertical slices. The talking-head slice now has production `remove_filler_words` and `tighten_silences` previews, configurable transcript/PCM thresholds, reviewable accepted-by-default ranges, atomic ripple application, exact one-step undo, fail-closed transcript discovery, and a fixed 30-second linked A/V regression. `requirement-9b922be7c8e92147` remains open until the combined real-media fixture also passes save/reopen/export and the user-facing per-cut review path is exercised. Motion tracking now has a strict capability-gated Agent contract, production desktop bridge, bounded real-video region analysis, editable linear position keyframes, typed low-confidence refusal, cancellation, optimistic revision commit, and one-step undo. Its deterministic target remains within five pixels and a generated MP4 exercises preview/apply/cancel/undo. It remains open for Inspector/Preview region selection, progress/retry, preview/export transform parity, save/reopen, and packaged GUI evidence. AI matting now has an official pinned RVM model, explicit verified installation, recurrent on-device inference, frame-aligned ProRes 4444 alpha plus audio, Inspector preview/cancel/retry/apply/undo, durable provenance, save/reopen, and alpha-aware playback/export plans; packaged GUI and final export inspection remain. Object removal now has editable-mask and frame-range input, an honest on-device boundary-fill provider/model, content-addressed ProRes 422 preview with audio, cancel/retry/apply, atomic media-swap-plus-mask-clear undo, source/provenance retention, failure atomicity, save/reopen, and exact preview/published-derivative identity; packaged GUI and final export inspection remain. Color match now samples image/video references and target frames in linear BT.709, generates an ordinary editable luma-preserving grade, reports CIE Delta E before/after, persists algorithm/version/source frames/statistics, clears stale provenance after manual edits, and supports preview/cancel/retry/apply/undo/save/reopen; packaged GUI and final preview/export inspection remain. Stem separation now routes through the same verified local model from Inspector and Agent, produces two stable provenanced media assets, reports progress/cancel/retry, exposes direct auditions, imports both aligned outputs to separate tracks in one undo entry, survives save/reopen/export, and enforces a >=60 dB mono-compatible reconstruction threshold; the documented centre/side semantic scope remains explicit. Caption translation now uses consented BYOK OpenAI/Anthropic providers, produces a strict ID-keyed review draft, allows per-caption accept/reject and retry, applies accepted text atomically with source/target locale plus provider/model provenance, preserves IDs/timing, clears stale provenance on manual edits, and supports one-step undo/save/reopen. Mock success/partial/failure and Captions UI review tests pass. The remaining three capabilities (script-to-video, avatar, and voice clone) are still open.
+
+The preceding decomposition paragraph is a historical checkpoint: its final sentence is superseded by the progress record at the top of this plan. Script-to-video is now closed; avatar and voice clone remain open.
 
 **Covered records:**
 - `requirement-fdd45062091b48f3` (requirement)
@@ -634,6 +657,15 @@
 
 ### Task 4: motion-canvas-production-runner + AG-motion-canvas-vertical (implementation-slice-0a5150eba626d02b)
 
+**2026-08-01 completion:** Beta v1 is closed. The pinned Motion Canvas 3.17.2
+wrapper, deterministic title-card render, validated `output.mp4`/result metadata,
+capability-safe Tauri/Core transaction, Motion Panel, and dynamically advertised
+Agent add/edit tools share one production path. Native acceptance verifies
+create/edit/undo/save/reopen, cancel/error/no-mutation boundaries, traversal and
+symlink rejection, deterministic duplicate pixels/metadata, and inclusion in
+both `composite_frame` and `export_video`. Transparent output, arbitrary TSX,
+and frame-sequence sources remain separately scoped post-Beta work.
+
 **Covered records:**
 - `requirement-62ed34afe0cbaddc` (requirement)
 - `requirement-8bde5113959f02c8` (requirement)
@@ -698,7 +730,7 @@
   - src-tauri/src/motion_canvas.rs exposes the registered command and never accepts output/work paths outside retained application/project authorities.
   - Tests cover success, renderer failure, cancellation, traversal/symlink rejection, malformed result JSON, and no manifest/timeline mutation before validation.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-motion/src/renderer.rs#chromium_skeleton_reports_unavailable_not_panic` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-motion/tests/pipeline.rs#full_pipeline_render_cache_and_ingest` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -706,7 +738,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-motion chromium_skeleton_reports_unavailable_not_panic`
   - Run: `cargo test -p opentake-motion --test pipeline full_pipeline_render_cache_and_ingest -- --exact`
@@ -714,11 +746,11 @@
 
   Expected: FAIL because one or more of the 4 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-agent/src/mcp/dispatch.rs#Dispatcher::dispatch`, `crates/opentake-agent/src/mcp/dispatch.rs#run_body`, `crates/opentake-motion/src/cache.rs#MotionCache`, `crates/opentake-motion/src/integration.rs#MotionClipSource`, `crates/opentake-motion/src/renderer.rs#HeadlessChromiumRenderer`, `crates/opentake-motion/src/renderer.rs#HeadlessChromiumRenderer::render`, `crates/opentake-motion/src/renderer.rs#MotionRenderer`, `src-tauri/src/motion.rs#render_import_place`, `web/src/components/agent/MotionPanel.tsx#MotionPanel`, `docs/architecture/ROADMAP.md`, `docs/modules/opentake-motion/MOTION-GRAPHICS-PLUGIN.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-motion chromium_skeleton_reports_unavailable_not_panic`
   - Run: `cargo test -p opentake-motion --test pipeline full_pipeline_render_cache_and_ingest -- --exact`
@@ -726,7 +758,7 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
@@ -2381,7 +2413,7 @@
   - Visible/returned assertion: assert exact category-specific wording and entries[3].startFrame formatting for every fixture, with no generic parser message, panic, or timeline mutation.
   - Evidence required: record the owning code:<tracked-file>#<declared-symbol> and the passing test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-agent/tests/spec_agent_4_line_55_5d932c51ced061d6.rs#spec_agent_4_line_55_5d932c51ced061d6_serde_error_categories_and_bracket_indices.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `crates/opentake-agent/src/tools/errors.rs#unknown_field_lists_sorted_allowed` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `crates/opentake-agent/src/tools/errors.rs#nested_array_index_uses_brackets` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -2399,11 +2431,15 @@
 
   Expected: FAIL because one or more of the 5 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Historical note (2026-07-29): the missing exact-owned test was discovered by the completion audit, but a complete pre-fix RED transcript for all four focused commands was not retained. This historical gate remains unchecked rather than fabricating evidence.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `crates/opentake-agent/src/tools/errors.rs#decode_tool_args`, `crates/opentake-agent/src/tools/errors.rs#validate_unknown_keys`, `crates/opentake-agent/src/tools/errors.rs#ToolArgs`, `docs/specs/agent/10-implementation.md`, `docs/specs/agent/4-execution-shell.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+  Rust boundary note (2026-07-29): standard `serde_json` rejects or loses the precise path for raw `NaN`/`Infinity` and exponent overflow before `decode_tool_args`. The minimal production slice therefore also owns `crates/opentake-agent/src/mcp/server.rs#finite_number_guard`; it scans the already size-bounded request, returns the exact safe path message, reconstructs the body for rmcp, and never dispatches rejected input.
+
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-agent unknown_field_lists_sorted_allowed`
   - Run: `cargo test -p opentake-agent nested_array_index_uses_brackets`
@@ -2412,11 +2448,13 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-07-29: all focused tests passed, `cargo clippy --workspace --all-targets -- -D warnings` passed, and `cargo test --workspace --no-fail-fast` passed. The three export and four playback probes explicitly marked `real-device probe` remain reserved for the real-machine phase.
 
 ### Task 19: AG-timeline-tool-schema-dispatch (implementation-slice-cb53b36cf984d605)
 

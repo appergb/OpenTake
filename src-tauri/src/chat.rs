@@ -18,11 +18,15 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 use opentake_agent::chat::{
-    ChatLoop, ChatMessage, ChatSession, ChatSessionStore, ChatTurnGate, EmitLoop, LoopError,
-    LoopEvent,
+    ChatLoop, ChatMessage, ChatSession, ChatSessionStore, ChatTurnGate, EmitLoop, LlmError,
+    LoopError, LoopEvent, Role,
 };
+use opentake_agent::mcp::advanced::AdvancedWorkflowBridge;
 use opentake_agent::mcp::core_handle::{AppCoreHandle, CoreHandle};
 use opentake_agent::mcp::dispatch::Dispatcher;
+use opentake_agent::mcp::generation::GenerationBridge;
+use opentake_agent::mcp::motion::MotionBridge;
+use opentake_agent::plugin::registry::PluginRegistry;
 use opentake_agent::tools::result::ToolResult;
 use opentake_gen::{KeyStore, KeyringStore};
 
@@ -33,6 +37,8 @@ use opentake_core::AppCore;
 #[derive(Clone)]
 pub struct ChatState {
     core: AppCore,
+    dispatcher: Arc<Dispatcher>,
+    registry: Arc<RwLock<PluginRegistry>>,
     loop_: ChatLoop,
     sessions: Arc<Mutex<HashMap<SessionKey, ChatSession>>>,
     turns: Arc<Mutex<TurnRegistry>>,
@@ -46,9 +52,26 @@ struct SessionKey {
     session_id: String,
 }
 
+fn agent_undo_scope(key: &SessionKey) -> String {
+    format!(
+        "opentake:chat:{}:{}:{}",
+        key.project_epoch,
+        key.project_dir.to_string_lossy(),
+        key.session_id
+    )
+}
+
 struct TurnCancel {
     requested: Arc<AtomicBool>,
     media: opentake_media::MediaCancelToken,
+    phase: Mutex<TurnPhase>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TurnPhase {
+    Running,
+    Cancelled,
+    Finalizing,
 }
 
 impl TurnCancel {
@@ -56,12 +79,33 @@ impl TurnCancel {
         Self {
             requested: Arc::new(AtomicBool::new(false)),
             media: opentake_media::MediaCancelToken::new(),
+            phase: Mutex::new(TurnPhase::Running),
         }
     }
 
     fn request(&self) {
-        self.requested.store(true, Ordering::Relaxed);
+        let mut phase = self
+            .phase
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *phase != TurnPhase::Running {
+            return;
+        }
+        *phase = TurnPhase::Cancelled;
+        self.requested.store(true, Ordering::Release);
         self.media.cancel();
+    }
+
+    fn begin_finalization(&self) -> bool {
+        let mut phase = self
+            .phase
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *phase != TurnPhase::Running {
+            return false;
+        }
+        *phase = TurnPhase::Finalizing;
+        true
     }
 }
 
@@ -69,6 +113,12 @@ impl TurnCancel {
 struct TurnRegistry {
     running: HashMap<SessionKey, Arc<TurnCancel>>,
     transition_depth: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TurnFinalization {
+    Committed,
+    Cancelled,
 }
 
 #[derive(Clone)]
@@ -89,27 +139,73 @@ impl ChatProjectContext {
 }
 
 impl ChatState {
-    /// Build the state in `setup`: a dispatcher over the live core + workflow
-    /// registry + the same media bridge the desktop MCP server uses.
+    #[cfg(test)]
     pub fn new(
         core: AppCore,
         workflows_dir: PathBuf,
         cache_root: PathBuf,
         models_dir: PathBuf,
     ) -> Self {
+        Self::new_inner(
+            core,
+            workflows_dir,
+            cache_root,
+            models_dir,
+            None,
+            None,
+            None,
+        )
+    }
+
+    /// Build the state in `setup`: a dispatcher over the live core + workflow
+    /// registry + the same media bridge the desktop MCP server uses.
+    pub fn new_with_capabilities(
+        core: AppCore,
+        workflows_dir: PathBuf,
+        cache_root: PathBuf,
+        models_dir: PathBuf,
+        generation_bridge: Arc<dyn GenerationBridge>,
+        motion_bridge: Arc<dyn MotionBridge>,
+        advanced_bridge: Arc<dyn AdvancedWorkflowBridge>,
+    ) -> Self {
+        Self::new_inner(
+            core,
+            workflows_dir,
+            cache_root,
+            models_dir,
+            Some(generation_bridge),
+            Some(motion_bridge),
+            Some(advanced_bridge),
+        )
+    }
+
+    fn new_inner(
+        core: AppCore,
+        workflows_dir: PathBuf,
+        cache_root: PathBuf,
+        models_dir: PathBuf,
+        generation_bridge: Option<Arc<dyn GenerationBridge>>,
+        motion_bridge: Option<Arc<dyn MotionBridge>>,
+        advanced_bridge: Option<Arc<dyn AdvancedWorkflowBridge>>,
+    ) -> Self {
         let handle: Arc<dyn CoreHandle> = Arc::new(AppCoreHandle::new(core.clone()));
         let registry = Arc::new(RwLock::new(crate::mcp::build_registry(&workflows_dir)));
         let bridge = crate::mcp::build_media_bridge(core.clone(), cache_root, models_dir);
-        let dispatcher = Arc::new(Dispatcher::with_bridge(
+        let dispatcher = Arc::new(Dispatcher::with_all_capability_bridges(
             handle,
             registry.clone(),
             Some(bridge),
+            generation_bridge,
+            motion_bridge,
+            advanced_bridge,
         ));
         let store: Arc<dyn KeyStore> = Arc::new(KeyringStore::new());
         let sessions = Arc::new(Mutex::new(HashMap::new()));
         let turns = Arc::new(Mutex::new(TurnRegistry::default()));
         let state = ChatState {
             core,
+            dispatcher: dispatcher.clone(),
+            registry: registry.clone(),
             loop_: ChatLoop::new(dispatcher, registry, store),
             sessions: sessions.clone(),
             turns: turns.clone(),
@@ -259,6 +355,14 @@ impl ChatState {
         session: ChatSession,
     ) -> Result<(), String> {
         let _identity = self.core.lock_project_identity_workflow();
+        self.put_project_session_with_identity_held(project, session)
+    }
+
+    fn put_project_session_with_identity_held(
+        &self,
+        project: &ChatProjectContext,
+        session: ChatSession,
+    ) -> Result<(), String> {
         self.ensure_project_context(project)?;
         let _persistence = self.persistence.lock().map_err(|e| e.to_string())?;
         project.store.save(&session).map_err(|e| e.to_string())?;
@@ -268,6 +372,37 @@ impl ChatState {
             .map_err(|e| e.to_string())?
             .insert(key, session);
         Ok(())
+    }
+
+    /// Linearize whole-turn cancellation against the durable Codex terminal
+    /// commit. Holding the turn registry excludes `chat_cancel` and project
+    /// transition hooks; `TurnCancel::begin_finalization` covers cancellation
+    /// sources that hold the token directly. The identity read lease then keeps
+    /// the accepted project stable through the session write.
+    fn finalize_project_turn(
+        &self,
+        project: &ChatProjectContext,
+        key: &SessionKey,
+        owner: &Arc<TurnCancel>,
+        session: ChatSession,
+    ) -> Result<TurnFinalization, String> {
+        let mut turns = self.turns.lock().map_err(|e| e.to_string())?;
+        let owns_turn = turns
+            .running
+            .get(key)
+            .is_some_and(|registered| Arc::ptr_eq(registered, owner));
+        if !owns_turn || turns.transition_depth > 0 || !owner.begin_finalization() {
+            if owns_turn {
+                turns.running.remove(key);
+            }
+            return Ok(TurnFinalization::Cancelled);
+        }
+
+        let _identity = self.core.lock_project_identity_workflow();
+        let persisted = self.put_project_session_with_identity_held(project, session);
+        turns.running.remove(key);
+        persisted?;
+        Ok(TurnFinalization::Committed)
     }
 
     fn list_project_sessions(
@@ -415,12 +550,13 @@ struct ProjectTurnGate {
     state: ChatState,
     project: ChatProjectContext,
     cancel: Arc<TurnCancel>,
+    undo_scope: String,
 }
 
 impl ProjectTurnGate {
     fn with_current_project<T>(&self, operation: impl FnOnce() -> T) -> Option<T> {
         let _identity = self.state.core.lock_project_identity_workflow();
-        if self.cancel.requested.load(Ordering::Relaxed)
+        if self.cancel.requested.load(Ordering::Acquire)
             || self.state.ensure_project_context(&self.project).is_err()
         {
             self.cancel.request();
@@ -442,9 +578,58 @@ impl ChatTurnGate for ProjectTurnGate {
         args: serde_json::Value,
     ) -> Option<ToolResult> {
         self.with_current_project(|| {
-            dispatcher.dispatch_cancellable(name, args, &self.cancel.media)
+            dispatcher.dispatch_cancellable_scoped(&self.undo_scope, name, args, &self.cancel.media)
         })
     }
+
+    fn request_cancel(&self) {
+        self.cancel.request();
+    }
+
+    fn request_dispatch_cancel(&self) {
+        self.cancel.media.cancel();
+    }
+}
+
+fn truncate_for_codex_prompt(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
+fn codex_turn_prompt(session: &ChatSession, user_text: &str) -> String {
+    let mut history = session
+        .messages
+        .iter()
+        .rev()
+        .skip(1)
+        .filter_map(|message| match message.role {
+            Role::User => Some(format!(
+                "User: {}",
+                truncate_for_codex_prompt(&message.content, 2_000)
+            )),
+            Role::Assistant if !message.content.trim().is_empty() => Some(format!(
+                "Assistant: {}",
+                truncate_for_codex_prompt(&message.content, 2_000)
+            )),
+            _ => None,
+        })
+        .take(6)
+        .collect::<Vec<_>>();
+    history.reverse();
+    let history = history.join("\n");
+    format!(
+        "You are the official Codex Agent embedded in OpenTake, a desktop video editor. \
+Use only the `opentake` MCP server for reading or changing the current project. \
+Do not use shell commands, direct file edits, web search, plugins, or other MCP servers. \
+Treat the current saved OpenTake project as the sole editing target. Explain the completed result concisely.\n\n\
+Recent conversation:\n{history}\n\nCurrent user request:\n{}",
+        truncate_for_codex_prompt(user_text, 20_000)
+    )
 }
 
 // MARK: - Commands
@@ -463,6 +648,7 @@ pub async fn chat_send(
 ) -> Result<(), String> {
     let project = state.project_context_for(expected_project_epoch, &expected_project_path)?;
     let session_key = project.key(&session_id);
+    let undo_scope = agent_undo_scope(&session_key);
     let turn_cancel = Arc::new(TurnCancel::new());
     state.reserve_turn(session_key.clone(), turn_cancel.clone())?;
     let cancel = turn_cancel.requested.clone();
@@ -489,15 +675,130 @@ pub async fn chat_send(
             state: state_clone.clone(),
             project: project.clone(),
         };
+        let turn_owner = turn_cancel.clone();
         let gate: Arc<dyn ChatTurnGate> = Arc::new(ProjectTurnGate {
             state: state_clone.clone(),
             project: project.clone(),
             cancel: turn_cancel,
+            undo_scope,
         });
-        let result = state_clone
-            .loop_
-            .run_turn_gated(&mut session, chat_provider, text, &emitter, cancel, gate)
-            .await;
+        let is_codex = chat_provider == "codex";
+        let mut codex_final: Option<(String, ChatMessage)> = None;
+        let result = if is_codex {
+            session.provider = Some("codex".into());
+            session.model = Some("official-codex-default".into());
+            let prompt = codex_turn_prompt(&session, &text);
+            let context = crate::codex::CodexTurnContext {
+                dispatcher: state_clone.dispatcher.clone(),
+                registry: state_clone.registry.clone(),
+                gate: gate.clone(),
+                cancel: cancel.clone(),
+            };
+            match crate::codex::run_agent_turn(context, &prompt, |tool_call| {
+                emitter.emit(LoopEvent::ToolCall {
+                    session_id: sid.clone(),
+                    tool_call,
+                });
+            })
+            .await
+            {
+                Ok(output) => {
+                    let message = ChatMessage::assistant(output.text.clone(), output.tool_calls);
+                    session.messages.push(message.clone());
+                    codex_final = Some((output.text, message));
+                    Ok(())
+                }
+                Err(crate::codex::CodexTurnError::Cancelled) => Err(LoopError::Cancelled),
+                Err(crate::codex::CodexTurnError::Unavailable) => {
+                    let guide = "Official Codex CLI was not found. Install Codex, then return to Settings → AI and choose Official Codex / ChatGPT.".to_string();
+                    let message = ChatMessage::assistant(guide.clone(), Vec::new());
+                    session.messages.push(message.clone());
+                    codex_final = Some((guide, message));
+                    Ok(())
+                }
+                Err(crate::codex::CodexTurnError::NotAuthenticated) => {
+                    let guide = "Codex is not signed in. Open Settings → AI, choose Official Codex / ChatGPT, and sign in with ChatGPT.".to_string();
+                    let message = ChatMessage::assistant(guide.clone(), Vec::new());
+                    session.messages.push(message.clone());
+                    codex_final = Some((guide, message));
+                    Ok(())
+                }
+                Err(crate::codex::CodexTurnError::IncompatibleCli)
+                | Err(crate::codex::CodexTurnError::StrictConfigRejected) => {
+                    let guide = "The installed official Codex CLI is not compatible with this OpenTake Beta. Update Codex CLI to version 0.146.0 or newer, then try again.".to_string();
+                    let message = ChatMessage::assistant(guide.clone(), Vec::new());
+                    session.messages.push(message.clone());
+                    codex_final = Some((guide, message));
+                    Ok(())
+                }
+                Err(crate::codex::CodexTurnError::McpStart)
+                | Err(crate::codex::CodexTurnError::Timeout)
+                | Err(crate::codex::CodexTurnError::Protocol)
+                | Err(crate::codex::CodexTurnError::ProviderFailed) => {
+                    Err(LoopError::Llm(LlmError::Provider(
+                        "official Codex turn failed; check the Codex login status and try again"
+                            .into(),
+                    )))
+                }
+            }
+        } else {
+            state_clone
+                .loop_
+                .run_turn_gated(&mut session, chat_provider, text, &emitter, cancel, gate)
+                .await
+        };
+
+        if is_codex {
+            let terminal = match result {
+                Ok(()) => codex_final,
+                Err(LoopError::Cancelled) => Some((
+                    String::new(),
+                    ChatMessage::assistant(String::new(), Vec::new()),
+                )),
+                Err(error) => {
+                    let message = ChatMessage::assistant(format!("⚠️ {error}"), Vec::new());
+                    session.messages.push(message.clone());
+                    Some((String::new(), message))
+                }
+            };
+            match state_clone.finalize_project_turn(
+                &project,
+                &session_key,
+                &turn_owner,
+                session.clone(),
+            ) {
+                Ok(TurnFinalization::Committed) => {
+                    if let Some((delta, message)) = terminal {
+                        if !delta.is_empty() {
+                            emitter.emit(LoopEvent::Delta {
+                                session_id: sid.clone(),
+                                delta,
+                            });
+                        }
+                        emitter.emit(LoopEvent::Done {
+                            session_id: sid.clone(),
+                            message,
+                        });
+                    }
+                }
+                Ok(TurnFinalization::Cancelled) => {
+                    emitter.emit(LoopEvent::Done {
+                        session_id: sid.clone(),
+                        message: ChatMessage::assistant(String::new(), Vec::new()),
+                    });
+                }
+                Err(error) => {
+                    emitter.emit(LoopEvent::Done {
+                        session_id: sid.clone(),
+                        message: ChatMessage::assistant(
+                            format!("⚠️ Chat history could not be saved: {error}"),
+                            Vec::new(),
+                        ),
+                    });
+                }
+            }
+            return;
+        }
 
         match &result {
             Err(LoopError::Cancelled) => {
@@ -596,6 +897,131 @@ pub fn chat_cancel(
 mod tests {
     use super::*;
 
+    struct RedactionMediaBridge;
+
+    impl opentake_agent::mcp::media_bridge::MediaBridge for RedactionMediaBridge {
+        fn inspect_media(
+            &self,
+            request: &opentake_agent::mcp::media_bridge::InspectMediaRequest,
+        ) -> Result<
+            opentake_agent::mcp::media_bridge::InspectMediaResult,
+            opentake_agent::mcp::media_bridge::BridgeError,
+        > {
+            Ok(opentake_agent::mcp::media_bridge::InspectMediaResult {
+                frames: vec![opentake_agent::mcp::media_bridge::InspectedMediaFrame {
+                    timestamp_seconds: 0.0,
+                    bytes: vec![0xff, 0xd8, 0xff, 0xe0],
+                    media_type: "image/jpeg".into(),
+                }],
+                overview_timestamps: Vec::new(),
+                duration_seconds: 3.0,
+                width: Some(1920),
+                height: Some(1080),
+                fps: Some(30.0),
+                has_audio: request.kind == opentake_domain::ClipType::Video,
+                byte_size: 4,
+                transcript: None,
+                transcription_unavailable: false,
+            })
+        }
+    }
+
+    struct RedactionAdvancedBridge;
+
+    const MOTION_PRIVATE_RENDERER: &str = "PRIVATE_CHAT_MOTION_RENDERER";
+    const MOTION_PRIVATE_VERSION: &str = "PRIVATE_CHAT_MOTION_RENDERER_VERSION";
+    const MOTION_PRIVATE_OUTPUT: &str = "/Users/private/chat-motion-output.mp4";
+    const MOTION_PRIVATE_HASH: &str = "PRIVATE_CHAT_MOTION_CONTENT_HASH";
+    const MOTION_PRIVATE_ACTION: &str = "PRIVATE_CHAT_MOTION_ACTION";
+
+    impl opentake_agent::mcp::advanced::AdvancedWorkflowBridge for RedactionAdvancedBridge {
+        fn supported_tools(&self) -> Vec<opentake_agent::tools::names::ToolName> {
+            vec![opentake_agent::tools::names::ToolName::GenerateAvatar]
+        }
+
+        fn execute(
+            &self,
+            _request: opentake_agent::mcp::advanced::AdvancedWorkflowRequest,
+            _cancel: &opentake_media::MediaCancelToken,
+        ) -> Result<
+            opentake_agent::mcp::advanced::AdvancedWorkflowCommit,
+            opentake_agent::mcp::advanced::AdvancedWorkflowError,
+        > {
+            Ok(opentake_agent::mcp::advanced::AdvancedWorkflowCommit {
+                result: serde_json::json!({
+                    "status": "completed",
+                    "assetId": "avatar-safe-asset",
+                    "imported": true,
+                    "previewPath": "/Users/private/avatar-preview.mov",
+                    "signedUrl": "https://provider.invalid/avatar?token=SIGNED_AVATAR_SECRET",
+                    "providerRequestId": "PRIVATE_PROVIDER_REQUEST_ID",
+                    "prompt": "PRIVATE_ADVANCED_PROMPT",
+                    "errors": [{"message": "provider failed with sk-private-avatar-key"}],
+                }),
+                action_name: None,
+            })
+        }
+    }
+
+    struct RedactionMotionBridge;
+
+    fn redaction_motion_commit(
+        clip_id: String,
+        asset_id: &str,
+    ) -> opentake_agent::mcp::motion::MotionCommit {
+        opentake_agent::mcp::motion::MotionCommit {
+            clip_id,
+            asset_id: asset_id.into(),
+            content_hash: MOTION_PRIVATE_HASH.into(),
+            action_name: MOTION_PRIVATE_ACTION.into(),
+            output: opentake_agent::mcp::motion::MotionOutputMetadata {
+                renderer: MOTION_PRIVATE_RENDERER.into(),
+                renderer_version: MOTION_PRIVATE_VERSION.into(),
+                output_file: MOTION_PRIVATE_OUTPUT.into(),
+                fps: 30.0,
+                width: 1920,
+                height: 1080,
+                duration_frames: 90,
+                duration_seconds: 3.0,
+                content_hash: MOTION_PRIVATE_HASH.into(),
+            },
+        }
+    }
+
+    impl opentake_agent::mcp::motion::MotionBridge for RedactionMotionBridge {
+        fn can_render_motion(&self) -> bool {
+            true
+        }
+
+        fn add(
+            &self,
+            _request: opentake_agent::mcp::motion::AddMotionRequest,
+            _cancel: &opentake_media::MediaCancelToken,
+        ) -> Result<
+            opentake_agent::mcp::motion::MotionCommit,
+            opentake_agent::mcp::motion::MotionBridgeError,
+        > {
+            Ok(redaction_motion_commit(
+                "motion-safe-add-clip".into(),
+                "motion-safe-add-asset",
+            ))
+        }
+
+        fn edit(
+            &self,
+            request: opentake_agent::mcp::motion::EditMotionRequest,
+            _cancel: &opentake_media::MediaCancelToken,
+        ) -> Result<
+            opentake_agent::mcp::motion::MotionCommit,
+            opentake_agent::mcp::motion::MotionBridgeError,
+        > {
+            Ok(redaction_motion_commit(
+                request.clip_id,
+                "motion-safe-edit-asset",
+            ))
+        }
+    }
+
     #[test]
     fn take_and_put_session_round_trips() {
         let temp = tempfile::tempdir().unwrap();
@@ -680,6 +1106,23 @@ mod tests {
     }
 
     #[test]
+    fn codex_prompt_keeps_recent_context_and_limits_unbounded_history() {
+        let mut session = ChatSession::new("codex-prompt");
+        session.messages.push(ChatMessage::user("earlier request"));
+        session
+            .messages
+            .push(ChatMessage::assistant("earlier result", Vec::new()));
+        session.messages.push(ChatMessage::user("x".repeat(30_000)));
+
+        let prompt = codex_turn_prompt(&session, &"当前请求".repeat(10_000));
+        assert!(prompt.contains("User: earlier request"));
+        assert!(prompt.contains("Assistant: earlier result"));
+        assert!(prompt.contains("Current user request:"));
+        assert!(prompt.chars().count() < 21_000);
+        assert!(prompt.ends_with('…'));
+    }
+
+    #[test]
     fn project_chat_session_reloads_from_the_bundle_after_state_recreation() {
         let temp = tempfile::tempdir().unwrap();
         let bundle = temp.path().join("Persist.opentake");
@@ -710,6 +1153,207 @@ mod tests {
         assert_eq!(loaded.messages.len(), 1);
         assert_eq!(loaded.messages[0].content, "remember me");
         assert_eq!(reopened.list_project_sessions(&project).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn sensitive_media_and_advanced_results_never_reach_persisted_chat_history() {
+        use opentake_agent::mcp::convert::safe_tool_result_for_llm;
+        use opentake_domain::{
+            ClipType, GenerationInput, GenerationJobStatus, MediaManifestEntry, MediaSource,
+        };
+
+        const ABSOLUTE_PATH: &str = "/Users/private/launch-cut.mov";
+        const SIGNED_RESULT_URL: &str =
+            "https://cdn.example.invalid/result.mov?token=SIGNED_RESULT_SECRET";
+        const SIGNED_REFERENCE_URL: &str =
+            "https://cdn.example.invalid/reference.png?token=SIGNED_REFERENCE_SECRET";
+        const SIGNED_IMAGE_URL: &str =
+            "https://cdn.example.invalid/input.png?token=SIGNED_IMAGE_SECRET";
+        const PRIVATE_PROMPT: &str = "PRIVATE_PROVIDER_PROMPT_SECRET";
+        const ADVANCED_PATH: &str = "/Users/private/avatar-preview.mov";
+        const ADVANCED_URL_SECRET: &str = "SIGNED_AVATAR_SECRET";
+        const ADVANCED_PROVIDER_ID: &str = "PRIVATE_PROVIDER_REQUEST_ID";
+        const ADVANCED_PROMPT: &str = "PRIVATE_ADVANCED_PROMPT";
+        const ADVANCED_KEY: &str = "sk-private-avatar-key";
+
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = temp.path().join("Redaction.opentake");
+        let mut project = opentake_project::Project::new(bundle.clone());
+        project.manifest.entries.push(MediaManifestEntry {
+            id: "generated-asset".into(),
+            name: "Generated clip".into(),
+            kind: ClipType::Video,
+            source: MediaSource::External {
+                absolute_path: ABSOLUTE_PATH.into(),
+            },
+            duration: 3.0,
+            generation_input: Some(GenerationInput {
+                prompt: PRIVATE_PROMPT.into(),
+                model: "provider-model".into(),
+                duration: 3,
+                aspect_ratio: "16:9".into(),
+                image_urls: Some(vec![SIGNED_IMAGE_URL.into()]),
+                reference_image_urls: Some(vec![SIGNED_REFERENCE_URL.into()]),
+                status: Some(GenerationJobStatus::Ready),
+                ..GenerationInput::default()
+            }),
+            source_width: Some(1920),
+            source_height: Some(1080),
+            source_fps: Some(30.0),
+            has_audio: Some(true),
+            color: None,
+            proxy: None,
+            folder_id: None,
+            cached_remote_url: Some(SIGNED_RESULT_URL.into()),
+            cached_remote_url_expires_at: Some(123_456.0),
+        });
+        project.save().unwrap();
+
+        let core = AppCore::new();
+        core.open_project(bundle.clone()).unwrap();
+        let state = ChatState::new(
+            core,
+            temp.path().join("no-workflows"),
+            temp.path().join("chat-cache"),
+            temp.path().join("chat-models"),
+        );
+        let project = state.project_context().unwrap();
+        let result = state
+            .dispatcher
+            .dispatch("get_media", serde_json::json!({}));
+        assert!(!result.is_error, "{}", result.text_joined());
+
+        let inspect_dispatcher = Dispatcher::with_bridge(
+            Arc::new(AppCoreHandle::new(state.core.clone())),
+            Arc::new(RwLock::new(PluginRegistry::new())),
+            Some(Arc::new(RedactionMediaBridge)),
+        );
+        let inspect_result = inspect_dispatcher.dispatch(
+            "inspect_media",
+            serde_json::json!({"mediaRef": "generated-asset"}),
+        );
+        assert!(!inspect_result.is_error, "{}", inspect_result.text_joined());
+
+        let advanced_dispatcher = Dispatcher::with_all_capability_bridges(
+            Arc::new(AppCoreHandle::new(state.core.clone())),
+            Arc::new(RwLock::new(PluginRegistry::new())),
+            None,
+            None,
+            None,
+            Some(Arc::new(RedactionAdvancedBridge)),
+        );
+        let advanced_result = advanced_dispatcher.dispatch(
+            "generate_avatar",
+            serde_json::json!({
+                "portraitMediaRef": "generated-asset",
+                "audioMediaRef": "generated-asset",
+                "consentId": "consent-safe",
+                "costAuthorized": true
+            }),
+        );
+        assert!(
+            !advanced_result.is_error,
+            "{}",
+            advanced_result.text_joined()
+        );
+
+        let motion_dispatcher = Dispatcher::with_capability_bridges(
+            Arc::new(AppCoreHandle::new(state.core.clone())),
+            Arc::new(RwLock::new(PluginRegistry::new())),
+            None,
+            None,
+            Some(Arc::new(RedactionMotionBridge)),
+        );
+        let add_motion_result = motion_dispatcher.dispatch(
+            "add_motion_graphic",
+            serde_json::json!({
+                "source": {"code": "export default {}"},
+                "startFrame": 0,
+                "durationFrames": 90
+            }),
+        );
+        assert!(
+            !add_motion_result.is_error,
+            "{}",
+            add_motion_result.text_joined()
+        );
+        let edit_motion_result = motion_dispatcher.dispatch(
+            "edit_motion_graphic",
+            serde_json::json!({
+                "clipId": "motion-safe-edit-clip",
+                "code": "export default {}"
+            }),
+        );
+        assert!(
+            !edit_motion_result.is_error,
+            "{}",
+            edit_motion_result.text_joined()
+        );
+
+        let mut session = ChatSession::new("get-media-redaction");
+        session.messages.push(ChatMessage::tool_result_blocks(
+            "call-get-media",
+            result.content.clone(),
+            safe_tool_result_for_llm(&result),
+            false,
+        ));
+        session.messages.push(ChatMessage::tool_result_blocks(
+            "call-inspect-media",
+            inspect_result.content.clone(),
+            safe_tool_result_for_llm(&inspect_result),
+            false,
+        ));
+        session.messages.push(ChatMessage::tool_result_blocks(
+            "call-generate-avatar",
+            advanced_result.content.clone(),
+            safe_tool_result_for_llm(&advanced_result),
+            false,
+        ));
+        session.messages.push(ChatMessage::tool_result_blocks(
+            "call-add-motion",
+            add_motion_result.content.clone(),
+            safe_tool_result_for_llm(&add_motion_result),
+            false,
+        ));
+        session.messages.push(ChatMessage::tool_result_blocks(
+            "call-edit-motion",
+            edit_motion_result.content.clone(),
+            safe_tool_result_for_llm(&edit_motion_result),
+            false,
+        ));
+        state.put_project_session(&project, session).unwrap();
+
+        let persisted =
+            std::fs::read_to_string(bundle.join("chat-sessions/get-media-redaction.json")).unwrap();
+        for secret in [
+            ABSOLUTE_PATH,
+            SIGNED_RESULT_URL,
+            SIGNED_REFERENCE_URL,
+            SIGNED_IMAGE_URL,
+            PRIVATE_PROMPT,
+            ADVANCED_PATH,
+            ADVANCED_URL_SECRET,
+            ADVANCED_PROVIDER_ID,
+            ADVANCED_PROMPT,
+            ADVANCED_KEY,
+            MOTION_PRIVATE_RENDERER,
+            MOTION_PRIVATE_VERSION,
+            MOTION_PRIVATE_OUTPUT,
+            MOTION_PRIVATE_HASH,
+            MOTION_PRIVATE_ACTION,
+        ] {
+            assert!(
+                !persisted.contains(secret),
+                "persisted chat history leaked {secret}: {persisted}"
+            );
+        }
+        assert!(persisted.contains("generated-asset"));
+        assert!(persisted.contains("Generated clip"));
+        assert!(persisted.contains("avatar-safe-asset"));
+        assert!(persisted.contains("motion-safe-add-clip"));
+        assert!(persisted.contains("motion-safe-add-asset"));
+        assert!(persisted.contains("motion-safe-edit-clip"));
+        assert!(persisted.contains("motion-safe-edit-asset"));
     }
 
     #[test]
@@ -805,6 +1449,7 @@ mod tests {
             state,
             project: project_a,
             cancel: cancel.clone(),
+            undo_scope: "test:stale-project".into(),
         };
         let handle: Arc<dyn CoreHandle> = Arc::new(AppCoreHandle::new(core.clone()));
         let registry = Arc::new(RwLock::new(crate::mcp::build_registry(
@@ -864,6 +1509,113 @@ mod tests {
     }
 
     #[test]
+    fn project_turn_gate_request_cancel_cancels_the_whole_turn() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = AppCore::new();
+        core.save_project(Some(temp.path().join("Project.opentake")))
+            .unwrap();
+        let state = ChatState::new(
+            core,
+            temp.path().join("no-workflows"),
+            temp.path().join("chat-cache"),
+            temp.path().join("chat-models"),
+        );
+        let cancel = Arc::new(TurnCancel::new());
+        let gate = ProjectTurnGate {
+            project: state.project_context().unwrap(),
+            state,
+            cancel: cancel.clone(),
+            undo_scope: "test:cancel".into(),
+        };
+
+        gate.request_dispatch_cancel();
+        assert!(!cancel.requested.load(Ordering::Acquire));
+        assert!(cancel.media.is_cancelled());
+
+        gate.request_cancel();
+
+        assert!(cancel.requested.load(Ordering::Acquire));
+        assert!(cancel.media.is_cancelled());
+    }
+
+    #[test]
+    fn codex_terminal_commit_linearizes_with_whole_turn_cancellation() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = AppCore::new();
+        core.save_project(Some(temp.path().join("Project.opentake")))
+            .unwrap();
+        let state = ChatState::new(
+            core,
+            temp.path().join("no-workflows"),
+            temp.path().join("chat-cache"),
+            temp.path().join("chat-models"),
+        );
+        let project = state.project_context().unwrap();
+
+        let mut cancelled_session = ChatSession::new("cancel-wins");
+        cancelled_session
+            .messages
+            .push(ChatMessage::user("request"));
+        state
+            .put_project_session(&project, cancelled_session.clone())
+            .unwrap();
+        let cancelled_owner = Arc::new(TurnCancel::new());
+        let cancelled_key = project.key(&cancelled_session.id);
+        state
+            .reserve_turn(cancelled_key.clone(), cancelled_owner.clone())
+            .unwrap();
+        cancelled_owner.request();
+        cancelled_session
+            .messages
+            .push(ChatMessage::assistant("must not commit", Vec::new()));
+        assert_eq!(
+            state
+                .finalize_project_turn(
+                    &project,
+                    &cancelled_key,
+                    &cancelled_owner,
+                    cancelled_session,
+                )
+                .unwrap(),
+            TurnFinalization::Cancelled
+        );
+        let persisted = state.take_project_session(&project, "cancel-wins").unwrap();
+        assert_eq!(persisted.messages.len(), 1);
+
+        let mut committed_session = ChatSession::new("commit-wins");
+        committed_session
+            .messages
+            .push(ChatMessage::user("request"));
+        state
+            .put_project_session(&project, committed_session.clone())
+            .unwrap();
+        let committed_owner = Arc::new(TurnCancel::new());
+        let committed_key = project.key(&committed_session.id);
+        state
+            .reserve_turn(committed_key.clone(), committed_owner.clone())
+            .unwrap();
+        committed_session
+            .messages
+            .push(ChatMessage::assistant("committed", Vec::new()));
+        assert_eq!(
+            state
+                .finalize_project_turn(
+                    &project,
+                    &committed_key,
+                    &committed_owner,
+                    committed_session,
+                )
+                .unwrap(),
+            TurnFinalization::Committed
+        );
+        committed_owner.request();
+        assert!(!committed_owner.requested.load(Ordering::Acquire));
+        let persisted = state.take_project_session(&project, "commit-wins").unwrap();
+        assert_eq!(persisted.messages.len(), 2);
+        assert_eq!(persisted.messages[1].content, "committed");
+    }
+
+    #[test]
     fn save_as_cancels_and_purges_the_previous_project_turn() {
         let temp = tempfile::tempdir().unwrap();
         let core = AppCore::new();
@@ -919,6 +1671,7 @@ mod tests {
             state,
             project,
             cancel: cancel.clone(),
+            undo_scope: "test:save-as".into(),
         };
         let (tool_started_tx, tool_started_rx) = std::sync::mpsc::channel();
         let (tool_finished_tx, tool_finished_rx) = std::sync::mpsc::channel();

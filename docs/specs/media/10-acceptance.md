@@ -24,8 +24,8 @@
 - **T8.7 VisualSearch 排名**:矩阵·向量、best-per-shot(同分保留先出现)、minScore 过滤、`prefix(limit)` 再 `filter(floor)` 顺序、top≤0 空。验收:构造已知向量集断言命中顺序/去重/截断边界与上游 `VisualSearch.search` 逐用例一致(尤其「先 limit 后 floor」最终 ≤ limit)。
 - **T8.8 VisualIndexer**:视频 shot 累积(首镜头起点强制 0、shotEnd=下一镜头起点/末镜头=duration)、图片单 embedding 零长 shot、needsIndex 幂等、导出让路 + 取消。验收:对已知镜头视频断言 rows 的 `shot_start/shot_end`;重复 index 跳过(幂等);取消中途 `Cancelled`。
 - **T8.9 ModelDownloader**:reqwest 流式下载 + 加权进度 + 流式 SHA256 + zip 解压(单顶层条目)+ 原子安装 + 幂等。验收:mock HTTP 下载三文件、进度单调到 1、错校验和→`Checksum`、安装目录结构正确、二次 install 直接返回。
-- **T8.10 ort worker 框架**:`OrtModel::{load,run}`、`OrtWorker::submit`(序列化 + 导出暂停)、`OrtModelRegistry` 懒加载、EP 回退 CPU、tensor 辅助。验收:加载 SigLIP image encoder 跑通(即 `OrtEmbedder` 复用它);EP 不可用回退 CPU 有日志;worker 串行执行、导出暂停期间不取模型。
-- **T8.11 IndexCoordinator**:schedule 条件、单 worker、dequeue 跳过失效 id、index_one 进度分配(转写 0.5)、并发转写+视觉、failed 集、search 快照 off-thread、ExportPause 引用计数 + 2s 轮询。验收:入队/去重/失败重试(failedIds 仅批内去重)行为与上游一致;导出 begin 后 worker 暂停、end 后恢复;search 空 query 返回空、命中合理。
+- **T8.10 ort worker 框架**:`OrtModel::{load,run_f32}`、固定容量 `OrtWorker::submit`、typed request/state/result/error、`OrtModelRegistry` 懒加载、EP 平台选择、tensor 辅助。验收由 owning stress test 证明:worker count 恒为 1；priority 内 FIFO；连续 4 个 interactive 后 background 不饥饿；容量满返回 `QueueFull`；排队/运行取消、model error 与 panic 都有终态且下一 job 恢复；shutdown 后 active=0。
+- **T8.11 生产 IndexCoordinator**:`search_index_start` 的 owned manifest snapshot 进入进程唯一 worker；source fingerprint + SigLIP model/version 组成 live job identity，重复提交共享结果。`index_assets` 串行处理需更新的视觉索引与无缓存转写，每个素材边界响应 `ExportPause`/取消；embedding 原子提交、transcript fingerprint cache 使 source 变化失效，重启 sweep 跳过完成项并续作缺失项。验收:嵌套压力仅在最后 guard drop 后恢复；容量/FIFO/防饥饿/去重/失败重试/模型升级/重启/终态矩阵全绿；空 query 仍返回空且普通 Files/Spoken fallback 不依赖视觉模型。
 
 ## 持续校准(非阻塞,跨 Phase)
 

@@ -1,5 +1,6 @@
 import { cancelSaveAsMedia } from "../../store/editActions";
 import { useEditorUiStore, type SaveAsProgressState } from "../../store/uiStore";
+import { useT } from "../../i18n";
 
 export function SaveAsProgress() {
   const progress = useEditorUiStore((state) => state.saveAsProgress);
@@ -8,12 +9,14 @@ export function SaveAsProgress() {
 }
 
 export function SaveAsProgressView({ progress }: { progress: SaveAsProgressState }) {
+  const t = useT();
   const fraction = Math.max(0, Math.min(1, progress.done / Math.max(1, progress.total)));
 
   return (
     <div
       role="status"
       aria-label={progress.label}
+      className="app-toast"
       style={{
         position: "fixed",
         right: 24,
@@ -54,7 +57,11 @@ export function SaveAsProgressView({ progress }: { progress: SaveAsProgressState
           opacity: !progress.cancellable || progress.cancelling ? 0.55 : 1,
         }}
       >
-        {progress.cancelling ? "正在取消…" : progress.cancellable ? "取消 / Cancel" : "准备中…"}
+        {progress.cancelling
+          ? t("saveAs.cancelling")
+          : progress.cancellable
+            ? t("saveAs.cancel")
+            : t("saveAs.preparing")}
       </button>
     </div>
   );

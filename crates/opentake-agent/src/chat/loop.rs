@@ -29,7 +29,6 @@ use crate::plugin::registry::PluginRegistry;
 use crate::prompt::assemble::assemble_system_prompt;
 use crate::signal::engine::build_signal;
 use crate::tools::descriptions::{description, input_schema};
-use crate::tools::names::ToolName;
 use crate::tools::panic_boundary::with_redacted_dispatch_panic;
 use crate::tools::result::ToolResult;
 
@@ -207,6 +206,45 @@ pub trait ChatTurnGate: Send + Sync {
         name: &str,
         args: serde_json::Value,
     ) -> Option<ToolResult>;
+
+    /// Dispatch with the transport request's cancellation token. Turn-bound
+    /// hosts normally cancel their own token from [`Self::request_cancel`];
+    /// long-lived MCP authorities can instead forward this request-local token
+    /// without coupling unrelated sessions.
+    fn dispatch_cancellable(
+        &self,
+        dispatcher: &Dispatcher,
+        name: &str,
+        args: serde_json::Value,
+        _request_cancel: &opentake_media::MediaCancelToken,
+    ) -> Option<ToolResult> {
+        self.dispatch(dispatcher, name, args)
+    }
+
+    /// Dispatch under a transport-supplied undo owner. Long-lived MCP gates use
+    /// this to isolate rmcp sessions; project-turn gates may ignore it and retain
+    /// their stable OpenTake ChatSession owner.
+    fn dispatch_cancellable_scoped(
+        &self,
+        dispatcher: &Dispatcher,
+        name: &str,
+        args: serde_json::Value,
+        _undo_scope: &str,
+        request_cancel: &opentake_media::MediaCancelToken,
+    ) -> Option<ToolResult> {
+        self.dispatch_cancellable(dispatcher, name, args, request_cancel)
+    }
+
+    /// Request cancellation of the whole turn. Standalone callers have no
+    /// project-bound cancellation state, so their default remains a no-op.
+    fn request_cancel(&self) {}
+
+    /// Stop in-flight dispatcher work while cleaning up an internally failed
+    /// provider turn. Project hosts may keep this distinct from a user-requested
+    /// whole-turn cancellation so the terminal failure can still be persisted.
+    fn request_dispatch_cancel(&self) {
+        self.request_cancel();
+    }
 }
 
 struct DirectChatTurnGate;
@@ -251,18 +289,15 @@ impl ChatLoop {
     }
 
     /// The tool catalog in the OpenAI function-calling shape. Built fresh per
-    /// turn (cheap; ~44 tools) so the model always sees the current schema.
+    /// turn (cheap; currently 38 base live tools) so the model always sees the
+    /// current fail-closed catalog.
     ///
     /// When the dispatcher lacks a media bridge, hide the bridge-dependent
     /// tools instead of advertising tools that would only fail at runtime.
     fn tool_catalog(&self) -> Vec<ToolSchema> {
-        ToolName::ALL
-            .iter()
-            .copied()
-            .filter(|tool| {
-                self.dispatcher.has_media_bridge()
-                    || !matches!(tool, ToolName::InspectTimeline | ToolName::ImportMedia)
-            })
+        self.dispatcher
+            .advertised_tools()
+            .into_iter()
             .map(|tool| ToolSchema {
                 name: tool.as_str().to_string(),
                 description: description(tool).to_string(),
@@ -281,7 +316,10 @@ impl ChatLoop {
         if let Ok(json) = serde_json::to_value(&signal) {
             s.push_str("\n\n# Current timeline context signal\n");
             s.push_str(&serde_json::to_string_pretty(&json).unwrap_or_default());
-            s.push_str("\n\nUse this signal to pick the right tool without re-reading the timeline first. For example, if the user asks to tighten silences on a talking-head timeline, call `tighten_silences` then `ripple_delete_ranges` with the returned ranges.");
+            s.push_str("\n\nUse this signal to pick the right tool without re-reading the timeline first. For example, if the user asks to tighten silences on a talking-head timeline, call `tighten_silences` then `ripple_delete_ranges` with the accepted returned ranges.");
+            if self.dispatcher.has_media_bridge() {
+                s.push_str(" If the user asks to remove filler words, call `remove_filler_words`, let them review the word-aligned cuts, then apply only the accepted ranges with `ripple_delete_ranges`.");
+            }
         }
         s
     }
@@ -603,6 +641,10 @@ mod tests {
         let loop_ = build_loop(talking_head_timeline(), Arc::new(MemoryKeyStore::new()));
         let tools = loop_.tool_catalog();
         assert!(tools.iter().any(|t| t.name == "tighten_silences"));
+        assert!(!tools.iter().any(|t| t.name == "remove_filler_words"));
+        assert!(!tools.iter().any(|t| t.name == "get_transcript"));
+        assert!(!tools.iter().any(|t| t.name == "search_media"));
+        assert!(!tools.iter().any(|t| t.name == "inspect_media"));
         assert!(!tools.iter().any(|t| t.name == "inspect_timeline"));
         assert!(!tools.iter().any(|t| t.name == "import_media"));
     }

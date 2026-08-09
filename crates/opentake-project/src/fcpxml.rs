@@ -1194,6 +1194,8 @@ mod tests {
             source_height: Some(1080),
             source_fps: Some(30.0),
             has_audio: Some(true),
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
@@ -1272,6 +1274,8 @@ mod tests {
             source_height: None,
             source_fps: None,
             has_audio: None,
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
@@ -1539,9 +1543,11 @@ mod tests {
 
         for xml in [&injected, &plain] {
             assert!(xml.contains("<frame>0</frame>"));
-            // 该文件 <file><timecode> 的 string 为 00:00:00:00;整份文档不含 999。
+            // 该文件 <file><timecode> 的 string 为 00:00:00:00；未命中的
+            // 注入值不能成为 timecode 帧。不要检查裸字符串 `999`，因为
+            // 临时素材路径包含进程号，PID 本身可能恰好含有这三位数字。
             assert!(xml.contains("<string>00:00:00:00</string>"));
-            assert!(!xml.contains("999"));
+            assert!(!xml.contains("<frame>999</frame>"));
         }
         fs::remove_dir_all(&dir).ok();
     }

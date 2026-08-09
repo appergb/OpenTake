@@ -34,33 +34,35 @@
   - Add browser interaction tests for every named Home, project, persistence, error, keyboard, and state transition; the affected web and Rust suites must pass.
   - Exercise the packaged application through create/open/close/reopen or the named Home path and retain exact runtime evidence before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/home/HomeView.test.tsx#upstream_home_children_close_one_composite_acceptance` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.test.tsx -t "upstream_home_children_close_one_composite_acceptance"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/home/HomeView.tsx#HomeView`, `web/src/store/recentStore.ts#useRecentStore`, `web/src/store/projectActions.ts#openProjectPath`, `docs/architecture/MODULE-PORT-MAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.test.tsx -t "upstream_home_children_close_one_composite_acceptance"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS. The missing exact composite runner first produced a zero-candidate skipped RED baseline, then passed 1/1 after the Home boundary covered sidebar, samples, first-run welcome, version update, project-card keyboard open, missing/context state, and safe-trash confirmation. Welcome/update state uses the build-time application version, persists only after dismissal, receives initial focus, and supports Escape. The complete Web suite passed 82 files / 774 tests and the production build passed with only the pre-existing bundle warnings. The rebuilt macOS app displayed the v1.0.0 update surface, returned to the complete Home shell, and did not redisplay it after quit/relaunch; child runtime records cover native new/open/sample, safe trash, autosave/reopen, and secondary controls. Runtime evidence: [`home-upstream-composite-real-device-2026-07-31.md`](../runtime-artifacts/automated/home-upstream-composite-real-device-2026-07-31.md).
 
 ### Task 2: HS-new-open-sample (implementation-slice-406b2853a5d6f67b)
 
@@ -89,36 +91,38 @@
   - Add browser interaction tests for every named Home, project, persistence, error, keyboard, and state transition; the affected web and Rust suites must pass.
   - Exercise the packaged application through create/open/close/reopen or the named Home path and retain exact runtime evidence before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `src-tauri/src/samples.rs#failed_materialization_rolls_back_entire_sample_directory` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
   - `web/src/components/home/HomeView.test.tsx#new_open_sample_register_only_after_success_and_route_tutorial` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-tauri failed_materialization_rolls_back_entire_sample_directory`
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.test.tsx -t "new_open_sample_register_only_after_success_and_route_tutorial"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/home/HomeView.tsx#HomeView`, `web/src/store/projectActions.ts#newProjectAndEnter`, `web/src/store/projectActions.ts#openProjectPath`, `web/src/store/projectActions.ts#openProjectViaDialog`, `src-tauri/src/samples.rs#SampleProjectService`, `docs/architecture/MODULE-PORT-MAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-tauri failed_materialization_rolls_back_entire_sample_directory`
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.test.tsx -t "new_open_sample_register_only_after_success_and_route_tutorial"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Runtime evidence: [`home-sample-project-real-device-2026-07-31.md`](../runtime-artifacts/automated/home-sample-project-real-device-2026-07-31.md).
 
 ### Task 3: HS-project-card-lifecycle (implementation-slice-1136a3fb2728f04d)
 
@@ -145,36 +149,38 @@
   - Add browser interaction tests for every named Home, project, persistence, error, keyboard, and state transition; the affected web and Rust suites must pass.
   - Exercise the packaged application through create/open/close/reopen or the named Home path and retain exact runtime evidence before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `src-tauri/src/home.rs#missing_entry_survives_registry_load_and_safe_trash_removes_only_after_success` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
   - `web/src/components/home/HomeView.test.tsx#missing_card_reveal_remove_and_trash_states` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-tauri missing_entry_survives_registry_load_and_safe_trash_removes_only_after_success`
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.test.tsx -t "missing_card_reveal_remove_and_trash_states"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `src-tauri/src/home.rs#ProjectRegistry`, `web/src/store/recentStore.ts#useRecentStore`, `web/src/components/home/HomeView.tsx#ProjectGridCard`, `docs/architecture/PORT-1TO1-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-tauri missing_entry_survives_registry_load_and_safe_trash_removes_only_after_success`
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.test.tsx -t "missing_card_reveal_remove_and_trash_states"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Runtime evidence: [`home-project-lifecycle-real-device-2026-07-31.md`](../runtime-artifacts/automated/home-project-lifecycle-real-device-2026-07-31.md).
 
 ### Task 4: HS-autosave-metadata-mixed (implementation-slice-c50679ed41628b06)
 
@@ -199,33 +205,35 @@
   - Add browser interaction tests for every named Home, project, persistence, error, keyboard, and state transition; the affected web and Rust suites must pass.
   - Exercise the packaged application through create/open/close/reopen or the named Home path and retain exact runtime evidence before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/store/recentStore.test.ts#autosave_and_home_metadata_have_separate_owners` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/store/recentStore.test.ts -t "autosave_and_home_metadata_have_separate_owners"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/store/recentStore.ts#useRecentStore`, `web/src/store/projectActions.ts#saveCurrentProject`, `docs/architecture/PORT-1TO1-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/store/recentStore.test.ts -t "autosave_and_home_metadata_have_separate_owners"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+Runtime evidence: [`home-autosave-metadata-real-device-2026-07-31.md`](../runtime-artifacts/automated/home-autosave-metadata-real-device-2026-07-31.md).
 
 ### Task 5: HS-layout-geometry + CC-layout-misgrouped (implementation-slice-395babc4fe771bb4)
 
@@ -391,29 +399,29 @@
   - Visible/returned assertion: assert the exact visible text/control/state/focus result and the returned success or typed failure, including a no-op assertion for disabled, cancelled, or rejected input.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:web/src/__tests__/completion/doc-59fbdae28c9200a7.test.ts#completion_59fbdae28c9200a7_the_editor_shell_implements_the_specified_panel_.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/shell/EditorSplit.test.tsx#all_presets_match_geometry_visibility_maximize_and_focus_shell` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/shell/EditorSplit.test.tsx -t "all_presets_match_geometry_visibility_maximize_and_focus_shell"`
 
   Expected: FAIL because one or more of the 10 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/store/uiStore.ts#useEditorUiStore`, `web/src/components/shell/EditorSplit.tsx#EditorSplit`, `web/src/components/shell/EditorSplit.tsx#DefaultLayout`, `web/src/components/shell/EditorSplit.tsx#MediaLayout`, `web/src/components/shell/EditorSplit.tsx#VerticalLayout`, `web/src/components/ui/PanelShell.tsx#PanelShell`, `docs/modules/web/SPEC.md`, `web/src/components/shell/ViewMenu.tsx#ViewMenu`, `docs/specs/frontend/2-layout.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/shell/EditorSplit.test.tsx -t "all_presets_match_geometry_visibility_maximize_and_focus_shell"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
@@ -455,29 +463,29 @@
   - Add browser interaction tests for every named Home, project, persistence, error, keyboard, and state transition; the affected web and Rust suites must pass.
   - Exercise the packaged application through create/open/close/reopen or the named Home path and retain exact runtime evidence before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/store/uiStore.persistence.test.ts#schema_safe_layout_panel_and_keyframe_state_survive_restart` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/store/uiStore.persistence.test.ts -t "schema_safe_layout_panel_and_keyframe_state_survive_restart"`
 
   Expected: FAIL because one or more of the 2 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/store/uiStore.ts#loadBool`, `web/src/store/uiStore.ts#loadPreset`, `web/src/store/uiStore.ts#persist`, `web/src/store/uiStore.ts#useEditorUiStore`, `docs/modules/web/SPEC.md`, `docs/specs/frontend/13-implementation.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/store/uiStore.persistence.test.ts -t "schema_safe_layout_panel_and_keyframe_state_survive_restart"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
@@ -506,29 +514,29 @@
   - Match shortcut, enabled, checked, and focus behavior.
   - Add menu action and packaged desktop tests.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/shell/ViewMenu.test.tsx#commands_shortcuts_checked_state_and_disabled_rules` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/shell/ViewMenu.test.tsx -t "commands_shortcuts_checked_state_and_disabled_rules"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/shell/ViewMenu.tsx#ViewMenu`, `web/src/store/uiStore.ts#useEditorUiStore`, `docs/specs/frontend/2-layout.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/shell/ViewMenu.test.tsx -t "commands_shortcuts_checked_state_and_disabled_rules"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
@@ -558,33 +566,35 @@
   - Wire each component to live commands/state.
   - Add component-map and visual acceptance coverage.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/shell/ShellComponentMapping.test.tsx#every_documented_shell_component_has_exact_owner` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/shell/ShellComponentMapping.test.tsx -t "every_documented_shell_component_has_exact_owner"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/home/HomeView.tsx#HomeView`, `web/src/components/shell/EditorSplit.tsx#EditorSplit`, `web/src/components/shell/ViewMenu.tsx#ViewMenu`, `docs/specs/frontend/3-components.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/shell/ShellComponentMapping.test.tsx -t "every_documented_shell_component_has_exact_owner"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS. Added the executable component-owner index and completed the missing AI Edit, Music, and cross-dissolve transition vertical slices through shared project commands/state. The complete Web suite passed 82 files / 773 tests, the production Web build passed with only the pre-existing chunk/dynamic-import warnings, the complete Rust workspace passed, and formatting plus diff checks passed. The rebuilt macOS application verified linked A/V selection, AI proposal/reject/apply/undo, project and library music placement, paid-generation confirmation handoff, transition apply/remove/undo, save/reopen persistence, and a parseable 720p H.264/AAC export. Runtime evidence: [`home-component-mapping-real-device-2026-07-31.md`](../runtime-artifacts/automated/home-component-mapping-real-device-2026-07-31.md).
 
 ### Task 9: control-acceptance (implementation-slice-60d775675af9091c)
 
@@ -651,7 +661,7 @@
   - Visible/accessibility/return path: success=create a new project from the populated launcher: newProjectAndEnter enters a fresh editor project; accessibility={"focus":"Custom LauncherButton focus behavior depends on its implementation","label":"Visible child text/title or caller-provided label; verify at runtime","shortcut":"None declared on this control"}; returnPath=["Project actions enter the editor; Library/Settings provide explicit Home/close actions."].
   - Outcome matrix: {"success":"create a new project from the populated launcher: newProjectAndEnter enters a fresh editor project","pending":"Pending behavior is the concrete busy/phase/disabled state in web/src/components/home/HomeView.tsx:421; no additional state is inferred beyond the source.","empty":"Required empty/no-selection behavior is the render/handler guard in web/src/components/home/HomeView.tsx:421; the candidate-specific interaction test must assert that exact guard.","disabled":"No explicit disabled prop on this candidate.","cancel":"Not applicable — this immediate handler has no cancellable operation or dismissible transient surface.","retry":"Retry is another activation after the source-defined pending guard clears; no separate retry command exists unless named in newProjectAndEnter enters a fresh editor project.","failure":"Failure behavior is limited to the catch/void-call behavior visible in web/src/components/home/HomeView.tsx:421; the missing DOM test must prove whether it is surfaced or silent."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/home/HomeView.interaction.test.tsx#control-e2d0f1ed3415ea45 create a new project from the Home sidebar` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
   - `web/src/components/home/HomeView.interaction.test.tsx#control-575978f9bced5959 create a new project from the empty launcher` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
@@ -659,7 +669,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-e2d0f1ed3415ea45 create a new project from the Home sidebar"`
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-575978f9bced5959 create a new project from the empty launcher"`
@@ -667,11 +677,11 @@
 
   Expected: FAIL because one or more of the 3 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/home/HomeView.tsx`, `web/src/store/projectActions.ts#newProjectAndEnter`, `web/src/lib/api.ts#getDefaultProjectDir`, `src-tauri/src/commands.rs#get_default_project_dir`, `web/src/lib/api.ts#projectNew`, `src-tauri/src/commands.rs#project_new`, `crates/opentake-core/src/dto.rs#handle_project_new`, `crates/opentake-core/src/core.rs`, `web/src/components/home/HomeView.tsx#HomeView` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-e2d0f1ed3415ea45 create a new project from the Home sidebar"`
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-575978f9bced5959 create a new project from the empty launcher"`
@@ -679,7 +689,7 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
@@ -749,7 +759,7 @@
   - Visible/accessibility/return path: success=open a project from the populated launcher: sets opening while openProjectViaDialog runs; accessibility={"focus":"Custom LauncherButton focus behavior depends on its implementation","label":"Visible child text/title or caller-provided label; verify at runtime","shortcut":"None declared on this control"}; returnPath=["Project actions enter the editor; Library/Settings provide explicit Home/close actions."].
   - Outcome matrix: {"success":"open a project from the populated launcher: sets opening while openProjectViaDialog runs","pending":"Pending behavior is the concrete busy/phase/disabled state in web/src/components/home/HomeView.tsx:422; no additional state is inferred beyond the source.","empty":"Required empty/no-selection behavior is the render/handler guard in web/src/components/home/HomeView.tsx:422; the candidate-specific interaction test must assert that exact guard.","disabled":"No explicit disabled prop on this candidate.","cancel":"Cancellation/dismissal follows the exact guard in sets opening while openProjectViaDialog runs; no broader cancellation behavior is assumed.","retry":"Retry is another activation after the source-defined pending guard clears; no separate retry command exists unless named in sets opening while openProjectViaDialog runs.","failure":"Failure behavior is limited to the catch/void-call behavior visible in web/src/components/home/HomeView.tsx:422; the missing DOM test must prove whether it is surfaced or silent."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/home/HomeView.interaction.test.tsx#control-ef78873f98fcab84 open a project from the Home sidebar` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
   - `web/src/components/home/HomeView.interaction.test.tsx#control-2121d7b9fdc279b9 open a project from the empty launcher` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
@@ -757,7 +767,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-ef78873f98fcab84 open a project from the Home sidebar"`
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-2121d7b9fdc279b9 open a project from the empty launcher"`
@@ -765,11 +775,11 @@
 
   Expected: FAIL because one or more of the 3 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/home/HomeView.tsx`, `web/src/store/projectActions.ts#openProjectViaDialog`, `web/src/store/projectActions.ts#openProjectPath`, `web/src/lib/api.ts#projectOpen`, `src-tauri/src/commands.rs#project_open`, `crates/opentake-core/src/core.rs#AppCore::prepare_project_open`, `web/src/components/home/HomeView.tsx#HomeView`, `crates/opentake-core/src/core.rs#AppCore` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-ef78873f98fcab84 open a project from the Home sidebar"`
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-2121d7b9fdc279b9 open a project from the empty launcher"`
@@ -777,7 +787,7 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
@@ -857,7 +867,7 @@
   - Visible/accessibility/return path: success=remove a recent project entry: recentStore.remove(entry.path); accessibility={"focus":"Native keyboard-focusable control","label":"t(\"home.remove\")","shortcut":"None declared on this control"}; returnPath=["Project actions enter the editor; Library/Settings provide explicit Home/close actions."].
   - Outcome matrix: {"success":"remove a recent project entry: recentStore.remove(entry.path)","pending":"Not applicable — this activation only changes local/caller state and starts no Promise, API, Tauri command, or Rust work.","empty":"Required empty/no-selection behavior is the render/handler guard in web/src/components/home/HomeView.tsx:521; the candidate-specific interaction test must assert that exact guard.","disabled":"No explicit disabled prop on this candidate.","cancel":"Not applicable — this immediate handler has no cancellable operation or dismissible transient surface.","retry":"Not applicable as an error-recovery state — the synchronous local action can simply be activated again.","failure":"Not applicable — this immediate activation calls no API/Tauri/Rust boundary, so there is no backend rejection path."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/home/HomeView.interaction.test.tsx#control-f4a6b4f8789ea013 open the global Library from Home` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
   - `web/src/components/home/HomeView.interaction.test.tsx#control-810a7d793fcd8323 open Settings from Home` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
@@ -866,7 +876,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-f4a6b4f8789ea013 open the global Library from Home"`
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-810a7d793fcd8323 open Settings from Home"`
@@ -875,11 +885,15 @@
 
   Expected: FAIL because one or more of the 4 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Result: The file existed only because Task 12 had just introduced it, but all four Task 11 names were absent; the focused filter executed zero candidates and reported the file/test as skipped. This is the missing-owning-evidence baseline rather than a manufactured production failure.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/home/HomeView.tsx`, `web/src/components/home/HomeView.tsx#HomeView` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+  Result: Existing Library, Settings, background-clear, and recent-store removal handlers already satisfied the four contracts. Added the four exact owning tests; no further product code change was required after Task 12 made the card and removal control natively accessible.
+
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-f4a6b4f8789ea013 open the global Library from Home"`
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-810a7d793fcd8323 open Settings from Home"`
@@ -888,11 +902,15 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+  Result: PASS, all four exact candidate tests executed in the 5/5 Home interaction runner.
+
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS, 72 Web files / 731 tests and production build. The packaged macOS app opened Library and Settings, selected then cleared a project card, removed only the recent entry while preserving the bundle, and reopened the bundle to restore the 2-entry Home state. Runtime evidence: `runtime-artifacts/automated/home-secondary-controls-real-device-2026-07-30.md`.
 
 ### Task 12: control-acceptance (implementation-slice-8e481b772d7d2357)
 
@@ -926,33 +944,41 @@
   - Visible/accessibility/return path: success=select or open a recent project card: onClick stops propagation and setSelectedPath(entry.path); onDoubleClick calls openProjectPath(entry.path); the launcher window Enter branch opens selectedPath; accessibility={"focus":"ProjectGridCard call site supplies pointer handlers; the implementation div is not keyboard focusable even though a window-level Enter handler exists","label":"Visible child text/title or caller-provided label; verify at runtime","shortcut":"None declared on this control"}; returnPath=["Project actions enter the editor; Library/Settings provide explicit Home/close actions."].
   - Outcome matrix: {"success":"select or open a recent project card: onClick stops propagation and setSelectedPath(entry.path); onDoubleClick calls openProjectPath(entry.path); the launcher window Enter branch opens selectedPath","pending":"Pending behavior is the concrete busy/phase/disabled state in web/src/components/home/HomeView.tsx:351; no additional state is inferred beyond the source.","empty":"Required empty/no-selection behavior is the render/handler guard in web/src/components/home/HomeView.tsx:351; the candidate-specific interaction test must assert that exact guard.","disabled":"No explicit disabled prop on this candidate.","cancel":"Cancellation/dismissal follows the exact guard in onClick stops propagation and setSelectedPath(entry.path); onDoubleClick calls openProjectPath(entry.path); the launcher window Enter branch opens selectedPath; no broader cancellation behavior is assumed.","retry":"Retry is another activation after the source-defined pending guard clears; no separate retry command exists unless named in onClick stops propagation and setSelectedPath(entry.path); onDoubleClick calls openProjectPath(entry.path); the launcher window Enter branch opens selectedPath.","failure":"Failure behavior is limited to the catch/void-call behavior visible in web/src/components/home/HomeView.tsx:351; the missing DOM test must prove whether it is surfaced or silent."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/home/HomeView.interaction.test.tsx#control-9697b53d4d2cf1ca select or open a recent project card` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-9697b53d4d2cf1ca select or open a recent project card"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Result: RED. The declared owning runner did not exist, and the direct focused Vitest command exited 1 with `No test files found`. The first packaged-app inspection also exposed the existing card as text rather than a keyboard-focusable action.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/home/HomeView.tsx`, `web/src/components/home/HomeView.tsx#ProjectLauncher`, `web/src/store/projectActions.ts#openProjectPath`, `web/src/lib/api.ts#projectOpen`, `src-tauri/src/commands.rs#project_open`, `crates/opentake-core/src/core.rs#AppCore::prepare_project_open`, `web/src/components/home/HomeView.tsx#HomeView`, `crates/opentake-core/src/core.rs#AppCore` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+  Result: Replaced the pointer-only card surface with a real focusable button carrying the project name and `aria-pressed` selection state. Kept the remove action as a separate sibling button, while preserving single-click selection, double-click open, focus selection, and the launcher-level Enter/Return open path. The global Return handler now ignores other focused interactive controls so it cannot open a stale selected project while activating another Home action.
+
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/home/HomeView.interaction.test.tsx -t "control-9697b53d4d2cf1ca select or open a recent project card"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+  Result: PASS, 1/1 exact candidate test. The nearby Home visual suite also passed 11/11.
+
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS. The complete Web suite passed 72 files / 727 tests, the production Web build passed with only the pre-existing bundle warnings, and the complete Rust workspace passed. The rebuilt packaged macOS app verified single-click selection, native keyboard focus plus Return, and native double-click opening the same project. Runtime evidence: `runtime-artifacts/automated/recent-project-card-real-device-2026-07-30.md`.
 
 ### Task 13: control-acceptance (implementation-slice-1f94f01d3b65a701)
 
@@ -1076,7 +1102,7 @@
   - Visible/accessibility/return path: success=open Video Export from the interchange menu: close menu -> open Export dialog; accessibility={"focus":"Native keyboard-focusable control","label":"menuitem","shortcut":"None declared on this control"}; returnPath=["Navigation changes the full-screen view; popup actions should close and return focus to the title-bar trigger."].
   - Outcome matrix: {"success":"open Video Export from the interchange menu: close menu -> open Export dialog","pending":"Not applicable — this activation only changes local/caller state and starts no Promise, API, Tauri command, or Rust work.","empty":"Required empty/no-selection behavior is the render/handler guard in web/src/components/shell/TitleBar.tsx:359; the candidate-specific interaction test must assert that exact guard.","disabled":"Disabled when {!hasClips}.","cancel":"Cancellation/dismissal follows the exact guard in close menu -> open Export dialog; no broader cancellation behavior is assumed.","retry":"Not applicable as an error-recovery state — the synchronous local action can simply be activated again.","failure":"Not applicable — this immediate activation calls no API/Tauri/Rust boundary, so there is no backend rejection path."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/shell/TitleBar.interaction.test.tsx#control-f52cc89817361a19 return from editor to Home` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
   - `web/src/components/shell/TitleBar.interaction.test.tsx#control-4bda8f075e1f3a14 open the global Library` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
@@ -1088,7 +1114,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify the baseline**
 
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.interaction.test.tsx -t "control-f52cc89817361a19 return from editor to Home"`
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.interaction.test.tsx -t "control-4bda8f075e1f3a14 open the global Library"`
@@ -1098,13 +1124,15 @@
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.interaction.test.tsx -t "control-229710d0115f07bc open/close interchange export menu"`
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.interaction.test.tsx -t "control-02d1bf7fff7c1e3a open Video Export from the interchange menu"`
 
-  Expected: FAIL because one or more of the 7 candidate-bound contracts are not yet satisfied.
+  Observed: all seven production controls already existed. The exact owning tests were absent, so the new candidate-bound tests passed against the existing implementation without introducing an artificial production failure.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/shell/TitleBar.tsx`, `web/src/components/shell/TitleBar.tsx#TitleBar` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+  Observed: production code required no change. The owning test now covers all seven planned controls, including empty-timeline video-export disablement and both Escape and outside-click menu dismissal.
+
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.interaction.test.tsx -t "control-f52cc89817361a19 return from editor to Home"`
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.interaction.test.tsx -t "control-4bda8f075e1f3a14 open the global Library"`
@@ -1116,11 +1144,13 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS, 70 files / 715 web tests. See `docs/audit/2026-07-14/runtime-artifacts/automated/titlebar-controls-real-device-2026-07-30.md` for the real application loop.
 
 ### Task 14: control-acceptance (implementation-slice-2e210a4b1ab6c5e9)
 
@@ -1154,33 +1184,37 @@
   - Visible/accessibility/return path: success=export SRT or VTT subtitles: close menu -> save dialog -> done/empty/failure toast; accessibility={"focus":"Native keyboard-focusable control","label":"menuitem","shortcut":"None declared on this control"}; returnPath=["Navigation changes the full-screen view; popup actions should close and return focus to the title-bar trigger."].
   - Outcome matrix: {"success":"export SRT or VTT subtitles: close menu -> save dialog -> done/empty/failure toast","pending":"Pending behavior is the concrete busy/phase/disabled state in web/src/components/shell/TitleBar.tsx:289; no additional state is inferred beyond the source.","empty":"Required empty/no-selection behavior is the render/handler guard in web/src/components/shell/TitleBar.tsx:289; the candidate-specific interaction test must assert that exact guard.","disabled":"No explicit disabled prop on this candidate.","cancel":"Cancellation/dismissal follows the exact guard in close menu -> save dialog -> done/empty/failure toast; no broader cancellation behavior is assumed.","retry":"Retry is another activation after the source-defined pending guard clears; no separate retry command exists unless named in close menu -> save dialog -> done/empty/failure toast.","failure":"Failure behavior is limited to the catch/void-call behavior visible in web/src/components/shell/TitleBar.tsx:289; the missing DOM test must prove whether it is surfaced or silent."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/shell/TitleBar.interaction.test.tsx#control-f54f4037ab7bffbe export SRT or VTT subtitles` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify the baseline**
 
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.interaction.test.tsx -t "control-f54f4037ab7bffbe export SRT or VTT subtitles"`
 
-  Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
+  Observed: the production UI/API/Tauri slice already existed, so the newly registered owning test passed immediately. No artificial production failure was introduced; the missing deliverable was exact owning evidence.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/shell/TitleBar.tsx`, `web/src/components/shell/TitleBar.tsx#onExportSubtitles`, `web/src/lib/api.ts#getDefaultProjectDir`, `src-tauri/src/commands.rs`, `web/src/lib/api.ts#exportSubtitles`, `src-tauri/src/commands.rs#export_subtitles`, `crates/opentake-domain/src/subtitle_export.rs#export_srt`, `web/src/components/shell/TitleBar.tsx#TitleBar` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+  Observed: production code required no change. The owning DOM test now covers SRT/VTT success, zero-cue empty state, write failure, user cancellation, default-directory fallback, extension completion, and typed API arguments.
+
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.interaction.test.tsx -t "control-f54f4037ab7bffbe export SRT or VTT subtitles"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS. See `docs/audit/2026-07-14/runtime-artifacts/automated/subtitle-export-real-device-2026-07-30.md` for the native title-bar/save-panel run and generated-file validation.
 
 ### Task 15: control-acceptance (implementation-slice-a85196307f399399)
 
@@ -1214,33 +1248,43 @@
   - Visible/accessibility/return path: success=export XMEML/FCPXML/OTIO/EDL: close menu -> save dialog -> format command -> success/failure toast; accessibility={"focus":"Native keyboard-focusable control","label":"menuitem","shortcut":"None declared on this control"}; returnPath=["Navigation changes the full-screen view; popup actions should close and return focus to the title-bar trigger."].
   - Outcome matrix: {"success":"export XMEML/FCPXML/OTIO/EDL: close menu -> save dialog -> format command -> success/failure toast","pending":"Pending behavior is the concrete busy/phase/disabled state in web/src/components/shell/TitleBar.tsx:396; no additional state is inferred beyond the source.","empty":"Required empty/no-selection behavior is the render/handler guard in web/src/components/shell/TitleBar.tsx:396; the candidate-specific interaction test must assert that exact guard.","disabled":"No explicit disabled prop on this candidate.","cancel":"Cancellation/dismissal follows the exact guard in close menu -> save dialog -> format command -> success/failure toast; no broader cancellation behavior is assumed.","retry":"Retry is another activation after the source-defined pending guard clears; no separate retry command exists unless named in close menu -> save dialog -> format command -> success/failure toast.","failure":"Failure behavior is limited to the catch/void-call behavior visible in web/src/components/shell/TitleBar.tsx:396; the missing DOM test must prove whether it is surfaced or silent."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/shell/TitleBar.interaction.test.tsx#control-0d98e5e5a0c417ed export XMEML/FCPXML/OTIO/EDL` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+  Result: Added the exact planned control test for XMEML, FCPXML, OTIO, and EDL, plus failure, cancellation, default-directory, extension, menu-dismissal, and macOS 26 native-dialog compatibility coverage.
+
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.interaction.test.tsx -t "control-0d98e5e5a0c417ed export XMEML/FCPXML/OTIO/EDL"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+  Result: The production interchange routes already existed, so the initial owning test passed rather than manufacturing an artificial RED. Real-device verification then supplied the missing failure evidence: EDL selected caption overlays as `Offline`, and the native extension filter disabled Save on macOS 26.
+
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/shell/TitleBar.tsx`, `web/src/components/shell/TitleBar.tsx#INTERCHANGE_FORMATS`, `web/src/lib/api.ts#getDefaultProjectDir`, `src-tauri/src/commands.rs`, `web/src/lib/api.ts`, `src-tauri/src/commands.rs#selected`, `crates/opentake-project/src/fcpxml.rs#export_xmeml`, `web/src/components/shell/TitleBar.tsx#TitleBar` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+  Result: Preserved the project-derived save path while avoiding the incompatible macOS native filter, and corrected EDL to skip text/Lottie overlays in favor of actual video/image clips. See `docs/audit/2026-07-14/runtime-artifacts/automated/interchange-export-real-device-2026-07-30.md`.
+
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.interaction.test.tsx -t "control-0d98e5e5a0c417ed export XMEML/FCPXML/OTIO/EDL"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+  Result: PASS. The repository web suite passed 70 files / 721 tests, including all six exact interchange-control cases; the EDL module passed 14/14 focused tests.
+
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS. The full Rust workspace, warnings-denied workspace clippy, web build, formatting, and diff checks completed successfully. The rebuilt macOS application exported and parsed all four formats, and the corrected three-event EDL was deterministic.
 
 ### Task 16: control-acceptance (implementation-slice-4a4cd45e11211989)
 
@@ -1332,7 +1376,7 @@
   - Visible/accessibility/return path: success=toggle the Inspector panel: toggleInspectorPanel; accessibility={"focus":"Custom MenuItem focus behavior depends on its implementation","label":"Visible child text/title or caller-provided label; verify at runtime","shortcut":"None declared on this control"}; returnPath=["Preset selection closes the menu; panel toggles leave it open; focus return is not managed."].
   - Outcome matrix: {"success":"toggle the Inspector panel: toggleInspectorPanel","pending":"Not applicable — this activation only changes local/caller state and starts no Promise, API, Tauri command, or Rust work.","empty":"Not applicable — this control does not consume a collection, selection, or free-form payload that has an empty state.","disabled":"No explicit disabled prop on this candidate.","cancel":"Not applicable — this immediate handler has no cancellable operation or dismissible transient surface.","retry":"Not applicable as an error-recovery state — the synchronous local action can simply be activated again.","failure":"Not applicable — this immediate activation calls no API/Tauri/Rust boundary, so there is no backend rejection path."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/shell/ViewMenu.interaction.test.tsx#control-d826a0ad433703cb open/close the View menu` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
   - `web/src/components/shell/ViewMenu.interaction.test.tsx#control-a2d1b5cb37952878 select a layout preset` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
@@ -1342,7 +1386,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/shell/ViewMenu.interaction.test.tsx -t "control-d826a0ad433703cb open/close the View menu"`
   - Run: `pnpm -C web test -- --run src/components/shell/ViewMenu.interaction.test.tsx -t "control-a2d1b5cb37952878 select a layout preset"`
@@ -1352,11 +1396,11 @@
 
   Expected: FAIL because one or more of the 5 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/shell/ViewMenu.tsx`, `web/src/components/shell/ViewMenu.tsx#ViewMenu` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/shell/ViewMenu.interaction.test.tsx -t "control-d826a0ad433703cb open/close the View menu"`
   - Run: `pnpm -C web test -- --run src/components/shell/ViewMenu.interaction.test.tsx -t "control-a2d1b5cb37952878 select a layout preset"`
@@ -1366,8 +1410,10 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS. The reviewed owning runner was the missing RED artifact; the existing `ViewMenu` implementation already satisfied all five contracts, so no production-code change was required. The true focused Vitest invocation passed 5/5, the complete web suite passed 726/726, and the production web build passed with only the pre-existing bundle warnings. The rebuilt macOS app then verified preset selection, checked states, three panel toggles, Escape dismissal, and outside-click dismissal. Runtime evidence: `runtime-artifacts/automated/view-menu-real-device-2026-07-30.md`.

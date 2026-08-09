@@ -1,6 +1,13 @@
 # opentake-agent 实现就绪规格（Issue #9）
 
-> 范围：`crates/opentake-agent` —— rmcp MCP server（`127.0.0.1:19789`）+ 31 个工具 + 短 ID 系统 + 统一执行壳 + 面向 LLM 的精确路径错误 + 应用内 chat（reqwest→Anthropic，BYOK + prompt cache）+ **Agent Context Signal 注入** + **Workflow Plugin 系统**。
+> **Beta 2 安全裁决（2026-08-03）：**本文保留上游固定端口方案作为设计来源与测试合同，
+> 但其“默认启动、未认证 `127.0.0.1:19789`、外部客户端直连”不再是产品运行合同。
+> 当前产品仅由官方 Codex / ChatGPT 每轮创建随机 loopback 端口、256-bit Bearer、工程绑定的
+> 临时 MCP；外部 Claude/Cursor 连接等待后续带认证的显式配对流程。
+>
+> 范围：`crates/opentake-agent` —— rmcp MCP transport + 45 个兼容工具（按能力动态发布）+
+> 短 ID 系统 + 统一执行壳 + 面向 LLM 的精确路径错误 + 应用内 chat +
+> **Agent Context Signal 注入** + **Workflow Plugin 系统**。
 >
 > 设计来源（已逐行核读）：上游 `palmier-pro-upstream/Sources/PalmierPro/Agent/`（29 文件），以及 OpenTake `docs/AGENT-CONTEXT-SIGNAL.md`、`docs/WORKFLOW-PLUGIN-SYSTEM.md`、`docs/ARCHITECTURE.md §7/§9`、`docs/MODULE-PORT-MAP.md`「Agent」、`docs/_analysis/04-MCP与Agent工具.md`、`docs/ROADMAP.md` Phase 7/S/W。
 >
@@ -156,6 +163,8 @@ capabilities: { resources: { subscribe:false, listChanged:false },
 
 枚举顺序严格按 `ToolName`（`ToolDefinitions.swift:4-36`）：`get_timeline, get_media, add_clips, insert_clips, remove_clips, remove_tracks, move_clips, set_clip_properties, set_keyframes, split_clip, ripple_delete_ranges, undo, add_texts, add_captions, generate_video, generate_image, generate_audio, upscale_media, import_media, list_models, inspect_media, get_transcript, inspect_timeline, search_media, list_folders, create_folder, move_to_folder, rename_media, rename_folder, delete_media, delete_folder`。
 
+> OpenTake 生产发现面按能力动态组成：基础集合最多 39 个真实路径工具，其中七个媒体/转写工具要求主机注入 `MediaBridge`；托管凭据或 fal/Replicate/OpenAI/ElevenLabs 兼容 BYOK 可用时再发布四个生成工具。四个生成工具都要求调用方传 `costAuthorized:true`，MCP 与应用内 Chat 共用同一 GenerationBridge；无凭据时 `get_timeline.canGenerate=false` 且工具不进入目录/系统提示。
+
 #### A. 读 / 内省（只读，7 个）
 
 | # | 工具 | 关键参数（schema 字段；`*`=required） | required 字段 | 背后命令（opentake-core） | Context Signal 附加（§6） |
@@ -189,10 +198,10 @@ capabilities: { resources: { subscribe:false, listChanged:false },
 
 | # | 工具 | 关键参数 | required | 背后命令 |
 |---|---|---|---|---|
-| 20 | `generate_video` | `prompt*`,`name?`,`model?`,`duration?`,`aspectRatio?`,`resolution?`,`startFrameMediaRef?`,`endFrameMediaRef?`,`sourceVideoMediaRef?`,`sourceClipId?`,`referenceImageMediaRefs?[]`,`referenceVideoMediaRefs?[]`,`referenceAudioMediaRefs?[]`,`folderId?` | `prompt` | `opentake-gen`：异步提交，立即返回 placeholder asset ID；**花钱、不可撤销** |
-| 21 | `generate_image` | `prompt*`,`name?`,`model?`,`aspectRatio?`,`resolution?`,`quality?`,`referenceMediaRefs?[]`,`folderId?` | `prompt` | `opentake-gen`：异步提交 placeholder |
-| 22 | `generate_audio` | `prompt?`,`name?`,`model?`,`voice?`,`lyrics?`,`styleInstructions?`,`instrumental?`,`duration?`,`videoSourceStartFrame?`,`videoSourceEndFrame?`,`videoSourceMediaRef?`,`folderId?` | （无） | `opentake-gen`：TTS / 文生乐 / 视频配乐；时间线区间结果自动落轨 |
-| 23 | `upscale_media` | `mediaRef*`,`model?`,`sourceClipId?` | `mediaRef` | `opentake-gen`：升分辨率 placeholder |
+| 20 | `generate_video` | `costAuthorized*:bool`,`prompt*`,`name?`,`model?`,`duration?`,`aspectRatio?`,`resolution?`,`startFrameMediaRef?`,`endFrameMediaRef?`,`sourceVideoMediaRef?`,`sourceClipId?`,`referenceImageMediaRefs?[]`,`referenceVideoMediaRefs?[]`,`referenceAudioMediaRefs?[]`,`folderId?` | `costAuthorized,prompt` | `opentake-gen`：耐久占位后异步提交；进度/取消/重试/恢复；**花钱、不可撤销** |
+| 21 | `generate_image` | `costAuthorized*:bool`,`prompt*`,`name?`,`model?`,`aspectRatio?`,`resolution?`,`quality?`,`numImages?:1..4`,`referenceMediaRefs?[]`,`folderId?` | `costAuthorized,prompt` | `opentake-gen`：异步提交 N 个有序耐久占位并逐项终局化 |
+| 22 | `generate_audio` | `costAuthorized*:bool`,`prompt?`,`name?`,`model?`,`voice?`,`lyrics?`,`styleInstructions?`,`instrumental?`,`duration?`,`videoSourceStartFrame?`,`videoSourceEndFrame?`,`videoSourceMediaRef?`,`folderId?` | `costAuthorized` | `opentake-gen`：TTS / 文生乐 / 能力允许时的视频配乐；时间线区间先确定性渲染再上传 |
+| 23 | `upscale_media` | `costAuthorized*:bool`,`mediaRef*`,`model?`,`sourceClipId?` | `costAuthorized,mediaRef` | `opentake-gen`：异步 2x，占位终局化为新资产且源资产不变 |
 | 24 | `import_media` | `source*`{三选一 `url?`(HTTPS≤1GB)/`path?`(本地，可目录递归)/`bytes?`(base64≤~15MB)，`mimeType?`},`name?`,`folderId?` | `source` | `opentake-core`/`opentake-project`：url 在阻塞工作线程中逐块下载、path/bytes 同步；扩展名/MIME/探测类型白名单；验证完成后原子发布 manifest |
 
 URL 导入禁用自动重定向并逐跳重新校验 HTTPS、host 与 userinfo；`Content-Length` 只做提前拒绝，逐块累计的解码后字节数才是 1 GiB 硬上限。下载先写 retained project capability 下的未提交 leaf，探测、容器/流类型、project epoch/目录、folder 与 leaf identity 全部通过后，才把候选 manifest 原子写入并发事件。任何此前错误或显式 MCP `notifications/cancelled` 都由 guard 擦除/删除 staging，并保持 live manifest 与磁盘 `media.json` 原字节不变。取消是 rmcp 的显式 request-id 通知语义；不承诺仅因原始 TCP 断连而取消。生产 HTTPS 请求与每个响应 chunk 都通过 `tokio::select!` 同时监听取消令牌，不等待长网络超时才清理。
@@ -1072,7 +1081,7 @@ src/
 
 **OpenTake 增强（ARCHITECTURE §7 `:154`，可后置）**
 16. [ ] 系统提示词分层化 + 模型策略从 `opentake-gen` 配置注入（§6.5.1）。
-17. [ ] 高阶工具 `remove_filler_words` / `tighten_silences`（把易错帧算术在 Rust 内一次完成）。
+17. [x] 高阶工具 `remove_filler_words` / `tighten_silences`（返回可审阅项目帧区间与原子 `ripple_delete_ranges` 命令；完整实机保存/重开/导出验收仍由审计计划跟踪）。
 18. [ ] 写工具统一返回结构化 JSON（§4.4 增强）。
 19. [ ] `get_capabilities`（一次性返回 ASR/视觉索引/生成/编解码就绪状态）。
 

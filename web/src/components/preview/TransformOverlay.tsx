@@ -17,7 +17,7 @@
  * Pointer drags use window pointermove/up listeners + a cleanup ref + an
  * unmount-safety effect (KeyframesLaneRow.tsx's drag pattern). Every move
  * updates only local state so the box tracks the cursor live; the actual clip
- * commits via ONE `setClipProperties` call on release. `setClipProperties`
+ * commits via ONE `setTransformAtFrame` call on release. `setTransformAtFrame`
  * round-trips through Tauri IPC and clones the whole Timeline for the undo
  * stack (see project CLAUDE.md), so calling it per pointermove would spam the
  * undo stack and add IPC latency to every frame of the drag — the same
@@ -27,8 +27,10 @@
 import { useEffect, useRef, useState } from "react";
 import { useEditorUiStore } from "../../store/uiStore";
 import * as edit from "../../store/editActions";
+import { useT } from "../../i18n";
 import {
   moveTransformByDeltaWithSnap,
+  moveTransformByDelta,
   resizeTransformFromCorner,
   rotateDeltaIntoLocalFrame,
   sampledTransform,
@@ -37,6 +39,7 @@ import {
 } from "../../lib/clip";
 import { SNAP, SPACE } from "../../lib/theme";
 import { CENTER_GUIDE_COLOR } from "./previewLayerStyles";
+import { playbackFrameFromActiveFrame } from "./timelinePlayback";
 import type { Clip, Transform } from "../../lib/types";
 
 /** AppTheme.Spacing.smMd (TransformOverlayView.swift:6). */
@@ -55,12 +58,30 @@ const CORNER_POSITION: Record<TransformResizeCorner, { left: string; top: string
   bottomRight: { left: "100%", top: "100%" },
 };
 
-const CORNER_CURSOR: Record<TransformResizeCorner, string> = {
+export const CORNER_CURSOR: Record<TransformResizeCorner, string> = {
   topLeft: "nwse-resize",
   bottomRight: "nwse-resize",
   topRight: "nesw-resize",
   bottomLeft: "nesw-resize",
 };
+
+const CORNER_LABEL_KEY: Record<TransformResizeCorner, string> = {
+  topLeft: "preview.transform.resizeTopLeft",
+  topRight: "preview.transform.resizeTopRight",
+  bottomLeft: "preview.transform.resizeBottomLeft",
+  bottomRight: "preview.transform.resizeBottomRight",
+};
+
+type TransformKeyboardTarget = "move" | TransformResizeCorner;
+
+interface TransformKeyboardGesture {
+  target: TransformKeyboardTarget;
+  start: Transform;
+  delta: { width: number; height: number };
+  next: Transform;
+  frame: number;
+  context: edit.ProjectEditContext;
+}
 
 export function TransformOverlay({
   clip,
@@ -71,52 +92,191 @@ export function TransformOverlay({
   canvasPx: { width: number; height: number };
   mediaAspect: number | null;
 }) {
+  const t = useT();
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
+  const editFrame = playbackFrameFromActiveFrame(activeFrame);
+  const pushToast = useEditorUiStore((s) => s.pushToast);
   // Live-sampled rest position (matches upstream `clip.transformAt(frame:)`) —
   // follows keyframed position/scale/rotation tracks the same way the actual
   // composited frame does, so the box always aligns with the rendered clip.
-  const restTransform = sampledTransform(clip, activeFrame);
+  const restTransform = sampledTransform(clip, editFrame);
   const [dragTransform, setDragTransform] = useState<Transform | null>(null);
+  const [keyboardTransform, setKeyboardTransform] = useState<Transform | null>(null);
   // Per-axis canvas-center snap flags for the current move-drag (Item 3). Only a
   // move sets these; a resize/idle leaves them false, so the guides never show
   // outside a move that lands on center. Drives the pink guide lines below.
   const [dragSnap, setDragSnap] = useState<CenterSnap>({ x: false, y: false });
   const dragCleanupRef = useRef<(() => void) | null>(null);
+  const dragTransformRef = useRef<Transform | null>(null);
+  const keyboardGestureRef = useRef<TransformKeyboardGesture | null>(null);
 
   // Selection moved to a different clip mid-drag (e.g. clicked elsewhere) —
   // don't let a stale local preview from the PREVIOUS clip leak onto this one.
   useEffect(() => {
+    dragCleanupRef.current?.();
+    dragCleanupRef.current = null;
+    dragTransformRef.current = null;
+    keyboardGestureRef.current = null;
     setDragTransform(null);
+    setKeyboardTransform(null);
     setDragSnap({ x: false, y: false });
-  }, [clip.id]);
+  }, [clip.id, editFrame]);
 
   // Unmount safety: remove any active drag's window listeners.
   useEffect(() => {
     return () => {
       dragCleanupRef.current?.();
       dragCleanupRef.current = null;
+      dragTransformRef.current = null;
+      keyboardGestureRef.current = null;
     };
   }, []);
 
-  const display = dragTransform ?? restTransform;
+  const display = dragTransform ?? keyboardTransform ?? restTransform;
+  const transformAnimated = [clip.positionTrack, clip.scaleTrack, clip.rotationTrack]
+    .some((track) => !!track && track.keyframes.length > 0);
+  const editable =
+    !transformAnimated ||
+    (editFrame >= clip.startFrame && editFrame < clip.startFrame + clip.durationFrames);
+
+  const commitTransform = (
+    next: Transform,
+    frame: number,
+    context: edit.ProjectEditContext,
+  ) => {
+    void edit.setTransformAtFrame(clip.id, frame, next, context).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      pushToast(t("preview.transformEditFailed", { error: message }));
+    });
+  };
+
+  const finishKeyboardGesture = () => {
+    const gesture = keyboardGestureRef.current;
+    keyboardGestureRef.current = null;
+    setKeyboardTransform(null);
+    if (gesture) commitTransform(gesture.next, gesture.frame, gesture.context);
+  };
+
+  const updateKeyboardGesture = (
+    target: TransformKeyboardTarget,
+    delta: { width: number; height: number },
+    compute: (start: Transform, total: { width: number; height: number }) => Transform,
+  ) => {
+    let gesture = keyboardGestureRef.current;
+    if (!gesture) {
+      gesture = {
+        target,
+        start: restTransform,
+        delta: { width: 0, height: 0 },
+        next: restTransform,
+        frame: editFrame,
+        context: edit.captureProjectEditContext(),
+      };
+    } else if (gesture.target !== target) {
+      gesture = {
+        ...gesture,
+        target,
+        start: gesture.next,
+        delta: { width: 0, height: 0 },
+      };
+    }
+    gesture.delta = {
+      width: gesture.delta.width + delta.width,
+      height: gesture.delta.height + delta.height,
+    };
+    gesture.next = compute(gesture.start, gesture.delta);
+    keyboardGestureRef.current = gesture;
+    setKeyboardTransform(gesture.next);
+  };
+
+  const handleKeyboardKeyUp = (e: React.KeyboardEvent) => {
+    if (!keyboardDelta(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    finishKeyboardGesture();
+  };
+
+  const keyboardDelta = (e: React.KeyboardEvent): { width: number; height: number } | null => {
+    const step = e.shiftKey ? 10 : 1;
+    if (e.key === "ArrowLeft") return { width: -step, height: 0 };
+    if (e.key === "ArrowRight") return { width: step, height: 0 };
+    if (e.key === "ArrowUp") return { width: 0, height: -step };
+    if (e.key === "ArrowDown") return { width: 0, height: step };
+    return null;
+  };
+
+  const handleMoveKeyDown = (e: React.KeyboardEvent) => {
+    if (!editable) return;
+    const delta = keyboardDelta(e);
+    if (!delta) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (dragCleanupRef.current) return;
+    updateKeyboardGesture("move", delta, (start, total) =>
+      moveTransformByDelta(start, total, canvasPx, start.rotation !== 0, 0),
+    );
+  };
+
+  const handleResizeKeyDown = (e: React.KeyboardEvent, corner: TransformResizeCorner) => {
+    if (!editable) return;
+    const delta = keyboardDelta(e);
+    if (!delta) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (dragCleanupRef.current) return;
+    updateKeyboardGesture(corner, delta, (start, total) =>
+      resizeTransformFromCorner(
+        start,
+        corner,
+        rotateDeltaIntoLocalFrame(total, start.rotation),
+        canvasPx,
+        mediaAspect,
+        start.rotation !== 0,
+        0,
+      ),
+    );
+  };
 
   // Shared drag scaffolding: registers window pointermove/up, feeds each move's
   // pixel delta through `computeNext` for live local preview, and commits once
-  // via setClipProperties on release. `computeNext` carries the move-vs-resize
+  // via setTransformAtFrame on release. `computeNext` carries the move-vs-resize
   // math difference; the listener lifecycle is identical for both.
   const beginDrag = (
     e: React.PointerEvent,
     // Returns the next transform plus optional per-axis center-snap flags (only
     // the move drag reports snap; a resize returns undefined and the guides stay
     // hidden). Computed once per move so both states share one calculation.
-    computeNext: (dxPx: number, dyPx: number) => { transform: Transform; snap?: CenterSnap },
+    computeNext: (
+      start: Transform,
+      dxPx: number,
+      dyPx: number,
+    ) => { transform: Transform; snap?: CenterSnap },
   ) => {
+    if (!editable) return;
     e.stopPropagation();
     e.preventDefault();
+    dragCleanupRef.current?.();
+    dragCleanupRef.current = null;
+    const pendingKeyboard = keyboardGestureRef.current;
+    keyboardGestureRef.current = null;
+    setKeyboardTransform(null);
+    const start = pendingKeyboard?.next ?? restTransform;
+    const editContext = pendingKeyboard?.context ?? edit.captureProjectEditContext();
+    const gestureFrame = pendingKeyboard?.frame ?? editFrame;
+    dragTransformRef.current = pendingKeyboard ? start : null;
+    setDragTransform(pendingKeyboard ? start : null);
+    // Clear/coalesce the keyboard draft before focus can blur another handle;
+    // that blur then observes no independent keyboard transaction to commit.
+    (e.currentTarget as HTMLElement).focus();
     const startClientX = e.clientX;
     const startClientY = e.clientY;
     const onMove = (ev: PointerEvent) => {
-      const { transform, snap } = computeNext(ev.clientX - startClientX, ev.clientY - startClientY);
+      const { transform, snap } = computeNext(
+        start,
+        ev.clientX - startClientX,
+        ev.clientY - startClientY,
+      );
+      dragTransformRef.current = transform;
       setDragTransform(transform);
       if (snap) setDragSnap(snap);
     };
@@ -125,10 +285,12 @@ export function TransformOverlay({
       window.removeEventListener("pointerup", onUp);
       dragCleanupRef.current = null;
       setDragSnap({ x: false, y: false });
-      setDragTransform((cur) => {
-        if (cur) void edit.setClipProperties([clip.id], { transform: cur });
-        return null;
-      });
+      const committed = dragTransformRef.current;
+      dragTransformRef.current = null;
+      setDragTransform(null);
+      if (committed) {
+        commitTransform(committed, gestureFrame, editContext);
+      }
     };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
@@ -139,20 +301,22 @@ export function TransformOverlay({
   };
 
   const handleMoveDown = (e: React.PointerEvent) => {
-    const start = restTransform;
-    const rotated = start.rotation !== 0;
     // `moveTransformByDeltaWithSnap` returns the landed transform + the per-axis
     // center-snap flags (upstream `movedTransform`'s `(x, y)` return) — the box
     // preview uses the transform, the guides use the flags.
-    beginDrag(e, (dx, dy) =>
-      moveTransformByDeltaWithSnap(start, { width: dx, height: dy }, canvasPx, rotated, SNAP.thresholdPixels),
+    beginDrag(e, (start, dx, dy) =>
+      moveTransformByDeltaWithSnap(
+        start,
+        { width: dx, height: dy },
+        canvasPx,
+        start.rotation !== 0,
+        SNAP.thresholdPixels,
+      ),
     );
   };
 
   const handleResizeDown = (e: React.PointerEvent, corner: TransformResizeCorner) => {
-    const start = restTransform;
-    const rotated = start.rotation !== 0;
-    beginDrag(e, (dx, dy) => {
+    beginDrag(e, (start, dx, dy) => {
       // Corner handles rotate with the box on screen, so a raw screen-space
       // delta must be rotated into the box's own local frame first — see
       // rotateDeltaIntoLocalFrame's doc comment for why move doesn't need this.
@@ -166,7 +330,7 @@ export function TransformOverlay({
           local,
           canvasPx,
           mediaAspect,
-          rotated,
+          start.rotation !== 0,
           SNAP.thresholdPixels,
         ),
       };
@@ -208,33 +372,69 @@ export function TransformOverlay({
       >
         {/* Move-drag surface + visual outline in one element (upstream's box
             border, TransformOverlayView.swift:30-31). */}
-        <div
+        <button
+          type="button"
+          data-transform-move-surface
+          aria-label={t("preview.transform.move")}
+          aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight"
+          aria-disabled={!editable}
+          disabled={!editable}
           onPointerDown={handleMoveDown}
+          onKeyDown={handleMoveKeyDown}
+          onKeyUp={handleKeyboardKeyUp}
+          onBlur={finishKeyboardGesture}
           style={{
             position: "absolute",
             inset: 0,
+            minWidth: 24,
+            minHeight: 24,
+            padding: 0,
+            background: "transparent",
             border: `${BORDER_WIDTH}px solid ${BORDER_COLOR}`,
-            cursor: "move",
-            pointerEvents: "auto",
+            cursor: !editable ? "not-allowed" : dragTransform ? "grabbing" : "move",
+            pointerEvents: editable ? "auto" : "none",
           }}
-        />
+          />
         {CORNERS.map((corner) => (
-          <div
+          <button
+            type="button"
             key={corner}
+            aria-label={t(CORNER_LABEL_KEY[corner])}
+            aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight"
+            aria-disabled={!editable}
+            disabled={!editable}
             onPointerDown={(e) => handleResizeDown(e, corner)}
+            onKeyDown={(e) => handleResizeKeyDown(e, corner)}
+            onKeyUp={handleKeyboardKeyUp}
+            onBlur={finishKeyboardGesture}
             style={{
               position: "absolute",
               left: CORNER_POSITION[corner].left,
               top: CORNER_POSITION[corner].top,
-              width: HANDLE_SIZE,
-              height: HANDLE_SIZE,
-              marginLeft: -HANDLE_SIZE / 2,
-              marginTop: -HANDLE_SIZE / 2,
-              background: BORDER_COLOR,
-              cursor: CORNER_CURSOR[corner],
-              pointerEvents: "auto",
+              width: 24,
+              height: 24,
+              marginLeft: -12,
+              marginTop: -12,
+              padding: 0,
+              border: 0,
+              background: "transparent",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: editable ? CORNER_CURSOR[corner] : "not-allowed",
+              pointerEvents: editable ? "auto" : "none",
             }}
-          />
+          >
+            <span
+              aria-hidden
+              style={{
+                width: HANDLE_SIZE,
+                height: HANDLE_SIZE,
+                background: BORDER_COLOR,
+                pointerEvents: "none",
+              }}
+            />
+          </button>
         ))}
       </div>
 

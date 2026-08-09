@@ -26,6 +26,7 @@ import { useState, useRef, useCallback, useEffect } from "react";
 import { useEditorUiStore } from "../../store/uiStore";
 import * as edit from "../../store/editActions";
 import { snapFrame } from "../../lib/keyframeSnap";
+import { LAYOUT } from "../../lib/theme";
 import type {
   AnimPair,
   Clip,
@@ -36,9 +37,9 @@ import type {
 } from "../../lib/types";
 import type { TFunction } from "../../i18n";
 
-const DIAMOND_SIZE = 8;
+const DIAMOND_SIZE = LAYOUT.keyframeDiamondSize;
 const SNAP_FRAMES = 5;
-const LANE_HEIGHT = 24;
+const LANE_HEIGHT = LAYOUT.keyframeRowHeight;
 
 /** Union of all concrete keyframe-track value types (mirror of Clip's *Track
  *  fields). Used so `getTrack` can return a single typed union. */
@@ -65,7 +66,10 @@ const ALL_PROPERTIES: KeyframeProperty[] = [
  *  (KeyframesLane.swift:210-214). Playhead is added separately by the caller
  *  since it isn't a track-derived target. */
 function crossPropertyAndBoundTargets(clip: Clip, property: KeyframeProperty): number[] {
-  const targets: number[] = [clip.startFrame, clip.startFrame + clip.durationFrames];
+  const targets: number[] = [
+    clip.startFrame,
+    clip.startFrame + Math.max(0, clip.durationFrames - 1),
+  ];
   for (const p of ALL_PROPERTIES) {
     if (p === property) continue;
     const otherTrack = getTrack(clip, p);
@@ -92,29 +96,36 @@ export function KeyframesLaneRow({
   onSnapChange?: (absFrame: number | null) => void;
 }) {
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
+  const editFrame = Math.round(activeFrame);
   const setActiveFrame = useEditorUiStore((s) => s.setActiveFrame);
+  const pushToast = useEditorUiStore((s) => s.pushToast);
   const track = getTrack(clip, property);
   const trackRef = useRef<HTMLDivElement>(null);
+  const menuTriggerRef = useRef<HTMLElement | null>(null);
   const [dragging, setDragging] = useState<{ fromFrame: number; currentFrame: number } | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; frame: number } | null>(null);
   /** Holds the cleanup function for the active drag's window listeners.
    *  Cleared on unmount via the useEffect below to prevent leaks. */
   const dragCleanupRef = useRef<(() => void) | null>(null);
+  const draggingRef = useRef<{ fromFrame: number; currentFrame: number } | null>(null);
 
   // Unmount safety: remove any active drag listeners and clear any snap line
   // the panel may be showing on our behalf (otherwise a mid-drag unmount —
   // e.g. deselecting the clip — would leave a stale yellow line onscreen).
   useEffect(() => {
+    setDragging(null);
     return () => {
       dragCleanupRef.current?.();
       dragCleanupRef.current = null;
+      draggingRef.current = null;
       onSnapChange?.(null);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [clip.id, property]);
 
   const startFrame = clip.startFrame;
   const duration = Math.max(1, clip.durationFrames);
+  const playheadInRange = editFrame >= startFrame && editFrame < startFrame + duration;
 
   // Frame → ratio (0..1) for diamond positioning.
   const frameToRatio = useCallback((frame: number) => frame / duration, [duration]);
@@ -131,7 +142,11 @@ export function KeyframesLaneRow({
   );
 
   const handleStamp = () => {
-    void edit.stampKeyframe(clip.id, property, activeFrame);
+    if (!playheadInRange) return;
+    void edit.stampKeyframe(clip.id, property, editFrame).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      pushToast(t("inspector.keyframes.stampFailed", { error: message }));
+    });
   };
 
   // Clear the whole track — kind depends on the property's value type.
@@ -152,6 +167,33 @@ export function KeyframesLaneRow({
     setActiveFrame(startFrame + rel);
   };
 
+  const handleTrackKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const endFrame = startFrame + duration;
+    const currentFrame = Math.max(startFrame, Math.min(endFrame, editFrame));
+    let nextFrame: number | null = null;
+    if (e.key === "ArrowLeft" || e.key === "ArrowDown") nextFrame = currentFrame - 1;
+    if (e.key === "ArrowRight" || e.key === "ArrowUp") nextFrame = currentFrame + 1;
+    if (e.key === "Home") nextFrame = startFrame;
+    if (e.key === "End") nextFrame = endFrame;
+    if (nextFrame === null) return;
+    e.preventDefault();
+    setActiveFrame(Math.max(startFrame, Math.min(endFrame, nextFrame)));
+  };
+
+  const commitKeyframeMove = useCallback(
+    (fromFrame: number, toFrame: number, context?: edit.ProjectEditContext) => {
+      if (fromFrame === toFrame) return;
+      const request = context
+        ? edit.moveKeyframe(clip.id, property, fromFrame, toFrame, context)
+        : edit.moveKeyframe(clip.id, property, fromFrame, toFrame);
+      void request.catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        pushToast(t("inspector.keyframes.moveFailed", { error: message }));
+      });
+    },
+    [clip.id, property, pushToast, t],
+  );
+
   // Start a keyframe drag. Uses window listeners so the drag continues even
   // when the cursor leaves the track (matches the app's existing drag pattern).
   // The cleanup ref ensures listeners are removed if the component unmounts
@@ -159,7 +201,12 @@ export function KeyframesLaneRow({
   const handleDiamondMouseDown = (e: React.MouseEvent<HTMLDivElement>, absFrame: number) => {
     e.stopPropagation();
     e.preventDefault();
-    setDragging({ fromFrame: absFrame, currentFrame: absFrame });
+    dragCleanupRef.current?.();
+    dragCleanupRef.current = null;
+    const initialDrag = { fromFrame: absFrame, currentFrame: absFrame };
+    draggingRef.current = initialDrag;
+    setDragging(initialDrag);
+    const editContext = edit.captureProjectEditContext();
     // Clamp to [startFrame, startFrame + duration - 1] (half-open clip range).
     const lastFrame = startFrame + duration - 1;
     // Cross-property + clip-bound targets are stable for the whole drag (they
@@ -175,24 +222,28 @@ export function KeyframesLaneRow({
       // keyframes} within SNAP_FRAMES (upstream KeyframesLane.swift:177-216).
       const { frame: snapped, snappedTo } = snapFrame(
         newFrame,
-        [...boundTargets, activeFrame],
+        [...boundTargets, editFrame],
         SNAP_FRAMES,
       );
-      newFrame = snapped;
-      onSnapChange?.(snappedTo);
-      setDragging((d) => (d ? { ...d, currentFrame: newFrame } : d));
+      newFrame = Math.max(startFrame, Math.min(lastFrame, snapped));
+      onSnapChange?.(snappedTo === newFrame ? snappedTo : null);
+      const current = draggingRef.current;
+      if (!current) return;
+      const next = { ...current, currentFrame: newFrame };
+      draggingRef.current = next;
+      setDragging(next);
     };
     const onUp = () => {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
       dragCleanupRef.current = null;
       onSnapChange?.(null);
-      setDragging((d) => {
-        if (d && d.fromFrame !== d.currentFrame) {
-          void edit.moveKeyframe(clip.id, property, d.fromFrame, d.currentFrame);
-        }
-        return null;
-      });
+      const committed = draggingRef.current;
+      draggingRef.current = null;
+      setDragging(null);
+      if (committed && committed.fromFrame !== committed.currentFrame) {
+        commitKeyframeMove(committed.fromFrame, committed.currentFrame, editContext);
+      }
     };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
@@ -205,18 +256,47 @@ export function KeyframesLaneRow({
   const handleDiamondContextMenu = (e: React.MouseEvent<HTMLDivElement>, absFrame: number) => {
     e.preventDefault();
     e.stopPropagation();
+    menuTriggerRef.current = e.currentTarget;
     setMenu({ x: e.clientX, y: e.clientY, frame: absFrame });
   };
 
-  const closeMenu = () => setMenu(null);
+  const handleDiamondKeyDown = (e: React.KeyboardEvent<HTMLDivElement>, absFrame: number) => {
+    const lastFrame = startFrame + duration - 1;
+    if (["ArrowLeft", "ArrowDown", "ArrowRight", "ArrowUp"].includes(e.key)) {
+      e.preventDefault();
+      e.stopPropagation();
+      const delta = e.key === "ArrowLeft" || e.key === "ArrowDown" ? -1 : 1;
+      commitKeyframeMove(absFrame, Math.max(startFrame, Math.min(lastFrame, absFrame + delta)));
+      return;
+    }
+    if (e.key === "Enter" || e.key === " " || e.key === "ContextMenu") {
+      e.preventDefault();
+      e.stopPropagation();
+      const rect = e.currentTarget.getBoundingClientRect();
+      menuTriggerRef.current = e.currentTarget;
+      setMenu({ x: rect.left + rect.width / 2, y: rect.bottom, frame: absFrame });
+    }
+  };
+
+  const closeMenu = () => {
+    const trigger = menuTriggerRef.current;
+    setMenu(null);
+    trigger?.focus();
+  };
 
   const handleDelete = (frame: number) => {
-    void edit.removeKeyframe(clip.id, property, frame);
+    void edit.removeKeyframe(clip.id, property, frame).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      pushToast(t("inspector.keyframes.deleteFailed", { error: message }));
+    });
     closeMenu();
   };
 
   const handleSetInterpolation = (frame: number, interp: Interpolation) => {
-    void edit.setKeyframeInterpolation(clip.id, property, frame, interp);
+    void edit.setKeyframeInterpolation(clip.id, property, frame, interp).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      pushToast(t("inspector.keyframes.interpolationFailed", { error: message }));
+    });
     closeMenu();
   };
 
@@ -241,7 +321,7 @@ export function KeyframesLaneRow({
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
-          height: 20,
+          minHeight: 24,
           marginBottom: 2,
         }}
       >
@@ -257,16 +337,30 @@ export function KeyframesLaneRow({
         </span>
         <div style={{ display: "flex", gap: "var(--space-sm)" }}>
           <button
+            data-keyframe-stamp
             onClick={handleStamp}
-            style={{ fontSize: "var(--fs-xxs)", color: "var(--text-tertiary)", padding: "0 4px" }}
-            title={t("inspector.keyframes.stamp")}
+            disabled={!playheadInRange}
+            style={{
+              minWidth: 24,
+              minHeight: 24,
+              fontSize: "var(--fs-xxs)",
+              color: "var(--text-tertiary)",
+              padding: "0 4px",
+            }}
+            title={t(playheadInRange ? "inspector.keyframes.stamp" : "inspector.keyframe.outsideClip")}
           >
             +
           </button>
           {keyframes.length > 0 && (
             <button
               onClick={handleClear}
-              style={{ fontSize: "var(--fs-xxs)", color: "var(--text-tertiary)", padding: "0 4px" }}
+              style={{
+                minWidth: 24,
+                minHeight: 24,
+                fontSize: "var(--fs-xxs)",
+                color: "var(--text-tertiary)",
+                padding: "0 4px",
+              }}
               title={t("inspector.keyframes.clear")}
             >
               ×
@@ -278,11 +372,20 @@ export function KeyframesLaneRow({
       {/* Keyframe track strip */}
       <div
         ref={trackRef}
+        data-keyframe-lane={property}
+        role="slider"
+        tabIndex={0}
+        aria-label={propertyLabel}
+        aria-orientation="horizontal"
+        aria-valuemin={startFrame}
+        aria-valuemax={startFrame + duration}
+        aria-valuenow={Math.max(startFrame, Math.min(startFrame + duration, editFrame))}
         onClick={handleTrackClick}
+        onKeyDown={handleTrackKeyDown}
         onContextMenu={(e) => e.preventDefault()}
         style={{
           position: "relative",
-          height: LANE_HEIGHT,
+          height: Math.max(24, LANE_HEIGHT),
           background: "var(--bg-raised)",
           borderRadius: 3,
           cursor: "pointer",
@@ -292,21 +395,47 @@ export function KeyframesLaneRow({
         {displayKeyframes.map((kf) => (
           <div
             key={kf.key}
+            data-keyframe-diamond={kf.key}
+            role="button"
+            tabIndex={0}
+            aria-label={t("inspector.keyframes.diamondLabel", {
+              property: propertyLabel,
+              frame: kf.key,
+            })}
             onMouseDown={(e) => handleDiamondMouseDown(e, kf.key)}
             onContextMenu={(e) => handleDiamondContextMenu(e, kf.key)}
+            onKeyDown={(e) => handleDiamondKeyDown(e, kf.key)}
             style={{
               position: "absolute",
               left: `${frameToRatio(kf.frame) * 100}%`,
               top: "50%",
-              width: DIAMOND_SIZE,
-              height: DIAMOND_SIZE,
-              background: kf.isDragging ? "var(--accent-primary)" : "var(--track-lottie)",
-              border: "0.5px solid rgba(0,0,0,0.4)",
-              transform: "translate(-50%, -50%) rotate(45deg)",
+              width: 24,
+              height: 24,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              background: "transparent",
+              border: 0,
+              transform: "translate(-50%, -50%)",
               cursor: "grab",
               pointerEvents: "auto",
             }}
-          />
+          >
+            <span
+              data-keyframe-diamond-glyph
+              aria-hidden="true"
+              style={{
+                width: DIAMOND_SIZE,
+                height: DIAMOND_SIZE,
+                background: kf.isDragging
+                  ? "var(--accent-primary)"
+                  : "var(--track-lottie)",
+                border: "0.5px solid rgba(0,0,0,0.4)",
+                transform: "rotate(45deg)",
+                pointerEvents: "none",
+              }}
+            />
+          </div>
         ))}
 
         {keyframes.length === 0 && !dragging && (
@@ -359,9 +488,14 @@ function KeyframeContextMenu({
   onSetInterpolation: (interp: Interpolation) => void;
   onClose: () => void;
 }) {
+  const menuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => menuRef.current?.focus(), []);
+
   return (
     <>
       <div
+        data-keyframe-menu-backdrop
+        aria-hidden="true"
         style={{ position: "fixed", inset: 0, zIndex: 1000 }}
         onClick={onClose}
         onContextMenu={(e) => {
@@ -370,6 +504,17 @@ function KeyframeContextMenu({
         }}
       />
       <div
+        ref={menuRef}
+        data-keyframe-context-menu
+        role="menu"
+        tabIndex={-1}
+        aria-label={t("inspector.keyframes.contextMenu")}
+        onKeyDown={(e) => {
+          if (e.key !== "Escape") return;
+          e.preventDefault();
+          e.stopPropagation();
+          onClose();
+        }}
         style={{
           position: "fixed",
           left: x,
@@ -383,7 +528,7 @@ function KeyframeContextMenu({
           boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
         }}
       >
-        <MenuItem onClick={onDelete} label={t("inspector.keyframes.delete")} />
+        <MenuItem action="delete" onClick={onDelete} label={t("inspector.keyframes.delete")} />
         <div style={{ height: 1, background: "var(--border-primary)", margin: "2px 0" }} />
         <div
           style={{
@@ -396,14 +541,17 @@ function KeyframeContextMenu({
           {t("inspector.keyframes.interpolation")}
         </div>
         <MenuItem
+          action="linear"
           onClick={() => onSetInterpolation("linear")}
           label={t("inspector.keyframes.interpolation.linear")}
         />
         <MenuItem
+          action="hold"
           onClick={() => onSetInterpolation("hold")}
           label={t("inspector.keyframes.interpolation.hold")}
         />
         <MenuItem
+          action="smooth"
           onClick={() => onSetInterpolation("smooth")}
           label={t("inspector.keyframes.interpolation.smooth")}
         />
@@ -412,21 +560,37 @@ function KeyframeContextMenu({
   );
 }
 
-function MenuItem({ onClick, label }: { onClick: () => void; label: string }) {
+function MenuItem({
+  action,
+  onClick,
+  label,
+}: {
+  action: string;
+  onClick: () => void;
+  label: string;
+}) {
   return (
-    <div
+    <button
+      type="button"
+      role="menuitem"
+      data-keyframe-menu-action={action}
       onClick={onClick}
       style={{
+        display: "flex",
+        alignItems: "center",
+        width: "100%",
+        minHeight: 24,
         padding: "4px 12px",
         fontSize: "var(--fs-xs)",
         color: "var(--text-primary)",
         cursor: "pointer",
+        textAlign: "left",
       }}
       onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-prominent)")}
       onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
     >
       {label}
-    </div>
+    </button>
   );
 }
 

@@ -1587,7 +1587,15 @@ impl LibraryStore {
                 stored.handle.as_file().set_len(0)?;
                 stored.handle.as_file().sync_all()
             };
-            let _ = cleanup();
+            if let Err(error) = cleanup() {
+                // The manifest is already committed, so the removal stands; only
+                // the best-effort truncation of the content-addressed copy
+                // failed, leaving an orphaned file that a later sweep can
+                // reclaim. Report it instead of swallowing it silently.
+                tracing::warn!(
+                    "library remove {id}: stored copy cleanup failed after manifest commit: {error}"
+                );
+            }
         }
         Ok(true)
     }
@@ -2527,6 +2535,75 @@ mod tests {
         let refavorited = store.favorite(&req(&source, "video", None)).unwrap();
         assert_eq!(refavorited.id, entry.id);
         assert!(store.contains(&entry.id).unwrap());
+    }
+
+    #[test]
+    fn remove_reports_failed_stored_copy_cleanup() {
+        use tracing::field::Visit;
+        use tracing::span::{Attributes, Id, Record};
+        use tracing::{Event, Level, Metadata, Subscriber};
+
+        struct Warnings(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+        impl Visit for Warnings {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.0.lock().unwrap().push(format!("{value:?}"));
+                }
+            }
+        }
+        impl Subscriber for Warnings {
+            fn enabled(&self, _metadata: &Metadata<'_>) -> bool {
+                true
+            }
+            fn new_span(&self, _attrs: &Attributes<'_>) -> Id {
+                Id::from_u64(1)
+            }
+            fn record(&self, _span: &Id, _values: &Record<'_>) {}
+            fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
+            fn event(&self, event: &Event<'_>) {
+                if *event.metadata().level() <= Level::WARN {
+                    event.record(&mut Warnings(self.0.clone()));
+                }
+            }
+            fn enter(&self, _span: &Id) {}
+            fn exit(&self, _span: &Id) {}
+        }
+
+        let warnings = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = warnings.clone();
+        let (entry, messages) = tracing::subscriber::with_default(Warnings(warnings), || {
+            let tmp = tempfile::tempdir().unwrap();
+            let source = src_file(tmp.path(), "cleanup-report.mp4", b"reported cleanup");
+            let store = LibraryStore::new(tmp.path().join("lib"));
+            let entry = store.favorite(&req(&source, "video", None)).unwrap();
+
+            // The `tracing::warn!` callsite inside `remove` caches its interest
+            // globally on first execution. Under parallel test load another
+            // test can reach it while no subscriber is installed, caching
+            // "never interested". This first failing removal guarantees the
+            // callsite is registered; rebuilding the interest cache then
+            // re-evaluates it with this subscriber active, so the second
+            // failing removal's warning is guaranteed to be delivered.
+            fail_next_removed_stored_cleanup_for_test();
+            assert!(store.remove(&entry.id).unwrap());
+            assert!(store.entries().unwrap().is_empty());
+            let refavorited = store.favorite(&req(&source, "video", None)).unwrap();
+            assert_eq!(refavorited.id, entry.id);
+            tracing::callsite::rebuild_interest_cache();
+            fail_next_removed_stored_cleanup_for_test();
+            assert!(store.remove(&refavorited.id).unwrap());
+            // The manifest commit still stands even though the best-effort
+            // truncation of the stored copy failed.
+            assert!(store.entries().unwrap().is_empty());
+            let messages = captured.lock().unwrap().clone();
+            (entry, messages)
+        });
+        assert!(
+            messages.iter().any(|message| {
+                message.contains("stored copy cleanup failed") && message.contains(&entry.id)
+            }),
+            "expected a warning reporting the stored copy cleanup failure, got {messages:?}"
+        );
     }
 
     #[test]

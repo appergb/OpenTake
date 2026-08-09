@@ -15,6 +15,9 @@
 //!   produces the same video-only file as before.
 //! - Export renders at the **full** export resolution
 //!   ([`opentake_render::export_render_size`]), not the preview cap.
+//! - Image and Lottie sources materialize directly as content-hashed GPU
+//!   textures; Lottie uses the same Velato/Vello frame contract as preview and
+//!   playback, and any unsupported document fails the export explicitly.
 //! - **Progress + cancel** (mirrors upstream `Export/ExportService.swift`'s
 //!   200ms `AVAssetExportSession.progress` poll + cooperative cancel): the frame
 //!   loop emits a throttled `"export://progress"` Tauri event and checks a
@@ -29,7 +32,7 @@
 //! preview path in `render.rs` is not touched). A later refactor can hoist the
 //! shared projection into a `pub(crate)` helper once both paths are stable.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Seek, SeekFrom, Write};
@@ -45,25 +48,36 @@ use same_file::Handle as FileIdentity;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 
+use crate::render::LottieMaterializer;
+
 use opentake_core::AppCore;
-use opentake_domain::{Clip, ClipType, MediaSource, TextStyle};
-use opentake_media::encode::{mix, ClipAudio, MIX_SAMPLE_RATE};
+use opentake_domain::{AudioDenoise, Clip, ClipType, LutReference, MediaSource, TextStyle};
+#[cfg(test)]
+use opentake_media::encode::ClipAudio;
+use opentake_media::encode::{mix, MIX_SAMPLE_RATE};
 use opentake_media::{
-    decode_frame_at, extract_pcm, extract_pcm_cancellable_with_progress, ExportPreset,
-    ExportResolution as EncodeResolution, FrameRequest, MediaCancelToken, PcmBuffer, PcmFormat,
+    decode_frame_at, extract_pcm, extract_pcm_cancellable_with_progress, interpolate_frame_pair,
+    probe, ExportPreset, ExportResolution as EncodeResolution, FrameInterpolationFallback,
+    FrameInterpolationMode, FrameRequest, MediaCancelToken, PcmBuffer, PcmFormat,
     PcmProgressCallback, PcmSpec, RgbaFrame, VideoCodec, VideoEncoder,
+};
+use opentake_project::ProjectRoot;
+use opentake_render::gpu::compositor::{
+    TextureInterpolationConfig, TextureInterpolationFallback, TextureInterpolationMode,
+    TextureResolveRequest,
 };
 use opentake_render::gpu::texture::upload_rgba;
 use opentake_render::{
-    build_render_plan, export_render_size, Compositor, CosmicTextRasterizer, DecodedFrame,
-    ExportResolution as RenderResolution, GpuTexture, RenderDevice, SourceMetrics,
-    TextRasterRequest, TextRasterizer, TextureCache, TextureResolver, TextureSource,
+    export_render_size, try_build_render_plan, AudioClipPlan, Compositor, CosmicTextRasterizer,
+    DecodedFrame, ExportResolution as RenderResolution, GpuLutTexture, GpuTexture, RenderDevice,
+    SourceMetrics, TextRasterRequest, TextRasterizer, TextureCache, TextureResolver, TextureSource,
 };
 
 /// Per-frame texture cache size. Export advances monotonically, so video-frame
 /// hit rate is low; a small cache still helps text/image layers re-used across
 /// frames. Bounds VRAM during the export loop.
 const TEXTURE_CACHE_CAP: usize = 64;
+const AUDIO_STREAM_WINDOW_SAMPLES: usize = MIX_SAMPLE_RATE as usize * 2;
 
 /// Requested output codec, projected from the front-end.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
@@ -294,6 +308,7 @@ impl ExportGuard<'_> {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn cancel_token(&self) -> &MediaCancelToken {
         &self.cancel
     }
@@ -429,6 +444,7 @@ fn resolve_preset(
 /// Resolvable info for one media asset, projected from the manifest.
 struct MediaInfo {
     path: PathBuf,
+    source_fps: Option<f64>,
 }
 
 /// A text clip projected from the timeline, keyed by clip id.
@@ -442,28 +458,37 @@ struct TextInfo {
 /// auto-rotates on decode in this cut).
 struct ManifestMetrics {
     sizes: HashMap<String, (u32, u32)>,
+    straight_alpha: HashSet<String>,
 }
 
 impl SourceMetrics for ManifestMetrics {
     fn natural_size(&self, media_ref: &str) -> Option<(u32, u32)> {
         self.sizes.get(media_ref).copied()
     }
+
+    fn needs_premultiply(&self, media_ref: &str) -> bool {
+        self.straight_alpha.contains(media_ref)
+    }
 }
 
 /// `TextureResolver` that decodes a layer's pixels on demand via ffmpeg and
-/// uploads them to the GPU. Video keys per source-frame; images key once; text
-/// rasterizes its box; Lottie returns `None` (skipped) in this cut. Mirrors the
-/// preview resolver, but the decode box is the full export render size.
+/// uploads them to the GPU. Video keys per source-frame; image and Lottie keys
+/// include source content hashes; text rasterizes its box. Mirrors the preview
+/// resolver, but the decode box is the full export render size.
 struct MediaResolver<'d> {
     device: &'d opentake_render::wgpu::Device,
     queue: &'d opentake_render::wgpu::Queue,
-    cache: TextureCache,
+    cache: &'d mut TextureCache,
+    lottie: &'d mut LottieMaterializer,
     media: &'d HashMap<String, MediaInfo>,
     timeline_fps: i32,
     text: &'d HashMap<String, TextInfo>,
     text_rasterizer: &'d CosmicTextRasterizer,
     /// Decode/raster box for source frames (matches the export render size).
     render_box: (u32, u32),
+    project_root: Option<&'d ProjectRoot>,
+    lut_cache: &'d mut HashMap<String, Rc<GpuLutTexture>>,
+    materialization_error: Option<String>,
 }
 
 impl MediaResolver<'_> {
@@ -484,24 +509,116 @@ impl MediaResolver<'_> {
         let tex = upload_rgba(self.device, self.queue, &frame, false, Some("export-text"));
         Some(self.cache.insert(key, tex))
     }
+
+    fn resolve_interpolated_video(
+        &mut self,
+        media_ref: &str,
+        source_frame: i64,
+        interpolation: TextureInterpolationConfig,
+    ) -> Option<Rc<GpuTexture>> {
+        let key = format!(
+            "vf:{media_ref}:{source_frame}:{:?}:{:.6}:{:.6}",
+            interpolation.mode, interpolation.source_fps, interpolation.target_fps
+        );
+        if let Some(tex) = self.cache.get(&key) {
+            return Some(tex);
+        }
+        let info = self.media.get(media_ref)?;
+        let source_fps = info.source_fps.unwrap_or(interpolation.source_fps);
+        if !source_fps.is_finite() || source_fps <= 0.0 {
+            return None;
+        }
+        let timestamp = source_frame.max(0) as f64 / interpolation.target_fps;
+        let source_position = timestamp * source_fps;
+        let first_index = source_position.floor().max(0.0) as i64;
+        let next_index = source_position.ceil().max(0.0) as i64;
+        let alpha = source_position - first_index as f64;
+        let decode = |index: i64| {
+            decode_frame_at(
+                &info.path,
+                &FrameRequest {
+                    time_secs: index as f64 / source_fps,
+                    max_size: self.render_box,
+                    tolerance_secs: 0.0,
+                    apply_rotation: true,
+                },
+            )
+            .ok()
+            .map(|(_, frame)| frame)
+        };
+        let first = decode(first_index)?;
+        let last = if next_index == first_index {
+            first.clone()
+        } else {
+            // A half-open media duration may not expose the mathematical next
+            // frame at the tail. Hold the last decodable endpoint instead of
+            // dropping the whole layer to black.
+            decode(next_index).unwrap_or_else(|| first.clone())
+        };
+        let requested = match interpolation.mode {
+            TextureInterpolationMode::Nearest => FrameInterpolationMode::Nearest,
+            TextureInterpolationMode::Blend => FrameInterpolationMode::Blend,
+            TextureInterpolationMode::OpticalFlow => FrameInterpolationMode::OpticalFlow,
+        };
+        let fallback = match interpolation.fallback {
+            TextureInterpolationFallback::Nearest => FrameInterpolationFallback::Nearest,
+            TextureInterpolationFallback::Blend => FrameInterpolationFallback::Blend,
+            TextureInterpolationFallback::Error => FrameInterpolationFallback::Error,
+        };
+        let frame = interpolate_frame_pair(&first, &last, alpha, requested, fallback, true)
+            .ok()?
+            .frame;
+        let decoded = DecodedFrame::new(frame.width, frame.height, frame.rgba, false);
+        let tex = upload_rgba(
+            self.device,
+            self.queue,
+            &decoded,
+            false,
+            Some("export-optical-flow"),
+        );
+        Some(self.cache.insert(key, tex))
+    }
 }
 
 impl TextureResolver for MediaResolver<'_> {
     fn resolve(&mut self, source: &TextureSource, source_frame: i64) -> Option<Rc<GpuTexture>> {
-        let (media_ref, key, is_image) = match source {
-            TextureSource::Decoded { media_ref } => {
-                (media_ref, format!("v:{media_ref}:{source_frame}"), false)
-            }
-            TextureSource::Image { media_ref } => (media_ref, format!("i:{media_ref}"), true),
+        let (media_ref, is_image) = match source {
+            TextureSource::Decoded { media_ref } => (media_ref, false),
+            TextureSource::Image { media_ref } => (media_ref, true),
             TextureSource::Text { clip_id } => return self.resolve_text(clip_id),
-            TextureSource::Lottie { .. } => return None,
+            TextureSource::Lottie { media_ref } => {
+                let info = self.media.get(media_ref)?;
+                return match self.lottie.resolve(
+                    self.device,
+                    self.queue,
+                    self.cache,
+                    &info.path,
+                    source_frame,
+                    self.render_box,
+                    "export-lottie",
+                ) {
+                    Ok(texture) => Some(texture),
+                    Err(error) => {
+                        eprintln!("[export] {error}");
+                        self.materialization_error = Some(error);
+                        None
+                    }
+                };
+            }
+        };
+
+        let info = self.media.get(media_ref)?;
+        let key = if is_image {
+            let content_hash = opentake_media::file_sha256(&info.path).ok()?;
+            format!("i:{content_hash}")
+        } else {
+            format!("v:{media_ref}:{source_frame}")
         };
 
         if let Some(tex) = self.cache.get(&key) {
             return Some(tex);
         }
 
-        let info = self.media.get(media_ref)?;
         let time_secs = if is_image {
             0.0
         } else {
@@ -522,29 +639,74 @@ impl TextureResolver for MediaResolver<'_> {
         let tex = upload_rgba(self.device, self.queue, &decoded, false, Some("export-src"));
         Some(self.cache.insert(key, tex))
     }
+
+    fn resolve_with_interpolation(
+        &mut self,
+        request: TextureResolveRequest<'_>,
+    ) -> Option<Rc<GpuTexture>> {
+        match request.source {
+            TextureSource::Decoded { media_ref }
+                if request.interpolation.mode != TextureInterpolationMode::Nearest =>
+            {
+                self.resolve_interpolated_video(
+                    media_ref,
+                    request.source_frame,
+                    request.interpolation,
+                )
+            }
+            _ => self.resolve(request.source, request.source_frame),
+        }
+    }
+
+    fn resolve_lut(
+        &mut self,
+        reference: &LutReference,
+    ) -> Result<Option<Rc<GpuLutTexture>>, opentake_render::RenderError> {
+        if let Some(cached) = self.lut_cache.get(&reference.id) {
+            return Ok(Some(cached.clone()));
+        }
+        let resolved = crate::lut::resolve_project_lut(
+            self.project_root,
+            reference,
+            self.device,
+            self.queue,
+            "export-lut",
+        )?;
+        if let Some(texture) = &resolved {
+            self.lut_cache.insert(reference.id.clone(), texture.clone());
+        }
+        Ok(resolved)
+    }
 }
 
 /// Project the timeline's text clips (content + style + box) into the per-clip
 /// lookup the resolver rasterizes from. Keyed by clip id.
 fn project_text(timeline: &opentake_domain::Timeline) -> HashMap<String, TextInfo> {
     let mut text: HashMap<String, TextInfo> = HashMap::new();
-    for track in &timeline.tracks {
-        for clip in &track.clips {
-            if clip.media_type != ClipType::Text {
-                continue;
+    for candidate in std::iter::once(timeline).chain(
+        timeline
+            .nested_sequences
+            .iter()
+            .map(|sequence| &sequence.timeline),
+    ) {
+        for track in &candidate.tracks {
+            for clip in &track.clips {
+                if clip.media_type != ClipType::Text {
+                    continue;
+                }
+                let (Some(content), Some(style)) = (&clip.text_content, &clip.text_style) else {
+                    continue;
+                };
+                let tl = clip.transform.top_left();
+                text.insert(
+                    clip.id.clone(),
+                    TextInfo {
+                        content: content.clone(),
+                        style: style.clone(),
+                        box_norm: (tl.x, tl.y, clip.transform.width, clip.transform.height),
+                    },
+                );
             }
-            let (Some(content), Some(style)) = (&clip.text_content, &clip.text_style) else {
-                continue;
-            };
-            let tl = clip.transform.top_left();
-            text.insert(
-                clip.id.clone(),
-                TextInfo {
-                    content: content.clone(),
-                    style: style.clone(),
-                    box_norm: (tl.x, tl.y, clip.transform.width, clip.transform.height),
-                },
-            );
         }
     }
     text
@@ -571,7 +733,13 @@ fn project_media(
                 sizes.insert(entry.id.clone(), (w as u32, h as u32));
             }
         }
-        media.insert(entry.id.clone(), MediaInfo { path });
+        media.insert(
+            entry.id.clone(),
+            MediaInfo {
+                path,
+                source_fps: entry.source_fps,
+            },
+        );
     }
     (sizes, media)
 }
@@ -588,9 +756,9 @@ const AUDIO_DECODE_SPEC: PcmSpec = PcmSpec {
 pub(crate) type AudioExportProgress = Arc<dyn Fn(i32, i32) + Send + Sync>;
 
 pub(crate) const AUDIO_PROGRESS_TOTAL: i32 = 1_000;
-const AUDIO_DECODE_END: i32 = 800;
 const AUDIO_MIX_START: i32 = 850;
 const AUDIO_MIX_END: i32 = 980;
+#[cfg(test)]
 const AUDIO_WAV_START: i32 = AUDIO_MIX_END;
 const AUDIO_WAV_END: i32 = 990;
 const AUDIO_CANCEL_CHUNK_SAMPLES: usize = 8 * 1024;
@@ -672,13 +840,67 @@ fn retime_pcm_to_len_with_control(
 /// Returns `Ok(None)` when the clip contributes no audio (no media path, no
 /// audio track, zero-length window, or a fully-decoded-to-empty buffer). Decode
 /// failures other than "no audio track" propagate as `Err`.
-fn project_clip_audio(
-    clip: &Clip,
+trait AudioPlanLike {
+    fn clip(&self) -> &Clip;
+    fn volume_at(&self, frame: i32) -> f64;
+    fn true_peak_ceiling_dbtp(&self) -> Option<f64>;
+    fn audio_denoise(&self) -> Option<AudioDenoise>;
+}
+
+impl AudioPlanLike for Clip {
+    fn clip(&self) -> &Clip {
+        self
+    }
+
+    fn volume_at(&self, frame: i32) -> f64 {
+        Clip::volume_at(self, frame)
+    }
+
+    fn true_peak_ceiling_dbtp(&self) -> Option<f64> {
+        self.loudness_normalization
+            .map(|normalization| normalization.true_peak_ceiling_dbtp)
+    }
+
+    fn audio_denoise(&self) -> Option<AudioDenoise> {
+        self.audio_denoise
+    }
+}
+
+impl AudioPlanLike for AudioClipPlan {
+    fn clip(&self) -> &Clip {
+        &self.clip
+    }
+
+    fn volume_at(&self, frame: i32) -> f64 {
+        AudioClipPlan::volume_at(self, frame)
+    }
+
+    fn true_peak_ceiling_dbtp(&self) -> Option<f64> {
+        std::iter::once(&self.gain_clip)
+            .chain(self.compound_ancestors.iter())
+            .filter_map(|clip| {
+                clip.loudness_normalization
+                    .map(|normalization| normalization.true_peak_ceiling_dbtp)
+            })
+            .min_by(f64::total_cmp)
+    }
+
+    fn audio_denoise(&self) -> Option<AudioDenoise> {
+        std::iter::once(&self.gain_clip)
+            .chain(self.compound_ancestors.iter())
+            .find_map(|clip| clip.audio_denoise)
+    }
+}
+
+#[cfg(test)]
+fn project_clip_audio<T: AudioPlanLike>(
+    plan: &T,
     media: &HashMap<String, MediaInfo>,
     timeline_fps: i32,
     control: Option<&ExportControl>,
     decode_progress: Option<PcmProgressCallback>,
 ) -> Result<Option<ClipAudio>, String> {
+    let clip = plan.clip();
     if clip.duration_frames <= 0 || timeline_fps <= 0 {
         return Ok(None);
     }
@@ -718,6 +940,7 @@ fn project_clip_audio(
     let target_len = ((clip.duration_frames as f64) / timeline_fps as f64 * MIX_SAMPLE_RATE as f64)
         .round() as usize;
     let samples = retime_pcm_to_len_with_control(&pcm.samples_f32, target_len, control)?;
+    let samples = apply_export_denoise(&samples, 1, plan.audio_denoise(), control)?;
     if samples.is_empty() {
         return Ok(None);
     }
@@ -739,7 +962,7 @@ fn project_clip_audio(
             }
         }
         let tl_frame = clip.start_frame + (k as f64 / samples_per_frame).floor() as i32;
-        let g = clip.volume_at(tl_frame) as f32;
+        let g = plan.volume_at(tl_frame) as f32;
         if (g - 1.0).abs() > f32::EPSILON {
             all_unity = false;
         }
@@ -753,66 +976,30 @@ fn project_clip_audio(
     }))
 }
 
-fn mix_clips_with_control(
-    clips: &[ClipAudio],
-    control: &ExportControl,
-    progress: Option<&dyn Fn(usize, usize)>,
+fn apply_export_denoise(
+    samples: &[f32],
+    channels: usize,
+    config: Option<AudioDenoise>,
+    control: Option<&ExportControl>,
 ) -> Result<Vec<f32>, String> {
-    for (index, clip) in clips.iter().enumerate() {
-        if !clip.gains.is_empty() && clip.gains.len() != clip.samples.len() {
-            return Err(format!(
-                "audio mix failed: clip {index}: gains len {} != samples len {}",
-                clip.gains.len(),
-                clip.samples.len()
-            ));
-        }
-    }
-    let total = clips
-        .iter()
-        .map(|clip| clip.start_sample + clip.samples.len())
-        .max()
-        .unwrap_or(0);
-    let work_total = clips
-        .iter()
-        .map(|clip| clip.samples.len())
-        .sum::<usize>()
-        .saturating_add(total)
-        .max(1);
-    let mut completed = 0_usize;
-    let mut mixed = vec![0.0_f32; total];
-
-    for clip in clips {
-        for (offset, &sample) in clip.samples.iter().enumerate() {
-            if completed.is_multiple_of(AUDIO_CANCEL_CHUNK_SAMPLES) {
-                check_audio_cancel(control)?;
-                if let Some(report) = progress {
-                    report(completed, work_total);
-                }
-            }
-            let gain = if clip.gains.is_empty() {
-                1.0
-            } else {
-                clip.gains[offset]
-            };
-            mixed[clip.start_sample + offset] += sample * gain;
-            completed += 1;
-        }
-    }
-    for sample in &mut mixed {
-        if completed.is_multiple_of(AUDIO_CANCEL_CHUNK_SAMPLES) {
-            check_audio_cancel(control)?;
-            if let Some(report) = progress {
-                report(completed, work_total);
-            }
-        }
-        *sample = sample.clamp(-1.0, 1.0);
-        completed += 1;
-    }
-    check_audio_cancel(control)?;
-    if let Some(report) = progress {
-        report(work_total, work_total);
-    }
-    Ok(mixed)
+    let Some(config) = config else {
+        return Ok(samples.to_vec());
+    };
+    let cancel = control
+        .map(ExportControl::media_cancel_token)
+        .unwrap_or_default();
+    opentake_media::analysis::denoise_interleaved(
+        samples,
+        channels,
+        MIX_SAMPLE_RATE,
+        config,
+        &cancel,
+        None,
+    )
+    .map_err(|error| match error {
+        opentake_media::analysis::DenoiseError::Cancelled => CANCELLED_SENTINEL.to_string(),
+        other => format!("audio denoise failed: {other}"),
+    })
 }
 
 /// Decode + mix every audio-bearing clip on the timeline into one mono buffer.
@@ -821,94 +1008,279 @@ fn mix_clips_with_control(
 /// each through [`project_clip_audio`], and linearly mixes the lot. Returns
 /// `None` when nothing contributes audio (→ the caller keeps the video-only
 /// output). Errors surface decode/mix failures to the front-end.
+#[cfg(test)]
 fn mix_timeline_audio(
     timeline: &opentake_domain::Timeline,
     media: &HashMap<String, MediaInfo>,
     control: Option<&ExportControl>,
     on_progress: Option<AudioExportProgress>,
 ) -> Result<Option<PcmBuffer>, String> {
-    let eligible_count = timeline
+    let clips = timeline
         .tracks
         .iter()
         .filter(|track| !track.muted)
         .flat_map(|track| &track.clips)
         .filter(|clip| matches!(clip.media_type, ClipType::Audio | ClipType::Video))
-        .count();
-    let mut clips_audio: Vec<ClipAudio> = Vec::new();
-    let mut eligible_index = 0_usize;
-    for track in &timeline.tracks {
-        if track.muted {
-            continue;
-        }
-        for clip in &track.clips {
-            // Only audio and video clips carry sound; text/image/lottie don't.
-            if clip.media_type != ClipType::Audio && clip.media_type != ClipType::Video {
-                continue;
-            }
-            let decode_progress = match (control, &on_progress) {
-                (Some(_), Some(emit)) => {
-                    let emit = Arc::clone(emit);
-                    let index = eligible_index;
-                    Some(Arc::new(move |done: usize, total: usize| {
-                        let total = total.max(1);
-                        let numerator = index
-                            .saturating_mul(AUDIO_DECODE_END as usize)
-                            .saturating_mul(total)
-                            .saturating_add(
-                                done.min(total).saturating_mul(AUDIO_DECODE_END as usize),
-                            );
-                        let denominator = eligible_count.saturating_mul(total).max(1);
-                        emit((numerator / denominator) as i32, AUDIO_PROGRESS_TOTAL);
-                    }) as PcmProgressCallback)
-                }
-                _ => None,
-            };
-            eligible_index += 1;
-            if let Some(ca) =
-                project_clip_audio(clip, media, timeline.fps, control, decode_progress)?
-            {
-                clips_audio.push(ca);
-            }
-        }
-    }
-    if clips_audio.is_empty() {
-        return Ok(None);
-    }
-    let mixed = match control {
-        Some(control) => {
-            if let Some(emit) = &on_progress {
-                emit(AUDIO_MIX_START, AUDIO_PROGRESS_TOTAL);
-            }
-            let mix_progress = |done: usize, total: usize| {
-                if let Some(emit) = &on_progress {
-                    let span = (AUDIO_MIX_END - AUDIO_MIX_START) as usize;
-                    let mapped = AUDIO_MIX_START
-                        + (done.min(total.max(1)).saturating_mul(span) / total.max(1)) as i32;
-                    emit(mapped, AUDIO_PROGRESS_TOTAL);
-                }
-            };
-            mix_clips_with_control(&clips_audio, control, Some(&mix_progress))?
-        }
-        None => mix::mix_clips(&clips_audio).map_err(|e| format!("audio mix failed: {e}"))?,
-    };
-    if mixed.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(PcmBuffer {
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut samples_f32 = Vec::new();
+    let has_audio = stream_flattened_audio(
+        &clips,
+        media,
+        AudioStreamOptions {
+            timeline_fps: timeline.fps,
+            start_frame: 0,
+            end_frame: timeline.total_frames(),
+            control,
+            on_progress,
+        },
+        |samples| {
+            samples_f32
+                .try_reserve(samples.len())
+                .map_err(|error| format!("audio output allocation failed: {error}"))?;
+            samples_f32.extend_from_slice(samples);
+            Ok(())
+        },
+    )?;
+    Ok(has_audio.then_some(PcmBuffer {
         spec: AUDIO_DECODE_SPEC,
-        samples_f32: mixed,
+        samples_f32,
     }))
 }
 
-pub(crate) fn mix_timeline_audio_for_manifest_with_control(
+struct AudioStreamOptions<'a> {
+    timeline_fps: i32,
+    start_frame: i32,
+    end_frame: i32,
+    control: Option<&'a ExportControl>,
+    on_progress: Option<AudioExportProgress>,
+}
+
+fn stream_flattened_audio<T: AudioPlanLike>(
+    clips: &[T],
+    media: &HashMap<String, MediaInfo>,
+    options: AudioStreamOptions<'_>,
+    mut emit: impl FnMut(&[f32]) -> Result<(), String>,
+) -> Result<bool, String> {
+    let AudioStreamOptions {
+        timeline_fps,
+        start_frame,
+        end_frame,
+        control,
+        on_progress,
+    } = options;
+    if timeline_fps <= 0 || start_frame >= end_frame {
+        return Ok(false);
+    }
+    let mut audible_media = HashSet::new();
+    for plan in clips {
+        let clip = plan.clip();
+        let clip_end = clip.start_frame.saturating_add(clip.duration_frames);
+        if clip.duration_frames <= 0 || clip_end <= start_frame || clip.start_frame >= end_frame {
+            continue;
+        }
+        let Some(info) = media.get(&clip.media_ref) else {
+            continue;
+        };
+        let metadata = opentake_media::probe(&info.path)
+            .map_err(|error| format!("audio probe failed for {}: {error}", clip.media_ref))?;
+        if metadata.has_audio {
+            audible_media.insert(clip.media_ref.clone());
+        }
+    }
+    if audible_media.is_empty() {
+        return Ok(false);
+    }
+
+    let sample_at_frame = |frame: i32| {
+        ((frame.max(0) as f64 / timeline_fps as f64) * MIX_SAMPLE_RATE as f64).round() as usize
+    };
+    let range_start = sample_at_frame(start_frame);
+    let range_end = sample_at_frame(end_frame);
+    let total_samples = range_end.saturating_sub(range_start);
+    let true_peak_ceiling_dbtp = clips
+        .iter()
+        .filter_map(AudioPlanLike::true_peak_ceiling_dbtp)
+        .min_by(f64::total_cmp);
+    let cancel = control
+        .map(ExportControl::media_cancel_token)
+        .unwrap_or_default();
+
+    for relative_start in (0..total_samples).step_by(AUDIO_STREAM_WINDOW_SAMPLES) {
+        if let Some(control) = control {
+            check_audio_cancel(control)?;
+        }
+        let window_len = AUDIO_STREAM_WINDOW_SAMPLES.min(total_samples - relative_start);
+        let window_start = range_start.saturating_add(relative_start);
+        let window_end = window_start.saturating_add(window_len);
+        let mut mixed = vec![0.0_f32; window_len];
+        for plan in clips {
+            let clip = plan.clip();
+            if !audible_media.contains(&clip.media_ref) || clip.duration_frames <= 0 {
+                continue;
+            }
+            let clip_start = sample_at_frame(clip.start_frame);
+            let clip_end = sample_at_frame(clip.start_frame.saturating_add(clip.duration_frames));
+            let overlap_start = window_start.max(clip_start);
+            let overlap_end = window_end.min(clip_end);
+            if overlap_start >= overlap_end || clip_end <= clip_start {
+                continue;
+            }
+            let Some(info) = media.get(&clip.media_ref) else {
+                continue;
+            };
+            let Some((source_lo, source_hi)) = clip_source_window_secs(clip, timeline_fps) else {
+                continue;
+            };
+            let source_span = source_hi - source_lo;
+            let relative_lo = (overlap_start - clip_start) as f64 / (clip_end - clip_start) as f64;
+            let relative_hi = (overlap_end - clip_start) as f64 / (clip_end - clip_start) as f64;
+            let source_range = (
+                source_lo + source_span * relative_lo,
+                source_lo + source_span * relative_hi,
+            );
+            let decoded = match control {
+                Some(control) => decode_pcm_with_export_control(
+                    control,
+                    &info.path,
+                    Some(source_range),
+                    None,
+                    extract_pcm_cancellable_with_progress,
+                ),
+                None => extract_pcm(&info.path, &AUDIO_DECODE_SPEC, Some(source_range)),
+            };
+            let pcm = match decoded {
+                Ok(pcm) => pcm,
+                Err(opentake_media::MediaError::NoTrack(_, _)) => continue,
+                Err(opentake_media::MediaError::Cancelled) => {
+                    return Err(CANCELLED_SENTINEL.to_string());
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "audio decode failed for {}: {error}",
+                        clip.media_ref
+                    ));
+                }
+            };
+            let target_len = overlap_end - overlap_start;
+            let retimed = retime_pcm_to_len_with_control(&pcm.samples_f32, target_len, control)?;
+            let processed = apply_export_denoise(&retimed, 1, plan.audio_denoise(), control)?;
+            let output_start = overlap_start - window_start;
+            for (offset, sample) in processed.into_iter().take(target_len).enumerate() {
+                if offset.is_multiple_of(AUDIO_CANCEL_CHUNK_SAMPLES) {
+                    if let Some(control) = control {
+                        check_audio_cancel(control)?;
+                    }
+                }
+                let absolute_sample = overlap_start.saturating_add(offset);
+                let timeline_frame = ((absolute_sample as f64 / MIX_SAMPLE_RATE as f64)
+                    * timeline_fps as f64)
+                    .floor() as i32;
+                mixed[output_start + offset] += sample * plan.volume_at(timeline_frame) as f32;
+            }
+        }
+        for sample in &mut mixed {
+            *sample = sample.clamp(-1.0, 1.0);
+        }
+        mix::apply_true_peak_ceiling(&mut mixed, true_peak_ceiling_dbtp);
+        emit(&mixed)?;
+        if let Some(report) = &on_progress {
+            let completed = relative_start.saturating_add(window_len);
+            let span = (AUDIO_MIX_END - AUDIO_MIX_START) as usize;
+            let mapped =
+                AUDIO_MIX_START + (completed.saturating_mul(span) / total_samples.max(1)) as i32;
+            report(mapped, AUDIO_PROGRESS_TOTAL);
+        }
+        if cancel.checkpoint() {
+            return Err(CANCELLED_SENTINEL.to_string());
+        }
+    }
+    Ok(true)
+}
+
+/// Mix a timeline in bounded windows and append each window directly to a WAV.
+///
+/// The output header is written lazily after the audio preflight succeeds, so
+/// callers can distinguish a silent timeline without materializing a full PCM
+/// buffer or leaving a header-only file behind.
+pub(crate) fn write_timeline_audio_wav_for_manifest_with_control(
     timeline: &opentake_domain::Timeline,
     manifest: &opentake_domain::MediaManifest,
     project_dir: &Option<PathBuf>,
+    file: &mut File,
     control: &ExportControl,
     on_progress: Option<AudioExportProgress>,
-) -> Result<Option<PcmBuffer>, String> {
+) -> Result<Option<usize>, String> {
     let (_sizes, media) = project_media(manifest, project_dir);
-    mix_timeline_audio(timeline, &media, Some(control), on_progress)
+    let clips = timeline
+        .tracks
+        .iter()
+        .filter(|track| !track.muted)
+        .flat_map(|track| &track.clips)
+        .filter(|clip| matches!(clip.media_type, ClipType::Audio | ClipType::Video))
+        .cloned()
+        .collect::<Vec<_>>();
+    let end_frame = timeline.total_frames();
+    let expected_samples = if timeline.fps > 0 {
+        ((end_frame.max(0) as f64 / timeline.fps as f64) * MIX_SAMPLE_RATE as f64).round() as usize
+    } else {
+        0
+    };
+    let mut written_samples = 0_usize;
+    let cancel = control.media_cancel_token();
+    let has_audio = stream_flattened_audio(
+        &clips,
+        &media,
+        AudioStreamOptions {
+            timeline_fps: timeline.fps,
+            start_frame: 0,
+            end_frame,
+            control: Some(control),
+            on_progress: on_progress.clone(),
+        },
+        |samples| {
+            if written_samples == 0 {
+                write_wav_header(file, expected_samples, MIX_SAMPLE_RATE)?;
+            }
+            if cancel.checkpoint() {
+                return Err(CANCELLED_SENTINEL.to_string());
+            }
+            let data = opentake_media::encode::mono_f32_to_s16le(samples);
+            file.write_all(&data)
+                .map_err(|error| format!("write wav samples: {error}"))?;
+            written_samples = written_samples.saturating_add(samples.len());
+            Ok(())
+        },
+    )?;
+    if !has_audio {
+        return Ok(None);
+    }
+    if written_samples != expected_samples {
+        return Err(format!(
+            "WAV sample count mismatch: wrote {written_samples}, expected {expected_samples}"
+        ));
+    }
+    file.flush()
+        .map_err(|error| format!("flush wav output: {error}"))?;
+    if let Some(report) = &on_progress {
+        report(AUDIO_WAV_END, AUDIO_PROGRESS_TOTAL);
+    }
+    // Post-write verification (same contract as the video path above): probe the
+    // finished WAV back through its retained handle and fail unless it reads as
+    // mono s16 PCM at the expected length. The reserved-output drop guard
+    // removes the partial file on error.
+    let probe = opentake_media::probe::probe_file(file)
+        .map_err(|error| format!("wav output validation failed: {error}"))?;
+    validate_export_probe(
+        &probe,
+        &ExportProbeExpectations {
+            video_codec: None,
+            audio_codec: Some(ProbeAudioCodec::PcmS16Le),
+            expected_duration_secs: written_samples as f64 / MIX_SAMPLE_RATE as f64,
+            duration_tolerance_secs: 0.05,
+        },
+    )?;
+    Ok(Some(written_samples))
 }
 
 /// `export_video`: render the whole timeline to a video file on disk.
@@ -995,6 +1367,7 @@ pub fn run_export(
 #[derive(Default)]
 pub(crate) struct ExportRunOptions<'a> {
     pub(crate) control: Option<&'a ExportControl>,
+    pub(crate) external_cancel: Option<MediaCancelToken>,
     pub(crate) on_progress: Option<AudioExportProgress>,
     pub(crate) frame_range: Option<(i32, i32)>,
     pub(crate) output_file: Option<File>,
@@ -1009,6 +1382,7 @@ pub(crate) fn run_export_with_control(
     mut options: ExportRunOptions<'_>,
 ) -> Result<ExportSummary, String> {
     let control = options.control;
+    let external_cancel = options.external_cancel.clone();
     let on_progress = options.on_progress;
     let defer_completion = options.defer_completion;
     let reserved_output = options.output_file.is_some();
@@ -1017,14 +1391,29 @@ pub(crate) fn run_export_with_control(
 
     let text = project_text(timeline);
     let (sizes, media) = project_media(manifest, project_dir);
+    let straight_alpha = manifest
+        .entries
+        .iter()
+        .filter(|entry| entry.carries_straight_alpha())
+        .map(|entry| entry.id.clone())
+        .collect();
 
     let render_size = export_render_size(
         (timeline.width, timeline.height),
         req.quality.render_resolution(),
     );
 
-    let metrics = ManifestMetrics { sizes };
-    let plan = build_render_plan(timeline, render_size, &metrics);
+    let metrics = ManifestMetrics {
+        sizes,
+        straight_alpha,
+    };
+    let plan = try_build_render_plan(timeline, render_size, &metrics)
+        .map_err(|error| format!("invalid timeline graph: {error}"))?;
+    let project_root = project_dir
+        .as_ref()
+        .map(ProjectRoot::open)
+        .transpose()
+        .map_err(|error| format!("open project LUT storage: {error}"))?;
 
     // Acquire the GPU device + compositor for this export. Unlike the preview
     // (which caches the context in Tauri state for repeated scrubs), an export is
@@ -1036,6 +1425,10 @@ pub(crate) fn run_export_with_control(
     if !text_rasterizer.has_fonts() {
         eprintln!("[render] no system fonts discovered; text clips will render blank");
     }
+    // Fail closed: a text-bearing export with no font faces would complete
+    // "successfully" with invisible text. Reject it before the encoder starts;
+    // the preview path (render.rs) deliberately stays lenient.
+    ensure_text_export_fonts(!plan.text_plans.is_empty(), &text_rasterizer)?;
 
     let mut encoder = match options.output_file.take() {
         Some(output) => VideoEncoder::new_with_file(
@@ -1067,8 +1460,15 @@ pub(crate) fn run_export_with_control(
     let range_total = end_frame - start_frame;
 
     let mut last_progress_emit = Instant::now();
+    let mut lut_cache = HashMap::new();
+    let mut texture_cache = TextureCache::new(TEXTURE_CACHE_CAP);
+    let mut lottie = LottieMaterializer::new();
     for f in start_frame..end_frame {
-        if control.is_some_and(|c| c.is_cancelled()) {
+        if control.is_some_and(|c| c.is_cancelled())
+            || external_cancel
+                .as_ref()
+                .is_some_and(MediaCancelToken::is_cancelled)
+        {
             // `abort` kills + waits on the ffmpeg child (unlike a plain `drop`,
             // which would orphan the process and race the file removal below).
             encoder.abort();
@@ -1085,22 +1485,43 @@ pub(crate) fn run_export_with_control(
         let mut resolver = MediaResolver {
             device: &dev.device,
             queue: &dev.queue,
-            cache: TextureCache::new(TEXTURE_CACHE_CAP),
+            cache: &mut texture_cache,
+            lottie: &mut lottie,
             media: &media,
             timeline_fps: plan.fps,
             text: &text,
             text_rasterizer: &text_rasterizer,
             render_box: (render_size.width, render_size.height),
+            project_root: project_root.as_ref(),
+            lut_cache: &mut lut_cache,
+            materialization_error: None,
         };
+        let interpolation = TextureInterpolationConfig::new(
+            plan.fps as f64,
+            plan.fps as f64,
+            TextureInterpolationMode::OpticalFlow,
+            TextureInterpolationFallback::Blend,
+        )
+        .map_err(str::to_string)?;
         let composite = compositor
-            .render_to_rgba(
+            .render_to_rgba_with_interpolation(
                 &dev.device,
                 &dev.queue,
                 render_size,
                 &frame_plan,
                 &mut resolver,
+                interpolation,
             )
             .map_err(|e| format!("composite render failed at frame {f}: {e}"))?;
+        if let Some(error) = resolver.materialization_error.take() {
+            encoder.abort();
+            if !reserved_output {
+                let _ = std::fs::remove_file(&out_path);
+            }
+            return Err(format!(
+                "Lottie materialization failed at frame {f}: {error}"
+            ));
+        }
         encoder
             .push_frame(&RgbaFrame::new(
                 composite.width,
@@ -1125,8 +1546,9 @@ pub(crate) fn run_export_with_control(
         }
     }
 
-    // Decode + linearly mix every audio-bearing clip, then hand the mixed PCM to
-    // the encoder so `finish` mux's it into the container. No audio → video-only.
+    // Decode + linearly mix every audio-bearing clip in bounded windows, then
+    // append each window to the encoder's private PCM spool. `finish` muxes that
+    // file into the container; no audio keeps the output video-only.
     let audio_progress = on_progress.as_ref().map(|emit| {
         let emit = Arc::clone(emit);
         Arc::new(move |done: i32, total: i32| {
@@ -1136,20 +1558,25 @@ pub(crate) fn run_export_with_control(
             emit(mapped, AUDIO_PROGRESS_TOTAL);
         }) as AudioExportProgress
     });
-    let mixed_audio = mix_timeline_audio(timeline, &media, control, audio_progress)?;
-    let mut has_audio = false;
-    if let Some(pcm) = mixed_audio {
-        // Once any audio overlaps the exported interval, pad its trailing
-        // silence to the exact video duration. The muxer uses `-shortest`, so
-        // this keeps the completed container's frame_count/fps duration true.
-        let pcm = slice_pcm(pcm, start_frame, end_frame, plan.fps);
-        has_audio = !pcm.samples_f32.is_empty();
-        encoder.push_audio(pcm);
-    }
-
     let cancel = control
         .map(ExportControl::media_cancel_token)
         .unwrap_or_default();
+    let has_audio = stream_flattened_audio(
+        &plan.audio_clips,
+        &media,
+        AudioStreamOptions {
+            timeline_fps: plan.fps,
+            start_frame,
+            end_frame,
+            control,
+            on_progress: audio_progress,
+        },
+        |samples| {
+            encoder
+                .push_audio_chunk(AUDIO_DECODE_SPEC, samples, &cancel)
+                .map_err(|error| format!("audio spool failed: {error}"))
+        },
+    )?;
     let finalize_progress = on_progress.as_ref().map(|emit| {
         let emit = Arc::clone(emit);
         move |done: usize, total: usize| {
@@ -1185,6 +1612,37 @@ pub(crate) fn run_export_with_control(
         }
         return Err(CANCELLED_SENTINEL.to_string());
     }
+    // Post-encode verification (mirrors motion.rs's post-encode probe): the
+    // ffmpeg child may exit 0 while the output is truncated or corrupt, so a
+    // clean exit alone is not proof of a usable file. Probe the produced file
+    // and fail (removing the partial output, consistent with the cancel/error
+    // cleanup path above) unless the streams, codec, and duration match the
+    // request. A zero-frame export is documented as valid and is skipped.
+    if range_total > 0 {
+        let fps = plan.fps.max(1) as f64;
+        let expectations = ExportProbeExpectations {
+            video_codec: Some(match preset.codec {
+                VideoCodec::H264 => ProbeVideoCodec::H264,
+                VideoCodec::H265 => ProbeVideoCodec::H265,
+                VideoCodec::ProRes422 | VideoCodec::ProRes4444 => ProbeVideoCodec::ProRes,
+            }),
+            audio_codec: has_audio.then_some(match preset.codec {
+                VideoCodec::ProRes422 | VideoCodec::ProRes4444 => ProbeAudioCodec::PcmS16Le,
+                _ => ProbeAudioCodec::Aac,
+            }),
+            expected_duration_secs: range_total as f64 / fps,
+            duration_tolerance_secs: 1.5 / fps,
+        };
+        let probe_result = probe(&out_path)
+            .map_err(|error| format!("output validation failed: {error}"))
+            .and_then(|probe| validate_export_probe(&probe, &expectations));
+        if let Err(error) = probe_result {
+            if !reserved_output {
+                let _ = std::fs::remove_file(&out_path);
+            }
+            return Err(error);
+        }
+    }
     if let Some(emit) = &on_progress {
         emit(completion_progress(defer_completion), AUDIO_PROGRESS_TOTAL);
     }
@@ -1207,6 +1665,138 @@ fn completion_progress(defer_completion: bool) -> i32 {
     }
 }
 
+// MARK: - Post-encode output validation
+
+/// Expected video codec family of a finished export, as reported by ffprobe's
+/// `codec_name`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProbeVideoCodec {
+    H264,
+    H265,
+    ProRes,
+}
+
+impl ProbeVideoCodec {
+    /// ffprobe `codec_name` values this family accepts. `prores_ks` is the
+    /// encoder token; the demuxed name is `prores`, so both are accepted.
+    fn accepts(&self, codec_name: &str) -> bool {
+        match self {
+            ProbeVideoCodec::H264 => codec_name == "h264",
+            ProbeVideoCodec::H265 => matches!(codec_name, "hevc" | "h265"),
+            ProbeVideoCodec::ProRes => matches!(codec_name, "prores" | "prores_ks"),
+        }
+    }
+}
+
+/// Expected audio codec family of a finished export, as reported by ffprobe's
+/// `codec_name`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProbeAudioCodec {
+    Aac,
+    PcmS16Le,
+}
+
+impl ProbeAudioCodec {
+    fn accepts(&self, codec_name: &str) -> bool {
+        match self {
+            ProbeAudioCodec::Aac => codec_name == "aac",
+            ProbeAudioCodec::PcmS16Le => codec_name == "pcm_s16le",
+        }
+    }
+}
+
+/// Expected stream/codec/duration contract for a completed media encode,
+/// checked by [`validate_export_probe`] before the export is reported as
+/// success. Text-only exports (SRT/VTT/XMEML/EDL/OTIO) are not media encodes
+/// and never reach this check.
+#[derive(Clone, Debug, PartialEq)]
+struct ExportProbeExpectations {
+    /// Expected video codec family of the primary video stream. `None` for
+    /// audio-only exports (WAV).
+    video_codec: Option<ProbeVideoCodec>,
+    /// Expected audio codec family. `None` when the export carries no audio.
+    audio_codec: Option<ProbeAudioCodec>,
+    /// Expected container duration in seconds (`frames / fps`).
+    expected_duration_secs: f64,
+    /// Allowed duration drift in seconds (a couple of frame periods).
+    duration_tolerance_secs: f64,
+}
+
+/// Verify a finished media encode against its request: the expected streams
+/// exist, their codecs match the requested encoder (or family), and the
+/// container duration is within tolerance of frames/fps. Mirrors the motion
+/// path's post-encode probe (`motion.rs` `render_and_encode`); unlike a
+/// non-zero-exit check alone, this also catches an ffmpeg child that exits 0
+/// while leaving a truncated or corrupt output.
+fn validate_export_probe(
+    probe: &opentake_media::MediaProbe,
+    expectations: &ExportProbeExpectations,
+) -> Result<(), String> {
+    if let Some(expected_video) = expectations.video_codec {
+        if !probe.has_video {
+            return Err("output validation failed: no video stream in exported file".to_string());
+        }
+        match probe.video_codec.as_deref() {
+            Some(codec_name) if expected_video.accepts(codec_name) => {}
+            Some(codec_name) => {
+                return Err(format!(
+                    "output validation failed: video codec '{codec_name}' does not match the \
+                     requested encoder (expected h264/hevc/prores)"
+                ));
+            }
+            None => {
+                return Err("output validation failed: video stream reports no codec".to_string());
+            }
+        }
+    }
+    if let Some(expected_audio) = expectations.audio_codec {
+        if !probe.has_audio {
+            return Err("output validation failed: no audio stream in exported file".to_string());
+        }
+        match probe.audio_codec.as_deref() {
+            Some(codec_name) if expected_audio.accepts(codec_name) => {}
+            Some(codec_name) => {
+                return Err(format!(
+                    "output validation failed: audio codec '{codec_name}' does not match the \
+                     requested encoder (expected aac/pcm_s16le)"
+                ));
+            }
+            None => {
+                return Err("output validation failed: audio stream reports no codec".to_string());
+            }
+        }
+    }
+    let drift = (probe.duration_secs - expectations.expected_duration_secs).abs();
+    if drift > expectations.duration_tolerance_secs {
+        return Err(format!(
+            "output validation failed: exported duration {}s does not match the expected {}s \
+             (off by {drift:.3}s)",
+            probe.duration_secs, expectations.expected_duration_secs
+        ));
+    }
+    Ok(())
+}
+
+/// Fail-closed guard for text-bearing exports: an export whose plan contains
+/// text clips must not report success when the rasterizer has no font faces —
+/// the composited text would be invisible (background/border only, as
+/// `CosmicTextRasterizer` documents). The preview path stays lenient (a
+/// preview can simply be re-run); this is export-only.
+fn ensure_text_export_fonts(
+    has_text_clips: bool,
+    rasterizer: &CosmicTextRasterizer,
+) -> Result<(), String> {
+    if has_text_clips && !rasterizer.has_fonts() {
+        return Err(
+            "cannot export: no system fonts found on this machine, text clips would render \
+             invisible"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn slice_pcm(pcm: PcmBuffer, start_frame: i32, end_frame: i32, fps: i32) -> PcmBuffer {
     if fps <= 0 || start_frame >= end_frame {
         return PcmBuffer {
@@ -1252,6 +1842,7 @@ pub(crate) fn write_wav_s16le(samples: &[f32], sample_rate: u32, out: &Path) -> 
     result
 }
 
+#[cfg(test)]
 pub(crate) fn write_wav_s16le_cancellable_to_file(
     samples: &[f32],
     sample_rate: u32,
@@ -1260,37 +1851,12 @@ pub(crate) fn write_wav_s16le_cancellable_to_file(
     on_progress: Option<&dyn Fn(i32, i32)>,
     checkpoint_hook: Option<&dyn Fn(usize)>,
 ) -> Result<(), String> {
-    let data_bytes = samples
-        .len()
-        .checked_mul(2)
-        .ok_or_else(|| "wav output is too large".to_string())?;
-    let data_len = u32::try_from(data_bytes).map_err(|_| "wav output is too large".to_string())?;
-    let chunk_size = 36 + data_len;
-    let mut header = Vec::with_capacity(44);
-    header.extend_from_slice(b"RIFF");
-    header.extend_from_slice(&chunk_size.to_le_bytes());
-    header.extend_from_slice(b"WAVE");
-    header.extend_from_slice(b"fmt ");
-    header.extend_from_slice(&16u32.to_le_bytes());
-    header.extend_from_slice(&1u16.to_le_bytes());
-    header.extend_from_slice(&1u16.to_le_bytes());
-    header.extend_from_slice(&sample_rate.to_le_bytes());
-    header.extend_from_slice(&(sample_rate * 2).to_le_bytes());
-    header.extend_from_slice(&2u16.to_le_bytes());
-    header.extend_from_slice(&16u16.to_le_bytes());
-    header.extend_from_slice(b"data");
-    header.extend_from_slice(&data_len.to_le_bytes());
+    write_wav_header(file, samples.len(), sample_rate)?;
 
     (|| {
         if cancel.checkpoint() {
             return Err(CANCELLED_SENTINEL.to_string());
         }
-        file.set_len(0)
-            .map_err(|error| format!("truncate WAV output: {error}"))?;
-        file.seek(SeekFrom::Start(0))
-            .map_err(|error| format!("seek WAV output: {error}"))?;
-        file.write_all(&header)
-            .map_err(|error| format!("write wav header: {error}"))?;
         for (chunk_index, chunk) in samples.chunks(AUDIO_CANCEL_CHUNK_SAMPLES).enumerate() {
             let done = chunk_index.saturating_mul(AUDIO_CANCEL_CHUNK_SAMPLES);
             if let Some(hook) = checkpoint_hook {
@@ -1317,6 +1883,35 @@ pub(crate) fn write_wav_s16le_cancellable_to_file(
             .map_err(|error| format!("flush wav output: {error}"))?;
         Ok(())
     })()
+}
+
+fn write_wav_header(file: &mut File, sample_count: usize, sample_rate: u32) -> Result<(), String> {
+    let data_bytes = sample_count
+        .checked_mul(2)
+        .ok_or_else(|| "wav output is too large".to_string())?;
+    let data_len = u32::try_from(data_bytes).map_err(|_| "wav output is too large".to_string())?;
+    let chunk_size = 36 + data_len;
+    let mut header = Vec::with_capacity(44);
+    header.extend_from_slice(b"RIFF");
+    header.extend_from_slice(&chunk_size.to_le_bytes());
+    header.extend_from_slice(b"WAVE");
+    header.extend_from_slice(b"fmt ");
+    header.extend_from_slice(&16u32.to_le_bytes());
+    header.extend_from_slice(&1u16.to_le_bytes());
+    header.extend_from_slice(&1u16.to_le_bytes());
+    header.extend_from_slice(&sample_rate.to_le_bytes());
+    header.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+    header.extend_from_slice(&2u16.to_le_bytes());
+    header.extend_from_slice(&16u16.to_le_bytes());
+    header.extend_from_slice(b"data");
+    header.extend_from_slice(&data_len.to_le_bytes());
+
+    file.set_len(0)
+        .map_err(|error| format!("truncate WAV output: {error}"))?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|error| format!("seek WAV output: {error}"))?;
+    file.write_all(&header)
+        .map_err(|error| format!("write wav header: {error}"))
 }
 
 fn metadata_is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
@@ -1927,6 +2522,7 @@ fn save_range_as_media_workflow(
         &req,
         ExportRunOptions {
             control: Some(control),
+            external_cancel: None,
             on_progress: Some(Arc::clone(&on_progress)),
             frame_range: Some((in_frame, out_frame)),
             output_file: Some(output_file),
@@ -2053,6 +2649,27 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::Path;
+
+    #[test]
+    fn denoise_export_uses_shared_processing_owner() {
+        let config = opentake_domain::AudioDenoise {
+            mode: opentake_domain::DenoiseMode::Voice,
+            strength: 0.8,
+            preview_enabled: false,
+        };
+        let input = vec![0.2, -0.1, 0.15, -0.05, 0.1, 0.0, 0.05, 0.05];
+        let exported = apply_export_denoise(&input, 1, Some(config), None).expect("export denoise");
+        let shared = opentake_media::analysis::denoise_interleaved(
+            &input,
+            1,
+            MIX_SAMPLE_RATE,
+            config,
+            &MediaCancelToken::new(),
+            None,
+        )
+        .expect("shared denoise");
+        assert_eq!(exported, shared);
+    }
 
     fn unknown_core(root: &Path) -> AppCore {
         let bundle = root.join("Unknown.opentake");
@@ -2899,6 +3516,7 @@ mod tests {
             "asset-1".into(),
             MediaInfo {
                 path: PathBuf::from("/nonexistent.wav"),
+                source_fps: None,
             },
         );
         // duration 0 short-circuits before any decode is attempted.
@@ -2939,6 +3557,7 @@ mod tests {
             "asset-1".into(),
             MediaInfo {
                 path: PathBuf::from("/nonexistent.wav"),
+                source_fps: None,
             },
         );
         assert!(mix_timeline_audio(&tl, &media, None, None)
@@ -3019,5 +3638,177 @@ mod tests {
                 name: "lost.png".into()
             }]
         );
+    }
+
+    // MARK: - Post-encode output validation
+
+    /// Fabricate a probe as ffprobe would report it (stream codecs + a
+    /// container duration), so the pure validator is testable without ffprobe.
+    fn fabricated_probe(
+        video_codec: Option<&str>,
+        audio_codec: Option<&str>,
+        duration_secs: f64,
+    ) -> opentake_media::MediaProbe {
+        let mut streams: Vec<serde_json::Value> = Vec::new();
+        if let Some(codec) = video_codec {
+            streams.push(serde_json::json!({
+                "codec_type": "video",
+                "codec_name": codec,
+                "width": 1280, "height": 720,
+                "avg_frame_rate": "30/1",
+                "duration": format!("{duration_secs}"),
+            }));
+        }
+        if let Some(codec) = audio_codec {
+            streams.push(serde_json::json!({
+                "codec_type": "audio",
+                "codec_name": codec,
+                "channels": 2,
+            }));
+        }
+        opentake_media::parse_probe(&serde_json::json!({
+            "streams": streams,
+            "format": { "duration": format!("{duration_secs}") },
+        }))
+    }
+
+    fn h264_aac_expectations() -> ExportProbeExpectations {
+        ExportProbeExpectations {
+            video_codec: Some(ProbeVideoCodec::H264),
+            audio_codec: Some(ProbeAudioCodec::Aac),
+            expected_duration_secs: 2.0,
+            duration_tolerance_secs: 0.05,
+        }
+    }
+
+    #[test]
+    fn validate_export_probe_accepts_matching_output() {
+        let probe = fabricated_probe(Some("h264"), Some("aac"), 2.0);
+        assert!(validate_export_probe(&probe, &h264_aac_expectations()).is_ok());
+    }
+
+    #[test]
+    fn validate_export_probe_rejects_missing_video_stream() {
+        let probe = fabricated_probe(None, Some("aac"), 2.0);
+        let error = validate_export_probe(&probe, &h264_aac_expectations())
+            .expect_err("missing video stream must fail");
+        assert!(error.contains("no video stream"), "{error}");
+    }
+
+    #[test]
+    fn validate_export_probe_rejects_wrong_video_codec() {
+        let probe = fabricated_probe(Some("mpeg4"), Some("aac"), 2.0);
+        let error = validate_export_probe(&probe, &h264_aac_expectations())
+            .expect_err("wrong video codec must fail");
+        assert!(error.contains("mpeg4"), "{error}");
+        assert!(error.contains("does not match"), "{error}");
+    }
+
+    #[test]
+    fn validate_export_probe_accepts_hevc_family_name_for_h265() {
+        let probe = fabricated_probe(Some("hevc"), Some("aac"), 2.0);
+        let expectations = ExportProbeExpectations {
+            video_codec: Some(ProbeVideoCodec::H265),
+            ..h264_aac_expectations()
+        };
+        assert!(validate_export_probe(&probe, &expectations).is_ok());
+    }
+
+    #[test]
+    fn validate_export_probe_accepts_prores_family_name() {
+        let probe = fabricated_probe(Some("prores"), Some("pcm_s16le"), 2.0);
+        let expectations = ExportProbeExpectations {
+            video_codec: Some(ProbeVideoCodec::ProRes),
+            audio_codec: Some(ProbeAudioCodec::PcmS16Le),
+            ..h264_aac_expectations()
+        };
+        assert!(validate_export_probe(&probe, &expectations).is_ok());
+    }
+
+    #[test]
+    fn validate_export_probe_rejects_missing_audio_stream_when_expected() {
+        let probe = fabricated_probe(Some("h264"), None, 2.0);
+        let error = validate_export_probe(&probe, &h264_aac_expectations())
+            .expect_err("missing audio stream must fail");
+        assert!(error.contains("no audio stream"), "{error}");
+    }
+
+    #[test]
+    fn validate_export_probe_rejects_wrong_audio_codec() {
+        let probe = fabricated_probe(Some("h264"), Some("mp3"), 2.0);
+        let error = validate_export_probe(&probe, &h264_aac_expectations())
+            .expect_err("wrong audio codec must fail");
+        assert!(error.contains("mp3"), "{error}");
+        assert!(error.contains("does not match"), "{error}");
+    }
+
+    #[test]
+    fn validate_export_probe_rejects_duration_drift_beyond_tolerance() {
+        let probe = fabricated_probe(Some("h264"), Some("aac"), 1.0);
+        let error = validate_export_probe(&probe, &h264_aac_expectations())
+            .expect_err("duration drift must fail");
+        assert!(error.contains("duration"), "{error}");
+    }
+
+    #[test]
+    fn validate_export_probe_tolerates_small_duration_drift() {
+        let probe = fabricated_probe(Some("h264"), Some("aac"), 2.02);
+        assert!(validate_export_probe(&probe, &h264_aac_expectations()).is_ok());
+    }
+
+    #[test]
+    fn validate_export_probe_accepts_audio_only_wav_output() {
+        let probe = fabricated_probe(None, Some("pcm_s16le"), 0.5);
+        let expectations = ExportProbeExpectations {
+            video_codec: None,
+            audio_codec: Some(ProbeAudioCodec::PcmS16Le),
+            expected_duration_secs: 0.5,
+            duration_tolerance_secs: 0.05,
+        };
+        assert!(validate_export_probe(&probe, &expectations).is_ok());
+    }
+
+    #[test]
+    fn wav_export_probe_reads_real_written_file() {
+        if !opentake_media::ffmpeg_status::ffprobe_available() {
+            eprintln!("[skip] ffprobe unavailable");
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let out = tmp.path().join("out.wav");
+        std::fs::write(&out, b"").expect("create wav output");
+        write_wav_s16le(&[0.25; 480], 48_000, &out).expect("write wav");
+        let probe = opentake_media::probe(&out).expect("probe written wav");
+        assert!(probe.has_audio && !probe.has_video);
+        assert_eq!(probe.audio_codec.as_deref(), Some("pcm_s16le"));
+        assert!((probe.duration_secs - 0.01).abs() < 0.01);
+    }
+
+    // MARK: - Fail-closed text export font guard
+
+    #[test]
+    fn text_export_fails_closed_when_fonts_absent() {
+        let headless = CosmicTextRasterizer::without_system_fonts();
+        assert!(!headless.has_fonts());
+        let error = ensure_text_export_fonts(true, &headless)
+            .expect_err("text-bearing export without fonts must fail");
+        assert!(error.contains("no system fonts"), "{error}");
+        assert!(error.contains("invisible"), "{error}");
+    }
+
+    #[test]
+    fn text_export_allows_fontless_run_without_text_clips() {
+        let headless = CosmicTextRasterizer::without_system_fonts();
+        assert!(ensure_text_export_fonts(false, &headless).is_ok());
+    }
+
+    #[test]
+    fn text_export_allows_text_clips_when_fonts_available() {
+        let rasterizer = CosmicTextRasterizer::new();
+        if !rasterizer.has_fonts() {
+            eprintln!("[skip] no system fonts on this machine");
+            return;
+        }
+        assert!(ensure_text_export_fonts(true, &rasterizer).is_ok());
     }
 }

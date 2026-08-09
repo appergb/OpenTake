@@ -48,6 +48,316 @@ impl Default for FrameRequest {
     }
 }
 
+/// Source-frame reconstruction policy used when a timeline requests frames at
+/// a different rate than the decoded asset. Optical flow is a deterministic
+/// local motion-compensated path; it never implies a cloud/model dependency.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameInterpolationMode {
+    Nearest,
+    Blend,
+    OpticalFlow,
+}
+
+/// Explicit recovery behavior when optical flow is unavailable on the current
+/// device/runtime. The caller chooses quality, determinism, or fail-closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameInterpolationFallback {
+    Nearest,
+    Blend,
+    Error,
+}
+
+/// One target-rate sample mapped back into the source-frame interval.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FrameRateSample {
+    pub timestamp_secs: f64,
+    pub source_frame: u64,
+    pub next_source_frame: u64,
+    pub source_alpha: f64,
+}
+
+/// Result of one pair interpolation, including the effective mode after an
+/// explicit unsupported-device fallback.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrameInterpolationResult {
+    pub frame: RgbaFrame,
+    pub mode_used: FrameInterpolationMode,
+}
+
+/// Map a finite source sequence onto a target frame rate while preserving both
+/// endpoint timestamps exactly. Interior timestamps follow the target-rate
+/// grid; the final sample is pinned to the source's final presentation time.
+pub fn convert_frame_rate(
+    source_frame_count: u64,
+    source_fps: f64,
+    target_fps: f64,
+) -> Result<Vec<FrameRateSample>> {
+    if source_frame_count == 0 {
+        return Err(MediaError::Decode(
+            "source_frame_count must be greater than zero".to_string(),
+        ));
+    }
+    if !source_fps.is_finite() || source_fps <= 0.0 {
+        return Err(MediaError::Decode(
+            "source_fps must be finite and greater than zero".to_string(),
+        ));
+    }
+    if !target_fps.is_finite() || target_fps <= 0.0 {
+        return Err(MediaError::Decode(
+            "target_fps must be finite and greater than zero".to_string(),
+        ));
+    }
+    if source_frame_count == 1 {
+        return Ok(vec![FrameRateSample {
+            timestamp_secs: 0.0,
+            source_frame: 0,
+            next_source_frame: 0,
+            source_alpha: 0.0,
+        }]);
+    }
+
+    let source_last = source_frame_count - 1;
+    let duration_secs = source_last as f64 / source_fps;
+    let target_intervals = (duration_secs * target_fps).round().max(1.0) as u64;
+    let mut samples = Vec::with_capacity(target_intervals as usize + 1);
+    for output_frame in 0..=target_intervals {
+        let timestamp_secs = if output_frame == target_intervals {
+            duration_secs
+        } else {
+            (output_frame as f64 / target_fps).min(duration_secs)
+        };
+        let source_position = (timestamp_secs * source_fps).clamp(0.0, source_last as f64);
+        let source_frame = source_position.floor() as u64;
+        let next_source_frame = source_frame.saturating_add(1).min(source_last);
+        let source_alpha = if source_frame == next_source_frame {
+            0.0
+        } else {
+            source_position - source_frame as f64
+        };
+        samples.push(FrameRateSample {
+            timestamp_secs,
+            source_frame,
+            next_source_frame,
+            source_alpha,
+        });
+    }
+    Ok(samples)
+}
+
+/// Interpolate two equal-size RGBA frames at `alpha` in `[0, 1]`.
+///
+/// The optical-flow path estimates a deterministic local block-motion field,
+/// warps both endpoints toward the requested instant, then blends the aligned
+/// pixels. This traditional path is intentionally model-free and provides a
+/// stable baseline for preview/export parity.
+pub fn interpolate_frame_pair(
+    first: &RgbaFrame,
+    last: &RgbaFrame,
+    alpha: f64,
+    requested: FrameInterpolationMode,
+    fallback: FrameInterpolationFallback,
+    optical_flow_available: bool,
+) -> Result<FrameInterpolationResult> {
+    if first.width != last.width
+        || first.height != last.height
+        || first.rgba.len() != last.rgba.len()
+    {
+        return Err(MediaError::Decode(
+            "interpolation frames must have identical dimensions".to_string(),
+        ));
+    }
+    if !alpha.is_finite() {
+        return Err(MediaError::Decode(
+            "interpolation alpha must be finite".to_string(),
+        ));
+    }
+
+    let mode_used = if requested == FrameInterpolationMode::OpticalFlow && !optical_flow_available {
+        match fallback {
+            FrameInterpolationFallback::Nearest => FrameInterpolationMode::Nearest,
+            FrameInterpolationFallback::Blend => FrameInterpolationMode::Blend,
+            FrameInterpolationFallback::Error => {
+                return Err(MediaError::Decode(
+                    "optical-flow interpolation is unavailable and fallback is Error".to_string(),
+                ));
+            }
+        }
+    } else {
+        requested
+    };
+
+    let alpha = alpha.clamp(0.0, 1.0);
+    let frame = if alpha == 0.0 {
+        first.clone()
+    } else if alpha == 1.0 {
+        last.clone()
+    } else {
+        match mode_used {
+            FrameInterpolationMode::Nearest => {
+                if alpha < 0.5 {
+                    first.clone()
+                } else {
+                    last.clone()
+                }
+            }
+            FrameInterpolationMode::Blend => blend_frames(first, last, alpha),
+            FrameInterpolationMode::OpticalFlow => optical_flow_frame(first, last, alpha),
+        }
+    };
+
+    Ok(FrameInterpolationResult { frame, mode_used })
+}
+
+fn blend_frames(first: &RgbaFrame, last: &RgbaFrame, alpha: f64) -> RgbaFrame {
+    let rgba = first
+        .rgba
+        .iter()
+        .zip(&last.rgba)
+        .map(|(&a, &b)| lerp_channel(a, b, alpha))
+        .collect();
+    RgbaFrame::new(first.width, first.height, rgba)
+}
+
+fn optical_flow_frame(first: &RgbaFrame, last: &RgbaFrame, alpha: f64) -> RgbaFrame {
+    let flow = estimate_block_motion(first, last);
+    let mut rgba = vec![0; first.rgba.len()];
+    for y in 0..first.height {
+        for x in 0..first.width {
+            let (motion_x, motion_y) = flow.at(x, y);
+            let x = x as f64;
+            let y = y as f64;
+            let from_first = sample_bilinear(first, x - alpha * motion_x, y - alpha * motion_y);
+            let from_last = sample_bilinear(
+                last,
+                x + (1.0 - alpha) * motion_x,
+                y + (1.0 - alpha) * motion_y,
+            );
+            let offset = ((y as u32 * first.width + x as u32) * 4) as usize;
+            for channel in 0..4 {
+                rgba[offset + channel] =
+                    lerp_channel(from_first[channel], from_last[channel], alpha);
+            }
+        }
+    }
+    RgbaFrame::new(first.width, first.height, rgba)
+}
+
+struct BlockMotionField {
+    block_size: u32,
+    columns: u32,
+    rows: u32,
+    vectors: Vec<(f64, f64)>,
+}
+
+impl BlockMotionField {
+    fn at(&self, x: u32, y: u32) -> (f64, f64) {
+        let column = (x / self.block_size).min(self.columns.saturating_sub(1));
+        let row = (y / self.block_size).min(self.rows.saturating_sub(1));
+        self.vectors[(row * self.columns + column) as usize]
+    }
+}
+
+/// Estimate a deterministic local motion field with block matching. Bounded
+/// search and per-block spatial sampling avoid the whole-frame distortion of a
+/// single global translation vector without introducing a model dependency.
+fn estimate_block_motion(first: &RgbaFrame, last: &RgbaFrame) -> BlockMotionField {
+    let shortest = first.width.min(first.height).max(1);
+    let block_size = shortest.min(32);
+    let columns = first.width.div_ceil(block_size);
+    let rows = first.height.div_ceil(block_size);
+    let search_radius = (block_size / 2).clamp(1, 12) as i32;
+    let sample_step = (block_size / 8).max(1);
+    let mut vectors = Vec::with_capacity((columns * rows) as usize);
+
+    for row in 0..rows {
+        for column in 0..columns {
+            let start_x = column * block_size;
+            let start_y = row * block_size;
+            let end_x = (start_x + block_size).min(first.width);
+            let end_y = (start_y + block_size).min(first.height);
+            let mut best = (f64::INFINITY, i32::MAX, 0, 0);
+            for dy in -search_radius..=search_radius {
+                for dx in -search_radius..=search_radius {
+                    let mut error = 0.0;
+                    let mut samples = 0u32;
+                    for y in (start_y..end_y).step_by(sample_step as usize) {
+                        for x in (start_x..end_x).step_by(sample_step as usize) {
+                            let target_x = x as i32 + dx;
+                            let target_y = y as i32 + dy;
+                            let target = if target_x < 0
+                                || target_y < 0
+                                || target_x >= last.width as i32
+                                || target_y >= last.height as i32
+                            {
+                                255.0
+                            } else {
+                                luma_at(last, target_x as u32, target_y as u32)
+                            };
+                            error += (luma_at(first, x, y) - target).abs();
+                            samples += 1;
+                        }
+                    }
+                    let mean_error = error / samples.max(1) as f64;
+                    let distance = dx * dx + dy * dy;
+                    let candidate = (mean_error, distance, dy, dx);
+                    if candidate < best {
+                        best = candidate;
+                    }
+                }
+            }
+            vectors.push((best.3 as f64, best.2 as f64));
+        }
+    }
+
+    BlockMotionField {
+        block_size,
+        columns,
+        rows,
+        vectors,
+    }
+}
+
+fn luma_at(frame: &RgbaFrame, x: u32, y: u32) -> f64 {
+    let offset = ((y * frame.width + x) * 4) as usize;
+    let r = frame.rgba[offset] as f64;
+    let g = frame.rgba[offset + 1] as f64;
+    let b = frame.rgba[offset + 2] as f64;
+    let a = frame.rgba[offset + 3] as f64 / 255.0;
+    (0.2126 * r + 0.7152 * g + 0.0722 * b) * a
+}
+
+fn sample_bilinear(frame: &RgbaFrame, x: f64, y: f64) -> [u8; 4] {
+    let x0 = x.floor() as i64;
+    let y0 = y.floor() as i64;
+    let fx = x - x0 as f64;
+    let fy = y - y0 as f64;
+    let mut out = [0; 4];
+    for (channel, value) in out.iter_mut().enumerate() {
+        let p00 = sample_channel(frame, x0, y0, channel);
+        let p10 = sample_channel(frame, x0 + 1, y0, channel);
+        let p01 = sample_channel(frame, x0, y0 + 1, channel);
+        let p11 = sample_channel(frame, x0 + 1, y0 + 1, channel);
+        let top = p00 + (p10 - p00) * fx;
+        let bottom = p01 + (p11 - p01) * fx;
+        *value = (top + (bottom - top) * fy).round().clamp(0.0, 255.0) as u8;
+    }
+    out
+}
+
+fn sample_channel(frame: &RgbaFrame, x: i64, y: i64, channel: usize) -> f64 {
+    if x < 0 || y < 0 || x >= frame.width as i64 || y >= frame.height as i64 {
+        return if channel == 3 { 255.0 } else { 0.0 };
+    }
+    let offset = ((y as u32 * frame.width + x as u32) * 4) as usize;
+    frame.rgba[offset + channel] as f64
+}
+
+fn lerp_channel(first: u8, last: u8, alpha: f64) -> u8 {
+    (first as f64 + (last as f64 - first as f64) * alpha)
+        .round()
+        .clamp(0.0, 255.0) as u8
+}
+
 /// Scale `(w, h)` down to fit within `max` while preserving aspect ratio. Never
 /// enlarges. A zero in either `max` dimension disables that bound. Mirrors
 /// `AVAssetImageGenerator.maximumSize` semantics ("not larger than this box,
@@ -74,9 +384,21 @@ pub fn fit_within(w: u32, h: u32, max: (u32, u32)) -> (u32, u32) {
 
 /// Build the ffmpeg arg list for decoding one frame to rawvideo RGBA on stdout.
 /// Pure so the exact CLI contract is testable.
+#[cfg(test)]
 fn frame_args(path: &Path, req: &FrameRequest) -> Vec<String> {
+    frame_args_with_color(path, req, None)
+}
+
+fn frame_args_with_color(
+    path: &Path,
+    req: &FrameRequest,
+    color: Option<&opentake_domain::MediaColorMetadata>,
+) -> Vec<String> {
     let seek = (req.time_secs - req.tolerance_secs).max(0.0);
     let mut args: Vec<String> = Vec::new();
+    if let Some(color) = color {
+        args.extend(crate::color::hdr_decode_input_args(color));
+    }
     // Fast input seek to just before the target keyframe window.
     args.push("-ss".into());
     args.push(format!("{seek:.6}"));
@@ -87,6 +409,9 @@ fn frame_args(path: &Path, req: &FrameRequest) -> Vec<String> {
     args.push("1".into());
 
     let mut filters: Vec<String> = Vec::new();
+    if let Some(filter) = color.and_then(crate::color::hdr_tonemap_filter) {
+        filters.push(filter);
+    }
     if req.apply_rotation {
         // Honor the display matrix when transposing (ffmpeg applies it via the
         // autorotate behavior; the scale filter runs after rotation).
@@ -134,8 +459,17 @@ pub fn decode_frame_at_cancellable(
     if cancel.is_cancelled() {
         return Err(MediaError::Cancelled);
     }
+    // Probe color only for ordinary files. FIFOs/device inputs are valid FFmpeg
+    // sources too; opening them once for ffprobe would consume or block the
+    // stream before the actual cancellable decoder child is spawned.
+    let color = path
+        .metadata()
+        .ok()
+        .filter(|metadata| metadata.is_file())
+        .and_then(|_| crate::probe::probe(path).ok())
+        .and_then(|probe| probe.color);
     let mut child = ff::ffmpeg()
-        .args(frame_args(path, req))
+        .args(frame_args_with_color(path, req, color.as_ref()))
         .spawn()
         .map_err(|e| MediaError::Ffmpeg(format!("spawn: {e}")))?;
     cancel.child_spawned();

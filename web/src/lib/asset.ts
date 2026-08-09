@@ -1,9 +1,9 @@
 /**
- * Local-file → webview-loadable URL via Tauri's asset protocol (enabled in
- * `tauri.conf.json` → `assetProtocol`). Lets `<img>`/`<video>`/`<audio>` show
- * imported media straight from disk — the pragmatic preview/thumbnail path
- * (WebKit/WebView2 decodes the original file) that mirrors upstream feeding an
- * `AVPlayerItem` a file URL, without a separate Rust thumbnail pipeline.
+ * Local-file → webview-loadable URL via OpenTake's bounded native protocol.
+ * The protocol opens a retained no-recall/non-blocking handle off the UI
+ * thread, authorizes that handle's final path, and serves bounded byte ranges,
+ * so File Provider placeholders or a path replaced by a FIFO/symlink cannot
+ * freeze WebKit/WebView2 or escape the native scope.
  *
  * `convertFileSrc` only builds a string, so a static import is safe in the
  * browser shell; we still gate on `isTauri` since the asset scheme only resolves
@@ -17,7 +17,7 @@ import { isTauri } from "./api";
 export function assetUrl(path: string | null | undefined): string | null {
   if (!path || !isTauri) return null;
   try {
-    return convertFileSrc(path);
+    return convertFileSrc(path, "opentake-asset");
   } catch {
     return null;
   }

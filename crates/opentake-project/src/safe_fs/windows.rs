@@ -23,22 +23,24 @@ use windows_sys::Win32::Foundation::{
     STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND, STATUS_OBJECT_TYPE_MISMATCH,
     STATUS_PENDING, STATUS_REPARSE_POINT_ENCOUNTERED, STATUS_SHARING_VIOLATION, UNICODE_STRING,
 };
-use windows_sys::Win32::Security::SECURITY_DESCRIPTOR;
+use windows_sys::Win32::Security::*;
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FileAttributeTagInfo, FileIdInfo, FileRemoteProtocolInfo, FileStandardInfo,
     GetDriveTypeW, GetFileInformationByHandleEx, GetVolumeInformationByHandleW,
     GetVolumeNameForVolumeMountPointW, GetVolumePathNameW, DELETE, FILE_ACCESS_RIGHTS,
-    FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_ATTRIBUTE_TAG_INFO, FILE_DELETE_CHILD, FILE_FLAGS_AND_ATTRIBUTES,
-    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_LIST_DIRECTORY,
-    FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_REMOTE_PROTOCOL_INFO, FILE_SHARE_MODE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO, FILE_TRAVERSE, FILE_WRITE_DATA,
-    GET_FILEEX_INFO_LEVELS, MAXIMUM_REPARSE_DATA_BUFFER_SIZE, OPEN_EXISTING, READ_CONTROL,
-    SYNCHRONIZE,
+    FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY, FILE_ALL_ACCESS, FILE_ATTRIBUTE_NORMAL,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TAG_INFO, FILE_DELETE_CHILD,
+    FILE_FLAGS_AND_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_ID_INFO, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_READ_DATA,
+    FILE_REMOTE_PROTOCOL_INFO, FILE_SHARE_MODE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    FILE_STANDARD_INFO, FILE_TRAVERSE, FILE_WRITE_DATA, GET_FILEEX_INFO_LEVELS,
+    MAXIMUM_REPARSE_DATA_BUFFER_SIZE, OPEN_EXISTING, READ_CONTROL, SYNCHRONIZE,
 };
 use windows_sys::Win32::System::Ioctl::FSCTL_GET_REPARSE_POINT;
-use windows_sys::Win32::System::SystemServices::FILE_CS_FLAG_CASE_SENSITIVE_DIR;
-use windows_sys::Win32::System::Threading::GetCurrentProcess;
+use windows_sys::Win32::System::SystemServices::{
+    ACCESS_ALLOWED_ACE_TYPE, FILE_CS_FLAG_CASE_SENSITIVE_DIR, SECURITY_DESCRIPTOR_REVISION,
+};
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
 const SHARE: FILE_SHARE_MODE = FILE_SHARE_READ | FILE_SHARE_WRITE;
@@ -48,6 +50,7 @@ const DIRECTORY_BUFFER_BYTES: usize = 64 * 1024;
 const REPARSE_HEADER_BYTES: usize = 8;
 const STATUS_SUCCESS: NTSTATUS = 0;
 const BOOL_FALSE: BOOL = 0;
+const BOOL_TRUE: BOOL = 1;
 const DRIVE_REMOVABLE: u32 = 2;
 const DRIVE_FIXED: u32 = 3;
 
@@ -338,6 +341,16 @@ fn complete_nt(
         return Err(nt_error(operation, final_status));
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn synchronous_pending_contract_for_test() -> Result<()> {
+    let mut iosb = IO_STATUS_BLOCK::default();
+    // Initialize the Status member even though `complete_nt` must reject the
+    // returned STATUS_PENDING before reading it.
+    iosb.Anonymous.Status = STATUS_SUCCESS;
+    iosb.Information = usize::MAX;
+    complete_nt(SafeFsOperation::ReadFile, STATUS_PENDING, &iosb)
 }
 
 #[allow(clippy::too_many_arguments)] // Mirrors the fixed NtCreateFile operation contract.
@@ -1319,18 +1332,496 @@ fn require_mutation(parent: &DirectoryAuthority, operation: SafeFsOperation) -> 
     }
 }
 
-fn owner_only_refusal<T>() -> Result<T> {
-    Err(SafeFsError::UnsupportedSecureFilesystem {
-        operation: SafeFsOperation::VerifySecurityDescriptor,
-        reason: SecureFilesystemReason::UnsupportedTarget,
-    })
+struct OwnerOnlySecurity {
+    sid: Vec<usize>,
+    _acl: Vec<usize>,
+    descriptor: Box<SECURITY_DESCRIPTOR>,
+    ace_flags: ACE_FLAGS,
 }
 
-fn require_inherited_permissions(permissions: CreatePermissions) -> Result<()> {
-    match permissions {
-        CreatePermissions::Inherit => Ok(()),
-        CreatePermissions::OwnerOnly => owner_only_refusal(),
+impl OwnerOnlySecurity {
+    fn new(directory: bool) -> Result<Self> {
+        let operation = SafeFsOperation::VerifySecurityDescriptor;
+        let mut token_raw = null_mut();
+        // SAFETY: the current-process pseudo-handle is valid and the output pointer is writable.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token_raw) } == 0 {
+            return Err(last_win32(operation));
+        }
+        let token = OwnedHandle::new(token_raw, operation)?;
+        let mut needed = 0u32;
+        // SAFETY: documented sizing call with a null output buffer.
+        let first =
+            unsafe { GetTokenInformation(token.raw(), TokenOwner, null_mut(), 0, &mut needed) };
+        if first != 0
+            || unsafe { GetLastError() }
+                != windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER
+            || needed < size_of::<TOKEN_OWNER>() as u32
+        {
+            return Err(last_win32(operation));
+        }
+        let mut token_words = vec![0usize; (needed as usize).div_ceil(size_of::<usize>())];
+        // SAFETY: aligned storage is writable for exactly `needed` bytes.
+        if unsafe {
+            GetTokenInformation(
+                token.raw(),
+                TokenOwner,
+                token_words.as_mut_ptr().cast(),
+                needed,
+                &mut needed,
+            )
+        } == 0
+        {
+            return Err(last_win32(operation));
+        }
+        // SAFETY: the successful TokenOwner query initialized a TOKEN_OWNER value.
+        let owner = unsafe { (*(token_words.as_ptr().cast::<TOKEN_OWNER>())).Owner };
+        if owner.is_null() || unsafe { IsValidSid(owner) } == 0 {
+            return Err(last_win32(operation));
+        }
+        // SAFETY: `owner` is a validated SID returned in the live token buffer.
+        let sid_len = usize::try_from(unsafe { GetLengthSid(owner) }).map_err(|_| {
+            SafeFsError::InvalidNativeBuffer {
+                operation,
+                reason: NativeBufferReason::SecurityDescriptorMalformed,
+            }
+        })?;
+        let mut sid = vec![0usize; sid_len.div_ceil(size_of::<usize>())];
+        // SAFETY: destination capacity is at least sid_len and owner is a validated SID.
+        if unsafe { CopySid(sid_len as u32, sid.as_mut_ptr().cast(), owner) } == 0 {
+            return Err(last_win32(operation));
+        }
+        drop(token_words);
+        drop(token);
+
+        let acl_bytes = size_of::<ACL>()
+            .checked_add(size_of::<ACCESS_ALLOWED_ACE>() - size_of::<u32>())
+            .and_then(|value| value.checked_add(sid_len))
+            .ok_or(SafeFsError::InvalidNativeBuffer {
+                operation,
+                reason: NativeBufferReason::LengthOverflow,
+            })?;
+        let acl_len = u32::try_from(acl_bytes).map_err(|_| SafeFsError::InvalidNativeBuffer {
+            operation,
+            reason: NativeBufferReason::LengthOverflow,
+        })?;
+        if acl_bytes > u16::MAX as usize {
+            return Err(SafeFsError::InvalidNativeBuffer {
+                operation,
+                reason: NativeBufferReason::LengthOverflow,
+            });
+        }
+        let mut acl = vec![0usize; acl_bytes.div_ceil(size_of::<usize>())];
+        let ace_flags = if directory {
+            OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
+        } else {
+            0
+        };
+        // SAFETY: aligned ACL storage and the copied SID remain live inside Self.
+        if unsafe { InitializeAcl(acl.as_mut_ptr().cast(), acl_len, ACL_REVISION) } == 0
+            || unsafe {
+                AddAccessAllowedAceEx(
+                    acl.as_mut_ptr().cast(),
+                    ACL_REVISION,
+                    ace_flags,
+                    FILE_ALL_ACCESS,
+                    sid.as_mut_ptr().cast(),
+                )
+            } == 0
+        {
+            return Err(last_win32(operation));
+        }
+        // SAFETY: SECURITY_DESCRIPTOR is a C POD initialized immediately below.
+        let mut descriptor = Box::<SECURITY_DESCRIPTOR>::new(unsafe { std::mem::zeroed() });
+        // SAFETY: the boxed descriptor has a stable address and ACL storage remains owned by Self.
+        if unsafe {
+            InitializeSecurityDescriptor(
+                (&mut *descriptor as *mut SECURITY_DESCRIPTOR).cast(),
+                SECURITY_DESCRIPTOR_REVISION,
+            )
+        } == 0
+            || unsafe {
+                SetSecurityDescriptorDacl(
+                    (&mut *descriptor as *mut SECURITY_DESCRIPTOR).cast(),
+                    BOOL_TRUE,
+                    acl.as_mut_ptr().cast(),
+                    BOOL_FALSE,
+                )
+            } == 0
+            || unsafe {
+                SetSecurityDescriptorControl(
+                    (&mut *descriptor as *mut SECURITY_DESCRIPTOR).cast(),
+                    SE_DACL_PROTECTED,
+                    SE_DACL_PROTECTED,
+                )
+            } == 0
+        {
+            return Err(last_win32(operation));
+        }
+        Ok(Self {
+            sid,
+            _acl: acl,
+            descriptor,
+            ace_flags,
+        })
     }
+
+    fn descriptor_ptr(&self) -> *const SECURITY_DESCRIPTOR {
+        &*self.descriptor
+    }
+}
+
+fn malformed_security() -> SafeFsError {
+    SafeFsError::InvalidNativeBuffer {
+        operation: SafeFsOperation::VerifySecurityDescriptor,
+        reason: NativeBufferReason::SecurityDescriptorMalformed,
+    }
+}
+
+fn checked_subslice(
+    base: usize,
+    length: usize,
+    pointer: usize,
+    needed: usize,
+) -> Result<std::ops::Range<usize>> {
+    let end = base.checked_add(length).ok_or_else(malformed_security)?;
+    let pointer_end = pointer.checked_add(needed).ok_or_else(malformed_security)?;
+    if pointer < base || pointer_end > end {
+        return Err(malformed_security());
+    }
+    Ok(pointer - base..pointer_end - base)
+}
+
+fn checked_sid_length(buffer: &[u8], sid: *const c_void) -> Result<usize> {
+    const SID_PREFIX: usize = 8;
+    let range = checked_subslice(
+        buffer.as_ptr() as usize,
+        buffer.len(),
+        sid as usize,
+        SID_PREFIX,
+    )?;
+    let count = usize::from(buffer[range.start + 1]);
+    let length = SID_PREFIX
+        .checked_add(
+            count
+                .checked_mul(size_of::<u32>())
+                .ok_or_else(malformed_security)?,
+        )
+        .ok_or_else(malformed_security)?;
+    checked_subslice(buffer.as_ptr() as usize, buffer.len(), sid as usize, length)?;
+    // SAFETY: the SID prefix and every declared sub-authority are inside buffer.
+    if unsafe { IsValidSid(sid.cast_mut()) } == 0 {
+        return Err(malformed_security());
+    }
+    // SAFETY: IsValidSid accepted the fully bounded SID.
+    if usize::try_from(unsafe { GetLengthSid(sid.cast_mut()) }).map_err(|_| malformed_security())?
+        != length
+    {
+        return Err(malformed_security());
+    }
+    Ok(length)
+}
+
+fn verify_single_owner_ace(
+    descriptor_bytes: &[u8],
+    dacl: *mut ACL,
+    acl_bytes_in_use: usize,
+    ace: *mut c_void,
+    expected: &OwnerOnlySecurity,
+) -> Result<()> {
+    let dacl_start = dacl as usize;
+    let dacl_range = checked_subslice(
+        descriptor_bytes.as_ptr() as usize,
+        descriptor_bytes.len(),
+        dacl_start,
+        acl_bytes_in_use.max(size_of::<ACL>()),
+    )?;
+    if acl_bytes_in_use < size_of::<ACL>() || dacl_range.len() != acl_bytes_in_use {
+        return Err(malformed_security());
+    }
+    let ace_start = ace as usize;
+    checked_subslice(
+        dacl_start,
+        acl_bytes_in_use,
+        ace_start,
+        size_of::<windows_sys::Win32::Security::ACE_HEADER>(),
+    )?;
+    // SAFETY: only the fixed ACE header bytes were bounds checked; read unaligned.
+    let header =
+        unsafe { std::ptr::read_unaligned(ace.cast::<windows_sys::Win32::Security::ACE_HEADER>()) };
+    if u32::from(header.AceType) != ACCESS_ALLOWED_ACE_TYPE {
+        return Err(malformed_security());
+    }
+    let ace_size = usize::from(header.AceSize);
+    let sid_offset = offset_of!(ACCESS_ALLOWED_ACE, SidStart);
+    if ace_size < sid_offset.checked_add(8).ok_or_else(malformed_security)? {
+        return Err(malformed_security());
+    }
+    checked_subslice(dacl_start, acl_bytes_in_use, ace_start, ace_size)?;
+    let sid_ptr = ace_start
+        .checked_add(sid_offset)
+        .ok_or_else(malformed_security)? as *const c_void;
+    let sid_length = checked_sid_length(descriptor_bytes, sid_ptr)?;
+    if sid_offset
+        .checked_add(sid_length)
+        .ok_or_else(malformed_security)?
+        != ace_size
+    {
+        return Err(malformed_security());
+    }
+    // SAFETY: ACE type, size, ACL bounds and SID range were established above.
+    let allowed = unsafe { std::ptr::read_unaligned(ace.cast::<ACCESS_ALLOWED_ACE>()) };
+    let expected_flags = u8::try_from(expected.ace_flags).map_err(|_| malformed_security())?;
+    if allowed.Header.AceFlags != expected_flags
+        || allowed.Mask != FILE_ALL_ACCESS
+        || unsafe { EqualSid(sid_ptr.cast_mut(), expected.sid.as_ptr().cast_mut().cast()) } == 0
+    {
+        return Err(malformed_security());
+    }
+    Ok(())
+}
+
+fn verify_owner_only(handle: HANDLE, expected: &OwnerOnlySecurity) -> Result<()> {
+    let operation = SafeFsOperation::VerifySecurityDescriptor;
+    let information = OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION;
+    let mut needed = 0u32;
+    // SAFETY: documented sizing call against a retained handle.
+    unsafe { GetKernelObjectSecurity(handle, information, null_mut(), 0, &mut needed) };
+    if unsafe { GetLastError() } != windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER {
+        return Err(last_win32(operation));
+    }
+    let mut words = vec![0usize; (needed as usize).div_ceil(size_of::<usize>())];
+    // SAFETY: aligned storage is writable for exactly needed bytes.
+    if unsafe {
+        GetKernelObjectSecurity(
+            handle,
+            information,
+            words.as_mut_ptr().cast(),
+            needed,
+            &mut needed,
+        )
+    } == 0
+    {
+        return Err(last_win32(operation));
+    }
+    // SAFETY: the successful query initialized exactly `needed` bytes.
+    let descriptor_bytes =
+        unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), needed as usize) };
+    if descriptor_bytes.len() < size_of::<SECURITY_DESCRIPTOR>() {
+        return Err(malformed_security());
+    }
+    let descriptor = descriptor_bytes.as_mut_ptr().cast::<SECURITY_DESCRIPTOR>();
+    let mut control = 0u16;
+    let mut revision = 0u32;
+    let mut owner = null_mut();
+    let mut owner_defaulted = BOOL_FALSE;
+    let mut dacl = null_mut();
+    let mut present = BOOL_FALSE;
+    let mut defaulted = BOOL_FALSE;
+    // SAFETY: the kernel returned a self-relative descriptor in aligned storage.
+    if unsafe { GetSecurityDescriptorControl(descriptor.cast(), &mut control, &mut revision) } == 0
+        || unsafe {
+            GetSecurityDescriptorOwner(descriptor.cast(), &mut owner, &mut owner_defaulted)
+        } == 0
+        || unsafe {
+            GetSecurityDescriptorDacl(descriptor.cast(), &mut present, &mut dacl, &mut defaulted)
+        } == 0
+        || control & SE_DACL_PROTECTED == 0
+        || owner_defaulted != BOOL_FALSE
+        || present == BOOL_FALSE
+        || defaulted != BOOL_FALSE
+        || dacl.is_null()
+        || owner.is_null()
+    {
+        return Err(malformed_security());
+    }
+    #[cfg(test)]
+    let descriptor_fixture = take_owner_descriptor_fixture();
+    #[cfg(test)]
+    if descriptor_fixture == Some(OwnerDescriptorFixture::NullOwner) {
+        owner = null_mut();
+    }
+    #[cfg(test)]
+    if descriptor_fixture == Some(OwnerDescriptorFixture::InvalidOwner) {
+        owner = descriptor_bytes
+            .as_mut_ptr()
+            .wrapping_add(descriptor_bytes.len() - 1)
+            .cast();
+    }
+    if owner.is_null() {
+        return Err(malformed_security());
+    }
+    checked_sid_length(descriptor_bytes, owner.cast_const())?;
+    // SAFETY: owner SID is fully bounded and validated in descriptor_bytes.
+    if unsafe { EqualSid(owner, expected.sid.as_ptr().cast_mut().cast()) } == 0 {
+        return Err(malformed_security());
+    }
+    #[cfg(test)]
+    if descriptor_fixture == Some(OwnerDescriptorFixture::DaclOutOfRange) {
+        dacl = descriptor_bytes
+            .as_mut_ptr()
+            .wrapping_add(descriptor_bytes.len() + 1)
+            .cast();
+    }
+    checked_subslice(
+        descriptor_bytes.as_ptr() as usize,
+        descriptor_bytes.len(),
+        dacl as usize,
+        size_of::<ACL>(),
+    )?;
+    let mut acl_info = ACL_SIZE_INFORMATION::default();
+    // SAFETY: the DACL fixed header is bounded and output is writable.
+    if unsafe {
+        GetAclInformation(
+            dacl,
+            (&mut acl_info as *mut ACL_SIZE_INFORMATION).cast(),
+            size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        )
+    } == 0
+    {
+        return Err(malformed_security());
+    }
+    #[cfg(test)]
+    if descriptor_fixture == Some(OwnerDescriptorFixture::WrongAceCount) {
+        acl_info.AceCount = 2;
+    }
+    if acl_info.AceCount != 1 {
+        return Err(malformed_security());
+    }
+    #[cfg(test)]
+    if descriptor_fixture == Some(OwnerDescriptorFixture::AclBytesOutOfRange) {
+        acl_info.AclBytesInUse = u32::MAX;
+    }
+    let acl_bytes_in_use =
+        usize::try_from(acl_info.AclBytesInUse).map_err(|_| malformed_security())?;
+    checked_subslice(
+        descriptor_bytes.as_ptr() as usize,
+        descriptor_bytes.len(),
+        dacl as usize,
+        acl_bytes_in_use.max(size_of::<ACL>()),
+    )?;
+    let mut ace = null_mut();
+    // SAFETY: the ACL and AclBytesInUse are bounded inside descriptor storage.
+    if unsafe { GetAce(dacl, 0, &mut ace) } == 0 || ace.is_null() {
+        return Err(last_win32(operation));
+    }
+    #[cfg(test)]
+    if descriptor_fixture == Some(OwnerDescriptorFixture::AceOutOfRange) {
+        ace = descriptor_bytes
+            .as_mut_ptr()
+            .wrapping_add(descriptor_bytes.len() + 1)
+            .cast();
+    }
+    #[cfg(test)]
+    if let Some(fixture) = descriptor_fixture {
+        // SAFETY: GetAce returned storage inside the already bounded single-entry
+        // ACL. Mutations remain inside that allocation and are consumed by the
+        // release bounds-first verifier before any kernel call.
+        unsafe {
+            let header = ace.cast::<windows_sys::Win32::Security::ACE_HEADER>();
+            match fixture {
+                OwnerDescriptorFixture::WrongAceType => (*header).AceType = 0x7f,
+                OwnerDescriptorFixture::UndersizedAce => {
+                    (*header).AceSize =
+                        size_of::<windows_sys::Win32::Security::ACE_HEADER>() as u16;
+                }
+                OwnerDescriptorFixture::OversizedSid => {
+                    let sid = (ace as *mut u8).add(offset_of!(ACCESS_ALLOWED_ACE, SidStart));
+                    *sid.add(1) = u8::MAX;
+                }
+                OwnerDescriptorFixture::InvalidSid => {
+                    let sid = (ace as *mut u8).add(offset_of!(ACCESS_ALLOWED_ACE, SidStart));
+                    *sid = 0;
+                }
+                OwnerDescriptorFixture::NullOwner
+                | OwnerDescriptorFixture::InvalidOwner
+                | OwnerDescriptorFixture::DaclOutOfRange
+                | OwnerDescriptorFixture::AclBytesOutOfRange
+                | OwnerDescriptorFixture::WrongAceCount
+                | OwnerDescriptorFixture::AceOutOfRange => {}
+            }
+        }
+    }
+    verify_single_owner_ace(descriptor_bytes, dacl, acl_bytes_in_use, ace, expected)
+}
+
+#[cfg(test)]
+static FORCE_DACL_VERIFY_FAILURE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+fn force_next_owner_verification_failure() {
+    FORCE_DACL_VERIFY_FAILURE.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OwnerDescriptorFixture {
+    WrongAceType,
+    UndersizedAce,
+    OversizedSid,
+    InvalidSid,
+    NullOwner,
+    InvalidOwner,
+    DaclOutOfRange,
+    AclBytesOutOfRange,
+    WrongAceCount,
+    AceOutOfRange,
+}
+
+#[cfg(test)]
+static OWNER_DESCRIPTOR_FIXTURE: std::sync::OnceLock<
+    std::sync::Mutex<Option<OwnerDescriptorFixture>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+struct OwnerDescriptorFixtureGuard;
+
+#[cfg(test)]
+impl Drop for OwnerDescriptorFixtureGuard {
+    fn drop(&mut self) {
+        *OWNER_DESCRIPTOR_FIXTURE
+            .get_or_init(Default::default)
+            .lock()
+            .expect("owner descriptor fixture mutex poisoned") = None;
+    }
+}
+
+#[cfg(test)]
+fn install_owner_descriptor_fixture(
+    fixture: OwnerDescriptorFixture,
+) -> OwnerDescriptorFixtureGuard {
+    let mut slot = OWNER_DESCRIPTOR_FIXTURE
+        .get_or_init(Default::default)
+        .lock()
+        .expect("owner descriptor fixture mutex poisoned");
+    assert!(
+        slot.is_none(),
+        "owner descriptor tests require --test-threads=1"
+    );
+    *slot = Some(fixture);
+    OwnerDescriptorFixtureGuard
+}
+
+#[cfg(test)]
+fn take_owner_descriptor_fixture() -> Option<OwnerDescriptorFixture> {
+    OWNER_DESCRIPTOR_FIXTURE
+        .get_or_init(Default::default)
+        .lock()
+        .expect("owner descriptor fixture mutex poisoned")
+        .take()
+}
+
+fn verify_created_owner_only(handle: HANDLE, expected: &OwnerOnlySecurity) -> Result<()> {
+    inject_windows_create_failure(
+        WindowsCreateFailurePoint::SecurityVerification,
+        SafeFsOperation::VerifySecurityDescriptor,
+    )?;
+    #[cfg(test)]
+    if FORCE_DACL_VERIFY_FAILURE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        return Err(malformed_security());
+    }
+    verify_owner_only(handle, expected)
 }
 
 #[allow(clippy::arc_with_non_send_sync)] // Arc retains the HANDLE-bearing parent chain; it is not shared publicly.
@@ -1445,7 +1936,13 @@ fn create_directory_contract(
         SafeFsOperation::CreateDirectory
     };
     require_mutation(parent, operation)?;
-    require_inherited_permissions(permissions)?;
+    let security = match permissions {
+        CreatePermissions::OwnerOnly => Some(OwnerOnlySecurity::new(true)?),
+        CreatePermissions::Inherit => None,
+    };
+    let security_descriptor = security
+        .as_ref()
+        .map_or(null(), OwnerOnlySecurity::descriptor_ptr);
     let handle = nt_create_relative(
         parent.native.node.handle.raw(),
         name,
@@ -1454,7 +1951,7 @@ fn create_directory_contract(
         contract.disposition,
         contract.options,
         contract.attributes,
-        null(),
+        security_descriptor,
         operation,
     )?;
     let validated =
@@ -1474,6 +1971,9 @@ fn create_directory_contract(
                     operation,
                     kind: opened.kind,
                 });
+            }
+            if let Some(expected) = &security {
+                verify_created_owner_only(handle.raw(), expected)?;
             }
             inject_windows_create_failure(WindowsCreateFailurePoint::CaseProof, operation)?;
             let case_mode = query_case_mode(handle.raw())?;
@@ -1635,20 +2135,6 @@ fn collect_revalidation_proof(directory: &DirectoryAuthority) -> Result<Revalida
         volume: fresh.anchor.native.mapping.clone(),
         snapshot: fresh.snapshot,
         remote: false,
-    })
-}
-
-fn filesystem_refusal<T>(operation: SafeFsOperation) -> Result<T> {
-    Err(SafeFsError::UnsupportedSecureFilesystem {
-        operation,
-        reason: SecureFilesystemReason::UnsupportedTarget,
-    })
-}
-
-fn mutation_refusal<T>(operation: SafeFsOperation) -> Result<T> {
-    Err(SafeFsError::UnsupportedAtomicPublish {
-        operation,
-        reason: AtomicPublishReason::PrimitiveUnavailable,
     })
 }
 
@@ -1906,11 +2392,10 @@ pub(super) fn create_stage_dir_new(
     name: &ComponentName,
     permissions: CreatePermissions,
 ) -> Result<StageCapability> {
-    require_inherited_permissions(permissions)?;
     let directory = create_directory_contract(
         parent,
         name,
-        CreatePermissions::Inherit,
+        permissions,
         DirectoryAccess::Stage,
         contract_for_operation(OpenOperation::CreateStage),
     )?;
@@ -1939,7 +2424,13 @@ pub(super) fn create_file_new(
     permissions: CreatePermissions,
 ) -> Result<FileCapability> {
     require_mutation(parent, SafeFsOperation::CreateFile)?;
-    require_inherited_permissions(permissions)?;
+    let security = match permissions {
+        CreatePermissions::OwnerOnly => Some(OwnerOnlySecurity::new(false)?),
+        CreatePermissions::Inherit => None,
+    };
+    let security_descriptor = security
+        .as_ref()
+        .map_or(null(), OwnerOnlySecurity::descriptor_ptr);
     let contract = contract_for_operation(OpenOperation::CreateFile);
     let handle = nt_create_relative(
         parent.native.node.handle.raw(),
@@ -1949,7 +2440,7 @@ pub(super) fn create_file_new(
         contract.disposition,
         contract.options,
         contract.attributes,
-        null(),
+        security_descriptor,
         SafeFsOperation::CreateFile,
     )?;
     let validated =
@@ -1979,6 +2470,9 @@ pub(super) fn create_file_new(
                     operation: SafeFsOperation::CreateFile,
                     kind: opened.kind,
                 });
+            }
+            if let Some(expected) = &security {
+                verify_created_owner_only(handle.raw(), expected)?;
             }
             Ok(opened)
         })();
@@ -2049,35 +2543,364 @@ pub(super) fn metadata_from_file(file: &NativeFile) -> Result<EntryMetadata> {
     )
 }
 
+fn rename_retained_noreplace(
+    native: &NativeDirectory,
+    parent: &DirectoryAuthority,
+    target: &ComponentName,
+) -> Result<()> {
+    require_mutation(parent, SafeFsOperation::RenameNoReplaceSameParent)?;
+    if matches!(
+        query_child_nofollow(parent, target)?,
+        ChildState::Present(_)
+    ) {
+        return Err(SafeFsError::AlreadyExists {
+            operation: SafeFsOperation::RenameNoReplaceSameParent,
+        });
+    }
+    if !native.delete_right {
+        return Err(raw_nt(
+            SafeFsOperation::RenameNoReplaceSameParent,
+            STATUS_ACCESS_DENIED,
+        ));
+    }
+    let buffer = RenameInformationBuffer::new(parent.native.node.handle.raw(), target)?;
+    let mut iosb = IO_STATUS_BLOCK::default();
+    // SAFETY: the retained DELETE source and parent handles plus the aligned,
+    // initialized variable-length buffer remain live for this synchronous call.
+    let status = unsafe {
+        NtSetInformationFile(
+            native.node.handle.raw(),
+            &mut iosb,
+            buffer.as_ptr(),
+            buffer.used,
+            FileRenameInformation,
+        )
+    };
+    if status < STATUS_SUCCESS {
+        return Err(map_rename_failure(
+            status,
+            true,
+            native.delete_right,
+            query_child_nofollow(parent, target),
+        ));
+    }
+    complete_nt(SafeFsOperation::RenameNoReplaceSameParent, status, &iosb)
+}
+
+fn verify_same_parent(expected: &DirectoryAuthority, actual: &DirectoryAuthority) -> Result<()> {
+    if expected.opened.identity == actual.opened.identity && expected.snapshot == actual.snapshot {
+        Ok(())
+    } else {
+        Err(SafeFsError::NamespaceChanged {
+            operation: SafeFsOperation::RenameNoReplaceSameParent,
+        })
+    }
+}
+
 pub(super) fn quarantine_stage(
-    _: StageCapability,
-    _: &DirectoryAuthority,
-    _: ComponentName,
+    stage: StageCapability,
+    parent: &DirectoryAuthority,
+    quarantine_name: ComponentName,
 ) -> Result<QuarantinedCapability> {
-    mutation_refusal(SafeFsOperation::QuarantineNoReplace)
+    let StageCapability {
+        parent: owned_parent,
+        directory,
+        original_name,
+        opened,
+    } = stage;
+    verify_same_parent(&owned_parent, parent)?;
+    revalidate_namespace(parent)?;
+    rename_retained_noreplace(&directory.native, parent, &quarantine_name)?;
+    Ok(QuarantinedCapability {
+        parent: owned_parent,
+        directory,
+        original_name,
+        quarantine_name,
+        opened,
+    })
 }
 
 pub(super) fn publish_stage_noreplace(
-    _: StageCapability,
-    _: &DirectoryAuthority,
-    _: ComponentName,
+    stage: StageCapability,
+    parent: &DirectoryAuthority,
+    destination: ComponentName,
 ) -> Result<()> {
-    mutation_refusal(SafeFsOperation::PublishNoReplace)
+    let StageCapability {
+        parent: owned_parent,
+        directory,
+        opened,
+        ..
+    } = stage;
+    verify_same_parent(&owned_parent, parent)?;
+    revalidate_namespace(parent)?;
+    if directory.opened.identity != opened.identity {
+        return Err(SafeFsError::IdentityChanged {
+            operation: SafeFsOperation::RenameNoReplaceSameParent,
+            expected: opened.identity,
+            actual: directory.opened.identity.clone(),
+        });
+    }
+    rename_retained_noreplace(&directory.native, parent, &destination)?;
+    drop(directory);
+    Ok(())
 }
 
+#[allow(clippy::arc_with_non_send_sync)] // Arc retains the HANDLE parent chain; capabilities never cross threads.
 pub(super) fn open_cleanup_child_nofollow(
-    _: &QuarantinedCapability,
-    _: &ComponentName,
+    quarantined: &QuarantinedCapability,
+    name: &ComponentName,
 ) -> Result<CleanupCapability> {
-    filesystem_refusal(SafeFsOperation::OpenCleanupEntry)
+    let parent = &quarantined.directory;
+    let metadata = match query_child_nofollow(parent, name)? {
+        ChildState::Absent => {
+            return Err(SafeFsError::NotFound {
+                operation: SafeFsOperation::OpenCleanupEntry,
+            })
+        }
+        ChildState::Present(metadata) => metadata,
+    };
+    let contract = contract_for_operation(match metadata.kind {
+        EntryKind::Directory => OpenOperation::CleanupDir,
+        EntryKind::SymlinkOrReparse => OpenOperation::CleanupReparse,
+        _ => OpenOperation::CleanupFile,
+    });
+    let handle = nt_create_relative(
+        parent.native.node.handle.raw(),
+        name,
+        parent.case_mode,
+        contract.desired,
+        contract.disposition,
+        contract.options,
+        contract.attributes,
+        null(),
+        SafeFsOperation::OpenCleanupEntry,
+    )?;
+    let filesystem =
+        parent
+            .opened
+            .filesystem
+            .as_ref()
+            .ok_or(SafeFsError::UnsupportedSecureFilesystem {
+                operation: SafeFsOperation::ProbeFilesystem,
+                reason: SecureFilesystemReason::FilesystemProbeUnavailable,
+            })?;
+    let opened = query_entry_metadata(handle.raw(), filesystem, SafeFsOperation::QueryMetadata)?;
+    if opened.identity != metadata.identity {
+        return Err(SafeFsError::IdentityChanged {
+            operation: SafeFsOperation::QueryMetadata,
+            expected: metadata.identity,
+            actual: opened.identity,
+        });
+    }
+    if opened.kind != metadata.kind {
+        return Err(SafeFsError::UnsupportedEntryType {
+            operation: SafeFsOperation::OpenCleanupEntry,
+            kind: opened.kind,
+        });
+    }
+    if opened.kind == EntryKind::Directory {
+        let duplicated_parent = duplicate_directory(parent)?;
+        let child_case = query_case_mode(handle.raw())?;
+        let child_snapshot = append_snapshot(&parent.snapshot, name.clone(), &opened, child_case)?;
+        let node = Arc::new(DirectoryNode {
+            handle,
+            parent: Some(Arc::clone(&parent.native.node)),
+            name: Some(name.clone()),
+            case_mode: child_case,
+            metadata: opened.clone(),
+            volume: parent.native.node.volume.clone(),
+        });
+        let directory = DirectoryAuthority {
+            anchor: Arc::clone(&parent.anchor),
+            native: NativeDirectory {
+                node,
+                access: DirectoryAccess::MutateChildren,
+                delete_right: true,
+            },
+            access: DirectoryAccess::MutateChildren,
+            opened: opened.clone(),
+            case_mode: child_case,
+            snapshot: child_snapshot,
+        };
+        Ok(CleanupCapability::Directory(Box::new(
+            QuarantinedCapability {
+                parent: duplicated_parent,
+                directory,
+                original_name: name.clone(),
+                quarantine_name: name.clone(),
+                opened,
+            },
+        )))
+    } else {
+        Ok(CleanupCapability::Entry(Box::new(CleanupEntry {
+            parent: duplicate_directory(parent)?,
+            native: NativeFile {
+                handle,
+                opened: opened.clone(),
+                access: FileAccess::Read,
+                delete_right: true,
+            },
+            name: name.clone(),
+            opened,
+            access: CleanupAccess::Delete,
+        })))
+    }
 }
 
-pub(super) fn delete_quarantined_entry(_: CleanupCapability) -> Result<()> {
-    filesystem_refusal(SafeFsOperation::DeleteQuarantinedEntry)
+#[cfg(test)]
+type BeforeRetainedDeleteHook =
+    Arc<dyn Fn(HANDLE, &DirectoryAuthority, &ComponentName) -> Result<()> + Send + Sync>;
+
+#[cfg(test)]
+static BEFORE_RETAINED_DELETE_HOOK: std::sync::OnceLock<
+    std::sync::Mutex<Option<BeforeRetainedDeleteHook>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+struct BeforeRetainedDeleteHookGuard;
+
+#[cfg(test)]
+impl Drop for BeforeRetainedDeleteHookGuard {
+    fn drop(&mut self) {
+        *BEFORE_RETAINED_DELETE_HOOK
+            .get_or_init(Default::default)
+            .lock()
+            .expect("retained-delete hook mutex poisoned") = None;
+    }
 }
 
-pub(super) fn delete_quarantined_empty_directory(_: QuarantinedCapability) -> Result<()> {
-    filesystem_refusal(SafeFsOperation::DeleteQuarantinedEmptyDirectory)
+#[cfg(test)]
+fn install_before_retained_delete_hook(
+    hook: BeforeRetainedDeleteHook,
+) -> BeforeRetainedDeleteHookGuard {
+    let mut slot = BEFORE_RETAINED_DELETE_HOOK
+        .get_or_init(Default::default)
+        .lock()
+        .expect("retained-delete hook mutex poisoned");
+    assert!(
+        slot.is_none(),
+        "retained-delete tests require --test-threads=1"
+    );
+    *slot = Some(hook);
+    BeforeRetainedDeleteHookGuard
+}
+
+fn run_before_retained_delete_hook(
+    handle: HANDLE,
+    parent: &DirectoryAuthority,
+    name: &ComponentName,
+) -> Result<()> {
+    #[cfg(test)]
+    {
+        let hook = BEFORE_RETAINED_DELETE_HOOK
+            .get_or_init(Default::default)
+            .lock()
+            .expect("retained-delete hook mutex poisoned")
+            .clone();
+        if let Some(hook) = hook {
+            return hook(handle, parent, name);
+        }
+    }
+    let _ = (handle, parent, name);
+    Ok(())
+}
+
+fn dispose_retained(
+    mut native: NativeFile,
+    parent: &DirectoryAuthority,
+    name: &ComponentName,
+    expected_kind: EntryKind,
+    operation: SafeFsOperation,
+) -> Result<()> {
+    if !native.delete_right {
+        return Err(SafeFsError::Os {
+            operation,
+            raw: RawOsError::Win32(windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED),
+        });
+    }
+    if native.opened.kind != expected_kind {
+        return Err(SafeFsError::UnsupportedEntryType {
+            operation,
+            kind: native.opened.kind,
+        });
+    }
+    run_before_retained_delete_hook(native.handle.raw(), parent, name)?;
+    mark_delete_handle(native.handle.raw(), operation)?;
+    native.delete_right = false;
+    drop(native);
+    Ok(())
+}
+
+pub(super) fn delete_quarantined_entry(cleanup: CleanupCapability) -> Result<()> {
+    match cleanup {
+        CleanupCapability::Entry(entry) => {
+            let CleanupEntry {
+                parent,
+                native,
+                name,
+                opened,
+                access: CleanupAccess::Delete,
+            } = *entry;
+            if native.opened.identity != opened.identity {
+                return Err(SafeFsError::IdentityChanged {
+                    operation: SafeFsOperation::DeleteQuarantinedEntry,
+                    expected: opened.identity,
+                    actual: native.opened.identity,
+                });
+            }
+            dispose_retained(
+                native,
+                &parent,
+                &name,
+                opened.kind,
+                SafeFsOperation::DeleteQuarantinedEntry,
+            )
+        }
+        CleanupCapability::Directory(_) => Err(SafeFsError::UnsupportedEntryType {
+            operation: SafeFsOperation::DeleteQuarantinedEntry,
+            kind: EntryKind::Directory,
+        }),
+    }
+}
+
+pub(super) fn delete_quarantined_empty_directory(quarantined: QuarantinedCapability) -> Result<()> {
+    let QuarantinedCapability {
+        parent,
+        directory,
+        quarantine_name,
+        opened,
+        ..
+    } = quarantined;
+    if directory.opened.identity != opened.identity || !directory.native.delete_right {
+        return Err(SafeFsError::IdentityChanged {
+            operation: SafeFsOperation::DeleteQuarantinedEmptyDirectory,
+            expected: opened.identity,
+            actual: directory.opened.identity,
+        });
+    }
+    let native = NativeFile {
+        handle: Arc::try_unwrap(directory.native.node)
+            .map_err(|node| {
+                SafeFsError::io(
+                    SafeFsOperation::DeleteQuarantinedEmptyDirectory,
+                    io::Error::other(format!(
+                        "directory handle still shared: {}",
+                        Arc::strong_count(&node)
+                    )),
+                )
+            })?
+            .handle,
+        opened: directory.opened,
+        access: FileAccess::Read,
+        delete_right: true,
+    };
+    dispose_retained(
+        native,
+        &parent,
+        &quarantine_name,
+        EntryKind::Directory,
+        SafeFsOperation::DeleteQuarantinedEmptyDirectory,
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2088,7 +2911,6 @@ enum WindowsCreateFailurePoint {
     CaseProof,
     SnapshotAssembly,
     ParentDuplicate,
-    #[allow(dead_code)] // Task 7A test-only removes this when it constructs the variant.
     SecurityVerification,
 }
 
@@ -2174,6 +2996,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
+    use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     struct TestDir(PathBuf);
@@ -2208,6 +3031,22 @@ mod tests {
     fn root(dir: &TestDir) -> DirectoryAuthority {
         capture_absolute_directory(dir.path(), DirectoryAccess::MutateChildren)
             .expect("capture fixture root")
+    }
+
+    fn present_for_test() -> ChildState {
+        ChildState::Present(EntryMetadata {
+            identity: StableIdentity::Windows {
+                volume_serial: 7,
+                file_id: [3; 16],
+            },
+            kind: EntryKind::RegularFile,
+            len: 0,
+            link_count: 1,
+            filesystem: Some(LocalFilesystemSnapshot::Windows {
+                volume_guid: vec![1],
+                serial: 7,
+            }),
+        })
     }
 
     #[test]
@@ -2266,6 +3105,364 @@ mod tests {
         assert_eq!(file.read(&mut output).unwrap(), 8);
         assert_eq!(&output, b"retained");
         assert_eq!(enumerate(&b).unwrap(), vec![name("data")]);
+    }
+
+    #[test]
+    fn owner_only_file_directory_stage_succeed_and_rollback() {
+        let temp = TestDir::new("owner-only");
+        let authority = root(&temp);
+
+        let file = create_file_new(&authority, &name("file"), CreatePermissions::OwnerOnly)
+            .expect("owner-only file creation succeeds");
+        drop(file);
+        let directory = create_dir_new(
+            &authority,
+            &name("directory"),
+            CreatePermissions::OwnerOnly,
+            DirectoryAccess::MutateChildren,
+        )
+        .expect("owner-only directory creation succeeds");
+        drop(directory);
+        let stage = create_stage_dir_new(&authority, &name("stage"), CreatePermissions::OwnerOnly)
+            .expect("owner-only stage creation succeeds");
+        drop(stage);
+        for value in ["file", "directory", "stage"] {
+            assert!(matches!(
+                query_child_nofollow(&authority, &name(value)).unwrap(),
+                ChildState::Present(_)
+            ));
+        }
+
+        force_next_owner_verification_failure();
+        assert!(matches!(
+            create_file_new(
+                &authority,
+                &name("rollback-file"),
+                CreatePermissions::OwnerOnly
+            ),
+            Err(SafeFsError::InvalidNativeBuffer {
+                operation: SafeFsOperation::VerifySecurityDescriptor,
+                reason: NativeBufferReason::SecurityDescriptorMalformed,
+            })
+        ));
+        force_next_owner_verification_failure();
+        assert!(matches!(
+            create_dir_new(
+                &authority,
+                &name("rollback-directory"),
+                CreatePermissions::OwnerOnly,
+                DirectoryAccess::MutateChildren,
+            ),
+            Err(SafeFsError::InvalidNativeBuffer {
+                operation: SafeFsOperation::VerifySecurityDescriptor,
+                reason: NativeBufferReason::SecurityDescriptorMalformed,
+            })
+        ));
+        force_next_owner_verification_failure();
+        assert!(matches!(
+            create_stage_dir_new(
+                &authority,
+                &name("rollback-stage"),
+                CreatePermissions::OwnerOnly,
+            ),
+            Err(SafeFsError::InvalidNativeBuffer {
+                operation: SafeFsOperation::VerifySecurityDescriptor,
+                reason: NativeBufferReason::SecurityDescriptorMalformed,
+            })
+        ));
+        for value in ["rollback-file", "rollback-directory", "rollback-stage"] {
+            assert!(matches!(
+                query_child_nofollow(&authority, &name(value)).unwrap(),
+                ChildState::Absent
+            ));
+        }
+    }
+
+    #[test]
+    fn windows_post_create_security_failure_rolls_back_same_handle() {
+        let temp = TestDir::new("security-rollback");
+        let authority = root(&temp);
+        let _failure =
+            install_windows_create_failure(WindowsCreateFailurePoint::SecurityVerification);
+        assert!(matches!(
+            create_file_new(&authority, &name("leaf"), CreatePermissions::OwnerOnly),
+            Err(SafeFsError::Io {
+                operation: SafeFsOperation::VerifySecurityDescriptor,
+                ..
+            })
+        ));
+        assert!(matches!(
+            query_child_nofollow(&authority, &name("leaf")).unwrap(),
+            ChildState::Absent
+        ));
+    }
+
+    fn assert_owner_descriptor_fixture_rejected(fixture: OwnerDescriptorFixture, leaf: &str) {
+        let temp = TestDir::new(leaf);
+        let authority = root(&temp);
+        let _fixture = install_owner_descriptor_fixture(fixture);
+        assert!(matches!(
+            create_file_new(&authority, &name(leaf), CreatePermissions::OwnerOnly),
+            Err(SafeFsError::InvalidNativeBuffer {
+                operation: SafeFsOperation::VerifySecurityDescriptor,
+                reason: NativeBufferReason::SecurityDescriptorMalformed,
+            })
+        ));
+        assert!(matches!(
+            query_child_nofollow(&authority, &name(leaf)).unwrap(),
+            ChildState::Absent
+        ));
+    }
+
+    #[test]
+    fn owner_only_dacl_rejects_wrong_ace_type() {
+        assert_owner_descriptor_fixture_rejected(
+            OwnerDescriptorFixture::WrongAceType,
+            "wrong-ace-type",
+        );
+    }
+
+    #[test]
+    fn owner_only_dacl_rejects_undersized_ace_and_out_of_range_acl_fields() {
+        for (fixture, leaf) in [
+            (OwnerDescriptorFixture::UndersizedAce, "undersized-ace"),
+            (OwnerDescriptorFixture::DaclOutOfRange, "dacl-out-of-range"),
+            (
+                OwnerDescriptorFixture::AclBytesOutOfRange,
+                "acl-bytes-out-of-range",
+            ),
+            (OwnerDescriptorFixture::WrongAceCount, "wrong-ace-count"),
+            (OwnerDescriptorFixture::AceOutOfRange, "ace-out-of-range"),
+        ] {
+            assert_owner_descriptor_fixture_rejected(fixture, leaf);
+        }
+    }
+
+    #[test]
+    fn owner_only_dacl_rejects_oversized_sid() {
+        assert_owner_descriptor_fixture_rejected(
+            OwnerDescriptorFixture::OversizedSid,
+            "oversized-sid",
+        );
+    }
+
+    #[test]
+    fn owner_only_dacl_rejects_invalid_sid() {
+        assert_owner_descriptor_fixture_rejected(OwnerDescriptorFixture::InvalidSid, "invalid-sid");
+    }
+
+    #[test]
+    fn owner_only_dacl_rejects_null_or_invalid_owner() {
+        assert_owner_descriptor_fixture_rejected(OwnerDescriptorFixture::NullOwner, "null-owner");
+        assert_owner_descriptor_fixture_rejected(
+            OwnerDescriptorFixture::InvalidOwner,
+            "invalid-owner",
+        );
+    }
+
+    #[test]
+    fn quarantine_and_publish_success_do_not_self_conflict() {
+        let quarantine_temp = TestDir::new("quarantine-success");
+        let authority = root(&quarantine_temp);
+        let stage =
+            create_stage_dir_new(&authority, &name("stage"), CreatePermissions::Inherit).unwrap();
+        let quarantined = quarantine_stage(stage, &authority, name("quarantine"))
+            .expect("retained quarantine rename succeeds");
+        drop(quarantined);
+        assert!(!quarantine_temp.path().join("stage").exists());
+        assert!(quarantine_temp.path().join("quarantine").is_dir());
+
+        let publish_temp = TestDir::new("publish-success");
+        let authority = root(&publish_temp);
+        let stage =
+            create_stage_dir_new(&authority, &name("stage"), CreatePermissions::Inherit).unwrap();
+        publish_stage_noreplace(stage, &authority, name("destination"))
+            .expect("retained publish rename succeeds");
+        assert!(!publish_temp.path().join("stage").exists());
+        assert!(publish_temp.path().join("destination").is_dir());
+    }
+
+    #[test]
+    fn rename_never_replaces_any_target_kind() {
+        assert!(matches!(
+            map_rename_failure(STATUS_ACCESS_DENIED, true, true, Ok(present_for_test())),
+            SafeFsError::AlreadyExists { .. }
+        ));
+        assert!(matches!(
+            map_rename_failure(STATUS_ACCESS_DENIED, true, true, Ok(ChildState::Absent)),
+            SafeFsError::Os {
+                raw: RawOsError::NtStatus {
+                    status: STATUS_ACCESS_DENIED,
+                    ..
+                },
+                ..
+            }
+        ));
+        for kind in ["file", "empty-dir", "nonempty-dir", "reparse"] {
+            let temp = TestDir::new(kind);
+            let target = temp.path().join("target");
+            let external = temp.path().join("external");
+            match kind {
+                "file" => fs::write(&target, b"keep-file").unwrap(),
+                "empty-dir" => fs::create_dir(&target).unwrap(),
+                "nonempty-dir" => {
+                    fs::create_dir(&target).unwrap();
+                    fs::write(target.join("keep"), b"tree").unwrap();
+                }
+                "reparse" => {
+                    fs::create_dir(&external).unwrap();
+                    fs::write(external.join("keep"), b"outside").unwrap();
+                    let output = Command::new("cmd")
+                        .args(["/C", "mklink", "/J"])
+                        .arg(&target)
+                        .arg(&external)
+                        .output()
+                        .unwrap();
+                    assert!(
+                        output.status.success(),
+                        "mklink failed: {}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                _ => unreachable!(),
+            }
+            let authority = root(&temp);
+            let before = match query_child_nofollow(&authority, &name("target")).unwrap() {
+                ChildState::Present(value) => value,
+                ChildState::Absent => panic!("collision target absent"),
+            };
+            let stage =
+                create_stage_dir_new(&authority, &name("stage"), CreatePermissions::Inherit)
+                    .unwrap();
+            assert!(matches!(
+                publish_stage_noreplace(stage, &authority, name("target")),
+                Err(SafeFsError::AlreadyExists { .. })
+            ));
+            let after = match query_child_nofollow(&authority, &name("target")).unwrap() {
+                ChildState::Present(value) => value,
+                ChildState::Absent => panic!("collision target removed"),
+            };
+            assert_eq!(after.identity, before.identity);
+            match kind {
+                "file" => assert_eq!(fs::read(&target).unwrap(), b"keep-file"),
+                "nonempty-dir" => assert_eq!(fs::read(target.join("keep")).unwrap(), b"tree"),
+                "reparse" => assert_eq!(fs::read(external.join("keep")).unwrap(), b"outside"),
+                _ => assert!(target.is_dir()),
+            }
+        }
+    }
+
+    #[test]
+    fn cleanup_quarantined_tree_deletes_nested_reparse_without_traversal() {
+        let temp = TestDir::new("cleanup-tree");
+        let external = temp.path().join("external");
+        fs::create_dir(&external).unwrap();
+        fs::write(external.join("keep"), b"outside-bytes").unwrap();
+        let authority = root(&temp);
+        let stage =
+            create_stage_dir_new(&authority, &name("stage"), CreatePermissions::Inherit).unwrap();
+        let nested = create_dir_new(
+            stage.directory(),
+            &name("nested"),
+            CreatePermissions::Inherit,
+            DirectoryAccess::MutateChildren,
+        )
+        .unwrap();
+        let mut file = create_file_new(&nested, &name("data"), CreatePermissions::Inherit).unwrap();
+        file.write_all(b"inside").unwrap();
+        drop(file);
+        drop(nested);
+        let output = Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(temp.path().join("stage").join("nested").join("link"))
+            .arg(&external)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "mklink failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let quarantine = quarantine_stage(stage, &authority, name("quarantine")).unwrap();
+        super::super::cleanup_quarantined_tree(quarantine)
+            .expect("common recursive cleanup succeeds");
+        assert!(matches!(
+            query_child_nofollow(&authority, &name("quarantine")).unwrap(),
+            ChildState::Absent
+        ));
+        assert_eq!(fs::read(external.join("keep")).unwrap(), b"outside-bytes");
+    }
+
+    #[test]
+    fn retained_delete_is_safe_when_real_name_rebinds_or_is_blocked() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let temp = TestDir::new("delete-rebound");
+        let authority = root(&temp);
+        let stage =
+            create_stage_dir_new(&authority, &name("stage"), CreatePermissions::Inherit).unwrap();
+        let mut file =
+            create_file_new(stage.directory(), &name("leaf"), CreatePermissions::Inherit).unwrap();
+        file.write_all(b"original").unwrap();
+        drop(file);
+        let quarantine = quarantine_stage(stage, &authority, name("quarantine")).unwrap();
+        let cleanup = open_cleanup_child_nofollow(&quarantine, &name("leaf")).unwrap();
+        let expected_source = match &cleanup {
+            CleanupCapability::Entry(entry) => entry.native.handle.raw() as usize,
+            CleanupCapability::Directory(_) => panic!("leaf opened as a directory"),
+        };
+        let quarantine_path = temp.path().join("quarantine");
+        let rebound = Arc::new(AtomicBool::new(false));
+        let hook_rebound = Arc::clone(&rebound);
+        let _guard = install_before_retained_delete_hook(Arc::new(
+            move |source, parent, _old_name| {
+                if source as usize != expected_source {
+                    return Ok(());
+                }
+                let buffer = RenameInformationBuffer::new(
+                    parent.native.node.handle.raw(),
+                    &name("moved-original"),
+                )?;
+                let mut iosb = IO_STATUS_BLOCK::default();
+                // SAFETY: source is the retained DELETE handle and all inputs
+                // remain live for this synchronous test-only rename.
+                let status = unsafe {
+                    NtSetInformationFile(
+                        source,
+                        &mut iosb,
+                        buffer.as_ptr(),
+                        buffer.used,
+                        FileRenameInformation,
+                    )
+                };
+                if status == STATUS_SUCCESS {
+                    complete_nt(SafeFsOperation::RenameNoReplaceSameParent, status, &iosb)?;
+                    fs::write(quarantine_path.join("leaf"), b"replacement")
+                        .map_err(|error| SafeFsError::io(SafeFsOperation::CreateFile, error))?;
+                    hook_rebound.store(true, Ordering::SeqCst);
+                } else {
+                    assert_eq!(
+                        status, STATUS_SHARING_VIOLATION,
+                        "Windows may reject the simulated same-handle rename, but no other failure is expected"
+                    );
+                }
+                Ok(())
+            },
+        ));
+        delete_quarantined_entry(cleanup).unwrap();
+        if rebound.load(Ordering::SeqCst) {
+            assert_eq!(
+                fs::read(temp.path().join("quarantine").join("leaf")).unwrap(),
+                b"replacement"
+            );
+        } else {
+            assert!(!temp.path().join("quarantine").join("leaf").exists());
+        }
+        assert!(!temp
+            .path()
+            .join("quarantine")
+            .join("moved-original")
+            .exists());
     }
 
     fn assert_file_create_failure_rolls_back(point: WindowsCreateFailurePoint, label: &str) {

@@ -17,10 +17,26 @@ use crate::clip_wire::{
     deserialize_one_on_error, deserialize_optional_crop_track_on_error,
     deserialize_optional_f64_track_on_error, deserialize_optional_pair_track_on_error,
 };
-use crate::grade::{ChromaKey, ColorGrade, Effect, Mask};
+use crate::grade::{ChromaKey, ColorGrade, ColorMatchInput, Effect, Mask};
 use crate::keyframe::{AnimPair, AnimatableProperty, Interpolation, KeyframeTrack};
+use crate::lut::LutReference;
+use crate::stabilization::StabilizationTrack;
 use crate::text::TextStyle;
 use crate::transform::{Crop, Point, Transform};
+use crate::transition::Transition;
+
+/// Persisted provenance for one accepted caption translation. The original
+/// text remains available for review/recovery and manual text edits clear this
+/// record so the project never attributes authored text to a provider.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptionTranslationInput {
+    pub source_text: String,
+    pub source_locale: String,
+    pub target_locale: String,
+    pub provider: String,
+    pub model: String,
+}
 
 /// Linear amplitude <-> dB mapping for the volume slider. 1:1 port of
 /// upstream `VolumeScale`. Below the floor we snap to true 0 (hard mute).
@@ -147,6 +163,15 @@ pub struct Clip {
         skip_serializing_if = "Option::is_none"
     )]
     pub caption_group_id: Option<String>,
+    /// ID of an editable child timeline in the root timeline's
+    /// `nestedSequences` registry. Nested clips never overload `mediaRef` with
+    /// a sentinel value, so media and sequence identity remain unambiguous.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_default_on_error",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub nested_sequence_id: Option<String>,
 
     // Text clips only.
     #[serde(
@@ -161,6 +186,8 @@ pub struct Clip {
         skip_serializing_if = "Option::is_none"
     )]
     pub text_style: Option<TextStyle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caption_translation_input: Option<CaptionTranslationInput>,
 
     // Keyframe tracks for each animatable property. None when no animation exists.
     #[serde(
@@ -200,12 +227,29 @@ pub struct Clip {
     )]
     pub volume_track: Option<KeyframeTrack<f64>>,
 
+    /// Source analysis plus the static gain used identically by preview and
+    /// export. `None` leaves authored volume behavior unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loudness_normalization: Option<crate::LoudnessNormalization>,
+
+    /// Local non-destructive denoise configuration. Source PCM is never
+    /// rewritten; native preview and export process decoded copies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_denoise: Option<crate::AudioDenoise>,
+
     // Advanced pixel-effect fields (A-tier; `docs/ADVANCED-FEATURES.md`). All
     // `#[serde(default)]` + Option/Vec, so older projects (without these keys)
     // decode unchanged, and an all-default clip omits them on the way out.
     /// High-end floating-point color grade (linear-light chain). `None` = no grade.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color_grade: Option<ColorGrade>,
+    /// Sampling inputs and measured result for an automatically matched grade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_match_input: Option<ColorMatchInput>,
+    /// Project-managed 3D LUT reference. The persisted id maps only to the
+    /// bundle's canonical `media/luts/<sha256>.cube` location.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lut: Option<LutReference>,
     /// Green/blue-screen chroma key. `None` = no keying.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chroma_key: Option<ChromaKey>,
@@ -215,6 +259,17 @@ pub struct Clip {
     /// Generic named-effect chain. Empty = no effects.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<Effect>,
+    /// Non-destructive camera compensation composed with authored transform tracks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stabilization: Option<StabilizationTrack>,
+    /// Optional visual transition into one exact adjacent successor. Pair
+    /// identity prevents stale transitions from rebinding after moves/deletes.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_default_on_error",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub transition_out: Option<Transition>,
     /// Reverse playback. When true, video clips sample their referenced source
     /// window in reverse order. Non-video sources ignore this flag.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -245,18 +300,25 @@ impl Clip {
         "crop",
         "linkGroupId",
         "captionGroupId",
+        "nestedSequenceId",
         "textContent",
         "textStyle",
+        "captionTranslationInput",
         "opacityTrack",
         "positionTrack",
         "scaleTrack",
         "rotationTrack",
         "cropTrack",
         "volumeTrack",
+        "loudnessNormalization",
+        "audioDenoise",
         "colorGrade",
+        "lut",
         "chromaKey",
         "masks",
         "effects",
+        "stabilization",
+        "transitionOut",
         "reversed",
     ];
     pub const TOLERANT_SCALAR_WIRE_FIELDS: &'static [&'static str] = &[
@@ -334,20 +396,40 @@ impl Clip {
             crop: Crop::default(),
             link_group_id: None,
             caption_group_id: None,
+            nested_sequence_id: None,
             text_content: None,
             text_style: None,
+            caption_translation_input: None,
             opacity_track: None,
             position_track: None,
             scale_track: None,
             rotation_track: None,
             crop_track: None,
             volume_track: None,
+            loudness_normalization: None,
+            audio_denoise: None,
             color_grade: None,
+            color_match_input: None,
+            lut: None,
             chroma_key: None,
             masks: Vec::new(),
             effects: Vec::new(),
+            stabilization: None,
+            transition_out: None,
             reversed: false,
         }
+    }
+
+    /// Construct a clip that references one editable nested sequence.
+    pub fn new_nested(
+        id: impl Into<String>,
+        sequence_id: impl Into<String>,
+        start_frame: i32,
+        duration_frames: i32,
+    ) -> Self {
+        let mut clip = Self::new(id, "", start_frame, duration_frames);
+        clip.nested_sequence_id = Some(sequence_id.into());
+        clip
     }
 
     /// Frame where this clip ends on the timeline (exclusive end).
@@ -486,7 +568,7 @@ impl Clip {
             }
             _ => 1.0,
         };
-        self.volume * kf_gain * self.fade_multiplier(frame)
+        self.volume * kf_gain * self.loudness_gain() * self.fade_multiplier(frame)
     }
 
     /// Linear volume without the fade envelope.
@@ -497,7 +579,13 @@ impl Clip {
             }
             _ => 1.0,
         };
-        self.volume * kf_gain
+        self.volume * kf_gain * self.loudness_gain()
+    }
+
+    pub fn loudness_gain(&self) -> f64 {
+        self.loudness_normalization
+            .map(crate::LoudnessNormalization::linear_gain)
+            .unwrap_or(1.0)
     }
 
     /// 0..=1 envelope from the fade head/tail ramps. `min(in, out)`. Returns 0
@@ -904,6 +992,27 @@ mod tests {
     }
 
     #[test]
+    fn persisted_loudness_gain_is_shared_by_raw_and_effective_volume() {
+        let mut c = base_clip();
+        c.volume = 0.5;
+        c.loudness_normalization = Some(crate::LoudnessNormalization {
+            target_lufs: -16.0,
+            true_peak_ceiling_dbtp: -1.0,
+            input_integrated_lufs: -22.0,
+            input_true_peak_dbtp: -8.0,
+            gain_db: 6.0,
+            output_integrated_lufs: -16.0,
+            output_true_peak_dbtp: -2.0,
+        });
+        let expected = 0.5 * 10.0_f64.powf(6.0 / 20.0);
+        approx(c.raw_volume_at(110), expected);
+        approx(c.volume_at(110), expected);
+        let json = serde_json::to_string(&c).unwrap();
+        let roundtrip: Clip = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip.loudness_normalization, c.loudness_normalization);
+    }
+
+    #[test]
     fn live_volume_kf_db_requires_active_track_and_membership() {
         let mut c = base_clip();
         assert_eq!(c.live_volume_kf_db(110), None); // no track
@@ -1150,6 +1259,42 @@ mod tests {
     }
 
     #[test]
+    fn clip_transition_roundtrips_and_legacy_projects_default_to_none() {
+        let mut c = base_clip();
+        c.transition_out = Some(crate::transition::Transition {
+            from_clip_id: "c1".into(),
+            to_clip_id: "c2".into(),
+            kind: crate::transition::TransitionKind::CrossDissolve,
+            duration_frames: 12,
+        });
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains(
+            r#""transitionOut":{"fromClipId":"c1","toClipId":"c2","kind":"crossDissolve","durationFrames":12}"#
+        ));
+        let back: Clip = serde_json::from_str(&json).unwrap();
+        assert_eq!(c, back);
+
+        let legacy: Clip = serde_json::from_str(
+            r#"{"id":"old","mediaRef":"m","startFrame":0,"durationFrames":12}"#,
+        )
+        .unwrap();
+        assert!(legacy.transition_out.is_none());
+
+        let legacy_transition: Clip = serde_json::from_str(
+            r#"{"id":"c1","mediaRef":"m","startFrame":0,"durationFrames":12,"transitionOut":{"toClipId":"c2","kind":"crossDissolve","durationFrames":4}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            legacy_transition
+                .transition_out
+                .as_ref()
+                .unwrap()
+                .from_clip_id,
+            ""
+        );
+    }
+
+    #[test]
     fn clip_decodes_with_missing_optional_fields() {
         // Only the required keys present; everything else falls back to defaults.
         let json = r#"{"mediaRef":"m","startFrame":0,"durationFrames":12}"#;
@@ -1221,8 +1366,9 @@ mod tests {
             },
             feather: 0.05,
             invert: false,
+            ..Mask::default()
         }];
-        c.effects = vec![Effect::new("gaussianBlur").with_param("radius", 4.0)];
+        c.effects = vec![Effect::new("grayscale").with_param("amount", 0.4)];
         let json = serde_json::to_string(&c).unwrap();
         assert!(json.contains("\"colorGrade\""));
         assert!(json.contains("\"chromaKey\""));

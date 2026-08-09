@@ -49,12 +49,18 @@ impl AllowedOrigin {
     /// local dev origin) URL — plaintext remote origins are refused outright.
     pub fn parse(origin: &str) -> Option<Self> {
         let lower = origin.trim().trim_end_matches('/').to_ascii_lowercase();
-        let is_https = lower.starts_with("https://");
-        // Allow http only for loopback dev servers; never for remote hosts.
-        let is_local_http = lower.starts_with("http://localhost")
-            || lower.starts_with("http://127.0.0.1")
-            || lower.starts_with("http://[::1]");
-        if (is_https || is_local_http) && lower.len() > "https://".len() {
+        let (scheme, authority) = lower.split_once("://")?;
+        if authority.is_empty()
+            || authority.contains(['/', '?', '#', '@'])
+            || authority.chars().any(char::is_whitespace)
+        {
+            return None;
+        }
+        let is_https = scheme == "https";
+        // Allow http only for exact loopback hosts (with an optional port),
+        // never for lookalikes such as localhost.evil.example.
+        let is_local_http = scheme == "http" && is_loopback_authority(authority);
+        if is_https || is_local_http {
             Some(AllowedOrigin(lower))
         } else {
             None
@@ -64,6 +70,28 @@ impl AllowedOrigin {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    fn matches_url(&self, url: &str) -> bool {
+        let Some(rest) = url.strip_prefix(self.as_str()) else {
+            return false;
+        };
+        rest.is_empty() || rest.starts_with(['/', '?', '#'])
+    }
+}
+
+fn is_loopback_authority(authority: &str) -> bool {
+    for host in ["localhost", "127.0.0.1", "[::1]"] {
+        if authority == host {
+            return true;
+        }
+        if let Some(port) = authority
+            .strip_prefix(host)
+            .and_then(|rest| rest.strip_prefix(':'))
+        {
+            return !port.is_empty() && port.bytes().all(|byte| byte.is_ascii_digit());
+        }
+    }
+    false
 }
 
 /// The sandbox policy applied to a single render.
@@ -128,7 +156,7 @@ impl SandboxPolicy {
         let allowed = self
             .allowed_origins
             .iter()
-            .any(|o| lower.starts_with(o.as_str()));
+            .any(|origin| origin.matches_url(&lower));
         if allowed {
             Ok(())
         } else {
@@ -138,7 +166,9 @@ impl SandboxPolicy {
         }
     }
 
-    /// Reject an inline document larger than the configured ceiling.
+    /// Reject an inline document larger than the configured byte ceiling.
+    /// Equality is accepted; UTF-8 text is charged by encoded bytes, matching
+    /// what is handed to Chromium and what consumes memory.
     pub fn check_document_size(&self, document: &str) -> MotionResult<()> {
         if document.len() > self.max_document_bytes {
             return Err(MotionError::sandbox(format!(
@@ -175,6 +205,9 @@ mod tests {
         assert!(p.check_url("https://unpkg.com/thing").is_err());
         // origin stored without trailing slash, case-insensitive match
         assert!(p.check_url("HTTPS://CDN.JSDELIVR.NET/a").is_ok());
+        assert!(p
+            .check_url("https://cdn.jsdelivr.net.evil.example/a")
+            .is_err());
     }
 
     #[test]
@@ -183,7 +216,9 @@ mod tests {
         assert!(AllowedOrigin::parse("http://cdn.evil.com").is_none());
         // but loopback http is allowed for local dev servers
         assert!(AllowedOrigin::parse("http://localhost:5173").is_some());
+        assert!(AllowedOrigin::parse("http://localhost.evil.example").is_none());
         assert!(AllowedOrigin::parse("https://example.com").is_some());
+        assert!(AllowedOrigin::parse("https://example.com/path").is_none());
         // junk
         assert!(AllowedOrigin::parse("ftp://x").is_none());
         assert!(AllowedOrigin::parse("https://").is_none());
@@ -203,8 +238,15 @@ mod tests {
             max_document_bytes: 10,
             ..Default::default()
         };
-        assert!(p.check_document_size("under10").is_ok());
-        assert!(p.check_document_size("this is way over ten bytes").is_err());
+        assert!(p.check_document_size("0123456789").is_ok());
+        assert!(p.check_document_size("01234567890").is_err());
+
+        let utf8 = SandboxPolicy {
+            max_document_bytes: 3,
+            ..Default::default()
+        };
+        assert!(utf8.check_document_size("é").is_ok()); // 2 UTF-8 bytes
+        assert!(utf8.check_document_size("éé").is_err()); // 4 UTF-8 bytes
     }
 
     #[test]

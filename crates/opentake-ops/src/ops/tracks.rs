@@ -88,13 +88,15 @@ pub fn available_audio_track_index(
     start_frame: i32,
     duration: i32,
 ) -> Option<usize> {
+    let end_frame = start_frame.checked_add(duration)?;
     let z = zones(timeline);
     for i in z.first_audio_index..z.track_count {
         let track = &timeline.tracks[i];
-        let conflicts = track
-            .clips
-            .iter()
-            .any(|c| !(c.end_frame() <= start_frame || c.start_frame >= start_frame + duration));
+        let conflicts = track.clips.iter().any(|clip| {
+            clip.start_frame
+                .checked_add(clip.duration_frames)
+                .is_none_or(|clip_end| !(clip_end <= start_frame || clip.start_frame >= end_frame))
+        });
         if !conflicts {
             return Some(i);
         }

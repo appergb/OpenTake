@@ -2,19 +2,17 @@
 //!
 //! The acceptance is "audio drives the playhead; video follows (dropping frames
 //! to stay in sync)". [`try_build_clock`] realises that: when the timeline carries
-//! sound it pre-mixes the whole timeline to one **interleaved stereo** buffer at
-//! the cpal device sample rate, plays it through a dedicated cpal output thread,
+//! sound it schedules bounded **interleaved stereo** windows at the cpal device
+//! sample rate, plays them through a dedicated cpal output thread,
 //! and exposes the device's frame position as [`AudioClock`] — the master clock
 //! the render loop reads to pick its target video frame. A silent timeline falls
 //! back to the wall-clock [`InstantClock`] PR1 ships.
 //!
-//! ## Why preload-mix (not chunked streaming)
-//! The cpal callback must never block or allocate. Pre-mixing to an immutable
-//! buffer makes the callback a lock-free copy from `buffer[pos..]` (advancing one
-//! `AtomicU64`), which is the simplest correct master clock — no live decode race
-//! in the real-time audio thread. The cost is an up-front decode (off the IPC
-//! thread, see `commands.rs`) + memory for the mix; chunked / background-filled
-//! streaming for very long timelines is the remaining half of #160.
+//! The cpal callback never blocks or allocates. A single producer decodes and
+//! mixes fixed windows into a bounded channel; the callback uses only atomics
+//! and non-blocking `try_recv`, emitting silence on underrun. Seek advances a
+//! generation, cancels the old decode, and makes both producer and consumer
+//! discard stale windows before audible output resumes.
 //!
 //! Stereo is mixed once and mapped to the device's channel count in the callback
 //! (mono downmix / >2 zero-fill). The mixing math mirrors the proven export
@@ -24,16 +22,18 @@ use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
+use crossbeam_channel::{bounded, Receiver as ChunkReceiver, Sender as ChunkSender};
 
-use opentake_domain::{Clip, ClipType, Timeline};
+use opentake_domain::{AudioDenoise, Clip, ClipType, Timeline};
 use opentake_media::{
-    decode_pcm_interleaved_cancellable, MediaCancelToken, MediaError, PcmFormat, PcmSpec,
+    decode_pcm_interleaved_cancellable, encode::mix::apply_true_peak_ceiling, MediaCancelToken,
+    MediaError, PcmFormat, PcmSpec,
 };
 
 use super::engine::{InstantClock, PlaybackClock};
@@ -45,8 +45,10 @@ const FALLBACK_SAMPLE_RATE: u32 = 48_000;
 /// The mix is always interleaved stereo; the callback maps it to the device's
 /// channel count.
 const MIX_CHANNELS: usize = 2;
-const MAX_SESSION_PREMIX_BYTES: usize = 256 * 1024 * 1024;
 const MIX_CANCEL_CHUNK_FRAMES: usize = 4 * 1024;
+const STREAM_WINDOW_SECONDS: usize = 2;
+const STREAM_WINDOW_CAPACITY: usize = 4;
+const STREAM_SEND_POLL: Duration = Duration::from_millis(5);
 const CALLBACK_START_TIMEOUT: Duration = Duration::from_secs(1);
 const CALLBACK_POLL_INTERVAL: Duration = Duration::from_millis(5);
 const CALLBACKS_REQUIRED_FOR_LIVENESS: u64 = 2;
@@ -179,73 +181,116 @@ fn audio_allocation_failed(detail: impl std::fmt::Display) -> MediaError {
     MediaError::Decode(format!("audio_allocation_failed: {detail}"))
 }
 
-fn checked_audio_bytes(frames: usize) -> Result<usize, MediaError> {
-    frames
-        .checked_mul(MIX_CHANNELS)
-        .and_then(|samples| samples.checked_mul(std::mem::size_of::<f32>()))
-        .ok_or_else(|| audio_buffer_too_large("stereo f32 byte count overflow"))
+struct AudioStreamControl {
+    generation: AtomicU64,
+    requested_start: AtomicU64,
+    stopped: AtomicBool,
+    underruns: AtomicU64,
+    active_decode: Mutex<Option<MediaCancelToken>>,
 }
 
-fn checked_gain_bytes(frames: usize) -> Result<usize, MediaError> {
-    frames
-        .checked_mul(std::mem::size_of::<f32>())
-        .ok_or_else(|| audio_buffer_too_large("gain byte count overflow"))
-}
-
-fn frames_at_rate(timeline_frames: i32, fps: i32, rate: u32) -> Result<usize, MediaError> {
-    if timeline_frames <= 0 || fps <= 0 || rate == 0 {
-        return Ok(0);
-    }
-    let frames = (f64::from(timeline_frames) / f64::from(fps) * f64::from(rate)).ceil();
-    if !frames.is_finite() || frames > usize::MAX as f64 {
-        return Err(audio_buffer_too_large("audio frame count exceeds usize"));
-    }
-    Ok(frames as usize)
-}
-
-fn projected_session_peak_bytes(timeline: &Timeline, rate: u32) -> Result<usize, MediaError> {
-    let mut retained_bytes = 0_usize;
-    let mut max_stage_bytes = 0_usize;
-    let mut max_mix_frames = 0_usize;
-    for track in &timeline.tracks {
-        if track.muted {
-            continue;
+impl AudioStreamControl {
+    fn new(start_frame: u64) -> Self {
+        Self {
+            generation: AtomicU64::new(0),
+            requested_start: AtomicU64::new(start_frame),
+            stopped: AtomicBool::new(false),
+            underruns: AtomicU64::new(0),
+            active_decode: Mutex::new(None),
         }
-        for clip in &track.clips {
-            if clip.media_type != ClipType::Audio && clip.media_type != ClipType::Video {
-                continue;
+    }
+
+    fn request_seek(&self, start_frame: u64) {
+        self.requested_start.store(start_frame, Ordering::Release);
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        if let Some(cancel) = self
+            .active_decode
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+        {
+            cancel.cancel();
+        }
+    }
+
+    fn stop(&self) {
+        self.stopped.store(true, Ordering::Release);
+        if let Some(cancel) = self
+            .active_decode
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+        {
+            cancel.cancel();
+        }
+    }
+}
+
+#[derive(Debug)]
+struct AudioStreamChunk {
+    generation: u64,
+    start_frame: u64,
+    samples: Vec<f32>,
+}
+
+struct AudioStreamConsumer {
+    receiver: ChunkReceiver<Result<AudioStreamChunk, MediaError>>,
+    control: Arc<AudioStreamControl>,
+    current: Option<AudioStreamChunk>,
+}
+
+impl AudioStreamConsumer {
+    fn discard_stale(&mut self) {
+        let generation = self.control.generation.load(Ordering::Acquire);
+        if self
+            .current
+            .as_ref()
+            .is_some_and(|chunk| chunk.generation != generation)
+        {
+            self.current = None;
+        }
+        if self.current.is_some() {
+            return;
+        }
+        while let Ok(item) = self.receiver.try_recv() {
+            match item {
+                Ok(chunk) if chunk.generation == generation => {
+                    self.current = Some(chunk);
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!("[audio] streaming decode failed: {error}");
+                }
             }
-            let source_frames = clip.source_frames_consumed().max(0);
-            let expected_frames = frames_at_rate(source_frames, timeline.fps, rate)?;
-            let bounded_frames = expected_frames
-                .checked_add(1)
-                .ok_or_else(|| audio_buffer_too_large("PCM slack frame overflow"))?;
-            let decoded_bytes = checked_audio_bytes(bounded_frames)?;
-            let gain_bytes = checked_gain_bytes(bounded_frames)?;
-
-            let conversion_stage = retained_bytes
-                .checked_add(decoded_bytes)
-                .and_then(|bytes| bytes.checked_add(decoded_bytes))
-                .ok_or_else(|| audio_buffer_too_large("PCM conversion peak overflow"))?;
-            max_stage_bytes = max_stage_bytes.max(conversion_stage);
-
-            retained_bytes = retained_bytes
-                .checked_add(decoded_bytes)
-                .and_then(|bytes| bytes.checked_add(gain_bytes))
-                .ok_or_else(|| audio_buffer_too_large("retained audio peak overflow"))?;
-            max_stage_bytes = max_stage_bytes.max(retained_bytes);
-
-            let start_frames = frames_at_rate(clip.start_frame.max(0), timeline.fps, rate)?;
-            let end_frames = start_frames
-                .checked_add(bounded_frames)
-                .ok_or_else(|| audio_buffer_too_large("mix frame extent overflow"))?;
-            max_mix_frames = max_mix_frames.max(end_frames);
         }
     }
-    let mix_stage = retained_bytes
-        .checked_add(checked_audio_bytes(max_mix_frames)?)
-        .ok_or_else(|| audio_buffer_too_large("final mix peak overflow"))?;
-    Ok(max_stage_bytes.max(mix_stage))
+
+    fn sample_frame(&mut self, frame: u64) -> (f32, f32) {
+        let generation = self.control.generation.load(Ordering::Acquire);
+        if self.current.as_ref().is_none_or(|chunk| {
+            let frames = chunk.samples.len() / MIX_CHANNELS;
+            chunk.generation != generation
+                || frame < chunk.start_frame
+                || frame >= chunk.start_frame.saturating_add(frames as u64)
+        }) {
+            self.current = None;
+            self.discard_stale();
+        }
+        if let Some(chunk) = self.current.as_ref() {
+            let offset = frame.saturating_sub(chunk.start_frame) as usize * MIX_CHANNELS;
+            if offset + 1 < chunk.samples.len() {
+                return (chunk.samples[offset], chunk.samples[offset + 1]);
+            }
+        }
+        self.control.underruns.fetch_add(1, Ordering::Relaxed);
+        (0.0, 0.0)
+    }
+}
+
+enum PlaybackSamples {
+    Buffered(Arc<Vec<f32>>),
+    Streaming(AudioStreamConsumer),
 }
 
 /// Audio master clock: the playhead derives from the device frame position
@@ -258,6 +303,7 @@ pub struct AudioClock {
     rate: u32,
     /// Project fps (for `seek`, which has no fps argument).
     fps: i32,
+    stream: Option<Arc<AudioStreamControl>>,
 }
 
 impl PlaybackClock for AudioClock {
@@ -277,6 +323,9 @@ impl PlaybackClock for AudioClock {
         let pos = ((frame.max(0) as f64 / fps as f64) * self.rate as f64).round() as u64;
         // Release pairs with the callback's AcqRel fetch_add so it observes the seek.
         self.pos.store(pos, Ordering::Release);
+        if let Some(stream) = &self.stream {
+            stream.request_seek(pos);
+        }
     }
 }
 
@@ -287,6 +336,8 @@ pub struct AudioPlayback {
     control_tx: Sender<AudioCmd>,
     paused: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
+    stream_control: Option<Arc<AudioStreamControl>>,
+    stream_producer: Option<JoinHandle<()>>,
 }
 
 enum AudioCmd {
@@ -314,7 +365,7 @@ impl AudioPlayback {
             .name("opentake-audio".to_string())
             .spawn(move || {
                 audio_thread(
-                    buffer,
+                    PlaybackSamples::Buffered(buffer),
                     pos,
                     thread_paused,
                     thread_callback_epoch,
@@ -328,12 +379,67 @@ impl AudioPlayback {
                 control_tx,
                 paused,
                 handle: Some(handle),
+                stream_control: None,
+                stream_producer: None,
             }),
             Ok(Err(e)) => {
                 let _ = handle.join();
                 Err(e)
             }
             Err(_) => Err("audio thread exited before init".to_string()),
+        }
+    }
+
+    fn start_stream(
+        consumer: AudioStreamConsumer,
+        stream_control: Arc<AudioStreamControl>,
+        stream_producer: JoinHandle<()>,
+        pos: Arc<AtomicU64>,
+        paused: Arc<AtomicBool>,
+    ) -> Result<Self, String> {
+        let (control_tx, control_rx) = mpsc::channel::<AudioCmd>();
+        let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
+        let thread_paused = Arc::clone(&paused);
+        let callback_epoch = Arc::new(AtomicU64::new(0));
+        let thread_callback_epoch = Arc::clone(&callback_epoch);
+        let handle = match thread::Builder::new()
+            .name("opentake-audio".to_string())
+            .spawn(move || {
+                audio_thread(
+                    PlaybackSamples::Streaming(consumer),
+                    pos,
+                    thread_paused,
+                    thread_callback_epoch,
+                    control_rx,
+                    ready_tx,
+                )
+            }) {
+            Ok(handle) => handle,
+            Err(error) => {
+                stream_control.stop();
+                let _ = stream_producer.join();
+                return Err(format!("spawn audio thread: {error}"));
+            }
+        };
+        match ready_rx.recv() {
+            Ok(Ok(())) => Ok(Self {
+                control_tx,
+                paused,
+                handle: Some(handle),
+                stream_control: Some(stream_control),
+                stream_producer: Some(stream_producer),
+            }),
+            Ok(Err(error)) => {
+                stream_control.stop();
+                let _ = handle.join();
+                let _ = stream_producer.join();
+                Err(error)
+            }
+            Err(_) => {
+                stream_control.stop();
+                let _ = stream_producer.join();
+                Err("audio thread exited before init".to_string())
+            }
         }
     }
 
@@ -377,8 +483,46 @@ impl AudioPlayback {
 
     pub fn request_stop(mut self) -> Option<JoinHandle<()>> {
         self.mute();
+        if let Some(control) = &self.stream_control {
+            control.stop();
+        }
         let _ = self.control_tx.send(AudioCmd::Stop);
-        self.handle.take()
+        let audio = self.handle.take();
+        let producer = self.stream_producer.take();
+        match (audio, producer) {
+            (Some(audio), Some(producer)) => {
+                let joins = Arc::new(Mutex::new(Some((audio, producer))));
+                let worker_joins = Arc::clone(&joins);
+                match thread::Builder::new()
+                    .name("opentake-audio-stop".to_string())
+                    .spawn(move || {
+                        if let Some((audio, producer)) = worker_joins
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .take()
+                        {
+                            let _ = audio.join();
+                            let _ = producer.join();
+                        }
+                    }) {
+                    Ok(handle) => Some(handle),
+                    Err(_) => {
+                        if let Some((audio, producer)) = joins
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .take()
+                        {
+                            let _ = audio.join();
+                            let _ = producer.join();
+                        }
+                        None
+                    }
+                }
+            }
+            (Some(audio), None) => Some(audio),
+            (None, Some(producer)) => Some(producer),
+            (None, None) => None,
+        }
     }
 
     #[cfg(test)]
@@ -404,6 +548,8 @@ impl AudioPlayback {
                 control_tx,
                 paused: Arc::clone(&paused),
                 handle: Some(handle),
+                stream_control: None,
+                stream_producer: None,
             },
             paused,
             stopped_rx,
@@ -432,6 +578,8 @@ impl AudioPlayback {
                 control_tx,
                 paused: Arc::clone(&paused),
                 handle: Some(handle),
+                stream_control: None,
+                stream_producer: None,
             },
             paused,
         )
@@ -462,6 +610,8 @@ impl AudioPlayback {
                 control_tx,
                 paused: Arc::clone(&paused),
                 handle: Some(handle),
+                stream_control: None,
+                stream_producer: None,
             },
             paused,
             stopped_rx,
@@ -472,8 +622,14 @@ impl AudioPlayback {
 
 impl Drop for AudioPlayback {
     fn drop(&mut self) {
+        if let Some(control) = &self.stream_control {
+            control.stop();
+        }
         let _ = self.control_tx.send(AudioCmd::Stop);
         if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+        if let Some(handle) = self.stream_producer.take() {
             let _ = handle.join();
         }
     }
@@ -482,14 +638,14 @@ impl Drop for AudioPlayback {
 /// The audio thread: build + play the output stream, report the result, then park
 /// (holding the `!Send` stream alive) until a stop is requested.
 fn audio_thread(
-    buffer: Arc<Vec<f32>>,
+    samples: PlaybackSamples,
     pos: Arc<AtomicU64>,
     paused: Arc<AtomicBool>,
     callback_epoch: Arc<AtomicU64>,
     control_rx: Receiver<AudioCmd>,
     ready_tx: Sender<Result<(), String>>,
 ) {
-    match build_and_play(&buffer, &pos, &paused, &callback_epoch) {
+    match build_and_play(samples, &pos, &paused, &callback_epoch) {
         Ok(stream) => {
             let _ = ready_tx.send(Ok(()));
             while let Ok(command) = control_rx.recv() {
@@ -521,7 +677,7 @@ fn audio_thread(
 /// Acquire the default output device + config, build the typed output stream, and
 /// start it. The returned `Stream` must stay alive on the calling thread.
 fn build_and_play(
-    buffer: &Arc<Vec<f32>>,
+    samples: PlaybackSamples,
     pos: &Arc<AtomicU64>,
     paused: &Arc<AtomicBool>,
     callback_epoch: &Arc<AtomicU64>,
@@ -539,7 +695,7 @@ fn build_and_play(
         sample_format,
         &device,
         &config,
-        buffer.clone(),
+        samples,
         pos.clone(),
         paused.clone(),
         Arc::clone(callback_epoch),
@@ -574,7 +730,7 @@ fn build_stream(
     format: cpal::SampleFormat,
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    buffer: Arc<Vec<f32>>,
+    samples: PlaybackSamples,
     pos: Arc<AtomicU64>,
     paused: Arc<AtomicBool>,
     callback_epoch: Arc<AtomicU64>,
@@ -584,34 +740,34 @@ fn build_stream(
     // instead of silently falling back to the wall clock.
     match format {
         cpal::SampleFormat::F32 => {
-            out_stream::<f32>(device, config, buffer, pos, paused, callback_epoch)
+            out_stream::<f32>(device, config, samples, pos, paused, callback_epoch)
         }
         cpal::SampleFormat::F64 => {
-            out_stream::<f64>(device, config, buffer, pos, paused, callback_epoch)
+            out_stream::<f64>(device, config, samples, pos, paused, callback_epoch)
         }
         cpal::SampleFormat::I8 => {
-            out_stream::<i8>(device, config, buffer, pos, paused, callback_epoch)
+            out_stream::<i8>(device, config, samples, pos, paused, callback_epoch)
         }
         cpal::SampleFormat::I16 => {
-            out_stream::<i16>(device, config, buffer, pos, paused, callback_epoch)
+            out_stream::<i16>(device, config, samples, pos, paused, callback_epoch)
         }
         cpal::SampleFormat::I32 => {
-            out_stream::<i32>(device, config, buffer, pos, paused, callback_epoch)
+            out_stream::<i32>(device, config, samples, pos, paused, callback_epoch)
         }
         cpal::SampleFormat::I64 => {
-            out_stream::<i64>(device, config, buffer, pos, paused, callback_epoch)
+            out_stream::<i64>(device, config, samples, pos, paused, callback_epoch)
         }
         cpal::SampleFormat::U8 => {
-            out_stream::<u8>(device, config, buffer, pos, paused, callback_epoch)
+            out_stream::<u8>(device, config, samples, pos, paused, callback_epoch)
         }
         cpal::SampleFormat::U16 => {
-            out_stream::<u16>(device, config, buffer, pos, paused, callback_epoch)
+            out_stream::<u16>(device, config, samples, pos, paused, callback_epoch)
         }
         cpal::SampleFormat::U32 => {
-            out_stream::<u32>(device, config, buffer, pos, paused, callback_epoch)
+            out_stream::<u32>(device, config, samples, pos, paused, callback_epoch)
         }
         cpal::SampleFormat::U64 => {
-            out_stream::<u64>(device, config, buffer, pos, paused, callback_epoch)
+            out_stream::<u64>(device, config, samples, pos, paused, callback_epoch)
         }
         other => Err(format!("unsupported cpal sample format: {other}")),
     }
@@ -640,7 +796,7 @@ fn write_frame<T: cpal::Sample + FromSample<f32>>(frame: &mut [T], left: f32, ri
 fn out_stream<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    buffer: Arc<Vec<f32>>,
+    mut samples: PlaybackSamples,
     pos: Arc<AtomicU64>,
     paused: Arc<AtomicBool>,
     callback_epoch: Arc<AtomicU64>,
@@ -660,18 +816,28 @@ where
                 // clock. A concurrent `seek` (store) is honored on the next
                 // callback; within a block we play from the claimed start.
                 if paused.load(Ordering::Acquire) {
+                    if let PlaybackSamples::Streaming(consumer) = &mut samples {
+                        consumer.discard_stale();
+                    }
                     for sample in data.iter_mut() {
                         *sample = T::from_sample(0.0f32);
                     }
                     return;
                 }
-                let start = pos.fetch_add(out_frames as u64, Ordering::AcqRel) as usize;
+                let start = pos.fetch_add(out_frames as u64, Ordering::AcqRel);
                 for (i, frame) in data.chunks_mut(channels).enumerate() {
-                    let base = (start + i) * MIX_CHANNELS;
-                    let (left, right) = if base + 1 < buffer.len() {
-                        (buffer[base], buffer[base + 1])
-                    } else {
-                        (0.0, 0.0) // past the mix end → silence (video may outlast audio)
+                    let audio_frame = start.saturating_add(i as u64);
+                    let (left, right) = match &mut samples {
+                        PlaybackSamples::Buffered(buffer) => {
+                            let base = usize::try_from(audio_frame)
+                                .ok()
+                                .and_then(|frame| frame.checked_mul(MIX_CHANNELS));
+                            match base.filter(|base| base + 1 < buffer.len()) {
+                                Some(base) => (buffer[base], buffer[base + 1]),
+                                None => (0.0, 0.0),
+                            }
+                        }
+                        PlaybackSamples::Streaming(consumer) => consumer.sample_frame(audio_frame),
                     };
                     write_frame(frame, left, right);
                 }
@@ -740,6 +906,9 @@ struct StereoClip {
     interleaved: Vec<f32>,
     /// Per-output-frame gain (length = frames; empty = unity throughout).
     gains: Vec<f32>,
+    /// User true-peak ceiling. The mixer keeps the same codec reconstruction
+    /// safety margin as export so native preview does not audition hotter peaks.
+    true_peak_ceiling_dbtp: Option<f64>,
 }
 
 /// Decode one clip's visible audio window into a placed [`StereoClip`] at `rate`
@@ -768,6 +937,8 @@ fn project_clip_audio_stereo(
     };
     let interleaved =
         decode_pcm_interleaved_cancellable(&info.path, &spec, Some((lo, hi)), cancel)?;
+    let interleaved =
+        apply_preview_denoise(&interleaved, MIX_CHANNELS, rate, clip.audio_denoise, cancel)?;
     let frames = interleaved.len() / MIX_CHANNELS;
     if frames == 0 {
         return Ok(None);
@@ -794,12 +965,53 @@ fn project_clip_audio_stereo(
         start_frame,
         interleaved,
         gains: if all_unity { Vec::new() } else { gains },
+        true_peak_ceiling_dbtp: clip
+            .loudness_normalization
+            .map(|normalization| normalization.true_peak_ceiling_dbtp),
     }))
 }
 
-/// Sum placed stereo clips into one interleaved buffer, applying per-frame gains
-/// and hard-limiting to [-1, 1] (mirrors the export mixdown, per channel).
-fn mix_stereo(clips: &[StereoClip], cancel: &MediaCancelToken) -> Result<Vec<f32>, MediaError> {
+fn apply_preview_denoise(
+    samples: &[f32],
+    channels: usize,
+    sample_rate: u32,
+    config: Option<AudioDenoise>,
+    cancel: &MediaCancelToken,
+) -> Result<Vec<f32>, MediaError> {
+    let Some(config) = config.filter(|config| config.preview_enabled) else {
+        return Ok(samples.to_vec());
+    };
+    opentake_media::analysis::denoise_interleaved(
+        samples,
+        channels,
+        sample_rate,
+        config,
+        cancel,
+        None,
+    )
+    .map_err(|error| match error {
+        opentake_media::analysis::DenoiseError::Cancelled => MediaError::Cancelled,
+        other => MediaError::Decode(other.to_string()),
+    })
+}
+
+/// Visit a placed stereo mix in bounded windows. Only one `window_frames`
+/// scratch buffer is live at a time regardless of the total timeline extent.
+fn mix_stereo_windows(
+    clips: &[StereoClip],
+    window_frames: usize,
+    cancel: &MediaCancelToken,
+    mut emit: impl FnMut(usize, &[f32]) -> Result<(), MediaError>,
+) -> Result<(), MediaError> {
+    if window_frames == 0 {
+        return Err(MediaError::Decode(
+            "audio mix window must contain at least one frame".to_string(),
+        ));
+    }
+    let true_peak_ceiling_dbtp = clips
+        .iter()
+        .filter_map(|clip| clip.true_peak_ceiling_dbtp)
+        .min_by(f64::total_cmp);
     let total_frames = clips
         .iter()
         .map(|c| {
@@ -811,58 +1023,134 @@ fn mix_stereo(clips: &[StereoClip], cancel: &MediaCancelToken) -> Result<Vec<f32
         .into_iter()
         .max()
         .unwrap_or(0);
-    let total_samples = total_frames
-        .checked_mul(MIX_CHANNELS)
-        .ok_or_else(|| audio_buffer_too_large("mix sample count overflow"))?;
-    let mut out = Vec::new();
-    out.try_reserve_exact(total_samples).map_err(|error| {
-        audio_allocation_failed(format!("mix reserve {total_samples}: {error}"))
-    })?;
-    out.resize(total_samples, 0.0);
-    for c in clips {
-        let frames = c.interleaved.len() / MIX_CHANNELS;
-        for chunk_start in (0..frames).step_by(MIX_CANCEL_CHUNK_FRAMES) {
-            if cancel.checkpoint() {
-                return Err(MediaError::Cancelled);
-            }
-            let chunk_end = (chunk_start + MIX_CANCEL_CHUNK_FRAMES).min(frames);
-            for k in chunk_start..chunk_end {
-                let g = if c.gains.is_empty() { 1.0 } else { c.gains[k] };
-                let o = (c.start_frame + k) * MIX_CHANNELS;
-                out[o] += c.interleaved[k * MIX_CHANNELS] * g;
-                out[o + 1] += c.interleaved[k * MIX_CHANNELS + 1] * g;
-            }
-        }
-    }
-    for chunk in out.chunks_mut(MIX_CANCEL_CHUNK_FRAMES * MIX_CHANNELS) {
+    for window_start in (0..total_frames).step_by(window_frames) {
         if cancel.checkpoint() {
             return Err(MediaError::Cancelled);
         }
-        for value in chunk {
+        let window_end = window_start.saturating_add(window_frames).min(total_frames);
+        let window_samples = window_end
+            .saturating_sub(window_start)
+            .checked_mul(MIX_CHANNELS)
+            .ok_or_else(|| audio_buffer_too_large("mix window sample count overflow"))?;
+        let mut out = Vec::new();
+        out.try_reserve_exact(window_samples).map_err(|error| {
+            audio_allocation_failed(format!("mix window reserve {window_samples}: {error}"))
+        })?;
+        out.resize(window_samples, 0.0);
+        for clip in clips {
+            let clip_frames = clip.interleaved.len() / MIX_CHANNELS;
+            let clip_end = clip.start_frame.saturating_add(clip_frames);
+            let overlap_start = window_start.max(clip.start_frame);
+            let overlap_end = window_end.min(clip_end);
+            if overlap_start >= overlap_end {
+                continue;
+            }
+            for chunk_start in (overlap_start..overlap_end).step_by(MIX_CANCEL_CHUNK_FRAMES) {
+                if cancel.checkpoint() {
+                    return Err(MediaError::Cancelled);
+                }
+                let chunk_end = chunk_start
+                    .saturating_add(MIX_CANCEL_CHUNK_FRAMES)
+                    .min(overlap_end);
+                for timeline_frame in chunk_start..chunk_end {
+                    let clip_frame = timeline_frame - clip.start_frame;
+                    let gain = if clip.gains.is_empty() {
+                        1.0
+                    } else {
+                        clip.gains[clip_frame]
+                    };
+                    let output = (timeline_frame - window_start) * MIX_CHANNELS;
+                    let input = clip_frame * MIX_CHANNELS;
+                    out[output] += clip.interleaved[input] * gain;
+                    out[output + 1] += clip.interleaved[input + 1] * gain;
+                }
+            }
+        }
+        for value in &mut out {
             *value = value.clamp(-1.0, 1.0);
         }
+        apply_true_peak_ceiling(&mut out, true_peak_ceiling_dbtp);
+        emit(window_start, &out)?;
     }
+    Ok(())
+}
+
+/// Sum placed stereo clips into one interleaved buffer, applying per-frame gains
+/// and hard-limiting to [-1, 1] (mirrors the export mixdown, per channel).
+fn mix_stereo(clips: &[StereoClip], cancel: &MediaCancelToken) -> Result<Vec<f32>, MediaError> {
+    let mut out = Vec::new();
+    mix_stereo_windows(
+        clips,
+        MIX_CANCEL_CHUNK_FRAMES,
+        cancel,
+        |_start_frame, samples| {
+            out.try_reserve(samples.len()).map_err(|error| {
+                audio_allocation_failed(format!("mix output reserve {}: {error}", samples.len()))
+            })?;
+            out.extend_from_slice(samples);
+            Ok(())
+        },
+    )?;
     Ok(out)
 }
 
-/// Pre-mix every audio-bearing clip into one interleaved stereo buffer at `rate`.
-/// Empty when the timeline has no audio (→ caller uses the wall clock).
-fn mix_timeline_stereo(
+fn retime_interleaved_stereo(samples: &[f32], target_frames: usize) -> Vec<f32> {
+    let source_frames = samples.len() / MIX_CHANNELS;
+    if source_frames == 0 || target_frames == 0 {
+        return Vec::new();
+    }
+    if source_frames == target_frames {
+        return samples[..source_frames * MIX_CHANNELS].to_vec();
+    }
+    let mut output = Vec::with_capacity(target_frames * MIX_CHANNELS);
+    let source_span = source_frames.saturating_sub(1) as f64;
+    let target_span = target_frames.saturating_sub(1).max(1) as f64;
+    for frame in 0..target_frames {
+        let source = if target_frames == 1 {
+            0.0
+        } else {
+            frame as f64 * source_span / target_span
+        };
+        let lo = source.floor() as usize;
+        let hi = source.ceil() as usize;
+        let fraction = (source - lo as f64) as f32;
+        for channel in 0..MIX_CHANNELS {
+            let a = samples[lo * MIX_CHANNELS + channel];
+            let b = samples[hi * MIX_CHANNELS + channel];
+            output.push(a + (b - a) * fraction);
+        }
+    }
+    output
+}
+
+fn timeline_audio_frames(timeline: &Timeline, rate: u32) -> Result<u64, MediaError> {
+    if timeline.fps <= 0 || rate == 0 {
+        return Ok(0);
+    }
+    let frames = timeline.total_frames().max(0) as u64;
+    let numerator = frames
+        .checked_mul(rate as u64)
+        .ok_or_else(|| audio_buffer_too_large("streaming timeline frame extent overflow"))?;
+    numerator
+        .checked_add(timeline.fps as u64 / 2)
+        .map(|rounded| rounded / timeline.fps as u64)
+        .ok_or_else(|| audio_buffer_too_large("streaming timeline frame rounding overflow"))
+}
+
+fn mix_timeline_window(
     timeline: &Timeline,
     media: &HashMap<String, MediaInfo>,
     rate: u32,
+    window_start: u64,
+    window_frames: usize,
     cancel: &MediaCancelToken,
 ) -> Result<Vec<f32>, MediaError> {
-    if timeline.fps <= 0 || rate == 0 {
-        return Ok(Vec::new());
-    }
-    let projected_bytes = projected_session_peak_bytes(timeline, rate)?;
-    if projected_bytes > MAX_SESSION_PREMIX_BYTES {
-        return Err(audio_buffer_too_large(format!(
-            "projected {projected_bytes} bytes exceeds {MAX_SESSION_PREMIX_BYTES}"
-        )));
-    }
-    let mut clips: Vec<StereoClip> = Vec::new();
+    let sample_count = window_frames
+        .checked_mul(MIX_CHANNELS)
+        .ok_or_else(|| audio_buffer_too_large("streaming window sample count overflow"))?;
+    let mut mixed = vec![0.0_f32; sample_count];
+    let mut true_peak_ceiling_dbtp: Option<f64> = None;
+    let window_end = window_start.saturating_add(window_frames as u64);
     for track in &timeline.tracks {
         if track.muted {
             continue;
@@ -871,18 +1159,238 @@ fn mix_timeline_stereo(
             if cancel.checkpoint() {
                 return Err(MediaError::Cancelled);
             }
-            if clip.media_type != ClipType::Audio && clip.media_type != ClipType::Video {
+            if !matches!(clip.media_type, ClipType::Audio | ClipType::Video)
+                || clip.duration_frames <= 0
+            {
                 continue;
             }
-            if let Some(sc) = project_clip_audio_stereo(clip, media, timeline.fps, rate, cancel)? {
-                clips.push(sc);
+            let Some(info) = media.get(&clip.media_ref) else {
+                continue;
+            };
+            let clip_start = ((clip.start_frame.max(0) as f64 / timeline.fps as f64) * rate as f64)
+                .round() as u64;
+            let clip_frames = ((clip.duration_frames as f64 / timeline.fps as f64) * rate as f64)
+                .round()
+                .max(0.0) as u64;
+            let clip_end = clip_start.saturating_add(clip_frames);
+            let overlap_start = window_start.max(clip_start);
+            let overlap_end = window_end.min(clip_end);
+            if overlap_start >= overlap_end || clip_frames == 0 {
+                continue;
+            }
+            let Some((source_lo, source_hi)) = clip_source_window_secs(clip, timeline.fps) else {
+                continue;
+            };
+            let source_span = source_hi - source_lo;
+            let relative_start = (overlap_start - clip_start) as f64 / clip_frames as f64;
+            let relative_end = (overlap_end - clip_start) as f64 / clip_frames as f64;
+            let range = (
+                source_lo + source_span * relative_start,
+                source_lo + source_span * relative_end,
+            );
+            let spec = PcmSpec {
+                sample_rate: rate,
+                channels: MIX_CHANNELS as u16,
+                format: PcmFormat::F32,
+            };
+            let decoded =
+                match decode_pcm_interleaved_cancellable(&info.path, &spec, Some(range), cancel) {
+                    Ok(decoded) => decoded,
+                    Err(MediaError::NoTrack(_, _)) => continue,
+                    Err(error) => return Err(error),
+                };
+            let target_frames = (overlap_end - overlap_start) as usize;
+            let retimed = retime_interleaved_stereo(&decoded, target_frames);
+            let retimed =
+                apply_preview_denoise(&retimed, MIX_CHANNELS, rate, clip.audio_denoise, cancel)?;
+            let frames_per_timeline_frame = rate as f64 / timeline.fps as f64;
+            for frame in 0..target_frames.min(retimed.len() / MIX_CHANNELS) {
+                let timeline_sample = overlap_start.saturating_add(frame as u64);
+                let timeline_frame =
+                    (timeline_sample as f64 / frames_per_timeline_frame).floor() as i32;
+                let gain = clip.volume_at(timeline_frame) as f32;
+                let output = (overlap_start - window_start) as usize + frame;
+                let output = output * MIX_CHANNELS;
+                mixed[output] += retimed[frame * MIX_CHANNELS] * gain;
+                mixed[output + 1] += retimed[frame * MIX_CHANNELS + 1] * gain;
+            }
+            if let Some(ceiling) = clip
+                .loudness_normalization
+                .map(|normalization| normalization.true_peak_ceiling_dbtp)
+            {
+                true_peak_ceiling_dbtp =
+                    Some(true_peak_ceiling_dbtp.map_or(ceiling, |current| current.min(ceiling)));
             }
         }
     }
-    if clips.is_empty() {
-        return Ok(Vec::new());
+    for sample in &mut mixed {
+        *sample = sample.clamp(-1.0, 1.0);
     }
-    mix_stereo(&clips, cancel)
+    apply_true_peak_ceiling(&mut mixed, true_peak_ceiling_dbtp);
+    Ok(mixed)
+}
+
+struct PreparedTimelineAudio {
+    consumer: AudioStreamConsumer,
+    control: Arc<AudioStreamControl>,
+    producer: JoinHandle<()>,
+}
+
+fn send_stream_chunk(
+    sender: &ChunkSender<Result<AudioStreamChunk, MediaError>>,
+    mut chunk: Result<AudioStreamChunk, MediaError>,
+    control: &AudioStreamControl,
+    generation: u64,
+) -> bool {
+    loop {
+        if control.stopped.load(Ordering::Acquire)
+            || control.generation.load(Ordering::Acquire) != generation
+        {
+            return false;
+        }
+        match sender.try_send(chunk) {
+            Ok(()) => return true,
+            Err(crossbeam_channel::TrySendError::Full(returned)) => {
+                chunk = returned;
+                thread::sleep(STREAM_SEND_POLL);
+            }
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => return false,
+        }
+    }
+}
+
+/// Prepare bounded timeline-audio scheduling at `rate`. The initial window is
+/// mixed synchronously so decode failures surface before playback ownership is
+/// published; all subsequent windows are produced on one bounded worker.
+fn mix_timeline_stereo(
+    timeline: &Timeline,
+    media: &HashMap<String, MediaInfo>,
+    rate: u32,
+    start_frame: u64,
+    cancel: &MediaCancelToken,
+) -> Result<Option<PreparedTimelineAudio>, MediaError> {
+    if timeline.fps <= 0 || rate == 0 {
+        return Ok(None);
+    }
+    let has_candidates = timeline
+        .tracks
+        .iter()
+        .filter(|track| !track.muted)
+        .any(|track| {
+            track.clips.iter().any(|clip| {
+                matches!(clip.media_type, ClipType::Audio | ClipType::Video)
+                    && clip.duration_frames > 0
+                    && media.contains_key(&clip.media_ref)
+            })
+        });
+    if !has_candidates {
+        return Ok(None);
+    }
+    let total_frames = timeline_audio_frames(timeline, rate)?;
+    if start_frame >= total_frames {
+        return Ok(None);
+    }
+    let window_frames = (rate as usize)
+        .checked_mul(STREAM_WINDOW_SECONDS)
+        .ok_or_else(|| audio_buffer_too_large("streaming window frame overflow"))?;
+    let first_len = (total_frames - start_frame).min(window_frames as u64) as usize;
+    let first_samples = mix_timeline_window(timeline, media, rate, start_frame, first_len, cancel)?;
+    let (sender, receiver) = bounded(STREAM_WINDOW_CAPACITY);
+    sender
+        .send(Ok(AudioStreamChunk {
+            generation: 0,
+            start_frame,
+            samples: first_samples,
+        }))
+        .map_err(|_| MediaError::Decode("audio stream queue closed during prefill".to_string()))?;
+    let control = Arc::new(AudioStreamControl::new(start_frame));
+    let producer_control = Arc::clone(&control);
+    let producer_timeline = timeline.clone();
+    let producer_media = media.clone();
+    let producer = thread::Builder::new()
+        .name("opentake-audio-fill".to_string())
+        .spawn(move || {
+            let mut generation = 0_u64;
+            let mut next_frame = start_frame.saturating_add(first_len as u64);
+            loop {
+                if producer_control.stopped.load(Ordering::Acquire) {
+                    break;
+                }
+                let observed = producer_control.generation.load(Ordering::Acquire);
+                if observed != generation {
+                    generation = observed;
+                    next_frame = producer_control.requested_start.load(Ordering::Acquire);
+                }
+                if next_frame >= total_frames {
+                    thread::sleep(STREAM_SEND_POLL);
+                    continue;
+                }
+                let len = (total_frames - next_frame).min(window_frames as u64) as usize;
+                let window_cancel = MediaCancelToken::new();
+                *producer_control
+                    .active_decode
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(window_cancel.clone());
+                if producer_control.generation.load(Ordering::Acquire) != generation {
+                    window_cancel.cancel();
+                    producer_control
+                        .active_decode
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .take();
+                    continue;
+                }
+                let result = mix_timeline_window(
+                    &producer_timeline,
+                    &producer_media,
+                    rate,
+                    next_frame,
+                    len,
+                    &window_cancel,
+                );
+                producer_control
+                    .active_decode
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take();
+                if producer_control.generation.load(Ordering::Acquire) != generation {
+                    continue;
+                }
+                match result {
+                    Ok(samples) => {
+                        if !send_stream_chunk(
+                            &sender,
+                            Ok(AudioStreamChunk {
+                                generation,
+                                start_frame: next_frame,
+                                samples,
+                            }),
+                            &producer_control,
+                            generation,
+                        ) {
+                            continue;
+                        }
+                        next_frame = next_frame.saturating_add(len as u64);
+                    }
+                    Err(MediaError::Cancelled) => continue,
+                    Err(error) => {
+                        let _ =
+                            send_stream_chunk(&sender, Err(error), &producer_control, generation);
+                        break;
+                    }
+                }
+            }
+        })
+        .map_err(|error| MediaError::Decode(format!("spawn audio fill worker: {error}")))?;
+    Ok(Some(PreparedTimelineAudio {
+        consumer: AudioStreamConsumer {
+            receiver,
+            control: Arc::clone(&control),
+            current: None,
+        },
+        control,
+        producer,
+    }))
 }
 
 /// Production-facing clock construction with explicit media/allocation errors.
@@ -932,19 +1440,33 @@ fn build_clock_with_state(
     cancel: &MediaCancelToken,
 ) -> Result<(Arc<dyn PlaybackClock>, Option<AudioPlayback>), MediaError> {
     let rate = default_output_rate().unwrap_or(FALLBACK_SAMPLE_RATE);
-    let mixed = mix_timeline_stereo(timeline, media, rate, cancel)?;
-    if mixed.is_empty() {
+    let start_audio_frame =
+        ((start_frame.max(0) as f64 / fps.max(1) as f64) * rate as f64).round() as u64;
+    let Some(prepared) = mix_timeline_stereo(timeline, media, rate, start_audio_frame, cancel)?
+    else {
         return Ok((Arc::new(InstantClock::new(start_frame)), None));
-    }
-
-    Ok(clock_from_mixed(
-        mixed,
+    };
+    let pos = Arc::new(AtomicU64::new(start_audio_frame));
+    let paused = Arc::new(AtomicBool::new(start_paused));
+    let clock = AudioClock {
+        pos: Arc::clone(&pos),
         rate,
         fps,
-        start_frame,
-        start_paused,
-        AudioPlayback::start,
-    ))
+        stream: Some(Arc::clone(&prepared.control)),
+    };
+    match AudioPlayback::start_stream(
+        prepared.consumer,
+        prepared.control,
+        prepared.producer,
+        pos,
+        paused,
+    ) {
+        Ok(audio) => Ok((Arc::new(clock), Some(audio))),
+        Err(error) => {
+            eprintln!("[audio] {error}; falling back to wall clock");
+            Ok((Arc::new(InstantClock::new(start_frame)), None))
+        }
+    }
 }
 
 fn clock_from_mixed<F>(
@@ -965,6 +1487,7 @@ where
         pos: pos.clone(),
         rate,
         fps,
+        stream: None,
     };
     clock.seek(start_frame); // begin playback at the current playhead
 
@@ -1024,8 +1547,20 @@ mod tests {
             audio_clip("c2", "m2", 900, 900),
         ]);
         let media = HashMap::from([
-            ("m1".to_string(), MediaInfo { path: first }),
-            ("m2".to_string(), MediaInfo { path: second }),
+            (
+                "m1".to_string(),
+                MediaInfo {
+                    path: first,
+                    straight_alpha: false,
+                },
+            ),
+            (
+                "m2".to_string(),
+                MediaInfo {
+                    path: second,
+                    straight_alpha: false,
+                },
+            ),
         ]);
         let cancel = MediaCancelToken::new();
         let worker_cancel = cancel.clone();
@@ -1036,6 +1571,7 @@ mod tests {
                     &timeline,
                     &media,
                     48_000,
+                    0,
                     &worker_cancel,
                 ))
                 .expect("publish audio prepare result");
@@ -1047,10 +1583,13 @@ mod tests {
         }
         assert_eq!(cancel.spawned_child_count(), 1);
         cancel.cancel();
-        let error = done_rx
+        let error = match done_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("cancelled audio prepare must return")
-            .expect_err("cancelled audio prepare must fail");
+        {
+            Err(error) => error,
+            Ok(_) => panic!("cancelled audio prepare must fail"),
+        };
         assert!(matches!(error, MediaError::Cancelled));
         worker.join().expect("join audio prepare worker");
         assert_eq!(
@@ -1068,6 +1607,7 @@ mod tests {
             start_frame: 0,
             interleaved: vec![0.25; 12_000_000],
             gains: Vec::new(),
+            true_peak_ceiling_dbtp: None,
         };
         let (done_tx, done_rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
@@ -1092,64 +1632,115 @@ mod tests {
     }
 
     #[test]
-    fn audio_prepare_rejects_projected_mix_over_256_mib_without_allocation() {
-        let timeline = audio_timeline(vec![audio_clip("huge", "missing", 0, 30 * 60 * 12)]);
-        let media = HashMap::from([(
-            "missing".to_string(),
-            MediaInfo {
-                path: PathBuf::from("/must/not/be/decoded.wav"),
+    fn long_timeline_mix_has_constant_peak_allocation_and_matches_short_reference() {
+        let near = StereoClip {
+            start_frame: 0,
+            interleaved: vec![0.6, -0.6, 0.5, 0.5],
+            gains: Vec::new(),
+            true_peak_ceiling_dbtp: None,
+        };
+        let far = StereoClip {
+            start_frame: 48_000 * 60 * 60,
+            interleaved: vec![0.25, -0.25],
+            gains: Vec::new(),
+            true_peak_ceiling_dbtp: None,
+        };
+        let reference = mix_stereo(
+            &[StereoClip {
+                start_frame: near.start_frame,
+                interleaved: near.interleaved.clone(),
+                gains: near.gains.clone(),
+                true_peak_ceiling_dbtp: near.true_peak_ceiling_dbtp,
+            }],
+            &MediaCancelToken::new(),
+        )
+        .unwrap();
+        let mut first_window = Vec::new();
+        let mut peak_samples = 0;
+
+        mix_stereo_windows(
+            &[near, far],
+            1024,
+            &MediaCancelToken::new(),
+            |start_frame, samples| {
+                peak_samples = peak_samples.max(samples.len());
+                if start_frame == 0 {
+                    first_window.extend_from_slice(samples);
+                }
+                Ok(())
             },
-        )]);
-        let cancel = MediaCancelToken::new();
+        )
+        .unwrap();
 
-        let error = mix_timeline_stereo(&timeline, &media, 48_000, &cancel)
-            .expect_err("a 12-minute stereo f32 pre-mix exceeds 256 MiB");
-
-        assert!(error.to_string().contains("audio_buffer_too_large"));
-        assert_eq!(cancel.spawned_child_count(), 0);
-    }
-
-    #[test]
-    fn audio_prepare_rejects_raw_plus_converted_peak_before_decode() {
-        let timeline = audio_timeline(vec![audio_clip("peak", "missing", 0, 30 * 60 * 5)]);
-        let media = HashMap::from([(
-            "missing".to_string(),
-            MediaInfo {
-                path: PathBuf::from("/must/not/be/decoded-for-peak.wav"),
-            },
-        )]);
-        let cancel = MediaCancelToken::new();
-
-        let error = mix_timeline_stereo(&timeline, &media, 48_000, &cancel)
-            .expect_err("raw PCM, converted f32, and output mix exceed 256 MiB together");
-
-        assert!(error.to_string().contains("audio_buffer_too_large"));
-        assert_eq!(
-            cancel.spawned_child_count(),
-            0,
-            "peak must be rejected before FFmpeg starts"
+        assert_eq!(&first_window[..reference.len()], reference);
+        assert!(
+            peak_samples <= 1024 * MIX_CHANNELS,
+            "one-hour timeline must retain only one bounded mix window"
         );
     }
 
     #[test]
-    fn speed_and_gain_actual_stage_peak_is_rejected_before_decode() {
-        let mut clip = audio_clip("expanded", "missing", 0, 73 * 30);
-        clip.speed = 4.0;
-        clip.volume = 0.5;
-        let timeline = audio_timeline(vec![clip]);
-        let media = HashMap::from([(
-            "missing".to_string(),
-            MediaInfo {
-                path: PathBuf::from("/must/not-decode-speed-gain-peak.wav"),
-            },
-        )]);
-        let cancel = MediaCancelToken::new();
+    fn streaming_consumer_discards_pre_seek_chunks_and_reports_underrun_as_silence() {
+        let control = Arc::new(AudioStreamControl::new(0));
+        let (sender, receiver) = bounded(4);
+        sender
+            .send(Ok(AudioStreamChunk {
+                generation: 0,
+                start_frame: 0,
+                samples: vec![0.25, -0.25],
+            }))
+            .unwrap();
+        let mut consumer = AudioStreamConsumer {
+            receiver,
+            control: Arc::clone(&control),
+            current: None,
+        };
+        assert_eq!(consumer.sample_frame(0), (0.25, -0.25));
 
-        let error = mix_timeline_stereo(&timeline, &media, 48_000, &cancel)
-            .expect_err("retained decoded, gains, and actual mix extent exceed 256 MiB");
+        control.request_seek(10);
+        sender
+            .send(Ok(AudioStreamChunk {
+                generation: 0,
+                start_frame: 1,
+                samples: vec![0.5, 0.5],
+            }))
+            .unwrap();
+        sender
+            .send(Ok(AudioStreamChunk {
+                generation: 1,
+                start_frame: 10,
+                samples: vec![0.75, -0.75],
+            }))
+            .unwrap();
+        assert_eq!(consumer.sample_frame(10), (0.75, -0.75));
+        assert_eq!(consumer.sample_frame(99), (0.0, 0.0));
+        assert_eq!(control.underruns.load(Ordering::Relaxed), 1);
+    }
 
-        assert!(error.to_string().contains("audio_buffer_too_large"));
-        assert_eq!(cancel.spawned_child_count(), 0);
+    #[test]
+    fn paused_stream_drain_retains_the_next_current_generation_chunk() {
+        let control = Arc::new(AudioStreamControl::new(0));
+        let (sender, receiver) = bounded(4);
+        for (start_frame, sample) in [(0, 0.25), (1, 0.75)] {
+            sender
+                .send(Ok(AudioStreamChunk {
+                    generation: 0,
+                    start_frame,
+                    samples: vec![sample, -sample],
+                }))
+                .unwrap();
+        }
+        let mut consumer = AudioStreamConsumer {
+            receiver,
+            control,
+            current: None,
+        };
+
+        consumer.discard_stale();
+        consumer.discard_stale();
+
+        assert_eq!(consumer.sample_frame(0), (0.25, -0.25));
+        assert_eq!(consumer.sample_frame(1), (0.75, -0.75));
     }
 
     #[test]
@@ -1159,11 +1750,15 @@ mod tests {
             "missing".to_string(),
             MediaInfo {
                 path: PathBuf::from("/definitely/missing/audio.wav"),
+                straight_alpha: false,
             },
         )]);
 
-        let error = mix_timeline_stereo(&timeline, &media, 48_000, &MediaCancelToken::new())
-            .expect_err("decode failure must propagate instead of producing an empty mix");
+        let error =
+            match mix_timeline_stereo(&timeline, &media, 48_000, 0, &MediaCancelToken::new()) {
+                Err(error) => error,
+                Ok(_) => panic!("decode failure must propagate instead of producing an empty mix"),
+            };
 
         assert!(!matches!(error, MediaError::Cancelled));
     }
@@ -1175,6 +1770,7 @@ mod tests {
             "missing".to_string(),
             MediaInfo {
                 path: PathBuf::from("/definitely/missing/try-build-clock.wav"),
+                straight_alpha: false,
             },
         )]);
 
@@ -1184,24 +1780,6 @@ mod tests {
         };
 
         assert!(!matches!(error, MediaError::Cancelled));
-    }
-
-    #[test]
-    fn try_build_clock_propagates_over_cap_error_without_panic() {
-        let timeline = audio_timeline(vec![audio_clip("huge", "missing", 0, 30 * 60 * 12)]);
-        let media = HashMap::from([(
-            "missing".to_string(),
-            MediaInfo {
-                path: PathBuf::from("/must/not-decode-over-cap-clock.wav"),
-            },
-        )]);
-
-        let error = match try_build_clock(&timeline, &media, 30, 0) {
-            Err(error) => error,
-            Ok(_) => panic!("production clock entry must propagate the preflight error"),
-        };
-
-        assert!(error.to_string().contains("audio_buffer_too_large"));
     }
 
     #[cfg(target_os = "windows")]
@@ -1358,6 +1936,7 @@ mod tests {
             pos: Arc::new(AtomicU64::new(0)),
             rate: 48_000,
             fps: 30,
+            stream: None,
         };
         // seek(30) → 30 frames = 1s = 48000 output frames → frame()==30.
         clock.seek(30);
@@ -1450,6 +2029,7 @@ mod tests {
             pos: Arc::new(AtomicU64::new(0)),
             rate: 48_000,
             fps: 30,
+            stream: None,
         };
         // 1599 frames @ 48k, 30fps = 0.999 video frame → truncates to 0.
         clock.pos.store(1_599, Ordering::Relaxed);
@@ -1468,11 +2048,23 @@ mod tests {
             pos: Arc::new(AtomicU64::new(0)),
             rate: 44_100,
             fps: 24,
+            stream: None,
         };
         for f in [1, 7, 23, 100, 511] {
             clock.seek(f);
             assert_eq!(clock.frame(24), f, "seek({f}) must round-trip");
         }
+    }
+
+    #[test]
+    fn streaming_timeline_extent_rounds_like_the_audio_clock_seek() {
+        let mut timeline = Timeline::new();
+        timeline.fps = 24;
+        let mut track = Track::new("v1", ClipType::Video);
+        track.clips.push(audio_clip("odd", "source", 0, 7));
+        timeline.tracks.push(track);
+
+        assert_eq!(timeline_audio_frames(&timeline, 44_100).unwrap(), 12_863);
     }
 
     #[test]
@@ -1501,9 +2093,9 @@ mod tests {
         let timeline = Timeline::new();
         let media: HashMap<String, MediaInfo> = HashMap::new();
         assert!(
-            mix_timeline_stereo(&timeline, &media, 48_000, &MediaCancelToken::new())
+            mix_timeline_stereo(&timeline, &media, 48_000, 0, &MediaCancelToken::new())
                 .expect("empty timeline")
-                .is_empty()
+                .is_none()
         );
     }
 
@@ -1515,11 +2107,13 @@ mod tests {
             start_frame: 0,
             interleaved: vec![0.6, -0.6, 0.5, 0.5],
             gains: Vec::new(),
+            true_peak_ceiling_dbtp: None,
         };
         let b = StereoClip {
             start_frame: 1,
             interleaved: vec![0.6, 0.6],
             gains: Vec::new(),
+            true_peak_ceiling_dbtp: None,
         };
         let out = mix_stereo(&[a, b], &MediaCancelToken::new()).expect("mix");
         assert_eq!(out.len(), 4); // 2 frames × 2 channels
@@ -1537,9 +2131,41 @@ mod tests {
             start_frame: 0,
             interleaved: vec![1.0, 1.0, 1.0, 1.0],
             gains: vec![0.5, 0.25],
+            true_peak_ceiling_dbtp: None,
         };
         let out = mix_stereo(&[c], &MediaCancelToken::new()).expect("mix");
         assert_eq!(out, vec![0.5, 0.5, 0.25, 0.25]);
+    }
+
+    #[test]
+    fn mix_stereo_enforces_normalized_true_peak_with_codec_margin() {
+        let clip = StereoClip {
+            start_frame: 0,
+            interleaved: vec![1.0, -1.0],
+            gains: Vec::new(),
+            true_peak_ceiling_dbtp: Some(-1.0),
+        };
+        let out = mix_stereo(&[clip], &MediaCancelToken::new()).expect("mix");
+        let expected = 10.0_f32.powf(-3.0 / 20.0);
+        assert!((out[0] - expected).abs() < 1e-6);
+        assert!((out[1] + expected).abs() < 1e-6);
+    }
+
+    #[test]
+    fn denoise_preview_uses_shared_processing_owner() {
+        let config = opentake_domain::AudioDenoise {
+            mode: opentake_domain::DenoiseMode::Adaptive,
+            strength: 0.75,
+            preview_enabled: true,
+        };
+        let input = vec![0.2, -0.1, 0.15, -0.05, 0.1, 0.0, 0.05, 0.05];
+        let cancel = MediaCancelToken::new();
+        let preview = apply_preview_denoise(&input, 2, 48_000, Some(config), &cancel)
+            .expect("preview denoise");
+        let shared =
+            opentake_media::analysis::denoise_interleaved(&input, 2, 48_000, config, &cancel, None)
+                .expect("shared denoise");
+        assert_eq!(preview, shared);
     }
 
     #[test]

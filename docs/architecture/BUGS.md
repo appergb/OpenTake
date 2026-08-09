@@ -17,7 +17,7 @@
 
 ---
 
-### B2. 前端帧数学截断不一致（高）
+### B2. 前端帧数学截断不一致（已修复）
 
 | 属性 | 值 |
 |---|---|
@@ -25,6 +25,7 @@
 | **描述** | Rust 端 `seconds_to_frame()` 使用截断 `(seconds * fps) as i32`（对应上游 `Int(s*fps)`），前端使用 `Math.round`（四舍五入）。当 `seconds * fps` 小数部分 ≥0.5 时，双方结果差 1 帧，导致同一媒体的计算时长不一致 |
 | **影响** | 媒体导入时的帧数计算偏差可能导致 clip 时长 off-by-1 |
 | **修复方案** | 将前端的 `Math.round(seconds * fps)` 改为 `Math.floor(seconds * fps)` |
+| **验证** | 媒体时长、搜索片段 trim 起点/时长、ripple insert 与默认文本时长统一使用向零截断；`seconds_to_frame_truncates_fractional_boundaries` 覆盖 24/30 fps 的半帧、帧边界和无效输入。仅播放头吸附等明确的 nearest-frame UI 交互继续使用 `Math.round`。 |
 
 ---
 
@@ -39,13 +40,13 @@
 
 ---
 
-### B4. `canGenerate` 硬编码为 `false`（中）
+### B4. `canGenerate` 硬编码为 `false`（已修复）
 
 | 属性 | 值 |
 |---|---|
-| **位置** | `crates/opentake-agent/src/tools/...` — 具体待定位 |
-| **描述** | Agent 工具的 `canGenerate` 返回值硬编码为 `false`，即使 BYOK key 已配置 |
-| **影响** | Agent 无法进行任何 AI 生成操作 |
+| **位置** | `crates/opentake-agent/src/mcp/{dispatch,generation}.rs`、`src-tauri/src/generation.rs` |
+| **修复** | `canGenerate` 由托管凭据或 fal/Replicate/OpenAI/ElevenLabs 兼容 BYOK 凭据动态派生；无可用凭据时四个付费工具不发布，有凭据时 MCP 与 Chat 共用同一异步生产桥 |
+| **验证** | `configured_capability_and_cost_authorization_gate_dispatch` 覆盖有/无能力与显式成本授权；生产 mock provider 路径覆盖 image/video/audio/upscale |
 
 ---
 
@@ -59,12 +60,12 @@
 | **描述** | GPU 合成的 infrastructure 已就绪（`composite_frame` Tauri 命令、`useTimelineFrame` hook 均存在），但 `Preview.tsx` 仍然使用 DOM `<video>`/`<img>` 路径渲染，未接入 `useTimelineFrame`。后果：看不到关键帧动画、transform/crop/text/effects，preview ≠ export |
 | **当前状态** | 已有完整的 wgpu 合成管线，只需在 Preview.tsx 中接入 `useTimelineFrame` hook |
 
-### D2. Agent/MCP 工具 12/40 为 stub（高）
+### D2. Agent/MCP Lottie 检查（已关闭）
 
 | 属性 | 值 |
 |---|---|
-| **位置** | `crates/opentake-agent/src/mcp/dispatch.rs:177-191` |
-| **描述** | 40 个工具中 12 个（30%）返回 `"not yet implemented"` stub 错误：InspectMedia、GetTranscript、InspectTimeline、SearchMedia、GenerateVideo/Image/Audio、UpscaleMedia、ImportMedia、AddCaptions、AddMotionGraphic、EditMotionGraphic。另有 `create_folder` 和 `move_to_folder` 的 batch 形式 stub |
+| **位置** | `src-tauri/src/mcp.rs`、`src-tauri/src/render.rs` |
+| **描述** | 已关闭：`inspect_media` 使用共享 Velato/Vello 管线在中性灰底上均匀采样 Lottie，返回尺寸、帧率、时长和真实 JPEG 帧；`inspect_timeline` 也不再跳过 Lottie 层。无效文档、离线源和无 GPU 环境返回类型化失败。 |
 
 ### D3. Media 缩略图始终返回 `None`（中）
 
@@ -112,9 +113,9 @@
 | **B1** | swapMedia IPC 缺失 | 🔴 关键 | 单功能完全不可用 | 低（~10 行代码） |
 | **B2** | 前端帧数学截断不一致 | 🟠 高 | 所有媒体导入时长偏差 | 低（3 处 Math.round→floor） |
 | **B3** | rippleDeleteRanges 忽略 clipId | 🟠 高 | Agent 工具精度下降 | 中 |
-| **B4** | canGenerate 硬编码 false | 🟡 中 | AI 生成功能不可用 | 低 |
+| **B4** | canGenerate 硬编码 false（已修复） | ✅ 已关闭 | 动态生成能力已恢复 | — |
 | **D1** | 预览未接入 GPU 合成 | 🟠 高 | 所有编辑效果不可见 | 中 |
-| **D2** | Agent 工具 30% stub | 🟠 高 | AI 协作核心缺失 | 高 |
+| **D2** | Agent/MCP Lottie 检查 | ✅ 已关闭 | 真实抽帧与合成已恢复 | — |
 | **D3** | 缩略图始终 None | 🟡 中 | 媒体库 UX 差 | 中 |
 | **D4** | Export 仅 H.264 | 🟡 中 | 输出格式受限 | 低 |
 | **D5** | TextTab/AIEdit scaffold | 🟡 中 | 功能不完整 | 中 |

@@ -1,14 +1,22 @@
+// @vitest-environment happy-dom
+
 import React from "react";
-import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { act } from "react";
+import { createRoot } from "react-dom/client";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({ cancelSaveAsMedia: vi.fn() }));
 vi.mock("../../store/editActions", () => ({ cancelSaveAsMedia: mocks.cancelSaveAsMedia }));
 
 import { SaveAsProgressView } from "./SaveAsProgress";
 
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
+  true;
+
+afterEach(() => document.body.replaceChildren());
+
 describe("SaveAsProgress", () => {
-  it("renders visible progress and an enabled cancel button", () => {
+  it("renders visible progress and an enabled cancel button", async () => {
     const progress = {
       operationId: "save-as:test",
       label: "Saving clip",
@@ -17,18 +25,19 @@ describe("SaveAsProgress", () => {
       cancellable: true,
       cancelling: false,
     };
-    const html = renderToStaticMarkup(<SaveAsProgressView progress={progress} />);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<SaveAsProgressView progress={progress} />));
 
-    expect(html).toContain("Saving clip");
-    expect(html).toContain("25%");
-    expect(html).toContain("Cancel");
-    expect(html).not.toContain("disabled");
+    expect(container.textContent).toContain("Saving clip");
+    expect(container.textContent).toContain("25%");
+    expect(container.textContent).toContain("取消");
+    const button = container.querySelector<HTMLButtonElement>("button")!;
+    expect(button.disabled).toBe(false);
 
-    const view = SaveAsProgressView({ progress });
-    const button = React.Children.toArray(view.props.children)[2] as React.ReactElement<{
-      onClick: () => void;
-    }>;
-    button.props.onClick();
+    await act(async () => button.dispatchEvent(new MouseEvent("click", { bubbles: true })));
     expect(mocks.cancelSaveAsMedia).toHaveBeenCalledTimes(1);
+    await act(async () => root.unmount());
   });
 });

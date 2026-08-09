@@ -22,7 +22,7 @@ use opentake_media::{
 };
 use serde::Serialize;
 
-const PREWARM_QUEUE_CAPACITY: usize = 24;
+const PREWARM_QUEUE_CAPACITY: usize = 64;
 const PREWARM_WORKERS: usize = 3;
 const LOW_PRIORITY_QUEUE_CAPACITY: usize = 8;
 static STAGING_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -818,13 +818,18 @@ mod tests {
     #[test]
     fn new_epoch_can_schedule_same_cache_key_after_old_reservation_drops() {
         let scheduler = PrewarmScheduler::new(1);
+        let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         assert_eq!(
             scheduler.schedule(1, PrewarmKind::PreviewPoster, "shared", false, move |_| {
+                entered_tx.send(()).expect("announce old epoch entry");
                 release_rx.recv().expect("release old epoch");
             }),
             PrewarmResult::Queued
         );
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("old epoch worker starts");
         scheduler
             .begin_project_transition()
             .expect("begin transition");

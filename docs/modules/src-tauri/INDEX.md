@@ -15,7 +15,7 @@
 - **[export.md](export.md)** — 整条时间线视频导出（`export_video`）。逐帧 GPU 合成 → ffmpeg 编码，**仅 H.264/.mp4** + 线性音频混音；H.265/ProRes 留位未接线；无进度 / 取消。
 - **[render.md](render.md)** — 单帧预览合成（`composite_frame`）。Timeline→RenderPlan→ffmpeg 解码→wgpu 合成→base64 PNG data URL；GPU 上下文懒加载（`RenderState`）；Lottie 跳过。
 - **[library-media.md](library-media.md)** — 媒体导入命令（6 个：import/relink/抽音频/波形…）+ 全局跨工程素材库命令（7 个 `library_*`）。
-- **[secret.md](secret.md)** — BYOK 密钥存系统钥匙串（3 命令）。明文单向入、只回掩码；provider 白名单（anthropic/openai/google）。
+- **[secret.md](secret.md)** — BYOK 密钥存系统钥匙串（3 命令）。明文单向入、只回掩码；provider 白名单（6 账户：anthropic/fal/replicate/openai/elevenlabs/google）。
 - **[mcp.md](mcp.md)** — `setup` 时 spawn 回环 MCP server（`127.0.0.1:19789`），共享 `AppCore` 克隆 + 工作流 registry；bind 失败不致命。
 
 ## 相关

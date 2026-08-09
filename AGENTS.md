@@ -91,7 +91,9 @@ cd web && pnpm install && pnpm build
 cargo tauri dev
 ```
 
-当前状态：**MVP 编辑闭环已并入 main**——9 个 crate + Tauri 壳 + React 前端均已存在并通过 CI。最新进度与下一步见 `CLAUDE.md`（工作交接状态文档）与 `docs/architecture/PORT-1TO1-GAP.md`。
+当前状态与发布门槛以 `docs/releases/1.0.0-beta.2.md` 为准，验证证据记录在
+`docs/audit/2026-08-02/beta-functional-verification.md`。`CLAUDE.md`、
+`docs/architecture/HANDOFF-2026-07.md` 与 `PORT-1TO1-GAP.md` 均为历史快照或设计来源。
 
 ## 上游参考
 

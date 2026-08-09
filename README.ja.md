@@ -82,17 +82,22 @@ OpenTake は CapCut / DaVinci Resolve / Final Cut Pro の代替品ではあり�
 
 📖 [Context Signal 設計](docs/modules/opentake-agent/AGENT-CONTEXT-SIGNAL.md)
 
-### 🔌 MCP Server — 31ツール
+### 🔌 Agent ツールサーフェス
 
-`127.0.0.1:19789` で動作する完全なMCPサーバー。Agentがタイムラインを直接制御：
+OpenTake は45個の互換 Agent ツールを提供し、メディア・生成・provider の実行可能性に
+応じて動的に公開します。利用できない機能は fail closed になります。
 
-| グループ | 数 | 主要ツール |
-|:--|:--:|:--|
-| 読取 / 内省 | 7 | `get_timeline`, `get_media`, `inspect_media`, `search_media` |
-| タイムライン編集 | 11 | `add_clips`, `split_clip`, `set_clip_properties`, `set_keyframes`, `ripple_delete_ranges` |
-| 生成 / インポート | 5 | `generate_video`, `generate_image`, `generate_audio`, `import_media` |
-| ライブラリ | 7 | `create_folder`, `move_to_folder`, `rename_media` |
-| リソース | 2 | `models/video`, `models/image` |
+| グループ | 主要ツール |
+|:--|:--|
+| 読取 / 内省 | `get_timeline`, `get_media`, `inspect_media`, `search_media` |
+| タイムライン編集 | `add_clips`, `split_clip`, `set_clip_properties`, `set_keyframes`, `ripple_delete_ranges` |
+| 生成 / インポート | `generate_video`, `generate_image`, `generate_audio`, `import_media` |
+| ライブラリ | `create_folder`, `move_to_folder`, `rename_media` |
+| リソース | `models/video`, `models/image` |
+
+公式 Codex / ChatGPT は、ターンごとにランダムな loopback ポート、256-bit Bearer、
+現在のプロジェクト ID を持つ一時 MCP を使用します。Beta 2 では旧来の未認証固定
+`127.0.0.1:19789` エンドポイントを無効化しています。
 
 ### 🎬 クロスプラットフォームメディアエンジン
 
@@ -159,7 +164,7 @@ crates/
 │  opentake-domain / ops / project / render / media    │
 │  opentake-agent / gen / core                          │
 │         ▲                          │                 │
-│   MCP Server (:19789)      呼出    ▼                 │
+│   ターン単位の認証 MCP     呼出    ▼                 │
 │   In-app Agent Chat   FFmpeg + wgpu + cpal + whisper │
 └──────────────────────────────────────────────────────┘
 ```
@@ -233,7 +238,9 @@ cd web && pnpm install && pnpm build
 cd .. && cargo tauri dev
 ```
 
-> ⚠️ **現在の状態**: 初期設計段階。アーキテクチャ、ロードマップ、モジュール移植マップは完了。コード実装中。
+> **現在の状態**: `1.0.0-beta.2` 候補版。ローカル編集、プレビュー、保存、
+> 書き出し、Agent、Motion Canvas、レビュー可能な AI ワークフローを実装済みです。
+> 検証範囲と制限は [Beta リリースノート](docs/releases/1.0.0-beta.2.md) を参照してください。
 
 ---
 
@@ -242,6 +249,8 @@ cd .. && cargo tauri dev
 | バージョン | 日付 | マイルストーン |
 |:--|:--|:--|
 | `0.1.0-dev` | 2026-06 | Phase 0+1: Cargo workspace + Domain models + Edit ops |
+| `1.0.0-beta.1` | 2026-08-01 | 初回インストール可能 Beta：ローカル編集、Agent、Motion、レビュー可能な AI ワークフロー |
+| `1.0.0-beta.2` | 2026-08-03 | 公式 Codex ログイン、原子的タイムライン操作、認証 MCP、操作性の強化 |
 | *(planned)* `1.0.0` | TBD | Phase 10: フルリリース |
 
 📖 [完全なロードマップ](docs/architecture/ROADMAP.md)

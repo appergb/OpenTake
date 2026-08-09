@@ -143,12 +143,14 @@ describe("native playback identity", () => {
     expect(getNativePlaybackPublication()?.sequence).toBe(2);
   });
 
-  it("allows fallback only for engine command errors", () => {
+  it("allows fallback only for engine failures and unavailable playback commands", () => {
     const controller = harness().controller;
     for (const code of ["superseded", "cancelled", "busy"] as const) {
       const error: PlaybackCommandError = { code, message: code };
       expect(controller.shouldFallback(error)).toBe(false);
     }
     expect(controller.shouldFallback({ code: "engine", message: "gpu" })).toBe(true);
+    expect(controller.shouldFallback("Command playback_start not found")).toBe(true);
+    expect(controller.shouldFallback("Command project_save not found")).toBe(false);
   });
 });

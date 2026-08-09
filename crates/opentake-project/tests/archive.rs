@@ -23,6 +23,8 @@ fn entry(id: &str, name: &str, kind: ClipType, source: MediaSource) -> MediaMani
         source_height: None,
         source_fps: None,
         has_audio: None,
+        color: None,
+        proxy: None,
         folder_id: None,
         cached_remote_url: None,
         cached_remote_url_expires_at: None,

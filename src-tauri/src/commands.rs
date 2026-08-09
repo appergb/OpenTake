@@ -1,10 +1,11 @@
 //! The `#[tauri::command]` surface.
 //!
-//! Each command is a thin shim: it locks nothing of its own, delegates to an
-//! `opentake_core::dto::handle_*` function (which wraps [`AppCore`]). Most
-//! boundary `CmdError`s become strings; playback-aware project lifecycle
-//! commands preserve the structured playback error code so overlap is reported
-//! as `busy` before core mutation.
+//! Each command is a thin shim over an `opentake_core::dto::handle_*` function
+//! (which wraps [`AppCore`]). Project New/Open additionally share one boundary
+//! single-flight gate so asynchronous project preparation cannot race another
+//! lifecycle transition. Core editing/history/save commands preserve
+//! `CmdError` at the IPC boundary; playback-aware lifecycle commands preserve
+//! their structured error code so callers never need to parse display text.
 //!
 //! `EditCommand` itself is not `Deserialize` (it carries engine value types with
 //! no serde derives), so the editing entry point takes a local serde-friendly
@@ -13,21 +14,150 @@
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
+use opentake_core::core::PreparedProjectOpen;
 use opentake_core::dto::{
-    handle_edit_apply, handle_get_timeline, handle_project_new, handle_redo, handle_undo,
-    EditResultDto, TimelineSnapshotDto,
+    handle_edit_apply_at_project_revision, handle_get_timeline, handle_project_new, EditResultDto,
+    TimelineSnapshotDto,
 };
-use opentake_core::{AppCore, CmdError, EditCommand};
+use opentake_core::{AppCore, CmdError, EditCommand, ProjectRevision};
 
+use opentake_ops::command::{
+    NewTrackClipMode, PasteClipEntry, PlaceMediaTarget, ProjectTimelineSettings, UnplacedClipEntry,
+};
 use opentake_ops::{
     CaptionEntry, ClipEntry, ClipMove, ClipProperties, FrameRange, KeyframePayload,
     KeyframeProperty, KeyframeValue, RenameEntry, TextAutoTrackEntry, TextEntry,
 };
 
 use opentake_domain::{
-    AnimPair, ChromaKey, ClipType, ColorGrade, Crop, Effect, Interpolation, Keyframe,
-    KeyframeTrack, Mask, TextStyle, Transform,
+    AnimPair, AudioDenoise, ChromaKey, Clip, ClipType, ColorGrade, Crop, Effect, Interpolation,
+    Keyframe, KeyframeTrack, LoudnessNormalization, LutReference, Mask, StabilizationTrack,
+    TextStyle, Transform, TransitionKind,
 };
+
+const MAX_CONCURRENT_PROJECT_PREPARES: usize = 4;
+
+#[derive(Clone)]
+pub(crate) struct ProjectLifecycleCoordinator {
+    gate: std::sync::Arc<tokio::sync::Mutex<()>>,
+    prepare_slots: std::sync::Arc<tokio::sync::Semaphore>,
+    timed_out_paths:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
+}
+
+#[derive(Clone, Debug)]
+struct ProjectLifecycleLease {
+    _guard: std::sync::Arc<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrepareOperationStatus {
+    Running,
+    TimedOut,
+    Finished,
+}
+
+#[derive(Debug)]
+struct PrepareOperationState {
+    path: std::path::PathBuf,
+    status: std::sync::Mutex<PrepareOperationStatus>,
+    timed_out_paths:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>>,
+}
+
+#[derive(Debug)]
+struct ProjectPrepareAdmission {
+    state: std::sync::Arc<PrepareOperationState>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl Default for ProjectLifecycleCoordinator {
+    fn default() -> Self {
+        Self {
+            gate: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+            prepare_slots: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                MAX_CONCURRENT_PROJECT_PREPARES,
+            )),
+            timed_out_paths: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashSet::new(),
+            )),
+        }
+    }
+}
+
+impl PrepareOperationState {
+    fn mark_timed_out(&self) {
+        let mut status = self
+            .status
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *status != PrepareOperationStatus::Running {
+            return;
+        }
+        self.timed_out_paths
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(self.path.clone());
+        *status = PrepareOperationStatus::TimedOut;
+    }
+}
+
+impl Drop for ProjectPrepareAdmission {
+    fn drop(&mut self) {
+        let mut status = self
+            .state
+            .status
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *status == PrepareOperationStatus::TimedOut {
+            self.state
+                .timed_out_paths
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&self.state.path);
+        }
+        *status = PrepareOperationStatus::Finished;
+    }
+}
+
+impl ProjectLifecycleCoordinator {
+    fn try_acquire(&self) -> Result<ProjectLifecycleLease, String> {
+        self.gate
+            .clone()
+            .try_lock_owned()
+            .map(|guard| ProjectLifecycleLease {
+                _guard: std::sync::Arc::new(guard),
+            })
+            .map_err(|_| "another project lifecycle transition is already in progress".to_string())
+    }
+
+    fn try_admit_prepare(&self, path: &std::path::Path) -> Result<ProjectPrepareAdmission, String> {
+        if self
+            .timed_out_paths
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains(path)
+        {
+            return Err(format!(
+                "a timed-out project prepare is still finishing for {}",
+                path.display()
+            ));
+        }
+        let permit = self
+            .prepare_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| "too many timed-out project prepares are still finishing".to_string())?;
+        Ok(ProjectPrepareAdmission {
+            state: std::sync::Arc::new(PrepareOperationState {
+                path: path.to_path_buf(),
+                status: std::sync::Mutex::new(PrepareOperationStatus::Running),
+                timed_out_paths: self.timed_out_paths.clone(),
+            }),
+            _permit: permit,
+        })
+    }
+}
 
 // MARK: - Read / lifecycle commands (direct DTO passthrough)
 
@@ -37,27 +167,112 @@ pub fn get_timeline(core: State<'_, AppCore>) -> TimelineSnapshotDto {
     handle_get_timeline(&core)
 }
 
-/// `undo` / `redo`: global history navigation.
+/// `generation_log`: the current project's append-only AI generation audit log
+/// (rows with model / credits / timestamps, persisted as
+/// `generation-log.json`). Read-only mirror of `AppCore::generation_log()`;
+/// there is deliberately no mutation path — the log is only ever appended by
+/// the core's generation lifecycle (upstream `editor.generationLog`, surfaced
+/// as Palmier Pro's generation-activity view). Infallible: a session with no
+/// project (or a project with no generations) yields the empty log
+/// (`version: 1`, no entries).
 #[tauri::command]
-pub fn undo(core: State<'_, AppCore>) -> Result<EditResultDto, String> {
-    handle_undo(&core).map_err(msg)
+pub fn generation_log(core: State<'_, AppCore>) -> opentake_project::GenerationLog {
+    core.generation_log()
+}
+
+/// `undo` / `redo`: global history navigation, bound to the project mirror
+/// that enabled the corresponding command in the UI.
+#[tauri::command]
+pub fn undo(
+    core: State<'_, AppCore>,
+    expected_project_epoch: u64,
+    expected_timeline_version: u64,
+    expected_project_path: Option<String>,
+) -> Result<EditResultDto, CmdError> {
+    handle_edit_apply_at_project_revision(
+        &core,
+        ProjectRevision {
+            project_epoch: expected_project_epoch,
+            version: expected_timeline_version,
+        },
+        expected_project_path.as_deref().map(std::path::Path::new),
+        EditCommand::Undo,
+    )
 }
 
 #[tauri::command]
-pub fn redo(core: State<'_, AppCore>) -> Result<EditResultDto, String> {
-    handle_redo(&core).map_err(msg)
+pub fn redo(
+    core: State<'_, AppCore>,
+    expected_project_epoch: u64,
+    expected_timeline_version: u64,
+    expected_project_path: Option<String>,
+) -> Result<EditResultDto, CmdError> {
+    handle_edit_apply_at_project_revision(
+        &core,
+        ProjectRevision {
+            project_epoch: expected_project_epoch,
+            version: expected_timeline_version,
+        },
+        expected_project_path.as_deref().map(std::path::Path::new),
+        EditCommand::Redo,
+    )
 }
 
-/// `project_new`: replace the session with a fresh, unsaved project and return
-/// its first snapshot.
+/// `project_new`: replace the session with a fresh project and return its first
+/// snapshot. When `path` is supplied, build and persist the new bundle away
+/// from the live session, then install it atomically only after preparation
+/// succeeds.
 #[cfg(feature = "playback-engine")]
 #[tauri::command]
-pub fn project_new(
-    core: State<'_, AppCore>,
-    playback: State<'_, crate::playback::PlaybackState>,
-    prewarm: State<'_, crate::media::prewarm::PrewarmScheduler>,
+pub async fn project_new(
+    app: AppHandle,
+    path: Option<String>,
 ) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
-    project_new_with_playback_and_prewarm(&core, &playback, &prewarm)
+    let coordinator = app.state::<ProjectLifecycleCoordinator>();
+    let lifecycle = coordinator
+        .try_acquire()
+        .map_err(crate::playback::session::PlaybackCommandError::busy)?;
+    if let Some(path) = path {
+        let path = std::path::PathBuf::from(path);
+        if !crate::safe_asset_protocol::scope_allows_lexical_path(
+            &app.asset_protocol_scope(),
+            &path,
+        ) {
+            return Err(crate::playback::session::PlaybackCommandError::engine(
+                "project path has not been approved by a native file dialog",
+            ));
+        }
+        app.state::<crate::playback::PlaybackState>()
+            .ensure_project_transition_available()?;
+        let admission = coordinator
+            .try_admit_prepare(&path)
+            .map_err(crate::playback::session::PlaybackCommandError::busy)?;
+        let prepared = prepare_saved_project_off_thread(path.clone(), admission)
+            .await
+            .map_err(crate::playback::session::PlaybackCommandError::engine)?;
+        if !prepared.is_current_namespace().map_err(|error| {
+            crate::playback::session::PlaybackCommandError::engine(error.to_string())
+        })? {
+            return Err(crate::playback::session::PlaybackCommandError::engine(
+                "project bundle changed while it was being prepared",
+            ));
+        }
+        let result = commit_prepared_project_open_with_playback_and_prewarm(
+            &app.state::<AppCore>(),
+            prepared,
+            &app.state::<crate::playback::PlaybackState>(),
+            &app.state::<crate::media::prewarm::PrewarmScheduler>(),
+        );
+        drop(lifecycle);
+        return result;
+    }
+    let result = project_new_with_playback_and_prewarm(
+        &app.state::<AppCore>(),
+        &app.state::<crate::playback::PlaybackState>(),
+        &app.state::<crate::media::prewarm::PrewarmScheduler>(),
+    );
+    drop(lifecycle);
+    result
 }
 
 #[cfg(all(feature = "playback-engine", test))]
@@ -89,26 +304,153 @@ fn project_new_with_playback_and_prewarm(
 
 #[cfg(not(feature = "playback-engine"))]
 #[tauri::command]
-pub fn project_new(
-    core: State<'_, AppCore>,
-    prewarm: State<'_, crate::media::prewarm::PrewarmScheduler>,
+pub async fn project_new(
+    app: AppHandle,
+    path: Option<String>,
 ) -> Result<TimelineSnapshotDto, String> {
+    let coordinator = app.state::<ProjectLifecycleCoordinator>();
+    let lifecycle = coordinator.try_acquire()?;
+    if let Some(path) = path {
+        let path = std::path::PathBuf::from(path);
+        if !crate::safe_asset_protocol::scope_allows_lexical_path(
+            &app.asset_protocol_scope(),
+            &path,
+        ) {
+            return Err("project path has not been approved by a native file dialog".into());
+        }
+        let admission = coordinator.try_admit_prepare(&path)?;
+        let prepared = prepare_saved_project_off_thread(path.clone(), admission).await?;
+        if !prepared
+            .is_current_namespace()
+            .map_err(|error| error.to_string())?
+        {
+            return Err("project bundle changed while it was being prepared".into());
+        }
+        let core = app.state::<AppCore>();
+        let prewarm = app.state::<crate::media::prewarm::PrewarmScheduler>();
+        prewarm.begin_project_transition()?;
+        let snapshot = TimelineSnapshotDto::from(core.commit_project_open(prepared));
+        prewarm.activate_project(snapshot.project_epoch);
+        drop(lifecycle);
+        return Ok(snapshot);
+    }
+    let core = app.state::<AppCore>();
+    let prewarm = app.state::<crate::media::prewarm::PrewarmScheduler>();
     prewarm.begin_project_transition()?;
     let snapshot = handle_project_new(&core);
     prewarm.activate_project(snapshot.project_epoch);
+    drop(lifecycle);
     Ok(snapshot)
 }
 
 /// `project_open`: open a `.opentake` bundle, returning the first snapshot.
+const PROJECT_LIFECYCLE_PREPARE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+async fn run_blocking_with_timeout<T, F>(
+    operation: &'static str,
+    timeout: std::time::Duration,
+    admission: ProjectPrepareAdmission,
+    build: F,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    let operation_state = admission.state.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        let _admission = admission;
+        build()
+    });
+    match tokio::time::timeout(timeout, task).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => Err(format!("{operation} task failed: {error}")),
+        Err(_) => {
+            operation_state.mark_timed_out();
+            Err(format!("{operation} timed out after {timeout:?}"))
+        }
+    }
+}
+
+async fn prepare_project_open_off_thread(
+    path: std::path::PathBuf,
+    admission: ProjectPrepareAdmission,
+) -> Result<PreparedProjectOpen, String> {
+    run_blocking_with_timeout(
+        "project open",
+        PROJECT_LIFECYCLE_PREPARE_TIMEOUT,
+        admission,
+        move || {
+            if crate::fs_availability::project_bundle_has_dataless_components(&path) {
+                return Err(
+                    "项目文件尚未下载到本机，请先在 Finder 中下载后再打开 / Project files are cloud-only; download them in Finder before opening"
+                        .to_string(),
+                );
+            }
+            AppCore::prepare_project_open(path).map_err(|error| error.to_string())
+        },
+    )
+    .await
+}
+
+async fn prepare_saved_project_off_thread(
+    path: std::path::PathBuf,
+    admission: ProjectPrepareAdmission,
+) -> Result<PreparedProjectOpen, String> {
+    run_blocking_with_timeout(
+        "project create",
+        PROJECT_LIFECYCLE_PREPARE_TIMEOUT,
+        admission,
+        move || {
+            AppCore::new()
+                .save_project(Some(path.clone()))
+                .map_err(|error| error.to_string())?;
+            AppCore::prepare_project_open(path).map_err(|error| error.to_string())
+        },
+    )
+    .await
+}
+
 #[cfg(feature = "playback-engine")]
 #[tauri::command]
-pub fn project_open(
-    core: State<'_, AppCore>,
+pub async fn project_open(
+    app: AppHandle,
     path: String,
-    playback: State<'_, crate::playback::PlaybackState>,
-    prewarm: State<'_, crate::media::prewarm::PrewarmScheduler>,
 ) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
-    project_open_with_playback_and_prewarm(&core, path, &playback, &prewarm)
+    let coordinator = app.state::<ProjectLifecycleCoordinator>();
+    let lifecycle = coordinator
+        .try_acquire()
+        .map_err(crate::playback::session::PlaybackCommandError::busy)?;
+    // Fail fast if another project transition is already active. Only the
+    // cloneable lifecycle lease crosses into the blocking filesystem prepare.
+    app.state::<crate::playback::PlaybackState>()
+        .ensure_project_transition_available()?;
+    let path = std::path::PathBuf::from(path);
+    if !crate::safe_asset_protocol::scope_allows_lexical_path(&app.asset_protocol_scope(), &path) {
+        return Err(crate::playback::session::PlaybackCommandError::engine(
+            "project path has not been approved by a native file dialog",
+        ));
+    }
+    let admission = coordinator
+        .try_admit_prepare(&path)
+        .map_err(crate::playback::session::PlaybackCommandError::busy)?;
+    let prepared = prepare_project_open_off_thread(path.clone(), admission)
+        .await
+        .map_err(crate::playback::session::PlaybackCommandError::engine)?;
+    if !prepared.is_current_namespace().map_err(|error| {
+        crate::playback::session::PlaybackCommandError::engine(error.to_string())
+    })? {
+        return Err(crate::playback::session::PlaybackCommandError::engine(
+            "project bundle changed while it was being prepared",
+        ));
+    }
+    let result = commit_prepared_project_open_with_playback_and_prewarm(
+        &app.state::<AppCore>(),
+        prepared,
+        &app.state::<crate::playback::PlaybackState>(),
+        &app.state::<crate::media::prewarm::PrewarmScheduler>(),
+    );
+    drop(lifecycle);
+    result
 }
 
 #[cfg(all(feature = "playback-engine", test))]
@@ -122,7 +464,7 @@ pub(crate) fn project_open_with_playback(
     project_open_with_playback_and_prewarm(core, path, playback, &prewarm)
 }
 
-#[cfg(feature = "playback-engine")]
+#[cfg(all(feature = "playback-engine", test))]
 pub(crate) fn project_open_with_playback_and_prewarm(
     core: &AppCore,
     path: String,
@@ -134,6 +476,16 @@ pub(crate) fn project_open_with_playback_and_prewarm(
         AppCore::prepare_project_open(std::path::PathBuf::from(path)).map_err(|error| {
             crate::playback::session::PlaybackCommandError::engine(error.to_string())
         })?;
+    commit_prepared_project_open_with_playback_and_prewarm(core, prepared, playback, prewarm)
+}
+
+#[cfg(feature = "playback-engine")]
+fn commit_prepared_project_open_with_playback_and_prewarm(
+    core: &AppCore,
+    prepared: PreparedProjectOpen,
+    playback: &crate::playback::PlaybackState,
+    prewarm: &crate::media::prewarm::PrewarmScheduler,
+) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
     let transition = playback.begin_project_transition()?;
     if let Err(error) = prewarm.begin_project_transition() {
         playback.cancel_project_transition(transition);
@@ -147,16 +499,27 @@ pub(crate) fn project_open_with_playback_and_prewarm(
 
 #[cfg(not(feature = "playback-engine"))]
 #[tauri::command]
-pub fn project_open(
-    core: State<'_, AppCore>,
-    path: String,
-    prewarm: State<'_, crate::media::prewarm::PrewarmScheduler>,
-) -> Result<TimelineSnapshotDto, String> {
-    let prepared = AppCore::prepare_project_open(std::path::PathBuf::from(path))
-        .map_err(|error| error.to_string())?;
+pub async fn project_open(app: AppHandle, path: String) -> Result<TimelineSnapshotDto, String> {
+    let coordinator = app.state::<ProjectLifecycleCoordinator>();
+    let lifecycle = coordinator.try_acquire()?;
+    let path = std::path::PathBuf::from(path);
+    if !crate::safe_asset_protocol::scope_allows_lexical_path(&app.asset_protocol_scope(), &path) {
+        return Err("project path has not been approved by a native file dialog".into());
+    }
+    let admission = coordinator.try_admit_prepare(&path)?;
+    let prepared = prepare_project_open_off_thread(path.clone(), admission).await?;
+    if !prepared
+        .is_current_namespace()
+        .map_err(|error| error.to_string())?
+    {
+        return Err("project bundle changed while it was being prepared".into());
+    }
+    let core = app.state::<AppCore>();
+    let prewarm = app.state::<crate::media::prewarm::PrewarmScheduler>();
     prewarm.begin_project_transition()?;
     let snapshot = TimelineSnapshotDto::from(core.commit_project_open(prepared));
     prewarm.activate_project(snapshot.project_epoch);
+    drop(lifecycle);
     Ok(snapshot)
 }
 
@@ -173,18 +536,52 @@ pub fn project_open(
 /// risk lock reentrancy for no fidelity gain. Capture is best-effort: a failure
 /// yields `None`, leaving any existing cover untouched, and never fails the save.
 #[tauri::command]
-pub fn project_save(core: State<'_, AppCore>, path: Option<String>) -> Result<String, String> {
+pub fn project_save(
+    core: State<'_, AppCore>,
+    path: Option<String>,
+    expected_project_epoch: u64,
+    expected_project_path: Option<String>,
+) -> Result<String, CmdError> {
+    project_save_for_project(
+        &core,
+        path,
+        expected_project_epoch,
+        expected_project_path,
+        |snapshot| {
+            opentake_media::capture_project_thumbnail(
+                &snapshot.timeline,
+                &snapshot.media,
+                snapshot.project_dir.as_deref(),
+            )
+        },
+    )
+}
+
+fn project_save_for_project(
+    core: &AppCore,
+    path: Option<String>,
+    expected_project_epoch: u64,
+    expected_project_path: Option<String>,
+    capture_thumbnail: impl FnOnce(&opentake_core::ProjectRuntimeSnapshot) -> Option<Vec<u8>>,
+) -> Result<String, CmdError> {
     let snapshot = core.runtime_snapshot();
-    let thumbnail = opentake_media::capture_project_thumbnail(
-        &snapshot.timeline,
-        &snapshot.media,
-        snapshot.project_dir.as_deref(),
-    );
+    if snapshot.project_epoch != expected_project_epoch
+        || snapshot.project_dir.as_deref()
+            != expected_project_path.as_deref().map(std::path::Path::new)
+    {
+        return Err(CmdError::from(opentake_core::CoreError::StaleProject));
+    }
+    let thumbnail = capture_thumbnail(&snapshot);
 
     let target = path.map(std::path::PathBuf::from);
-    core.save_project_with_thumbnail(target, thumbnail)
-        .map(|p| p.to_string_lossy().into_owned())
-        .map_err(|e| e.to_string())
+    core.save_project_with_thumbnail_for_project(
+        expected_project_epoch,
+        expected_project_path.as_deref().map(std::path::Path::new),
+        target,
+        thumbnail,
+    )
+    .map(|p| p.to_string_lossy().into_owned())
+    .map_err(CmdError::from)
 }
 
 /// `get_default_project_dir`: the default folder new projects save into
@@ -390,34 +787,74 @@ pub fn can_redo(core: State<'_, AppCore>) -> bool {
 
 /// `edit_apply`: the unified editing command. The front end constructs an
 /// [`EditRequest`] from a UI gesture; this maps it to an [`EditCommand`] and
-/// routes it through [`AppCore::apply`] (which performs the snapshot/commit/
-/// version transaction and emits `TimelineChanged`).
+/// routes it through [`AppCore::apply_at_project_revision`] (which performs the
+/// project identity check and snapshot/commit/version transaction under one
+/// authoritative lock, then emits `TimelineChanged`).
 #[tauri::command]
 pub fn edit_apply(
     core: State<'_, AppCore>,
     render: State<'_, crate::render::RenderState>,
     media: State<'_, crate::media::MediaState>,
     command: EditRequest,
-) -> Result<EditResultDto, String> {
+    expected_project_epoch: u64,
+    expected_timeline_version: u64,
+    expected_project_path: Option<String>,
+) -> Result<EditResultDto, CmdError> {
+    let mut prepared_freeze_path = None;
     let cmd = match command {
         EditRequest::FreezeFrame {
             clip_id,
             at_frame,
             duration_frames,
         } => {
-            validate_freeze_frame_request(&core, &clip_id, at_frame, duration_frames)?;
-            let media_ref =
-                crate::render::capture_freeze_frame(&core, &render, &media, &clip_id, at_frame)?;
-            EditCommand::FreezeFrame {
+            // Save As/project replacement takes the write side. Retain the read
+            // lease while freeze-frame preparation reads external/render state,
+            // then release it before the core emits post-commit events. If a
+            // transition wins after capture, the atomic revision/path check
+            // below rejects the prepared command.
+            let prepared = {
+                let _identity = core.lock_project_identity_workflow();
+                validate_freeze_frame_request(&core, &clip_id, at_frame, duration_frames)
+                    .map_err(validation_error)?;
+                crate::render::capture_freeze_frame(&core, &render, &media, &clip_id, at_frame)
+                    .map_err(|error| {
+                        eprintln!("freeze-frame capture failed: {error}");
+                        internal_error("Freeze-frame capture failed")
+                    })?
+            };
+            // The identity lease is deliberately gone before the command can
+            // emit TimelineChanged/MediaChanged. The final revision/path check
+            // below is still authoritative and shares the edit's core lock.
+            prepared_freeze_path = Some(prepared.path);
+            EditCommand::RegisterMediaAndFreezeFrame {
+                media: prepared.media,
                 clip_id,
                 at_frame,
                 duration_frames,
-                media_ref,
             }
         }
-        other => other.into_command()?,
+        other => other.into_command().map_err(validation_error)?,
     };
-    handle_edit_apply(&core, cmd).map_err(msg)
+    let result = handle_edit_apply_at_project_revision(
+        &core,
+        ProjectRevision {
+            project_epoch: expected_project_epoch,
+            version: expected_timeline_version,
+        },
+        expected_project_path.as_deref().map(std::path::Path::new),
+        cmd,
+    );
+    if result.is_err() {
+        if let Some(path) = prepared_freeze_path {
+            if let Err(error) = std::fs::remove_file(&path) {
+                eprintln!(
+                    "failed to remove rejected freeze-frame capture {}: {error}",
+                    path.display()
+                );
+            }
+        }
+    }
+    result
 }
 
 /// `check_path_exists`: checks if a path (e.g. project bundle folder) exists on disk.
@@ -426,8 +863,18 @@ pub fn check_path_exists(path: String) -> bool {
     std::path::Path::new(&path).exists()
 }
 
-fn msg(e: CmdError) -> String {
-    e.message
+fn validation_error(message: String) -> CmdError {
+    CmdError {
+        code: "validation".to_string(),
+        message,
+    }
+}
+
+fn internal_error(message: impl Into<String>) -> CmdError {
+    CmdError {
+        code: "internal".to_string(),
+        message: message.into(),
+    }
 }
 
 fn validate_freeze_frame_request(
@@ -471,8 +918,26 @@ fn validate_freeze_frame_request(
 /// union. Engine value types (`ClipMove`, `TrimEdit`, `FrameRange`, keyframe
 /// tracks) are mirrored as local serde DTOs and converted in [`into_command`].
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 pub enum EditRequest {
+    #[serde(rename_all = "camelCase")]
+    CreateNestedSequence { name: String, clip_ids: Vec<String> },
+    #[serde(rename_all = "camelCase")]
+    EditNestedSequence {
+        sequence_id: String,
+        command: Box<EditRequest>,
+    },
+    #[serde(rename_all = "camelCase")]
+    RenameNestedSequence { sequence_id: String, name: String },
+    #[serde(rename_all = "camelCase")]
+    DissolveNestedSequence { clip_id: String },
+    #[serde(rename_all = "camelCase")]
+    PlaceMedia {
+        sequence_id: Option<String>,
+        settings: Option<ProjectTimelineSettingsDto>,
+        target: PlaceMediaTargetDto,
+        entry: UnplacedClipEntryDto,
+    },
     #[serde(rename_all = "camelCase")]
     AddClips { entries: Vec<ClipEntryDto> },
     #[serde(rename_all = "camelCase")]
@@ -490,9 +955,24 @@ pub enum EditRequest {
         target_track_indexes: Vec<usize>,
     },
     #[serde(rename_all = "camelCase")]
+    MoveOrDuplicateClipsToNewTrack {
+        clip_ids: Vec<String>,
+        lead_clip_id: String,
+        requested_frame_delta: i32,
+        insert_at: usize,
+        mode: NewTrackClipModeDto,
+    },
+    #[serde(rename_all = "camelCase")]
+    PasteClips { entries: Vec<PasteClipEntryDto> },
+    #[serde(rename_all = "camelCase")]
     RemoveClips { clip_ids: Vec<String> },
     #[serde(rename_all = "camelCase")]
     SplitClip { clip_id: String, at_frame: i32 },
+    #[serde(rename_all = "camelCase")]
+    SplitClips {
+        clip_ids: Vec<String>,
+        at_frame: i32,
+    },
     #[serde(rename_all = "camelCase")]
     FreezeFrame {
         clip_id: String,
@@ -507,6 +987,12 @@ pub enum EditRequest {
         // Boxed to keep `EditRequest` small: `ClipPropertiesDto` carries a full
         // `TextStyle`, which would otherwise dominate the enum size.
         properties: Box<ClipPropertiesDto>,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetTransformAtFrame {
+        clip_id: String,
+        frame: i32,
+        transform: Transform,
     },
     #[serde(rename_all = "camelCase")]
     SetKeyframes {
@@ -553,6 +1039,11 @@ pub enum EditRequest {
         grade: Option<ColorGrade>,
     },
     #[serde(rename_all = "camelCase")]
+    SetLut {
+        clip_ids: Vec<String>,
+        lut: Option<LutReference>,
+    },
+    #[serde(rename_all = "camelCase")]
     SetChromaKey {
         clip_ids: Vec<String>,
         chroma_key: Option<ChromaKey>,
@@ -566,6 +1057,36 @@ pub enum EditRequest {
     SetEffects {
         clip_ids: Vec<String>,
         effects: Vec<Effect>,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetLoudnessNormalization {
+        clip_id: String,
+        normalization: Option<LoudnessNormalization>,
+    },
+    #[serde(rename_all = "camelCase")]
+    SetAudioDenoise {
+        clip_id: String,
+        denoise: Option<AudioDenoise>,
+    },
+    #[serde(rename_all = "camelCase")]
+    ApplyStabilization {
+        clip_id: String,
+        solution: StabilizationTrack,
+    },
+    #[serde(rename_all = "camelCase")]
+    AdjustStabilization {
+        clip_id: String,
+        strength: Option<f64>,
+        crop_margin: Option<f64>,
+    },
+    #[serde(rename_all = "camelCase")]
+    ResetStabilization { clip_id: String },
+    #[serde(rename_all = "camelCase")]
+    SetTransition {
+        from_clip_id: String,
+        to_clip_id: String,
+        kind: Option<TransitionKind>,
+        duration_frames: i32,
     },
     #[serde(rename_all = "camelCase")]
     RippleDeleteRanges {
@@ -628,6 +1149,33 @@ pub enum EditRequest {
 impl EditRequest {
     fn into_command(self) -> Result<EditCommand, String> {
         Ok(match self {
+            EditRequest::CreateNestedSequence { name, clip_ids } => {
+                EditCommand::CreateNestedSequenceFromClips { name, clip_ids }
+            }
+            EditRequest::EditNestedSequence {
+                sequence_id,
+                command,
+            } => EditCommand::EditNestedSequence {
+                sequence_id,
+                command: Box::new(command.into_command()?),
+            },
+            EditRequest::RenameNestedSequence { sequence_id, name } => {
+                EditCommand::RenameNestedSequence { sequence_id, name }
+            }
+            EditRequest::DissolveNestedSequence { clip_id } => {
+                EditCommand::DissolveNestedSequence { clip_id }
+            }
+            EditRequest::PlaceMedia {
+                sequence_id,
+                settings,
+                target,
+                entry,
+            } => EditCommand::PlaceMedia {
+                sequence_id,
+                settings: settings.map(ProjectTimelineSettingsDto::into_settings),
+                target: target.into_target(),
+                entry: entry.into_entry(),
+            },
             EditRequest::AddClips { entries } => EditCommand::AddClips {
                 entries: entries.into_iter().map(ClipEntryDto::into_entry).collect(),
             },
@@ -652,9 +1200,31 @@ impl EditRequest {
                 offset_frames,
                 target_track_indexes,
             },
+            EditRequest::MoveOrDuplicateClipsToNewTrack {
+                clip_ids,
+                lead_clip_id,
+                requested_frame_delta,
+                insert_at,
+                mode,
+            } => EditCommand::MoveOrDuplicateClipsToNewTrack {
+                clip_ids,
+                lead_clip_id,
+                requested_frame_delta,
+                insert_at,
+                mode: mode.into(),
+            },
+            EditRequest::PasteClips { entries } => EditCommand::PasteClips {
+                entries: entries
+                    .into_iter()
+                    .map(PasteClipEntryDto::into_entry)
+                    .collect(),
+            },
             EditRequest::RemoveClips { clip_ids } => EditCommand::RemoveClips { clip_ids },
             EditRequest::SplitClip { clip_id, at_frame } => {
                 EditCommand::SplitClip { clip_id, at_frame }
+            }
+            EditRequest::SplitClips { clip_ids, at_frame } => {
+                EditCommand::SplitClips { clip_ids, at_frame }
             }
             EditRequest::FreezeFrame { .. } => {
                 return Err("freezeFrame must be handled by edit_apply".into())
@@ -668,6 +1238,15 @@ impl EditRequest {
             } => EditCommand::SetClipProperties {
                 clip_ids,
                 properties: Box::new((*properties).into_properties()),
+            },
+            EditRequest::SetTransformAtFrame {
+                clip_id,
+                frame,
+                transform,
+            } => EditCommand::SetTransformAtFrame {
+                clip_id,
+                frame,
+                transform,
             },
             EditRequest::SetKeyframes {
                 clip_id,
@@ -732,6 +1311,7 @@ impl EditRequest {
             EditRequest::SetColorGrade { clip_ids, grade } => {
                 EditCommand::SetColorGrade { clip_ids, grade }
             }
+            EditRequest::SetLut { clip_ids, lut } => EditCommand::SetLut { clip_ids, lut },
             EditRequest::SetChromaKey {
                 clip_ids,
                 chroma_key,
@@ -743,6 +1323,42 @@ impl EditRequest {
             EditRequest::SetEffects { clip_ids, effects } => {
                 EditCommand::SetEffects { clip_ids, effects }
             }
+            EditRequest::SetLoudnessNormalization {
+                clip_id,
+                normalization,
+            } => EditCommand::SetLoudnessNormalization {
+                clip_id,
+                normalization,
+            },
+            EditRequest::SetAudioDenoise { clip_id, denoise } => {
+                EditCommand::SetAudioDenoise { clip_id, denoise }
+            }
+            EditRequest::ApplyStabilization { clip_id, solution } => {
+                EditCommand::ApplyStabilization { clip_id, solution }
+            }
+            EditRequest::AdjustStabilization {
+                clip_id,
+                strength,
+                crop_margin,
+            } => EditCommand::AdjustStabilization {
+                clip_id,
+                strength,
+                crop_margin,
+            },
+            EditRequest::ResetStabilization { clip_id } => {
+                EditCommand::ResetStabilization { clip_id }
+            }
+            EditRequest::SetTransition {
+                from_clip_id,
+                to_clip_id,
+                kind,
+                duration_frames,
+            } => EditCommand::SetTransition {
+                from_clip_id,
+                to_clip_id,
+                kind,
+                duration_frames,
+            },
             EditRequest::RippleDeleteRanges {
                 track_index,
                 ranges,
@@ -826,6 +1442,119 @@ impl EditRequest {
                 EditCommand::SetTimelineSettings { fps, width, height }
             }
         })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectTimelineSettingsDto {
+    pub fps: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl ProjectTimelineSettingsDto {
+    fn into_settings(self) -> ProjectTimelineSettings {
+        ProjectTimelineSettings {
+            fps: self.fps,
+            width: self.width,
+            height: self.height,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum PlaceMediaTargetDto {
+    #[serde(rename_all = "camelCase")]
+    ExistingTrack { track_id: String },
+    #[serde(rename_all = "camelCase")]
+    NewTrack {
+        track_type: ClipType,
+        at: Option<usize>,
+    },
+}
+
+impl PlaceMediaTargetDto {
+    fn into_target(self) -> PlaceMediaTarget {
+        match self {
+            Self::ExistingTrack { track_id } => PlaceMediaTarget::ExistingTrack { track_id },
+            Self::NewTrack { track_type, at } => PlaceMediaTarget::NewTrack {
+                kind: track_type,
+                at,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnplacedClipEntryDto {
+    pub media_ref: String,
+    pub media_type: ClipType,
+    pub source_clip_type: ClipType,
+    pub start_frame: i32,
+    pub duration_frames: i32,
+    #[serde(default)]
+    pub trim_start_frame: Option<i32>,
+    #[serde(default)]
+    pub trim_end_frame: Option<i32>,
+    #[serde(default)]
+    pub has_audio: bool,
+    #[serde(default)]
+    pub add_linked_audio: bool,
+    #[serde(default)]
+    pub transform: Option<Transform>,
+}
+
+impl UnplacedClipEntryDto {
+    fn into_entry(self) -> UnplacedClipEntry {
+        UnplacedClipEntry {
+            media_ref: self.media_ref,
+            media_type: self.media_type,
+            source_clip_type: self.source_clip_type,
+            start_frame: self.start_frame,
+            duration_frames: self.duration_frames,
+            trim_start_frame: self.trim_start_frame,
+            trim_end_frame: self.trim_end_frame,
+            has_audio: self.has_audio,
+            add_linked_audio: self.add_linked_audio,
+            transform: self.transform,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NewTrackClipModeDto {
+    Move,
+    Duplicate,
+}
+
+impl From<NewTrackClipModeDto> for NewTrackClipMode {
+    fn from(value: NewTrackClipModeDto) -> Self {
+        match value {
+            NewTrackClipModeDto::Move => NewTrackClipMode::Move,
+            NewTrackClipModeDto::Duplicate => NewTrackClipMode::Duplicate,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasteClipEntryDto {
+    pub clip: Clip,
+    pub target_track_id: String,
+    pub start_frame: i32,
+}
+
+impl PasteClipEntryDto {
+    fn into_entry(self) -> PasteClipEntry {
+        PasteClipEntry {
+            clip: self.clip,
+            target_track_id: self.target_track_id,
+            start_frame: self.start_frame,
+        }
     }
 }
 
@@ -1189,6 +1918,319 @@ impl KeyframeValueDto {
     }
 }
 
+#[cfg(test)]
+mod project_open_async_tests {
+    use super::{
+        prepare_saved_project_off_thread, project_save_for_project, run_blocking_with_timeout,
+        ProjectLifecycleCoordinator,
+    };
+    use opentake_core::core::PreparedProjectOpen;
+    use opentake_core::AppCore;
+    use std::time::Duration;
+    #[cfg(unix)]
+    #[test]
+    fn prepared_project_detects_an_ambient_namespace_rebind_before_commit() {
+        let fixture = tempfile::tempdir().expect("fixture tempdir");
+        let selected = fixture.path().join("Selected.opentake");
+        let retained = fixture.path().join("Retained-A.opentake");
+        AppCore::new()
+            .save_project(Some(selected.clone()))
+            .expect("save project A");
+        let prepared = AppCore::prepare_project_open(selected.clone()).expect("prepare A");
+
+        std::fs::rename(&selected, &retained).expect("move A out of selected namespace");
+        AppCore::new()
+            .save_project(Some(selected))
+            .expect("replace selected path with B");
+
+        assert!(!prepared
+            .is_current_namespace()
+            .expect("namespace identity check"));
+    }
+
+    /// cap-std retains the bundle without FILE_SHARE_DELETE, so on Windows the
+    /// ambient rename fails closed while prepared — the stronger namespace
+    /// guard (rebind detection on the open handle is Unix-verified above).
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn prepared_project_blocks_an_ambient_namespace_rebind_while_retained() {
+        let fixture = tempfile::tempdir().expect("fixture tempdir");
+        let selected = fixture.path().join("Selected.opentake");
+        let retained = fixture.path().join("Retained-A.opentake");
+        AppCore::new()
+            .save_project(Some(selected.clone()))
+            .expect("save project A");
+        let prepared = AppCore::prepare_project_open(selected.clone()).expect("prepare A");
+
+        assert!(std::fs::rename(&selected, &retained).is_err());
+        assert!(prepared
+            .is_current_namespace()
+            .expect("namespace identity check"));
+
+        drop(prepared);
+        std::fs::rename(&selected, &retained).expect("rename succeeds after release");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocking_project_prepare_runs_off_the_async_caller_thread() {
+        let caller = std::thread::current().id();
+        let coordinator = ProjectLifecycleCoordinator::default();
+        let lifecycle = coordinator.try_acquire().expect("test transition starts");
+        let admission = coordinator
+            .try_admit_prepare(std::path::Path::new("off-thread.opentake"))
+            .expect("prepare admitted");
+
+        let worker =
+            run_blocking_with_timeout("test prepare", Duration::from_secs(1), admission, || {
+                Ok(std::thread::current().id())
+            })
+            .await
+            .expect("blocking task completes");
+
+        assert_ne!(worker, caller);
+        assert!(
+            coordinator.try_acquire().is_err(),
+            "caller lease must span successful prepare and commit"
+        );
+        drop(lifecycle);
+        coordinator
+            .try_acquire()
+            .expect("transition releases after the caller commits");
+    }
+
+    #[test]
+    fn project_lifecycle_transitions_are_single_flight() {
+        let coordinator = ProjectLifecycleCoordinator::default();
+        let incumbent = coordinator.try_acquire().expect("first transition starts");
+
+        assert_eq!(
+            coordinator
+                .try_acquire()
+                .expect_err("overlapping transition must be busy"),
+            "another project lifecycle transition is already in progress"
+        );
+
+        drop(incumbent);
+        coordinator
+            .try_acquire()
+            .expect("transition may retry after incumbent settles");
+    }
+
+    #[test]
+    fn project_prepare_admission_is_globally_bounded() {
+        let coordinator = ProjectLifecycleCoordinator::default();
+        let admissions = (0..super::MAX_CONCURRENT_PROJECT_PREPARES)
+            .map(|index| {
+                coordinator
+                    .try_admit_prepare(std::path::Path::new(&format!("blocked-{index}.opentake")))
+                    .expect("bounded prepare admitted")
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            coordinator
+                .try_admit_prepare(std::path::Path::new("overflow.opentake"))
+                .expect_err("fifth abandoned prepare must fail fast"),
+            "too many timed-out project prepares are still finishing"
+        );
+        drop(admissions);
+        coordinator
+            .try_admit_prepare(std::path::Path::new("recovered.opentake"))
+            .expect("admission recovers when work actually finishes");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn timed_out_worker_quarantines_only_its_path_and_releases_lifecycle() {
+        let coordinator = ProjectLifecycleCoordinator::default();
+        let lifecycle = coordinator.try_acquire().expect("first transition starts");
+        let (release_worker, wait_for_release) = std::sync::mpsc::channel();
+        let slow_path = std::path::Path::new("slow.opentake");
+        let admission = coordinator
+            .try_admit_prepare(slow_path)
+            .expect("slow prepare admitted");
+
+        let result: Result<(), String> = run_blocking_with_timeout(
+            "test prepare",
+            Duration::from_millis(10),
+            admission,
+            move || {
+                wait_for_release
+                    .recv()
+                    .map_err(|error| format!("release channel closed: {error}"))
+            },
+        )
+        .await;
+
+        assert_eq!(
+            result.expect_err("blocked worker must time out"),
+            "test prepare timed out after 10ms"
+        );
+        drop(lifecycle);
+        let retry_lifecycle = coordinator
+            .try_acquire()
+            .expect("a timed-out worker must not wedge every project transition");
+        assert!(coordinator.try_admit_prepare(slow_path).is_err());
+        coordinator
+            .try_admit_prepare(std::path::Path::new("other.opentake"))
+            .expect("an unrelated project path remains usable");
+        drop(retry_lifecycle);
+
+        release_worker.send(()).expect("release worker");
+        let released_path = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Ok(admission) = coordinator.try_admit_prepare(slow_path) {
+                    break admission;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("worker removes path quarantine after finishing");
+        drop(released_path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn timed_out_prepare_cannot_commit_a_late_project() {
+        let fixture = tempfile::tempdir().expect("fixture tempdir");
+        let bundle = fixture.path().join("slow.opentake");
+        AppCore::new()
+            .save_project(Some(bundle.clone()))
+            .expect("save project fixture");
+        let core = AppCore::new();
+        let before = core.project_revision();
+        let coordinator = ProjectLifecycleCoordinator::default();
+        let _lifecycle = coordinator.try_acquire().expect("test transition starts");
+        let admission = coordinator
+            .try_admit_prepare(&bundle)
+            .expect("prepare admitted");
+
+        let result: Result<PreparedProjectOpen, String> = run_blocking_with_timeout(
+            "project open",
+            Duration::from_millis(10),
+            admission,
+            move || {
+                std::thread::sleep(Duration::from_millis(75));
+                AppCore::prepare_project_open(bundle).map_err(|error| error.to_string())
+            },
+        )
+        .await;
+
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("slow prepare must time out"),
+        };
+        assert_eq!(error, "project open timed out after 10ms");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(core.project_revision(), before);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn saved_project_is_prepared_without_mutating_live_core_until_commit() {
+        let fixture = tempfile::tempdir().expect("fixture tempdir");
+        let bundle = fixture.path().join("Fresh.opentake");
+        let core = AppCore::new();
+        let before = core.project_revision();
+        let coordinator = ProjectLifecycleCoordinator::default();
+        let _lifecycle = coordinator.try_acquire().expect("test transition starts");
+        let admission = coordinator
+            .try_admit_prepare(&bundle)
+            .expect("prepare admitted");
+
+        let prepared = prepare_saved_project_off_thread(bundle.clone(), admission)
+            .await
+            .expect("new project bundle prepares");
+
+        assert_eq!(core.project_revision(), before);
+        assert!(bundle.join("project.json").is_file());
+        let snapshot = core.commit_project_open(prepared);
+        assert_eq!(snapshot.project_path.as_deref(), Some(bundle.as_path()));
+        assert_eq!(snapshot.version, 0);
+        assert_ne!(snapshot.project_epoch, before.project_epoch);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_saved_project_prepare_preserves_live_core() {
+        let fixture = tempfile::tempdir().expect("fixture tempdir");
+        let regular_file = fixture.path().join("not-a-directory");
+        std::fs::write(&regular_file, b"occupied").expect("write blocking fixture");
+        let bundle = regular_file.join("Fresh.opentake");
+        let core = AppCore::new();
+        let before = core.project_revision();
+        let coordinator = ProjectLifecycleCoordinator::default();
+        let _lifecycle = coordinator.try_acquire().expect("test transition starts");
+        let admission = coordinator
+            .try_admit_prepare(&bundle)
+            .expect("prepare admitted");
+
+        let error = match prepare_saved_project_off_thread(bundle, admission).await {
+            Err(error) => error,
+            Ok(_) => panic!("invalid destination must fail"),
+        };
+
+        assert!(!error.is_empty());
+        assert_eq!(core.project_revision(), before);
+    }
+
+    #[test]
+    fn thumbnail_capture_cannot_save_a_replacement_project() {
+        let fixture = tempfile::tempdir().expect("fixture tempdir");
+        let first = fixture.path().join("First.opentake");
+        let second = fixture.path().join("Second.opentake");
+        let destination = fixture.path().join("Stale-Copy.opentake");
+        AppCore::new()
+            .save_project(Some(first.clone()))
+            .expect("save first fixture");
+        AppCore::new()
+            .save_project(Some(second.clone()))
+            .expect("save second fixture");
+
+        let core = AppCore::new();
+        core.open_project(&first).expect("open first fixture");
+        let expected = core.runtime_snapshot();
+        let save_core = core.clone();
+        let expected_path = expected
+            .project_dir
+            .as_ref()
+            .expect("opened project has path")
+            .to_string_lossy()
+            .into_owned();
+        let destination_string = destination.to_string_lossy().into_owned();
+        let (capture_started, wait_for_capture) = std::sync::mpsc::channel();
+        let (release_capture, capture_released) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            project_save_for_project(
+                &save_core,
+                Some(destination_string),
+                expected.project_epoch,
+                Some(expected_path),
+                |_| {
+                    capture_started.send(()).expect("announce capture");
+                    capture_released.recv().expect("release capture");
+                    Some(b"thumbnail".to_vec())
+                },
+            )
+        });
+
+        wait_for_capture
+            .recv_timeout(Duration::from_secs(1))
+            .expect("capture starts");
+        core.open_project(&second)
+            .expect("replace project while thumbnail is captured");
+        release_capture.send(()).expect("release capture");
+        let error = worker
+            .join()
+            .expect("save worker joins")
+            .expect_err("stale save must be rejected");
+
+        assert_eq!(error.code, "staleProject", "{error:?}");
+        assert!(!destination.exists());
+        assert_eq!(
+            core.runtime_snapshot().project_dir.as_deref(),
+            Some(second.as_path())
+        );
+    }
+}
+
 #[cfg(all(test, feature = "playback-engine"))]
 mod project_prewarm_lifecycle_tests {
     use super::project_open_with_playback_and_prewarm;
@@ -1249,6 +2291,8 @@ mod project_prewarm_lifecycle_tests {
             source_height: Some(720),
             source_fps: Some(24.0),
             has_audio: Some(false),
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
@@ -1297,7 +2341,10 @@ mod project_prewarm_lifecycle_tests {
                 .path,
             media_path
         );
-        let metrics = crate::playback::ManifestMetrics { sizes };
+        let metrics = crate::playback::ManifestMetrics {
+            sizes,
+            straight_alpha: std::collections::HashSet::new(),
+        };
         let plan = build_render_plan(
             &snapshot.timeline,
             RenderSize::new(
@@ -1357,8 +2404,524 @@ mod project_prewarm_lifecycle_tests {
 mod edit_request_serde_tests {
     use super::{validate_freeze_frame_request, EditRequest};
     use opentake_core::{AppCore, EditCommand};
-    use opentake_domain::ClipType;
+    use opentake_domain::{ClipType, TransitionKind};
+    use opentake_ops::command::{NewTrackClipMode, PlaceMediaTarget};
     use opentake_ops::ClipEntry;
+
+    fn request_route(request: &EditRequest) -> &'static str {
+        match request {
+            EditRequest::CreateNestedSequence { .. } => "CreateNestedSequence",
+            EditRequest::EditNestedSequence { .. } => "EditNestedSequence",
+            EditRequest::RenameNestedSequence { .. } => "RenameNestedSequence",
+            EditRequest::DissolveNestedSequence { .. } => "DissolveNestedSequence",
+            EditRequest::PlaceMedia { .. } => "PlaceMedia",
+            EditRequest::AddClips { .. } => "AddClips",
+            EditRequest::InsertClips { .. } => "InsertClips",
+            EditRequest::MoveClips { .. } => "MoveClips",
+            EditRequest::DuplicateClips { .. } => "DuplicateClips",
+            EditRequest::MoveOrDuplicateClipsToNewTrack { .. } => "MoveOrDuplicateClipsToNewTrack",
+            EditRequest::PasteClips { .. } => "PasteClips",
+            EditRequest::RemoveClips { .. } => "RemoveClips",
+            EditRequest::SplitClip { .. } => "SplitClip",
+            EditRequest::SplitClips { .. } => "SplitClips",
+            EditRequest::FreezeFrame { .. } => "FreezeFrame",
+            EditRequest::TrimClips { .. } => "TrimClips",
+            EditRequest::SetClipProperties { .. } => "SetClipProperties",
+            EditRequest::SetTransformAtFrame { .. } => "SetTransformAtFrame",
+            EditRequest::SetKeyframes { .. } => "SetKeyframes",
+            EditRequest::StampKeyframe { .. } => "StampKeyframe",
+            EditRequest::UpsertKeyframe { .. } => "UpsertKeyframe",
+            EditRequest::RemoveKeyframe { .. } => "RemoveKeyframe",
+            EditRequest::MoveKeyframe { .. } => "MoveKeyframe",
+            EditRequest::SetKeyframeInterpolation { .. } => "SetKeyframeInterpolation",
+            EditRequest::SetColorGrade { .. } => "SetColorGrade",
+            EditRequest::SetLut { .. } => "SetLut",
+            EditRequest::SetChromaKey { .. } => "SetChromaKey",
+            EditRequest::SetMasks { .. } => "SetMasks",
+            EditRequest::SetEffects { .. } => "SetEffects",
+            EditRequest::SetLoudnessNormalization { .. } => "SetLoudnessNormalization",
+            EditRequest::SetAudioDenoise { .. } => "SetAudioDenoise",
+            EditRequest::ApplyStabilization { .. } => "ApplyStabilization",
+            EditRequest::AdjustStabilization { .. } => "AdjustStabilization",
+            EditRequest::ResetStabilization { .. } => "ResetStabilization",
+            EditRequest::SetTransition { .. } => "SetTransition",
+            EditRequest::RippleDeleteRanges { .. } => "RippleDeleteRanges",
+            EditRequest::RippleDeleteClips { .. } => "RippleDeleteClips",
+            EditRequest::AddTexts { .. } => "AddTexts",
+            EditRequest::AddTextsAutoTrack { .. } => "AddTextsAutoTrack",
+            EditRequest::AddCaptions { .. } => "AddCaptions",
+            EditRequest::Link { .. } => "Link",
+            EditRequest::Unlink { .. } => "Unlink",
+            EditRequest::RemoveTracks { .. } => "RemoveTracks",
+            EditRequest::SwapTracks { .. } => "SwapTracks",
+            EditRequest::SwapClips { .. } => "SwapClips",
+            EditRequest::InsertTrack { .. } => "InsertTrack",
+            EditRequest::SetTrackProps { .. } => "SetTrackProps",
+            EditRequest::CreateFolder { .. } => "CreateFolder",
+            EditRequest::MoveToFolder { .. } => "MoveToFolder",
+            EditRequest::RenameMedia { .. } => "RenameMedia",
+            EditRequest::RenameFolder { .. } => "RenameFolder",
+            EditRequest::DeleteMedia { .. } => "DeleteMedia",
+            EditRequest::DeleteFolder { .. } => "DeleteFolder",
+            EditRequest::SwapMedia { .. } => "SwapMedia",
+            EditRequest::ResetTransform { .. } => "ResetTransform",
+            EditRequest::SetTimelineSettings { .. } => "SetTimelineSettings",
+        }
+    }
+
+    fn command_matches_route(command: &EditCommand, route: &str) -> bool {
+        matches!(
+            (route, command),
+            (
+                "CreateNestedSequence",
+                EditCommand::CreateNestedSequenceFromClips { .. }
+            ) | ("EditNestedSequence", EditCommand::EditNestedSequence { .. })
+                | (
+                    "RenameNestedSequence",
+                    EditCommand::RenameNestedSequence { .. }
+                )
+                | (
+                    "DissolveNestedSequence",
+                    EditCommand::DissolveNestedSequence { .. }
+                )
+                | ("PlaceMedia", EditCommand::PlaceMedia { .. })
+                | ("AddClips", EditCommand::AddClips { .. })
+                | ("InsertClips", EditCommand::InsertClips { .. })
+                | ("MoveClips", EditCommand::MoveClips { .. })
+                | ("DuplicateClips", EditCommand::DuplicateClips { .. })
+                | (
+                    "MoveOrDuplicateClipsToNewTrack",
+                    EditCommand::MoveOrDuplicateClipsToNewTrack { .. }
+                )
+                | ("PasteClips", EditCommand::PasteClips { .. })
+                | ("RemoveClips", EditCommand::RemoveClips { .. })
+                | ("SplitClip", EditCommand::SplitClip { .. })
+                | ("SplitClips", EditCommand::SplitClips { .. })
+                | ("TrimClips", EditCommand::TrimClips { .. })
+                | ("SetClipProperties", EditCommand::SetClipProperties { .. })
+                | (
+                    "SetTransformAtFrame",
+                    EditCommand::SetTransformAtFrame { .. }
+                )
+                | ("SetKeyframes", EditCommand::SetKeyframes { .. })
+                | ("StampKeyframe", EditCommand::StampKeyframe { .. })
+                | ("UpsertKeyframe", EditCommand::UpsertKeyframe { .. })
+                | ("RemoveKeyframe", EditCommand::RemoveKeyframe { .. })
+                | ("MoveKeyframe", EditCommand::MoveKeyframe { .. })
+                | (
+                    "SetKeyframeInterpolation",
+                    EditCommand::SetKeyframeInterpolation { .. }
+                )
+                | ("SetColorGrade", EditCommand::SetColorGrade { .. })
+                | ("SetLut", EditCommand::SetLut { .. })
+                | ("SetChromaKey", EditCommand::SetChromaKey { .. })
+                | ("SetMasks", EditCommand::SetMasks { .. })
+                | ("SetEffects", EditCommand::SetEffects { .. })
+                | (
+                    "SetLoudnessNormalization",
+                    EditCommand::SetLoudnessNormalization { .. }
+                )
+                | ("SetAudioDenoise", EditCommand::SetAudioDenoise { .. })
+                | ("ApplyStabilization", EditCommand::ApplyStabilization { .. })
+                | (
+                    "AdjustStabilization",
+                    EditCommand::AdjustStabilization { .. }
+                )
+                | ("ResetStabilization", EditCommand::ResetStabilization { .. })
+                | ("SetTransition", EditCommand::SetTransition { .. })
+                | ("RippleDeleteRanges", EditCommand::RippleDeleteRanges { .. })
+                | ("RippleDeleteClips", EditCommand::RippleDeleteClips { .. })
+                | ("AddTexts", EditCommand::AddTexts { .. })
+                | ("AddTextsAutoTrack", EditCommand::AddTextsAutoTrack { .. })
+                | ("AddCaptions", EditCommand::AddCaptions { .. })
+                | ("Link", EditCommand::Link { .. })
+                | ("Unlink", EditCommand::Unlink { .. })
+                | ("RemoveTracks", EditCommand::RemoveTracks { .. })
+                | ("SwapTracks", EditCommand::SwapTracks { .. })
+                | ("SwapClips", EditCommand::SwapClips { .. })
+                | ("InsertTrack", EditCommand::InsertTrack { .. })
+                | ("SetTrackProps", EditCommand::SetTrackProps { .. })
+                | ("CreateFolder", EditCommand::CreateFolder { .. })
+                | ("MoveToFolder", EditCommand::MoveToFolder { .. })
+                | ("RenameMedia", EditCommand::RenameMedia { .. })
+                | ("RenameFolder", EditCommand::RenameFolder { .. })
+                | ("DeleteMedia", EditCommand::DeleteMedia { .. })
+                | ("DeleteFolder", EditCommand::DeleteFolder { .. })
+                | ("SwapMedia", EditCommand::SwapMedia { .. })
+                | ("ResetTransform", EditCommand::ResetTransform { .. })
+                | (
+                    "SetTimelineSettings",
+                    EditCommand::SetTimelineSettings { .. }
+                )
+        )
+    }
+
+    fn assert_every_edit_request_maps_to_exact_edit_command() {
+        let cases = [
+            (
+                r#"{"type":"createNestedSequence","name":"Scene","clipIds":["c"]}"#,
+                "CreateNestedSequence",
+            ),
+            (
+                r#"{"type":"editNestedSequence","sequenceId":"s","command":{"type":"removeClips","clipIds":["c"]}}"#,
+                "EditNestedSequence",
+            ),
+            (
+                r#"{"type":"renameNestedSequence","sequenceId":"s","name":"Scene"}"#,
+                "RenameNestedSequence",
+            ),
+            (
+                r#"{"type":"dissolveNestedSequence","clipId":"c"}"#,
+                "DissolveNestedSequence",
+            ),
+            (
+                r#"{"type":"placeMedia","sequenceId":null,"settings":{"fps":24,"width":1920,"height":1080},"target":{"kind":"newTrack","trackType":"video","at":0},"entry":{"mediaRef":"m","mediaType":"video","sourceClipType":"video","startFrame":0,"durationFrames":24,"hasAudio":false,"addLinkedAudio":false}}"#,
+                "PlaceMedia",
+            ),
+            (r#"{"type":"addClips","entries":[]}"#, "AddClips"),
+            (
+                r#"{"type":"insertClips","trackIndex":0,"atFrame":0,"entries":[]}"#,
+                "InsertClips",
+            ),
+            (r#"{"type":"moveClips","moves":[]}"#, "MoveClips"),
+            (
+                r#"{"type":"duplicateClips","clipIds":[],"offsetFrames":0,"targetTrackIndexes":[]}"#,
+                "DuplicateClips",
+            ),
+            (
+                r#"{"type":"moveOrDuplicateClipsToNewTrack","clipIds":["c"],"leadClipId":"c","requestedFrameDelta":1,"insertAt":0,"mode":"move"}"#,
+                "MoveOrDuplicateClipsToNewTrack",
+            ),
+            (r#"{"type":"pasteClips","entries":[]}"#, "PasteClips"),
+            (r#"{"type":"removeClips","clipIds":[]}"#, "RemoveClips"),
+            (
+                r#"{"type":"splitClip","clipId":"c","atFrame":1}"#,
+                "SplitClip",
+            ),
+            (
+                r#"{"type":"splitClips","clipIds":["a","b"],"atFrame":1}"#,
+                "SplitClips",
+            ),
+            (
+                r#"{"type":"freezeFrame","clipId":"c","atFrame":1,"durationFrames":1}"#,
+                "FreezeFrame",
+            ),
+            (r#"{"type":"trimClips","edits":[]}"#, "TrimClips"),
+            (
+                r#"{"type":"setClipProperties","clipIds":[],"properties":{}}"#,
+                "SetClipProperties",
+            ),
+            (
+                r#"{"type":"setTransformAtFrame","clipId":"c","frame":1,"transform":{"centerX":0.5,"centerY":0.5,"width":1.0,"height":1.0,"rotation":0.0,"flipHorizontal":false,"flipVertical":false}}"#,
+                "SetTransformAtFrame",
+            ),
+            (
+                r#"{"type":"setKeyframes","clipId":"c","property":"opacity","payload":{"kind":"scalar","keyframes":[]}}"#,
+                "SetKeyframes",
+            ),
+            (
+                r#"{"type":"stampKeyframe","clipId":"c","property":"opacity","frame":1}"#,
+                "StampKeyframe",
+            ),
+            (
+                r#"{"type":"upsertKeyframe","clipId":"c","property":"opacity","frame":1,"value":{"kind":"scalar","value":0.5}}"#,
+                "UpsertKeyframe",
+            ),
+            (
+                r#"{"type":"removeKeyframe","clipId":"c","property":"opacity","frame":1}"#,
+                "RemoveKeyframe",
+            ),
+            (
+                r#"{"type":"moveKeyframe","clipId":"c","property":"opacity","fromFrame":1,"toFrame":2}"#,
+                "MoveKeyframe",
+            ),
+            (
+                r#"{"type":"setKeyframeInterpolation","clipId":"c","property":"opacity","frame":1,"interpolation":"hold"}"#,
+                "SetKeyframeInterpolation",
+            ),
+            (
+                r#"{"type":"setColorGrade","clipIds":[],"grade":null}"#,
+                "SetColorGrade",
+            ),
+            (r#"{"type":"setLut","clipIds":[],"lut":null}"#, "SetLut"),
+            (
+                r#"{"type":"setChromaKey","clipIds":[],"chromaKey":null}"#,
+                "SetChromaKey",
+            ),
+            (r#"{"type":"setMasks","clipIds":[],"masks":[]}"#, "SetMasks"),
+            (
+                r#"{"type":"setEffects","clipIds":[],"effects":[]}"#,
+                "SetEffects",
+            ),
+            (
+                r#"{"type":"setLoudnessNormalization","clipId":"c","normalization":null}"#,
+                "SetLoudnessNormalization",
+            ),
+            (
+                r#"{"type":"setAudioDenoise","clipId":"c","denoise":null}"#,
+                "SetAudioDenoise",
+            ),
+            (
+                r#"{"type":"applyStabilization","clipId":"c","solution":{"model":"opentake.motion-smoothing","modelVersion":1,"sourceIdentity":"asset","strength":1.0,"cropMargin":0.0,"keyframes":[{"frame":0,"translationX":0.0,"translationY":0.0,"rotationDegrees":0.0},{"frame":1,"translationX":0.0,"translationY":0.0,"rotationDegrees":0.0}]}}"#,
+                "ApplyStabilization",
+            ),
+            (
+                r#"{"type":"adjustStabilization","clipId":"c","strength":0.75,"cropMargin":0.02}"#,
+                "AdjustStabilization",
+            ),
+            (
+                r#"{"type":"resetStabilization","clipId":"c"}"#,
+                "ResetStabilization",
+            ),
+            (
+                r#"{"type":"setTransition","fromClipId":"a","toClipId":"b","kind":null,"durationFrames":1}"#,
+                "SetTransition",
+            ),
+            (
+                r#"{"type":"rippleDeleteRanges","trackIndex":0,"ranges":[]}"#,
+                "RippleDeleteRanges",
+            ),
+            (
+                r#"{"type":"rippleDeleteClips","clipIds":[]}"#,
+                "RippleDeleteClips",
+            ),
+            (r#"{"type":"addTexts","entries":[]}"#, "AddTexts"),
+            (
+                r#"{"type":"addTextsAutoTrack","entries":[]}"#,
+                "AddTextsAutoTrack",
+            ),
+            (r#"{"type":"addCaptions","entries":[]}"#, "AddCaptions"),
+            (r#"{"type":"link","clipIds":[]}"#, "Link"),
+            (r#"{"type":"unlink","clipIds":[]}"#, "Unlink"),
+            (
+                r#"{"type":"removeTracks","trackIndexes":[]}"#,
+                "RemoveTracks",
+            ),
+            (r#"{"type":"swapTracks","a":0,"b":1}"#, "SwapTracks"),
+            (
+                r#"{"type":"swapClips","clipA":"a","clipB":"b"}"#,
+                "SwapClips",
+            ),
+            (
+                r#"{"type":"insertTrack","kind":"video","at":0}"#,
+                "InsertTrack",
+            ),
+            (
+                r#"{"type":"setTrackProps","trackIndex":0,"muted":true}"#,
+                "SetTrackProps",
+            ),
+            (r#"{"type":"createFolder","name":"f"}"#, "CreateFolder"),
+            (
+                r#"{"type":"moveToFolder","assetIds":[],"folderId":null}"#,
+                "MoveToFolder",
+            ),
+            (r#"{"type":"renameMedia","entries":[]}"#, "RenameMedia"),
+            (r#"{"type":"renameFolder","entries":[]}"#, "RenameFolder"),
+            (r#"{"type":"deleteMedia","assetIds":[]}"#, "DeleteMedia"),
+            (r#"{"type":"deleteFolder","folderIds":[]}"#, "DeleteFolder"),
+            (
+                r#"{"type":"swapMedia","clipId":"c","mediaRef":"m"}"#,
+                "SwapMedia",
+            ),
+            (
+                r#"{"type":"resetTransform","clipIds":[]}"#,
+                "ResetTransform",
+            ),
+            (
+                r#"{"type":"setTimelineSettings","fps":24,"width":1920,"height":1080}"#,
+                "SetTimelineSettings",
+            ),
+        ];
+
+        assert_eq!(cases.len(), 56);
+        for (json, expected_route) in cases {
+            let mut hostile = serde_json::from_str::<serde_json::Value>(json).unwrap();
+            hostile
+                .as_object_mut()
+                .unwrap()
+                .insert("unexpected".to_string(), serde_json::json!(true));
+            assert!(
+                serde_json::from_value::<EditRequest>(hostile).is_err(),
+                "{expected_route} must reject unknown fields"
+            );
+
+            let request = serde_json::from_str::<EditRequest>(json)
+                .unwrap_or_else(|error| panic!("{expected_route} DTO failed: {error}"));
+            assert_eq!(request_route(&request), expected_route);
+            if expected_route == "FreezeFrame" {
+                assert!(request.into_command().is_err());
+            } else {
+                let command = request.into_command().expect("request maps to EditCommand");
+                assert!(
+                    command_matches_route(&command, expected_route),
+                    "{expected_route} mapped to {command:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_frontend_edit_request_deserializes_to_intended_command() {
+        assert_every_edit_request_maps_to_exact_edit_command();
+    }
+
+    #[test]
+    fn every_edit_request_maps_to_exact_edit_command() {
+        assert_every_edit_request_maps_to_exact_edit_command();
+    }
+
+    #[test]
+    fn atomic_timeline_gesture_dtos_preserve_the_authoritative_plan() {
+        let place = serde_json::from_str::<EditRequest>(
+            r#"{
+                "type":"placeMedia",
+                "sequenceId":"sequence-a",
+                "settings":{"fps":24,"width":3840,"height":2160},
+                "target":{"kind":"existingTrack","trackId":"stable-track"},
+                "entry":{
+                    "mediaRef":"media-a",
+                    "mediaType":"video",
+                    "sourceClipType":"video",
+                    "startFrame":12,
+                    "durationFrames":48,
+                    "trimStartFrame":3,
+                    "trimEndFrame":5,
+                    "hasAudio":true,
+                    "addLinkedAudio":true
+                }
+            }"#,
+        )
+        .unwrap()
+        .into_command()
+        .unwrap();
+        match place {
+            EditCommand::PlaceMedia {
+                sequence_id,
+                settings,
+                target,
+                entry,
+            } => {
+                assert_eq!(sequence_id.as_deref(), Some("sequence-a"));
+                let settings = settings.expect("settings preserved");
+                assert_eq!(
+                    (settings.fps, settings.width, settings.height),
+                    (24, 3840, 2160)
+                );
+                assert_eq!(
+                    target,
+                    PlaceMediaTarget::ExistingTrack {
+                        track_id: "stable-track".into()
+                    }
+                );
+                assert_eq!(entry.media_ref, "media-a");
+                assert_eq!(entry.media_type, ClipType::Video);
+                assert_eq!((entry.start_frame, entry.duration_frames), (12, 48));
+                assert_eq!(
+                    (entry.trim_start_frame, entry.trim_end_frame),
+                    (Some(3), Some(5))
+                );
+                assert!(entry.has_audio);
+                assert!(entry.add_linked_audio);
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+
+        let new_track = serde_json::from_str::<EditRequest>(
+            r#"{
+                "type":"moveOrDuplicateClipsToNewTrack",
+                "clipIds":["lead","linked-audio"],
+                "leadClipId":"lead",
+                "requestedFrameDelta":-17,
+                "insertAt":2,
+                "mode":"duplicate"
+            }"#,
+        )
+        .unwrap()
+        .into_command()
+        .unwrap();
+        match new_track {
+            EditCommand::MoveOrDuplicateClipsToNewTrack {
+                clip_ids,
+                lead_clip_id,
+                requested_frame_delta,
+                insert_at,
+                mode,
+            } => {
+                assert_eq!(clip_ids, vec!["lead", "linked-audio"]);
+                assert_eq!(lead_clip_id, "lead");
+                assert_eq!(requested_frame_delta, -17);
+                assert_eq!(insert_at, 2);
+                assert_eq!(mode, NewTrackClipMode::Duplicate);
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+
+        let paste = serde_json::from_str::<EditRequest>(
+            r#"{
+                "type":"pasteClips",
+                "entries":[{
+                    "clip":{
+                        "id":"clipboard-a",
+                        "mediaRef":"media-a",
+                        "mediaType":"video",
+                        "sourceClipType":"video",
+                        "startFrame":10,
+                        "durationFrames":20,
+                        "trimStartFrame":2,
+                        "trimEndFrame":4,
+                        "speed":1.25,
+                        "volume":0.75,
+                        "fadeInFrames":3,
+                        "fadeOutFrames":4,
+                        "opacity":0.8,
+                        "linkGroupId":"old-link",
+                        "captionGroupId":"old-caption",
+                        "transitionOut":{
+                            "fromClipId":"clipboard-a",
+                            "toClipId":"clipboard-b",
+                            "kind":"crossDissolve",
+                            "durationFrames":5
+                        },
+                        "reversed":true
+                    },
+                    "targetTrackId":"stable-track",
+                    "startFrame":120
+                }]
+            }"#,
+        )
+        .unwrap()
+        .into_command()
+        .unwrap();
+        match paste {
+            EditCommand::PasteClips { entries } => {
+                assert_eq!(entries.len(), 1);
+                let entry = &entries[0];
+                assert_eq!(entry.target_track_id, "stable-track");
+                assert_eq!(entry.start_frame, 120);
+                assert_eq!(entry.clip.id, "clipboard-a");
+                assert_eq!(
+                    (entry.clip.trim_start_frame, entry.clip.trim_end_frame),
+                    (2, 4)
+                );
+                assert_eq!(
+                    (entry.clip.speed, entry.clip.volume, entry.clip.opacity),
+                    (1.25, 0.75, 0.8)
+                );
+                assert_eq!(entry.clip.link_group_id.as_deref(), Some("old-link"));
+                assert_eq!(entry.clip.caption_group_id.as_deref(), Some("old-caption"));
+                assert!(entry.clip.reversed);
+                let transition = entry
+                    .clip
+                    .transition_out
+                    .as_ref()
+                    .expect("transition preserved");
+                assert_eq!(transition.from_clip_id, "clipboard-a");
+                assert_eq!(transition.to_clip_id, "clipboard-b");
+                assert_eq!(transition.duration_frames, 5);
+            }
+            command => panic!("unexpected command: {command:?}"),
+        }
+    }
 
     // Regression: the front end sends camelCase keys (clipIds/clipId/atFrame…).
     // serde's enum-level `rename_all` does NOT rename struct-variant fields, so
@@ -1372,11 +2935,61 @@ mod edit_request_serde_tests {
         serde_json::from_str::<EditRequest>(r#"{"type":"splitClip","clipId":"a","atFrame":5}"#)
             .expect("splitClip camelCase");
         serde_json::from_str::<EditRequest>(
+            r#"{"type":"splitClips","clipIds":["a","b"],"atFrame":5}"#,
+        )
+        .expect("splitClips camelCase");
+        serde_json::from_str::<EditRequest>(
+            r#"{"type":"setTransformAtFrame","clipId":"a","frame":5,"transform":{"centerX":0.5,"centerY":0.5,"width":1.0,"height":1.0,"rotation":0.0,"flipHorizontal":false,"flipVertical":false}}"#,
+        )
+        .expect("setTransformAtFrame camelCase");
+        serde_json::from_str::<EditRequest>(
             r#"{"type":"insertClips","trackIndex":0,"atFrame":0,"entries":[]}"#,
         )
         .expect("insertClips camelCase");
         serde_json::from_str::<EditRequest>(r#"{"type":"rippleDeleteClips","clipIds":["a"]}"#)
             .expect("rippleDeleteClips camelCase");
+    }
+
+    #[test]
+    fn atomic_split_and_transform_requests_preserve_every_field() {
+        let split = serde_json::from_str::<EditRequest>(
+            r#"{"type":"splitClips","clipIds":["video","audio"],"atFrame":130}"#,
+        )
+        .expect("splitClips request")
+        .into_command()
+        .expect("splitClips command");
+        match split {
+            EditCommand::SplitClips { clip_ids, at_frame } => {
+                assert_eq!(clip_ids, vec!["video", "audio"]);
+                assert_eq!(at_frame, 130);
+            }
+            other => panic!("expected SplitClips, got {other:?}"),
+        }
+
+        let transform = serde_json::from_str::<EditRequest>(
+            r#"{"type":"setTransformAtFrame","clipId":"video","frame":130,"transform":{"centerX":0.7,"centerY":0.6,"width":0.4,"height":0.25,"rotation":33.0,"flipHorizontal":true,"flipVertical":false}}"#,
+        )
+        .expect("setTransformAtFrame request")
+        .into_command()
+        .expect("setTransformAtFrame command");
+        match transform {
+            EditCommand::SetTransformAtFrame {
+                clip_id,
+                frame,
+                transform,
+            } => {
+                assert_eq!(clip_id, "video");
+                assert_eq!(frame, 130);
+                assert_eq!(transform.center_x, 0.7);
+                assert_eq!(transform.center_y, 0.6);
+                assert_eq!(transform.width, 0.4);
+                assert_eq!(transform.height, 0.25);
+                assert_eq!(transform.rotation, 33.0);
+                assert!(transform.flip_horizontal);
+                assert!(!transform.flip_vertical);
+            }
+            other => panic!("expected SetTransformAtFrame, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1415,6 +3028,29 @@ mod edit_request_serde_tests {
                 assert_eq!(properties.reversed, Some(true));
             }
             other => panic!("expected SetClipProperties, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserializes_set_transition_pair_and_kind() {
+        let request: EditRequest = serde_json::from_str(
+            r#"{"type":"setTransition","fromClipId":"a","toClipId":"b","kind":"crossDissolve","durationFrames":15}"#,
+        )
+        .expect("setTransition camelCase");
+
+        match request.into_command().expect("setTransition command") {
+            EditCommand::SetTransition {
+                from_clip_id,
+                to_clip_id,
+                kind,
+                duration_frames,
+            } => {
+                assert_eq!(from_clip_id, "a");
+                assert_eq!(to_clip_id, "b");
+                assert_eq!(kind, Some(TransitionKind::CrossDissolve));
+                assert_eq!(duration_frames, 15);
+            }
+            other => panic!("expected SetTransition, got {other:?}"),
         }
     }
 
@@ -1716,13 +3352,13 @@ mod edit_request_serde_tests {
         ));
 
         let effects = serde_json::from_str::<EditRequest>(
-            r#"{"type":"setEffects","clipIds":["clip-1"],"effects":[{"name":"gaussianBlur","params":{"radius":4.0}}]}"#,
+            r#"{"type":"setEffects","clipIds":["clip-1"],"effects":[{"name":"grayscale","params":{"amount":0.4}}]}"#,
         )
         .expect("setEffects camelCase");
         match effects.into_command().expect("setEffects command") {
             EditCommand::SetEffects { effects, .. } => {
-                assert_eq!(effects[0].name, "gaussianBlur");
-                assert_eq!(effects[0].param("radius", 0.0), 4.0);
+                assert_eq!(effects[0].name, "grayscale");
+                assert_eq!(effects[0].param("amount", 0.0), 0.4);
             }
             other => panic!("expected SetEffects, got {other:?}"),
         }
@@ -1781,6 +3417,104 @@ mod edit_request_serde_tests {
             delete_folder.into_command().expect("deleteFolder command"),
             EditCommand::DeleteFolder { .. }
         ));
+    }
+}
+
+#[cfg(test)]
+mod generation_log_tests {
+    use opentake_core::AppCore;
+    use opentake_domain::GenerationJobStatus;
+    use opentake_project::{GenerationLog, GenerationLogEntry};
+    use serde_json::Value;
+
+    /// The exact wire shape the front end receives: `version` + `entries` on
+    /// the log, camelCase on every entry, and `None` fields omitted entirely
+    /// (`skip_serializing_if`) so the TS mirror never sees a `null` it did not
+    /// declare.
+    #[test]
+    fn log_serializes_camel_case_entries_and_omits_none_fields() {
+        let log = GenerationLog {
+            version: 1,
+            entries: vec![
+                GenerationLogEntry::new("row-1", "veo-3", Some(250), Some(700_000_000.0)),
+                GenerationLogEntry::new("row-2", "gpt-4o", None, None),
+                GenerationLogEntry::job_event(
+                    "row-3",
+                    "job-9",
+                    "suno-v4",
+                    Some(120),
+                    "provider-x",
+                    Some("provider-job-9".to_string()),
+                    "asset-9",
+                    GenerationJobStatus::Ready,
+                    Some(1.0),
+                    None,
+                    Some(700_000_100.0),
+                    Some("source-asset-8".to_string()),
+                    Some("clip-8".to_string()),
+                ),
+            ],
+        };
+
+        let json = serde_json::to_string(&log).expect("serialize");
+        let parsed: Value = serde_json::from_str(&json).expect("parse back");
+        assert_eq!(parsed["version"], 1, "got: {json}");
+        assert_eq!(
+            parsed["entries"].as_array().map(Vec::len),
+            Some(3),
+            "got: {json}"
+        );
+        let first = &parsed["entries"][0];
+        assert_eq!(first["id"], "row-1");
+        assert_eq!(first["model"], "veo-3");
+        assert_eq!(first["costCredits"], 250);
+        assert_eq!(first["createdAt"], 700_000_000.0);
+        // `None` fields are absent (not `null`), matching the TS optional keys.
+        assert!(first.get("status").is_none(), "got: {json}");
+        assert!(
+            parsed["entries"][1].get("costCredits").is_none(),
+            "got: {json}"
+        );
+        // A full job row keeps every present field and the lower-case status
+        // tag serde derives from the camelCase enum (`Ready` -> `"ready"`).
+        let third = &parsed["entries"][2];
+        assert_eq!(third["jobId"], "job-9");
+        assert_eq!(third["provider"], "provider-x");
+        assert_eq!(third["providerJobId"], "provider-job-9");
+        assert_eq!(third["status"], "ready");
+        assert_eq!(third["sourceAssetId"], "source-asset-8");
+        assert_eq!(third["sourceClipId"], "clip-8");
+    }
+
+    /// A session with no project must not error: the command is an infallible
+    /// read (like `get_timeline`), returning the empty log (`version: 1`, no
+    /// entries, zero total credits).
+    #[test]
+    fn no_project_returns_empty_log() {
+        let core = AppCore::new();
+        let log = core.generation_log();
+        assert_eq!(log.version, 1);
+        assert!(log.entries.is_empty());
+        assert_eq!(log.total_credits(), 0);
+
+        // The command body is a direct passthrough; a fresh session serializes
+        // to the stable empty shape the front end's loading/empty states rely on.
+        let json = serde_json::to_string(&log).expect("serialize empty log");
+        assert!(json.contains("\"version\":1"), "got: {json}");
+        assert!(json.contains("\"entries\":[]"), "got: {json}");
+    }
+
+    /// The command is a one-line passthrough to `AppCore::generation_log()`
+    /// (mirroring `get_timeline`), so the accessor it exposes is the contract
+    /// under test here. Reads are stable snapshots: a fresh session keeps an
+    /// empty log across repeated reads, so the UI can poll it freely.
+    #[test]
+    fn repeated_reads_are_stable_snapshots() {
+        let core = AppCore::new();
+        let first = core.generation_log();
+        let second = core.generation_log();
+        assert_eq!(first, second);
+        assert!(first.entries.is_empty());
     }
 }
 

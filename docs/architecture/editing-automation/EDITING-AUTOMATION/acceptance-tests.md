@@ -46,13 +46,15 @@ Parent contract: [Editing Automation DOS](../EDITING-AUTOMATION-DOS.md). Source 
 ## Agent / Workflow Checks
 
 - `detect_beats`, `auto_cut_to_beats`, `smart_reframe`, and `tighten_silences` are visible in tool metadata when implemented.
-- `remove_filler_words` reports unavailable until word-level transcript is wired to timeline frames.
+- `remove_filler_words` is advertised only with the transcript bridge; it returns word-aligned review cuts and direct dispatch fails closed when the bridge is absent.
 - Active workflow plugin roles affect tool target selection.
 - Plugin rules appear in `context_signal` warnings without suppressing built-in warnings.
 - Agent `ripple_delete_ranges` rejects calls that pass both `trackIndex` and `clipId`, accepts `clipId + units=seconds`, and emits half-open project-frame ranges after fps/source-trim conversion.
 - Agent `add_clips` with omitted `trackIndex` creates shared auto tracks and clips in one undoable transaction; one `undo` removes both clips and auto-created tracks.
-- PCM-backed MCP tools return deterministic preview data: `detect_beats` returns beat frame hints, `auto_cut_to_beats` returns beat/cut/placement suggestions, and `tighten_silences` returns `ripple_delete_ranges` candidate commands without mutating the timeline. `smart_reframe` still returns a deterministic vision-backend diagnostic until sampled-frame analysis is wired.
+- PCM-backed MCP tools return deterministic preview data: `detect_beats` returns beat frame hints, `auto_cut_to_beats(write=false)` returns beat/cut/placement suggestions, and `tighten_silences` returns `ripple_delete_ranges` candidate commands without mutating the timeline. `auto_cut_to_beats(write=true)` applies selected visual placements and linked A/V partners through exactly one `MoveClips` command. `smart_reframe` still returns a deterministic vision-backend diagnostic until sampled-frame analysis is wired.
 
 ## Minimum Local Verification
 
 Run a local Markdown link existence check over `docs/DOS/**/*.md`. This does not prove implementation behavior, but it prevents stale cross-document references in the DOS set.
+
+Current verification (2026-07-31): the source-bound completion owners for Documentation Checks, Shared Implementation Checks, Beat Sync Checks, and Minimum Local Verification all execute `crates/opentake-agent/tests/editing_automation_acceptance.rs#automation_children_are_atomic_reviewable_and_command_routed`. That integration test covers deterministic media analysis, review-only MCP results, typed failure with zero mutation, single-command plans, linked-A/V intent flags, command-bound mutation, and exact undo restoration. A local relative-link check over this file and its parent DOS passed with no unresolved targets.

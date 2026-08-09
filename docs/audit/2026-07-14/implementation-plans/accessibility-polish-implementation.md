@@ -32,33 +32,43 @@
   - Add token, semantic-role, keyboard-focus, state, privacy, and visual assertions for every named surface; the affected lint, typecheck, and web suites must pass.
   - Exercise the named surface with keyboard and browser or packaged-app visual inspection, and retain exact accessibility or screenshot evidence before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `src-tauri/tests/feedback.rs#submission_includes_app_and_os_version` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-tauri --test feedback submission_includes_app_and_os_version -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `src-tauri/src/feedback.rs#submit_feedback`, `docs/architecture/MODULE-PORT-MAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-tauri --test feedback submission_includes_app_and_os_version -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Completed 2026-08-01. The owning integration test was observed RED before the
+  module existed, then GREEN after the typed submission boundary was registered.
+  It covers package/build and OS metadata, missing-version fallbacks, camel-case
+  serialization, no-email contact suppression, and debug redaction. The runtime
+  remains offline unless an HTTPS endpoint is explicitly configured; redirects
+  are disabled and requests have a 15-second timeout. The formatting check and
+  `cargo test --workspace --no-fail-fast` pass. This metadata slice
+  has no user-visible surface; the disabled Beta feedback menu is not claimed as
+  an implemented feedback form by this task.
 
 ### Task 2: centralized-design-token-table + AP-design-token-consistency (implementation-slice-d434285f35d42846)
 
@@ -331,7 +341,7 @@
   - Add token, semantic-role, keyboard-focus, state, privacy, and visual assertions for every named surface; the affected lint, typecheck, and web suites must pass.
   - Exercise the named surface with keyboard and browser or packaged-app visual inspection, and retain exact accessibility or screenshot evidence before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/preview/TransformOverlay.test.tsx#renders 4 corner handles at the OpenTake spacing/opacity tokens matching upstream AppTheme.Spacing.smMd / Opacity.strong` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `web/src/components/shell/TitleBar.visual.test.ts#TitleBar alignment` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -340,7 +350,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/preview/TransformOverlay.test.tsx -t "renders 4 corner handles at the OpenTake spacing/opacity tokens matching upstream AppTheme.Spacing.smMd / Opacity.strong"`
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.visual.test.ts -t "TitleBar alignment"`
@@ -349,11 +359,11 @@
 
   Expected: FAIL because one or more of the 17 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/ui/PanelShell.tsx#PanelShell`, `web/src/lib/theme.ts#ACCENT`, `web/src/lib/theme.ts#BG`, `web/src/lib/theme.ts#BORDER`, `web/src/lib/theme.ts#FS`, `web/src/lib/theme.ts#LAYOUT`, `web/src/lib/theme.ts#RADIUS`, `web/src/lib/theme.ts#SPACE`, `web/src/lib/theme.ts#TEXT`, `web/src/lib/theme.ts#TRACK_COLOR`, `web/src/styles/tokens.css`, `web/src/styles/tokens.css#--bg-raised`, `docs/architecture/MODULE-PORT-MAP.md`, `docs/modules/web/SPEC.md`, `docs/specs/frontend/1-design-tokens.md`, `docs/specs/frontend/13-implementation.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/preview/TransformOverlay.test.tsx -t "renders 4 corner handles at the OpenTake spacing/opacity tokens matching upstream AppTheme.Spacing.smMd / Opacity.strong"`
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.visual.test.ts -t "TitleBar alignment"`
@@ -362,11 +372,24 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Code acceptance completed 2026-08-01. Both reviewed-planned owners were
+  observed RED, then all four focused runners passed (17 assertions). The full
+  Web gate passes with 97 files / 834 tests and a production build; only the
+  pre-existing dynamic-import and chunk-size advisories remain. The typed table
+  now covers every documented token and local dimension, the CSS projection has
+  no undefined production references, and captions/keyframe UI consume their
+  typed local constants. Keyframe rows were corrected from 24px to the specified
+  22px.
+
+- [ ] **Runtime evidence gate:** inspect the packaged editor at the pinned
+  viewport/scale/locale and retain the six-surface Shell/Toolbar/Media/Inspector/
+  Preview/Timeline token-parity evidence during the sequential GUI phase.
 
 ### Task 3: dsn-gated-telemetry-init (implementation-slice-6fd8dbcff3a60a4b)
 
@@ -390,33 +413,40 @@
   - Add token, semantic-role, keyboard-focus, state, privacy, and visual assertions for every named surface; the affected lint, typecheck, and web suites must pass.
   - Exercise the named surface with keyboard and browser or packaged-app visual inspection, and retain exact accessibility or screenshot evidence before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `src-tauri/tests/telemetry_init.rs#starts_only_with_explicit_packaged_or_environment_dsn` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `cargo test -p opentake-tauri --test telemetry_init starts_only_with_explicit_packaged_or_environment_dsn -- --exact`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `src-tauri/src/telemetry.rs#init_telemetry`, `docs/architecture/MODULE-PORT-MAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-tauri --test telemetry_init starts_only_with_explicit_packaged_or_environment_dsn -- --exact`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: the reviewed test first failed while the telemetry owner
+  was absent, then passed after the DSN gate and scrubber were integrated. The
+  exact owner, telemetry unit test, `cargo fmt --all -- --check`, and
+  `CARGO_INCREMENTAL=0 cargo test --workspace --no-fail-fast` all passed. The
+  workspace gate reported only the existing explicitly ignored real-device
+  probes.
 
 ### Task 4: release-accessibility-visual-parity (implementation-slice-75d12e695c4bc7e4)
 
@@ -442,33 +472,47 @@
   - Validate sample-project load and core edit flows.
   - Run visual and accessibility regression checks on packaged desktop builds.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/releaseParity.test.tsx#sample_projects_accessibility_visual_and_interaction_gate` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/releaseParity.test.tsx -t "sample_projects_accessibility_visual_and_interaction_gate"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/ui/PanelShell.tsx#PanelShell`, `web/src/components/timeline/TimelineContainer.tsx#accessibleClipRects`, `web/src/styles/global.css`, `docs/architecture/PORT-1TO1-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/releaseParity.test.tsx -t "sample_projects_accessibility_visual_and_interaction_gate"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: the focused release owner failed first because panel
+  regions were not keyboard-focusable. It passed after keyboard panel focus and
+  global focus-visible, reduced-motion, and forced-colors behavior were added.
+  The release owner also binds the existing executable sample materialization,
+  rollback, Home routing, and 24px timeline clip-access contracts. The full Web
+  gate passed with 98 files / 835 tests and the production build passed; only
+  the existing dynamic-import and chunk-size advisories remained.
+
+- [ ] **Runtime evidence gate:** on the packaged desktop build, open an offline
+  sample, perform the core edit flow, traverse panel and timeline controls by
+  keyboard, inspect focus/hover/high-contrast/reduced-motion presentation, and
+  retain screenshots plus the exact interaction result before release-ready
+  reclassification.
 
 ### Task 5: AP-keyboard-shortcut-matrix + complete-shortcut-table (implementation-slice-c9e6c68dcdf6b5bb)
 
@@ -525,7 +569,7 @@
   - Conflicting or disabled shortcuts must not mutate state; repeat behavior and undo grouping must match the specified command.
   - Table-drive all shortcut rows across editor focus, text input, modal, locked selection, playback, and no-project states.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/hooks/useKeyboardShortcuts.matrix.test.ts#all_shortcuts_conflicts_editable_suppression_and_platform_modifiers` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
   - `web/src/hooks/useKeyboardShortcuts.test.ts#complete_documented_shortcut_table` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
@@ -536,7 +580,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/hooks/useKeyboardShortcuts.matrix.test.ts -t "all_shortcuts_conflicts_editable_suppression_and_platform_modifiers"`
   - Run: `pnpm -C web test -- --run src/hooks/useKeyboardShortcuts.test.ts -t "complete_documented_shortcut_table"`
@@ -547,11 +591,11 @@
 
   Expected: FAIL because one or more of the 3 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/App.tsx#App`, `web/src/hooks/useKeyboardShortcuts.ts#handleProjectSaveKeyDown`, `web/src/hooks/useKeyboardShortcuts.ts#handleTransportSpaceKeyDown`, `web/src/hooks/useKeyboardShortcuts.ts#useKeyboardShortcuts`, `web/src/store/editActions.ts#splitAtPlayhead`, `docs/modules/web/SPEC.md`, `docs/specs/frontend/13-implementation.md`, `docs/specs/frontend/9-interactions.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/hooks/useKeyboardShortcuts.matrix.test.ts -t "all_shortcuts_conflicts_editable_suppression_and_platform_modifiers"`
   - Run: `pnpm -C web test -- --run src/hooks/useKeyboardShortcuts.test.ts -t "complete_documented_shortcut_table"`
@@ -562,11 +606,23 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: both reviewed owners first failed because the complete
+  resolver/table did not exist. They passed after one physical-key resolver was
+  integrated with the hook and native-menu semantic command boundary. All six
+  named existing/focused owners passed; the full Web gate passed with 99 files /
+  837 tests and the production build passed, with only the existing dynamic-
+  import and chunk-size advisories.
+
+- [ ] **Runtime evidence gate:** exercise every §9.6 row in the packaged desktop
+  app on the macOS accelerator path, including input focus, modal, repeat,
+  disabled/read-only and no-project states; retain the exact command/result and
+  visible-state evidence before final parity reclassification.
 
 ### Task 6: AP-hover-focus-cursor-matrix + complete-hover-cursor-table (implementation-slice-7dce3a0f53283ac9)
 
@@ -626,7 +682,7 @@
   - Focus order and restoration must remain deterministic across panels, menus, dialogs, project switches, and hidden/maximized panels.
   - Run keyboard-only focus traversal plus pointer-state visual snapshots at default and high-contrast themes, with no focus traps or unlabeled controls.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/preview/TransformOverlay.test.tsx#TransformOverlay` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `web/src/components/preview/TransformOverlay.test.tsx#renders 4 corner handles at the OpenTake spacing/opacity tokens matching upstream AppTheme.Spacing.smMd / Opacity.strong` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
@@ -636,7 +692,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/preview/TransformOverlay.test.tsx -t "TransformOverlay"`
   - Run: `pnpm -C web test -- --run src/components/preview/TransformOverlay.test.tsx -t "renders 4 corner handles at the OpenTake spacing/opacity tokens matching upstream AppTheme.Spacing.smMd / Opacity.strong"`
@@ -646,11 +702,11 @@
 
   Expected: FAIL because one or more of the 3 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/inspector/ScrubbableNumberField.tsx#ScrubbableNumberField`, `web/src/components/preview/CropOverlay.tsx#CropOverlay`, `web/src/components/preview/TransformOverlay.tsx#CORNER_CURSOR`, `web/src/components/preview/TransformOverlay.tsx#TransformOverlay`, `web/src/components/shell/SplitPane.tsx#SplitPane`, `web/src/components/timeline/TimelineContainer.tsx#TimelineContainer`, `web/src/components/timeline/TimelineContainer.tsx#toolMode`, `web/src/components/ui/HoverButton.tsx#HoverButton`, `web/src/styles/global.css`, `docs/modules/web/SPEC.md`, `docs/specs/frontend/13-implementation.md`, `docs/specs/frontend/9-interactions.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/preview/TransformOverlay.test.tsx -t "TransformOverlay"`
   - Run: `pnpm -C web test -- --run src/components/preview/TransformOverlay.test.tsx -t "renders 4 corner handles at the OpenTake spacing/opacity tokens matching upstream AppTheme.Spacing.smMd / Opacity.strong"`
@@ -660,11 +716,23 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: the two reviewed matrix owners first failed because the
+  shared timeline cursor projection and interaction-state attributes did not
+  exist. All five named focused owners passed after the cursor/focus/disabled
+  boundary was integrated. The full Web gate passed with 101 files / 839 tests
+  and the production build passed, with only the existing dynamic-import and
+  chunk-size advisories.
+
+- [ ] **Runtime evidence gate:** traverse the packaged app by keyboard and
+  pointer, then capture default/high-contrast hover, focus-visible, pressed,
+  disabled, resize, trim, razor, forbidden, loading and dragging states with no
+  focus traps or unlabeled controls before final parity reclassification.
 
 ### Task 7: AP-i18n-runtime-contract (implementation-slice-2123bc4e99fa84c2)
 
@@ -688,33 +756,40 @@
 - Exact acceptance contract:
   - Add deterministic unit tests for default/invalid persisted locale, zh-CN/en lookup, missing-key fallback, numeric/string interpolation, unknown placeholder preservation, locale persistence, and document.lang updates.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/i18n/index.test.ts#defaults_zh_cn_supports_en_and_preserves_unknown_named_placeholders` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/i18n/index.test.ts -t "defaults_zh_cn_supports_en_and_preserves_unknown_named_placeholders"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/i18n/index.ts#DEFAULT_LOCALE`, `web/src/i18n/index.ts#translate`, `web/src/i18n/dict.ts#DICTS`, `docs/modules/web/hooks-i18n-theme.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/i18n/index.test.ts -t "defaults_zh_cn_supports_en_and_preserves_unknown_named_placeholders"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: the reviewed owner first failed because an invalid
+  persisted locale remained in storage after the runtime fell back to zh-CN.
+  The runtime now removes unsupported persisted values, tolerates unavailable
+  storage, and exports the default/translation boundaries for deterministic
+  proof. The full Web gate passed with 102 files / 840 tests and the production
+  build passed, with only the existing dynamic-import and chunk-size advisories.
 
 ### Task 8: AP-bg-placeholder-token (implementation-slice-2c3937178aa8f103)
 
@@ -743,23 +818,23 @@
   - Visible/returned assertion: assert the exact visible text/control/state/focus result and the returned success or typed failure, including a no-op assertion for disabled, cancelled, or rejected input.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:web/src/__tests__/completion/doc-de0f95b975d2b2c6.test.ts#completion_de0f95b975d2b2c6_define_bg_placeholder_exactly_as_rgb_30_30_30_eq.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/styles/tokens.test.ts#bg_placeholder_equals_raised_rgb_30` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/styles/tokens.test.ts -t "bg_placeholder_equals_raised_rgb_30"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/styles/tokens.css#--bg-placeholder`, `web/src/styles/tokens.css#--bg-raised`, `docs/specs/frontend/1-design-tokens.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/styles/tokens.test.ts -t "bg_placeholder_equals_raised_rgb_30"`
 
@@ -770,6 +845,16 @@
   Run: `node --test tools/completion-audit.test.mjs`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: focused RED was the reviewed owner being absent. The
+  existing CSS projection already held both tokens at exact `rgb(30,30,30)`,
+  so GREEN adds the missing direct equality proof without changing production
+  values. The focused owner passes. The full completion-audit regression gate
+  ran 206 assertions (203 passed); after removing an induced frozen-source
+  drift, the two remaining focused failures are both caused by the four
+  preserved, user-owned audit outputs not matching their normative
+  renders/inventory. Step 5 remains open until that external dirty state is
+  reconciled.
 
 ### Task 9: five-panel-layout-focus (implementation-slice-b99fb8c63f2086b0)
 
@@ -798,36 +883,47 @@
   - Add token, semantic-role, keyboard-focus, state, privacy, and visual assertions for every named surface; the affected lint, typecheck, and web suites must pass.
   - Exercise the named surface with keyboard and browser or packaged-app visual inspection, and retain exact accessibility or screenshot evidence before reclassification.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/ui/PanelShell.test.tsx#PanelShell preview surface` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `web/src/components/shell/EditorSplit.test.tsx#all_presets_ratios_gutters_surfaces_focus` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/ui/PanelShell.test.tsx -t "PanelShell preview surface"`
   - Run: `pnpm -C web test -- --run src/components/shell/EditorSplit.test.tsx -t "all_presets_ratios_gutters_surfaces_focus"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/shell/EditorSplit.tsx#EditorSplit`, `web/src/components/shell/EditorSplit.tsx#DefaultLayout`, `web/src/components/shell/EditorSplit.tsx#MediaLayout`, `web/src/components/shell/EditorSplit.tsx#VerticalLayout`, `web/src/components/ui/PanelShell.tsx#PanelShell`, `docs/specs/frontend/13-implementation.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/ui/PanelShell.test.tsx -t "PanelShell preview surface"`
   - Run: `pnpm -C web test -- --run src/components/shell/EditorSplit.test.tsx -t "all_presets_ratios_gutters_surfaces_focus"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Reverified 2026-08-01: both owning runners pass (2 files / 4 tests), covering
+  all three presets at 1600×1000 plus reduced viewport, documented initial
+  ratios, panel visibility/maximize behavior, keyboard-adjustable separators,
+  semantic regions and focus transfer. The full Web gate passes with 103 files
+  / 841 tests and the production build passes, with only the existing
+  dynamic-import and chunk-size advisories.
+
+- [ ] **Runtime evidence gate:** in the packaged app at 1600×1000, capture all
+  three presets with the five panels enabled and verify 5px gutters, 6px
+  surfaces, focused/unfocused rings, Tab focus and keyboard separator resize.
 
 ### Task 10: control-acceptance (implementation-slice-7729e824b5300938)
 
@@ -855,33 +951,44 @@
   - Visible/accessibility/return path: success=keyframe lane seek: assert exactly if (e.target === e.currentTarget) setActiveFrame(startFrame + xToFrame(e.clientX)); contextmenu only preventDefault() and no sibling branch/command.; accessibility={"focus":"Custom rendered element has no proven tabIndex/keyboard equivalent at this candidate.","label":"No explicit aria-label/title association was discovered at this candidate.","shortcut":"No dedicated shortcut is declared."}; returnPath=["Remain on the owning editor surface after local state or authoritative mirror refresh.","Retain focus on the native control or explicitly restore it when conditional UI closes; this must be asserted."].
   - Outcome matrix: {"success":"keyframe lane seek: assert exactly if (e.target === e.currentTarget) setActiveFrame(startFrame + xToFrame(e.clientX)); contextmenu only preventDefault() and no sibling branch/command.","pending":"N/A — synchronous local/browser state only.","empty":"N/A — owning visibility/handler guards prevent an absent target from emitting a command.","disabled":"No explicit disabled attribute beyond the listed visibility/handler guards.","cancel":"N/A — no separate cancellation phase.","retry":"N/A — repeated activation is a new synchronous action.","failure":"N/A — no API/Tauri/Rust failure route."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/inspector/KeyframesLaneRow.interaction.test.tsx#control-75a9964d0b81961a keyframe lane seek` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/inspector/KeyframesLaneRow.interaction.test.tsx -t "control-75a9964d0b81961a keyframe lane seek"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/inspector/KeyframesLaneRow.tsx`, `web/src/components/inspector/KeyframesLaneRow.tsx#KeyframesLaneRow` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/inspector/KeyframesLaneRow.interaction.test.tsx -t "control-75a9964d0b81961a keyframe lane seek"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: the focused owner failed first because the lane had no
+  queryable/focusable semantic boundary. It now proves empty-lane pointer seek,
+  child-click isolation, context-menu no-op, zero edit-command emission,
+  horizontal slider semantics and keyboard frame seek with retained focus. The
+  full Web gate passes with 104 files / 842 tests and the production build
+  passes, with only the existing dynamic-import and chunk-size advisories.
+
+- [ ] **Runtime evidence gate:** in the packaged Inspector keyframes panel,
+  verify pointer and keyboard seek, visible focus, frame updates, child click
+  isolation and right-click no-op before final control reclassification.
 
 ### Task 11: control-acceptance (implementation-slice-0fa7eb23d9e9be73)
 
@@ -917,33 +1024,46 @@
   - Visible/accessibility/return path: success=keyframe diamond drag/context menu: assert exactly onMouseDown starts local drag; window mouseup calls edit.moveKeyframe(clip.id, property, fromFrame, currentFrame) only when the frame changed; onContextMenu sets menu { x: e.clientX, y: e.clientY, frame: kf.key } and emits no edit command and no sibling branch/command.; accessibility={"focus":"Custom rendered element has no proven tabIndex/keyboard equivalent at this candidate.","label":"No explicit aria-label/title association was discovered at this candidate.","shortcut":"No dedicated shortcut is declared."}; returnPath=["Remain on the owning editor surface after local state or authoritative mirror refresh.","Retain focus on the native control or explicitly restore it when conditional UI closes; this must be asserted."].
   - Outcome matrix: {"success":"keyframe diamond drag/context menu: assert exactly onMouseDown starts local drag; window mouseup calls edit.moveKeyframe(clip.id, property, fromFrame, currentFrame) only when the frame changed; onContextMenu sets menu { x: e.clientX, y: e.clientY, frame: kf.key } and emits no edit command and no sibling branch/command.","pending":"A promise may be pending, but this candidate exposes no explicit progress state.","empty":"N/A — owning visibility/handler guards prevent an absent target from emitting a command.","disabled":"No explicit disabled attribute beyond the listed visibility/handler guards.","cancel":"N/A — no separate cancellation phase.","retry":"No automatic retry; repeated activation resubmits after the candidate becomes actionable.","failure":"Backend rejection is not caught/rendered at this fire-and-forget candidate; visible recovery evidence is required."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/inspector/KeyframesLaneRow.interaction.test.tsx#control-4e0a20c7d0e54f3e keyframe diamond drag/context menu` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/inspector/KeyframesLaneRow.interaction.test.tsx -t "control-4e0a20c7d0e54f3e keyframe diamond drag/context menu"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/inspector/KeyframesLaneRow.tsx`, `web/src/components/inspector/KeyframesLaneRow.tsx#handleDiamondMouseDown`, `web/src/store/editActions.ts#moveKeyframe`, `web/src/store/editActions.ts#applyAndRefresh`, `web/src/lib/api.ts#editApply`, `src-tauri/src/commands.rs#edit_apply`, `crates/opentake-core/src/dto.rs#handle_edit_apply`, `crates/opentake-ops/src/command.rs#EditCommand::MoveKeyframe`, `web/src/components/inspector/KeyframesLaneRow.tsx#KeyframesLaneRow`, `crates/opentake-ops/src/command.rs#EditCommand` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/inspector/KeyframesLaneRow.interaction.test.tsx -t "control-4e0a20c7d0e54f3e keyframe diamond drag/context menu"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: RED proved the diamond lacked an accessible owner. The
+  focused test now covers unchanged-drag no-op, changed-drag exact single
+  command, right-click menu coordinates with zero edit calls, keyboard
+  one-frame movement with focus retention, and visible toast recovery on a
+  rejected command. The Web gate passes with 104 files / 843 tests plus a
+  production build. Formatting and the complete Rust workspace pass; only the
+  seven pre-existing real-device probes remain ignored.
+
+- [ ] **Runtime evidence gate:** in the packaged Inspector, drag a diamond,
+  open its menu by pointer and keyboard, verify focus/labels, and force a safe
+  rejected move to confirm visible recovery before final control
+  reclassification.
 
 ### Task 12: control-acceptance (implementation-slice-40b57db02ead9758)
 
@@ -975,33 +1095,44 @@
   - Visible/accessibility/return path: success=dismiss keyframe context menu: assert exactly click calls onClose(); contextmenu preventDefault() then onClose() and no sibling branch/command.; accessibility={"focus":"Custom rendered element has no proven tabIndex/keyboard equivalent at this candidate.","label":"No explicit aria-label/title association was discovered at this candidate.","shortcut":"Escape/outside close exists where mounted, but arrow-key roving focus and invoking-control focus restoration are not proven."}; returnPath=["Close through selected item, Escape, or outside action exactly where implemented.","Restore focus to the invoking control; current code does not explicitly prove this."].
   - Outcome matrix: {"success":"dismiss keyframe context menu: assert exactly click calls onClose(); contextmenu preventDefault() then onClose() and no sibling branch/command.","pending":"N/A — synchronous local/browser state only.","empty":"N/A — owning visibility/handler guards prevent an absent target from emitting a command.","disabled":"No explicit disabled attribute beyond the listed visibility/handler guards.","cancel":"Dismiss/close leaves authoritative state unchanged; invoking-control focus restoration is not proven.","retry":"N/A — repeated activation is a new synchronous action.","failure":"N/A — no API/Tauri/Rust failure route."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/inspector/KeyframesLaneRow.interaction.test.tsx#control-6e36c47f93f0d4fb dismiss keyframe context menu` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/inspector/KeyframesLaneRow.interaction.test.tsx -t "control-6e36c47f93f0d4fb dismiss keyframe context menu"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/inspector/KeyframesLaneRow.tsx`, `web/src/components/inspector/KeyframesLaneRow.tsx#KeyframeContextMenu`, `web/src/components/inspector/KeyframesLaneRow.tsx#KeyframesLaneRow` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/inspector/KeyframesLaneRow.interaction.test.tsx -t "control-6e36c47f93f0d4fb dismiss keyframe context menu"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: RED proved the context menu had no menu semantic or
+  focus contract. The owning test now proves outside click, outside
+  context-menu and Escape each dismiss without an edit command, and each path
+  restores focus to the invoking diamond. The full Web gate passes with 104
+  files / 844 tests and the production build passes, with only the existing
+  dynamic-import and chunk-size advisories.
+
+- [ ] **Runtime evidence gate:** open and dismiss the packaged keyframe menu by
+  pointer, right-click and Escape, confirming visible focus returns to the
+  invoking diamond before final control reclassification.
 
 ### Task 13: control-acceptance (implementation-slice-29f0b31549c65faf)
 
@@ -1036,33 +1167,44 @@
   - Visible/accessibility/return path: success=delete keyframe: assert exactly onDelete() -> edit.removeKeyframe(clip.id, property, menu.frame); then closeMenu() and no sibling branch/command.; accessibility={"focus":"Custom rendered element has no proven tabIndex/keyboard equivalent at this candidate.","label":"No explicit aria-label/title association was discovered at this candidate.","shortcut":"Escape/outside close exists where mounted, but arrow-key roving focus and invoking-control focus restoration are not proven."}; returnPath=["Close through selected item, Escape, or outside action exactly where implemented.","Restore focus to the invoking control; current code does not explicitly prove this."].
   - Outcome matrix: {"success":"delete keyframe: assert exactly onDelete() -> edit.removeKeyframe(clip.id, property, menu.frame); then closeMenu() and no sibling branch/command.","pending":"A promise may be pending, but this candidate exposes no explicit progress state.","empty":"N/A — owning visibility/handler guards prevent an absent target from emitting a command.","disabled":"No explicit disabled attribute beyond the listed visibility/handler guards.","cancel":"Dismiss/close leaves authoritative state unchanged; invoking-control focus restoration is not proven.","retry":"No automatic retry; repeated activation resubmits after the candidate becomes actionable.","failure":"Backend rejection is not caught/rendered at this fire-and-forget candidate; visible recovery evidence is required."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/inspector/KeyframesLaneRow.interaction.test.tsx#control-c191a17716450b1a delete keyframe` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/inspector/KeyframesLaneRow.interaction.test.tsx -t "control-c191a17716450b1a delete keyframe"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/inspector/KeyframesLaneRow.tsx`, `web/src/store/editActions.ts#removeKeyframe`, `web/src/store/editActions.ts#applyAndRefresh`, `web/src/lib/api.ts#editApply`, `src-tauri/src/commands.rs#edit_apply`, `crates/opentake-core/src/dto.rs#handle_edit_apply`, `crates/opentake-ops/src/command.rs#EditCommand::RemoveKeyframe`, `web/src/components/inspector/KeyframesLaneRow.tsx#KeyframesLaneRow`, `crates/opentake-ops/src/command.rs#EditCommand` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/inspector/KeyframesLaneRow.interaction.test.tsx -t "control-c191a17716450b1a delete keyframe"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: RED proved the delete item lacked a native accessible
+  action boundary. The owner now proves one exact remove command, no sibling
+  edit command, immediate menu close, trigger-focus restoration and visible
+  toast recovery after backend rejection. The Web gate passes with 104 files /
+  845 tests plus a production build. Formatting and the complete Rust workspace
+  pass; only the seven pre-existing real-device probes remain ignored.
+
+- [ ] **Runtime evidence gate:** delete a disposable keyframe from the packaged
+  menu by pointer and keyboard, verify focus restoration and safely exercise a
+  rejected deletion before final control reclassification.
 
 ### Task 14: control-acceptance (implementation-slice-a43944e5aef30cb5)
 
@@ -1129,7 +1271,7 @@
   - Visible/accessibility/return path: success=smooth keyframe interpolation: assert exactly onSetInterpolation('smooth') -> edit.setKeyframeInterpolation(clip.id, property, menu.frame, 'smooth'); then closeMenu() and no sibling branch/command.; accessibility={"focus":"Custom rendered element has no proven tabIndex/keyboard equivalent at this candidate.","label":"No explicit aria-label/title association was discovered at this candidate.","shortcut":"Escape/outside close exists where mounted, but arrow-key roving focus and invoking-control focus restoration are not proven."}; returnPath=["Close through selected item, Escape, or outside action exactly where implemented.","Restore focus to the invoking control; current code does not explicitly prove this."].
   - Outcome matrix: {"success":"smooth keyframe interpolation: assert exactly onSetInterpolation('smooth') -> edit.setKeyframeInterpolation(clip.id, property, menu.frame, 'smooth'); then closeMenu() and no sibling branch/command.","pending":"A promise may be pending, but this candidate exposes no explicit progress state.","empty":"N/A — owning visibility/handler guards prevent an absent target from emitting a command.","disabled":"No explicit disabled attribute beyond the listed visibility/handler guards.","cancel":"Dismiss/close leaves authoritative state unchanged; invoking-control focus restoration is not proven.","retry":"No automatic retry; repeated activation resubmits after the candidate becomes actionable.","failure":"Backend rejection is not caught/rendered at this fire-and-forget candidate; visible recovery evidence is required."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/inspector/KeyframesLaneRow.interaction.test.tsx#control-3b4230aba22c9422 linear keyframe interpolation` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
   - `web/src/components/inspector/KeyframesLaneRow.interaction.test.tsx#control-16737eebbe9cb784 hold keyframe interpolation` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
@@ -1137,7 +1279,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/inspector/KeyframesLaneRow.interaction.test.tsx -t "control-3b4230aba22c9422 linear keyframe interpolation"`
   - Run: `pnpm -C web test -- --run src/components/inspector/KeyframesLaneRow.interaction.test.tsx -t "control-16737eebbe9cb784 hold keyframe interpolation"`
@@ -1145,11 +1287,11 @@
 
   Expected: FAIL because one or more of the 3 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/inspector/KeyframesLaneRow.tsx`, `web/src/store/editActions.ts#setKeyframeInterpolation`, `web/src/store/editActions.ts#applyAndRefresh`, `web/src/lib/api.ts#editApply`, `src-tauri/src/commands.rs#edit_apply`, `crates/opentake-core/src/dto.rs#handle_edit_apply`, `crates/opentake-ops/src/command.rs#EditCommand::SetKeyframeInterpolation`, `web/src/components/inspector/KeyframesLaneRow.tsx#KeyframesLaneRow`, `crates/opentake-ops/src/command.rs#EditCommand` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/inspector/KeyframesLaneRow.interaction.test.tsx -t "control-3b4230aba22c9422 linear keyframe interpolation"`
   - Run: `pnpm -C web test -- --run src/components/inspector/KeyframesLaneRow.interaction.test.tsx -t "control-16737eebbe9cb784 hold keyframe interpolation"`
@@ -1157,11 +1299,24 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: all three focused owners first failed only on absent
+  failure recovery. Linear, hold and smooth now each prove one exact
+  interpolation command, no sibling command, native menuitem activation,
+  immediate close, trigger-focus restoration and a visible rejected-command
+  toast. The Web gate passes with 104 files / 848 tests plus a production build.
+  Formatting and the complete Rust workspace pass; only the seven pre-existing
+  real-device probes remain ignored.
+
+- [ ] **Runtime evidence gate:** set linear, hold and smooth on disposable
+  keyframes in the packaged menu using pointer and keyboard, verify focus
+  restoration and a safe rejection state before final control
+  reclassification.
 
 ### Task 15: control-acceptance (implementation-slice-112e03f8a358e250)
 
@@ -1208,36 +1363,48 @@
   - Visible/accessibility/return path: success=pointer-scrubbable numeric value: assert exactly pointerdown captures start; pointermove computes clamped startValue + delta*sensitivity (Shift x10, Command x0.1) and calls p.onChange?.(next); pointerup calls p.onCommit(provisionalValue) exactly once when moved, otherwise enters text editing and no sibling branch/command.; accessibility={"focus":"Pointer-only span has no tabIndex or keyboard adjustment.","label":"No role or accessible name exists on the displayed-value span.","shortcut":"Shift/Command change pointer sensitivity only."}; returnPath=["Pointerup/cancel releases the gesture and remains on the same editor surface.","A keyboard equivalent must retain/restore focus; current custom drag surface does not prove one."].
   - Outcome matrix: {"success":"pointer-scrubbable numeric value: assert exactly pointerdown captures start; pointermove computes clamped startValue + delta*sensitivity (Shift x10, Command x0.1) and calls p.onChange?.(next); pointerup calls p.onCommit(provisionalValue) exactly once when moved, otherwise enters text editing and no sibling branch/command.","pending":"N/A — synchronous local/browser state only.","empty":"N/A — owning visibility/handler guards prevent an absent target from emitting a command.","disabled":"No explicit disabled attribute beyond the listed visibility/handler guards.","cancel":"Pointer capture loss/Escape cancellation is not implemented for the drag.","retry":"N/A — repeated activation is a new synchronous action.","failure":"N/A — no API/Tauri/Rust failure route."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/inspector/ScrubbableNumberField.interaction.test.tsx#control-481c7d66573516a6 numeric text-entry mode` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
   - `web/src/components/inspector/ScrubbableNumberField.interaction.test.tsx#control-3e4fc80f4dde046e pointer-scrubbable numeric value` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/inspector/ScrubbableNumberField.interaction.test.tsx -t "control-481c7d66573516a6 numeric text-entry mode"`
   - Run: `pnpm -C web test -- --run src/components/inspector/ScrubbableNumberField.interaction.test.tsx -t "control-3e4fc80f4dde046e pointer-scrubbable numeric value"`
 
   Expected: FAIL because one or more of the 2 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/inspector/ScrubbableNumberField.tsx`, `web/src/components/inspector/ScrubbableNumberField.tsx#ScrubbableNumberField` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/inspector/ScrubbableNumberField.interaction.test.tsx -t "control-481c7d66573516a6 numeric text-entry mode"`
   - Run: `pnpm -C web test -- --run src/components/inspector/ScrubbableNumberField.interaction.test.tsx -t "control-3e4fc80f4dde046e pointer-scrubbable numeric value"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: RED exposed missing post-edit focus restoration and
+  pointer-cancellation cleanup. The two owners now prove suffix/decimal-comma
+  parsing, finite-only clamped commit, invalid/blur and Escape behavior,
+  thresholded live scrub, Shift/Command multipliers, exactly-once pointerup
+  commit, pointercancel/lost-capture/Escape cancellation and focus retention.
+  The full Web gate passes with 105 files / 850 tests and the production build
+  passes, with only the existing dynamic-import and chunk-size advisories.
+
+- [ ] **Runtime evidence gate:** exercise text entry, modifier scrubbing,
+  pointer-capture loss and Escape cancellation in the packaged Inspector,
+  confirming focus and visible values before final control reclassification.
 
 ### Task 16: control-acceptance (implementation-slice-aea2e7e06f8f518b)
 
@@ -1272,33 +1439,46 @@
   - Visible/accessibility/return path: success=pointer scrub preview playhead: assert exactly pointerdown sets capture, calls onScrubbingChange?.(true), then seekFromEvent(clientX) -> onSeek(Math.round(ratio * total)); pointermove with buttons===1 repeats seek; pointerup/lost capture calls onScrubbingChange?.(false); hover only changes local hover state and no sibling branch/command.; accessibility={"focus":"Scrub div has no role or tabIndex.","label":"No slider accessible name/value semantics exist.","shortcut":"No Arrow/Home/End seek handling exists."}; returnPath=["Pointerup/cancel releases the gesture and remains on the same editor surface.","A keyboard equivalent must retain/restore focus; current custom drag surface does not prove one."].
   - Outcome matrix: {"success":"pointer scrub preview playhead: assert exactly pointerdown sets capture, calls onScrubbingChange?.(true), then seekFromEvent(clientX) -> onSeek(Math.round(ratio * total)); pointermove with buttons===1 repeats seek; pointerup/lost capture calls onScrubbingChange?.(false); hover only changes local hover state and no sibling branch/command.","pending":"N/A — synchronous local/browser state only.","empty":"N/A — owning visibility/handler guards prevent an absent target from emitting a command.","disabled":"No explicit disabled attribute beyond the listed visibility/handler guards.","cancel":"Pointerup or lost capture clears scrubbing; no keyboard/Escape path exists.","retry":"N/A — repeated activation is a new synchronous action.","failure":"N/A — no API/Tauri/Rust failure route."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/preview/Preview.interaction.test.tsx#control-200c9fd6ec3f0f35 pointer scrub preview playhead` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/preview/Preview.interaction.test.tsx -t "control-200c9fd6ec3f0f35 pointer scrub preview playhead"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/preview/Preview.tsx`, `web/src/components/preview/Preview.tsx#ScrubBar`, `web/src/components/preview/Preview.tsx#Preview` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/preview/Preview.interaction.test.tsx -t "control-200c9fd6ec3f0f35 pointer scrub preview playhead"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: RED exposed a real sticky-scrubbing defect: the cancel
+  state transition intentionally has no seek effect, but the component also
+  suppressed the required `scrubbing=false` notification. The owner now proves
+  capture, down/move/exact-up seeks, buttons guard, hover-only state,
+  lost-capture/pointercancel cleanup, horizontal slider semantics and
+  Arrow/Home/End keyboard seeks with retained focus. The full Web gate passes
+  with 106 files / 851 tests and the production build passes, with only the
+  existing dynamic-import and chunk-size advisories.
+
+- [ ] **Runtime evidence gate:** scrub the packaged Preview by pointer, force
+  capture loss/cancel, hover the control and seek by keyboard while confirming
+  playhead/focus/scrubbing state before final control reclassification.
 
 ### Task 17: control-acceptance (implementation-slice-c09938dfb4f83d4c)
 
@@ -1326,33 +1506,45 @@
   - Visible/accessibility/return path: success=resize two editor panes: pointer capture; move clamps first pane to min and secondMin; accessibility={"focus":"Non-focusable div","label":"Visible child text/title or caller-provided label; verify at runtime","shortcut":"None declared on this control"}; returnPath=["Pointer capture releases on pointerup; no keyboard focus path exists."].
   - Outcome matrix: {"success":"resize two editor panes: pointer capture; move clamps first pane to min and secondMin","pending":"Not applicable — this activation only changes local/caller state and starts no Promise, API, Tauri command, or Rust work.","empty":"Not applicable — this control does not consume a collection, selection, or free-form payload that has an empty state.","disabled":"No explicit disabled prop on this candidate.","cancel":"Not applicable — this immediate handler has no cancellable operation or dismissible transient surface.","retry":"Not applicable as an error-recovery state — the synchronous local action can simply be activated again.","failure":"Not applicable — this immediate activation calls no API/Tauri/Rust boundary, so there is no backend rejection path."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/shell/SplitPane.interaction.test.tsx#control-d88c7103e09bb382 resize two editor panes` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/shell/SplitPane.interaction.test.tsx -t "control-d88c7103e09bb382 resize two editor panes"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/shell/SplitPane.tsx`, `web/src/components/shell/SplitPane.tsx#SplitPane` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/shell/SplitPane.interaction.test.tsx -t "control-d88c7103e09bb382 resize two editor panes"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: RED proved pointer cancellation left the separator in
+  its dragging state. The owner now covers stable separator capture/release,
+  horizontal and vertical geometry, both min clamps, pointerup/cancel/lost
+  capture/Escape cleanup, semantic separator values and Home/End keyboard
+  resize with retained focus. The full Web gate passes with 107 files / 852
+  tests and the production build passes, with only the existing dynamic-import
+  and chunk-size advisories.
+
+- [ ] **Runtime evidence gate:** resize horizontal and vertical packaged panes
+  by pointer and keyboard, force cancellation/capture loss and confirm clamps,
+  cursor, focus and dragging state before final control reclassification.
 
 ### Task 18: control-acceptance (implementation-slice-30967cbef194812a)
 
@@ -1419,7 +1611,7 @@
   - Visible/accessibility/return path: success=toggle track sync lock: assert exactly setTrackProps(p.index, { syncLocked: !p.syncLocked }) and no sibling branch/command.; accessibility={"focus":"role=button span has no tabIndex and is not keyboard-focusable.","label":"title supplies text but aria-pressed is absent.","shortcut":"No Enter/Space handler exists."}; returnPath=["Remain on the owning editor surface after local state or authoritative mirror refresh.","Retain focus on the native control or explicitly restore it when conditional UI closes; this must be asserted."].
   - Outcome matrix: {"success":"toggle track sync lock: assert exactly setTrackProps(p.index, { syncLocked: !p.syncLocked }) and no sibling branch/command.","pending":"A promise may be pending, but this candidate exposes no explicit progress state.","empty":"N/A — owning visibility/handler guards prevent an absent target from emitting a command.","disabled":"No explicit disabled attribute beyond the listed visibility/handler guards.","cancel":"N/A — no separate cancellation phase.","retry":"No automatic retry; repeated activation resubmits after the candidate becomes actionable.","failure":"Backend rejection is not caught/rendered at this fire-and-forget candidate; visible recovery evidence is required."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/timeline/TrackHeaderColumn.interaction.test.tsx#control-4c72d4f81e47c57d mute audio track` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
   - `web/src/components/timeline/TrackHeaderColumn.interaction.test.tsx#control-74289f5806f8162a hide visual track` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
@@ -1427,7 +1619,7 @@
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/timeline/TrackHeaderColumn.interaction.test.tsx -t "control-4c72d4f81e47c57d mute audio track"`
   - Run: `pnpm -C web test -- --run src/components/timeline/TrackHeaderColumn.interaction.test.tsx -t "control-74289f5806f8162a hide visual track"`
@@ -1435,11 +1627,11 @@
 
   Expected: FAIL because one or more of the 3 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/timeline/TrackHeaderColumn.tsx`, `web/src/store/editActions.ts#setTrackProps`, `web/src/store/editActions.ts#applyAndRefresh`, `web/src/lib/api.ts#editApply`, `src-tauri/src/commands.rs#edit_apply`, `crates/opentake-core/src/dto.rs#handle_edit_apply`, `crates/opentake-ops/src/command.rs#EditCommand::SetTrackProps`, `web/src/components/timeline/TrackHeaderColumn.tsx#TrackHeaderColumn`, `crates/opentake-ops/src/command.rs#EditCommand` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/timeline/TrackHeaderColumn.interaction.test.tsx -t "control-4c72d4f81e47c57d mute audio track"`
   - Run: `pnpm -C web test -- --run src/components/timeline/TrackHeaderColumn.interaction.test.tsx -t "control-74289f5806f8162a hide visual track"`
@@ -1447,11 +1639,23 @@
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: all three focused owners first failed because the
+  controls were non-focusable spans without pressed state. Mute, hide and sync
+  lock are now native labeled toggle buttons that each prove one exact
+  `setTrackProps` patch, no swap command, retained focus and visible recovery on
+  rejection. The Web gate passes with 108 files / 855 tests plus a production
+  build. Formatting and the complete Rust workspace pass; only the seven
+  pre-existing real-device probes remain ignored.
+
+- [ ] **Runtime evidence gate:** toggle mute, hide and sync lock by pointer and
+  keyboard in the packaged timeline, verifying icon/pressed/focus states and a
+  safe rejected update before final control reclassification.
 
 ### Task 19: control-acceptance (implementation-slice-d5ef678a62684383)
 
@@ -1480,33 +1684,46 @@
   - Visible/accessibility/return path: success=resize track display height: assert exactly pointerdown captures startY; pointermove calls p.onResize(delta), whose wrapper computes clamp(h + delta, TRACK_SIZE.minHeight, TRACK_SIZE.maxHeight) then setTrackHeight(track.id,next); pointerup releases capture and no sibling branch/command.; accessibility={"focus":"Custom rendered element has no proven tabIndex/keyboard equivalent at this candidate.","label":"No explicit aria-label/title association was discovered at this candidate.","shortcut":"No dedicated shortcut is declared."}; returnPath=["Pointerup/cancel releases the gesture and remains on the same editor surface.","A keyboard equivalent must retain/restore focus; current custom drag surface does not prove one."].
   - Outcome matrix: {"success":"resize track display height: assert exactly pointerdown captures startY; pointermove calls p.onResize(delta), whose wrapper computes clamp(h + delta, TRACK_SIZE.minHeight, TRACK_SIZE.maxHeight) then setTrackHeight(track.id,next); pointerup releases capture and no sibling branch/command.","pending":"N/A — synchronous local/browser state only.","empty":"N/A — owning visibility/handler guards prevent an absent target from emitting a command.","disabled":"No explicit disabled attribute beyond the listed visibility/handler guards.","cancel":"Pointerup/cancel follows the exact profile; Escape rollback is not otherwise implemented.","retry":"N/A — repeated activation is a new synchronous action.","failure":"N/A — no API/Tauri/Rust failure route."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/timeline/TrackHeaderColumn.interaction.test.tsx#control-9f9173ff2ee37464 resize track display height` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/timeline/TrackHeaderColumn.interaction.test.tsx -t "control-9f9173ff2ee37464 resize track display height"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/timeline/TrackHeaderColumn.tsx`, `web/src/components/timeline/TrackHeaderColumn.tsx#TrackHeaderRow`, `web/src/components/timeline/TrackHeaderColumn.tsx#TrackHeaderColumn` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/timeline/TrackHeaderColumn.interaction.test.tsx -t "control-9f9173ff2ee37464 resize track display height"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: the focused owner first failed because the resize grip
+  exposed no accessible control or cancellation state. The grip is now a
+  labeled horizontal separator with current/min/max values, retained focus,
+  Home/End/Arrow keyboard resizing, exact incremental pointer deltas and safe
+  pointerup/cancel/lost-capture release. The wrapper still owns the 32..200
+  clamp and the UI-only `setTrackHeight` write; no edit or reorder command is
+  emitted. The Web gate passes with 108 files / 856 tests plus a production
+  build.
+
+- [ ] **Runtime evidence gate:** resize an audio and visual track in the
+  packaged timeline by pointer and keyboard, then cancel an active drag and
+  verify focus/value/state recovery before final control reclassification.
 
 ### Task 20: control-acceptance (implementation-slice-a9b2786eddf478dc)
 
@@ -1538,33 +1755,47 @@
   - Visible/accessibility/return path: success=dismiss track reorder menu: assert exactly backdrop mousedown calls onClose(); contextmenu preventDefault() then onClose() and no sibling branch/command.; accessibility={"focus":"Custom rendered element has no proven tabIndex/keyboard equivalent at this candidate.","label":"No explicit aria-label/title association was discovered at this candidate.","shortcut":"Escape/outside close exists where mounted, but arrow-key roving focus and invoking-control focus restoration are not proven."}; returnPath=["Close through selected item, Escape, or outside action exactly where implemented.","Restore focus to the invoking control; current code does not explicitly prove this."].
   - Outcome matrix: {"success":"dismiss track reorder menu: assert exactly backdrop mousedown calls onClose(); contextmenu preventDefault() then onClose() and no sibling branch/command.","pending":"N/A — synchronous local/browser state only.","empty":"N/A — owning visibility/handler guards prevent an absent target from emitting a command.","disabled":"No explicit disabled attribute beyond the listed visibility/handler guards.","cancel":"Dismiss/close leaves authoritative state unchanged; invoking-control focus restoration is not proven.","retry":"N/A — repeated activation is a new synchronous action.","failure":"N/A — no API/Tauri/Rust failure route."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/timeline/TrackHeaderColumn.interaction.test.tsx#control-db7fbb7edbcca44d dismiss track reorder menu` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/timeline/TrackHeaderColumn.interaction.test.tsx -t "control-db7fbb7edbcca44d dismiss track reorder menu"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/timeline/TrackHeaderColumn.tsx`, `web/src/components/timeline/TrackHeaderColumn.tsx#TrackHeaderContextMenu`, `web/src/components/timeline/TrackHeaderColumn.tsx#TrackHeaderColumn` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/timeline/TrackHeaderColumn.interaction.test.tsx -t "control-db7fbb7edbcca44d dismiss track reorder menu"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: the focused owner first failed because the invoking row
+  and menu backdrop had no stable accessible boundary. The row now supports
+  pointer context menus plus ContextMenu/Shift+F10, the menu moves focus to an
+  enabled item or its container, supports roving Arrow/Home/End focus and
+  Escape dismissal, and every dismissal restores focus to the invoking row.
+  Backdrop contextmenu now stops Portal bubbling so closing cannot immediately
+  reopen the menu. Outside mousedown and contextmenu emit no edit/reorder
+  command. The Web gate passes with 108 files / 857 tests plus a production
+  build.
+
+- [ ] **Runtime evidence gate:** open the packaged track reorder menu by right
+  click and Shift+F10, traverse it by keyboard, dismiss it by outside click,
+  right click and Escape, and verify invoking-row focus restoration.
 
 ### Task 21: control-acceptance (implementation-slice-440d530594b95cd0)
 
@@ -1592,33 +1823,46 @@
   - Visible/accessibility/return path: success=open/close a reusable enum Dropdown: setOpen toggles; outside/Escape closes; accessibility={"focus":"Native keyboard-focusable control","label":"ariaLabel","shortcut":"None declared on this control"}; returnPath=["Outside click/Escape closes visually; DOM focus is not explicitly restored."].
   - Outcome matrix: {"success":"open/close a reusable enum Dropdown: setOpen toggles; outside/Escape closes","pending":"Not applicable — this activation only changes local/caller state and starts no Promise, API, Tauri command, or Rust work.","empty":"Not applicable — this control does not consume a collection, selection, or free-form payload that has an empty state.","disabled":"No explicit disabled prop on this candidate.","cancel":"Cancellation/dismissal follows the exact guard in setOpen toggles; outside/Escape closes; no broader cancellation behavior is assumed.","retry":"Not applicable as an error-recovery state — the synchronous local action can simply be activated again.","failure":"Not applicable — this immediate activation calls no API/Tauri/Rust boundary, so there is no backend rejection path."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/ui/Dropdown.interaction.test.tsx#control-f1370db38b24cf33 open/close a reusable enum Dropdown` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/ui/Dropdown.interaction.test.tsx -t "control-f1370db38b24cf33 open/close a reusable enum Dropdown"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/ui/Dropdown.tsx`, `web/src/components/ui/Dropdown.tsx#Dropdown` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/ui/Dropdown.interaction.test.tsx -t "control-f1370db38b24cf33 open/close a reusable enum Dropdown"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: the focused owner first failed because the trigger had
+  no programmatic listbox relationship and dismissal did not restore focus.
+  Opening now focuses the selected enabled option (or first enabled fallback),
+  Arrow/Home/End move only among enabled options, and outside click, Escape,
+  option selection or a second trigger activation closes safely and restores
+  the native labeled trigger. The synchronous open/close path emits no caller
+  change. The Web gate passes with 109 files / 858 tests plus a production
+  build.
+
+- [ ] **Runtime evidence gate:** exercise a packaged reusable Dropdown by
+  pointer and keyboard, verify selected/disabled option navigation, then close
+  by outside click, Escape and the trigger while checking focus restoration.
 
 ### Task 22: control-acceptance (implementation-slice-ba029e02db838d36)
 
@@ -1646,30 +1890,44 @@
   - Visible/accessibility/return path: success=focus an editor panel: onMouseDown -> focusPanel(panel) -> focus ring; accessibility={"focus":"Outer div is not keyboard focusable","label":"Visible child text/title or caller-provided label; verify at runtime","shortcut":"None declared on this control"}; returnPath=["Focus state remains on the selected panel until another panel is clicked/shortcut-selected."].
   - Outcome matrix: {"success":"focus an editor panel: onMouseDown -> focusPanel(panel) -> focus ring","pending":"Not applicable — this activation only changes local/caller state and starts no Promise, API, Tauri command, or Rust work.","empty":"Not applicable — this control does not consume a collection, selection, or free-form payload that has an empty state.","disabled":"No explicit disabled prop on this candidate.","cancel":"Not applicable — this immediate handler has no cancellable operation or dismissible transient surface.","retry":"Not applicable as an error-recovery state — the synchronous local action can simply be activated again.","failure":"Not applicable — this immediate activation calls no API/Tauri/Rust boundary, so there is no backend rejection path."}.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `web/src/components/ui/PanelShell.interaction.test.tsx#control-bbc125bbbf2275f2 focus an editor panel` (reviewed-planned) — The control acceptance contract explicitly names this owning component test runner.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify RED**
 
   - Run: `pnpm -C web test -- --run src/components/ui/PanelShell.interaction.test.tsx -t "control-bbc125bbbf2275f2 focus an editor panel"`
 
   Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/ui/PanelShell.tsx`, `web/src/components/ui/PanelShell.tsx#PanelShell` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `pnpm -C web test -- --run src/components/ui/PanelShell.interaction.test.tsx -t "control-bbc125bbbf2275f2 focus an editor panel"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `pnpm -C web test -- --run && pnpm -C web build`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Verified 2026-08-01: the reviewed owner is now present and proves the exact
+  mousedown -> `focusPanel("media")` -> focus-ring path, including the intended
+  clip-selection clear without disturbing media selection. The baseline
+  production component already carried the required labeled region,
+  `tabIndex=0`, mouse handler and focus handler from the earlier panel-surface
+  hardening, so the contract passed without another production mutation; the
+  planned RED premise was stale. The keyboard focus path independently proves
+  retained DOM focus and the same visible ring. The Web gate passes with 110
+  files / 859 tests plus a production build.
+
+- [ ] **Runtime evidence gate:** in the packaged editor, switch among all five
+  panels by pointer and keyboard focus, verifying the focus ring and the media/
+  timeline selection-clearing rules before final control reclassification.

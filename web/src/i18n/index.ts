@@ -11,12 +11,18 @@ import { create } from "zustand";
 import { DICTS, type Dict, type Locale } from "./dict";
 
 const LS_LOCALE = "locale";
-const DEFAULT_LOCALE: Locale = "zh-CN";
+export const DEFAULT_LOCALE: Locale = "zh-CN";
 
 function loadLocale(): Locale {
   if (typeof localStorage === "undefined") return DEFAULT_LOCALE;
-  const v = localStorage.getItem(LS_LOCALE);
-  return v === "en" || v === "zh-CN" ? v : DEFAULT_LOCALE;
+  try {
+    const value = localStorage.getItem(LS_LOCALE);
+    if (value === "en" || value === "zh-CN") return value;
+    if (value !== null) localStorage.removeItem(LS_LOCALE);
+  } catch {
+    // Storage can be unavailable in private or embedded browser contexts.
+  }
+  return DEFAULT_LOCALE;
 }
 
 interface I18nState {
@@ -27,7 +33,13 @@ interface I18nState {
 export const useI18nStore = create<I18nState>((set) => ({
   locale: loadLocale(),
   setLocale: (locale) => {
-    if (typeof localStorage !== "undefined") localStorage.setItem(LS_LOCALE, locale);
+    if (typeof localStorage !== "undefined") {
+      try {
+        localStorage.setItem(LS_LOCALE, locale);
+      } catch {
+        // The in-memory locale and document language should still update.
+      }
+    }
     if (typeof document !== "undefined") {
       document.documentElement.lang = locale === "zh-CN" ? "zh-CN" : "en";
     }
@@ -36,7 +48,11 @@ export const useI18nStore = create<I18nState>((set) => ({
 }));
 
 /** Translate `key` in `dict`, falling back to the key itself when missing. */
-function translate(dict: Dict, key: string, vars?: Record<string, string | number>): string {
+export function translate(
+  dict: Dict,
+  key: string,
+  vars?: Record<string, string | number>,
+): string {
   const template = dict[key] ?? key;
   if (!vars) return template;
   return template.replace(/\{(\w+)\}/g, (_m, name: string) =>

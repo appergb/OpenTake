@@ -30,7 +30,7 @@ describe("recent project compatibility cleanup", () => {
     });
   });
 
-  it("clears the whole active read-only snapshot when its recent entry is removed", () => {
+  it("clears the whole active read-only snapshot when its recent entry is removed", async () => {
     useProjectStore.setState({
       projectEpoch: 17,
       timelineVersion: 12,
@@ -43,7 +43,7 @@ describe("recent project compatibility cleanup", () => {
       compatibilityBlockers: ["manifest.futureField"],
     });
 
-    useRecentStore.getState().remove(ACTIVE_PATH);
+    await useRecentStore.getState().remove(ACTIVE_PATH);
 
     const state = useProjectStore.getState();
     expect(useRecentStore.getState().recents).toEqual([]);

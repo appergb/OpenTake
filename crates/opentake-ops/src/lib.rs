@@ -31,8 +31,9 @@ pub use engines::{
 
 // --- Command layer ---
 pub use command::{
-    apply, CaptionEntry, ClipEntry, ClipProperties, EditCommand, EditError, EditResult,
-    KeyframePayload, KeyframeProperty, KeyframeValue, RenameEntry, TextAutoTrackEntry, TextEntry,
+    apply, CaptionEntry, CaptionTranslationChange, ClipEntry, ClipProperties,
+    ClipPropertyAssignment, EditCommand, EditError, EditResult, KeyframePayload, KeyframeProperty,
+    KeyframeValue, RenameEntry, TextAutoTrackEntry, TextEntry,
 };
 pub use editor_state::{DocSnapshot, EditorState};
 pub use id::{IdGen, SeqIdGen};

@@ -1,5 +1,12 @@
 # 交接 · 未完成工作规划(2026-07-04)
 
+> **2026-08-03 状态裁决：**本文件是历史交接记录，不再是当前状态真值。Beta 1
+> 已发布（`v1.0.0-beta.1`，起点 `c73c192`），Beta 2 收尾进行中；当前范围与发布
+> 门槛见 `docs/releases/1.0.0-beta.2.md`，逐项执行证据见
+> `docs/audit/2026-08-02/beta-functional-verification.md`，代码现状以 `agent/advanced-ai-workflows`
+> 分支工作树为准（前端 129 文件 / 1072 测试全绿）。本文档仅保留 2026-07-04 快照与
+> Wave 1A 增补作为历史/设计参考，不再作为操作手册。
+
 ## 2026-07-10/11 Wave 1A reviewed addendum
 
 This dated addendum supersedes the **current-status** playback and real-device
@@ -98,9 +105,9 @@ default-off Rust renderer or to perform the then-missing first device check.
 
 | Issue | 已做 | 剩余 |
 |---|---|---|
-| #13 进阶能力 | 调色链/绿幕/蒙版着色器(`8813df2`) | 转场(§3.9)、AI 推理(#27)、音频工程(#28) |
+| #13 进阶能力 | 调色链/绿幕/蒙版着色器(`8813df2`)、首个交叉溶解转场竖切(§3.9) | 扩展转场库、AI 推理(#27)、音频工程(#28) |
 | #25 Inspector/MediaPanel tab | 关键帧钻石(#187)、Text MVP(#107)、Captions(#184) | AI-Edit tab、Music tab(§3.6) |
-| #29 进阶纯逻辑 | SRT/VTT 纯逻辑(#110)、字幕批量样式纯逻辑(#113) | 两者接 UI/命令;曲线变速(§3.10)、多机位、复合片段 |
+| #29 进阶纯逻辑 | SRT/VTT 已接 UI/Tauri 命令(#110)、字幕批量样式纯逻辑(#113) | 字幕批量样式接 UI/命令；曲线变速(§3.10)、多机位、复合片段 |
 | #37 全局素材库 | 后端+前端全量(#104/#106/#115) | 库→时间线拖拽、媒体面板星标迁 `library_favorite` |
 | #48 片段编辑收尾 | 右键菜单(Copy/Swap 已接)、nudge/间隙/ripple(#186) | **Save as Media 仅前端菜单占位,后端零实现**(§3.5) |
 | #131 编解码/无缝切换 | 播放路径已被流式引擎取代 | ffmpeg 未随包分发(§3.12) |
@@ -138,19 +145,19 @@ default-off Rust renderer or to perform the then-missing first device check.
 
 - **现状**:`web/src/components/agent/AgentPanel.tsx` 仅渲染占位文案;`crates/opentake-agent/src/` 只有 mcp/plugin/prompt/signal/tools,**无会话循环**。
 - **怎么写**(对照上游 `Sources/PalmierPro/` 的 Agent 聊天 UI 结构):
-  1. 后端 `crates/opentake-agent/src/chat/`:会话结构(消息历史 + streaming)+ LLM 调用走 `opentake-gen` 的 provider/keys 基建(BYOK,钥匙串已有);工具调用直接复用 `tools/` 现有 44 工具的 dispatch(与 MCP 同一入口,保证"唯一编辑入口"不破)。
+  1. 后端 `crates/opentake-agent/src/chat/`:会话结构(消息历史 + streaming)+ LLM 调用走 `opentake-gen` 的 provider/keys 基建(BYOK,钥匙串已有);工具调用直接复用统一 dispatch(基础集合最多 39 个、按主机能力过滤，另有 4 个动态生成工具；45 个兼容线名保留在 `KNOWN`)。
   2. `src-tauri` 命令:`chat_send`/`chat_history`/`chat_cancel` + `chat_delta` 事件流(参照 `transcribe` 的进度事件模式)。
   3. 前端:AgentPanel 消息列表 + streaming 渲染 + 工具调用卡片;Context Signal(`signal/`)注入系统提示已有,接上即可。
 - **验收**:面板内发"把这段静音剪掉"能走 tighten_silences 工具链并落 EditCommand;无 key 时有引导文案。
 
-### 3.4 【P1】生成式 UI + `generate_*`/`upscale` 去 stub(#30 切片)
+### 3.4 【P1，代码竖切已完成】生成式 UI + `generate_*`/`upscale` 去 stub(#30 切片)
 
-- **现状**:`opentake-gen` client/job/provider/keys **全部建成、零调用**;MCP `GenerateVideo/Image/Audio | UpscaleMedia` 返回 "not yet implemented"(`dispatch.rs:158-166`);`encode_timeline(..., false)` 硬编 canGenerate=false;web 无任何生成 UI(上游 `GenerationView.swift` 1884 行)。
+- **现状(2026-07-29)**:`GenerateVideo/Image/Audio | UpscaleMedia` 已通过 MCP/Chat 共用的 Tauri GenerationBridge 接入 fal/Replicate/OpenAI/ElevenLabs；先持久化占位和 generation log，再异步上传/提交/轮询/下载/探测/导入。`canGenerate` 由可用凭据派生，四工具仅在能力可用时动态发布。MediaPanel 卡片显示进度、取消、固定错误码与需重新确认成本的重试。
 - **怎么写**:
   1. `src-tauri` 命令层:`generate_start(params)->job_id` / `generate_status` / `generate_cancel`,内部 `opentake-gen::client` 异步 job 轮询,产物落项目 `media/` 并走 `import_media` 现有通路(保证出现在素材面板 + 可撤销)。
   2. MCP dispatch 同一命令复用,去掉 4 个 stub;canGenerate 改为"有 BYOK key 即 true"(`keys.rs` 可查)。
   3. 前端:对照上游 GenerationView 做 MediaPanel「AI 生成」分区(与 #91 的左侧分区合流):模型选择(`catalog/` 已有 list_models)、提示词、参考图、进度卡片。
-- **验收**:配 fal.ai key 后文生图落库并可拖上时间线;无 key 显示引导;取消可用。
+- **验收状态**:无付费网络的配置 provider 生产路径已覆盖 image/video/audio/upscale、N 图顺序、部分/全部失败、取消、恢复、鉴权/限流、重试和精确 2x；完整工作区测试通过。真实账号付费请求保留到 Beta 实机验证清单，未在自动化中消费用户额度。
 
 ### 3.5 【P1】Save as Media(#48 尾巴)
 
@@ -170,14 +177,15 @@ default-off Rust renderer or to perform the then-missing first device check.
 
 ### 3.8 【P1·用户加单】HDR v1 / 代理媒体 / 账号脚手架
 
-- **HDR v1**:`probe.rs:MediaProbe` 加 `color_primaries/transfer/matrix`(ffprobe 已能给);导出 `encode/preset.rs:80` 从硬编 BT.709 改透传;预览 wgpu 加 PQ/HLG→SDR tonemap pass(shader 链已有挂点)。
-- **代理媒体**:`opentake-media` 加 `proxy.rs`(ffmpeg 半分辨率 H.264 后台转码,进度事件);`MediaItemDto` 加 `proxyPath`;流式引擎 resolver 优先解代理、导出永远用原件;设置页加开关。
-- **账号脚手架**:可配置后端 URL 的登录面板(设置页新 pane),仅 token 存钥匙串 + 状态显示,**如实标注无官方后端**;不阻塞任何本地功能。
-- **验收**:HDR 素材导出色彩元数据不丢;4K 素材开代理后时间线流畅;账号面板断网不影响编辑。
+- **功能完成状态(2026-08-01)**:三个独立 child 均已通过，并由 `crates/opentake-render/tests/composite_acceptance.rs#hdr_proxy_account_children_close_one_composite_acceptance` 关闭同一个父验收。
+- **HDR v1 PASS**:`MediaColorMetadata` 持久化 primaries/transfer/matrix/range；PQ/HLG 在单帧、流式预览和导出共用路径进入 BT.709 SDR。运行时按实际 FFmpeg filter 能力选择 `scale_vt` 或 `zscale`，已修复 bundled sidecar 导出全黑。当前是明确的 SDR delivery policy，不声称 HDR passthrough。
+- **代理媒体 PASS**:项目内 `media/proxies/<uuid>.mp4` 以 H.264/AAC 原子生成并记录原件 SHA-256；设置开关驱动播放 resolver，导出只读原件。创建、目录祖先、授权、移除和重连均使用 exact-leaf/no-follow 约束，拒绝符号链接/Windows reparse；项目切换会取消在途转码，移除/重连在旧代理文件清理完成前持续持有项目身份租约。打包 GUI 已完成开关、播放、移除、重建、保存重开与原件导出验证。
+- **账号脚手架 PASS**:设置页如实标注无官方后端；远端只接受 HTTPS，本机回环 HTTP 仅作开发例外；token 只进钥匙串。失败登录和断网时，播放、编辑、保存与导出不被账号状态门控。
+- **证据与限制**:[`hdr-proxy-account-real-device-2026-08-01.md`](../audit/2026-07-14/runtime-artifacts/automated/hdr-proxy-account-real-device-2026-08-01.md)。最新本地 `.app`/DMG 仅为 ad-hoc 签名且未 notarize，不能作为 Developer ID Beta 发布证据；完成度账本仍需在不覆盖用户改动的前提下重建文件清单。
 
 ### 3.9 【P2】转场(#13 切片,对标剪映)
 
-- **怎么写**:`opentake-domain` 加 `Transition { kind, duration_frames }` 挂在相邻 clip 对;`opentake-ops` 加 `SetTransition` 命令(校验相邻/时长夹取);`opentake-render` 合成器对重叠区做双纹理混合 pass(cross-dissolve 起步,shader 框架已有调色链可挂);前端时间线 clip 接缝处画转场标记 + Inspector 选型。**先 cross-dissolve 一种打通全链,再扩库。**
+- **完成状态(2026-07-31)**:cross-dissolve 首个竖切已打通。`opentake-domain::Transition` 持久化双方 clip ID、类型和时长；`SetTransition` 校验同轨、视觉源、直接相邻和最大 handle，过长请求显式失败。素材面板转场页支持添加/调时长/删除，操作进入统一 undo/redo，时间线接缝显示标记。RenderPlan 在转场区保持出片完整底层、以进度 alpha-over 入片，消除了旧双透明度造成的中点变暗；拥有测试 `crates/opentake-render/tests/transitions.rs#adjacent_clip_transition_is_editable_undoable_and_matches_preview_export` 覆盖保存重开、拒绝/恢复和四个关键帧的像素/预览导出一致性。后续工作仅是扩展 wipe/slide/3D 等转场库，不再属于首个竖切缺口。
 
 ### 3.10 【P2】曲线变速(#29 切片)
 
@@ -185,20 +193,20 @@ default-off Rust renderer or to perform the then-missing first device check.
 
 ### 3.11 【P2】流式音频分块解码(#160 剩余)
 
-- **现状**:播放前一次性 `extract_pcm` 全时间线预混(长工程首帧慢、改动即整段重混)。
-- **怎么写**:按 N 秒窗口分块解码 + 环形缓冲后台填充(cpal 回调只读环形缓冲,不破 lock-free);seek 丢弃未播块。参照 `playback/audio.rs` 现有 `AtomicU64` 主时钟结构。
+- **完成状态(2026-08-01) PASS**:播放以 2 秒窗口解码、4 窗口有界队列后台填充；cpal 回调只做非阻塞读取，underrun 输出静音且音频主时钟继续前进。seek 递增 generation、取消在途解码并丢弃旧块；pause 保留当前 generation 的下一块，resume 从同一音频时钟继续。停止会取消并回收解码、音频和协调线程。
+- **导出与另存 PASS**:视频导出逐窗口混音并把 PCM 直接追加到 encoder 私有文件 spool，完成时再 mux，不保留全时间线 `Vec`；音频片段另存 WAV 也逐窗口写文件。60 秒打包 GUI 时间线完成跨窗口播放、暂停/继续、首尾跳转后继续、完整 H.264/AAC 导出和 8 秒 WAV 另存。自动化覆盖长时间线恒定峰值分配、短参考一致性、取消、underrun、暂停不吞块及增量 spool。证据见 [`bounded-audio-streaming-real-device-2026-08-01.md`](../audit/2026-07-14/runtime-artifacts/automated/bounded-audio-streaming-real-device-2026-08-01.md)。
 
 ### 3.12 【P2】收尾杂项
 
 | 项 | 怎么写 |
 |---|---|
-| Lottie 接线(#34/#65) | `opentake-motion` 实现已在但 src-tauri 未依赖;评估 wgpu 直渲 vs 预烘焙 PNG 序列(后者先通:motion→PNG 序列→图片 clip) |
+| Lottie 接线(#34/#65) | 已完成：Velato/Vello 直渲共用于 preview/playback/export/Agent 源检查和时间线检查；无效文档及无 GPU 时 fail closed。 |
 | ffmpeg 随包(#131) | tauri sidecar 打包 ffmpeg/ffprobe,`OPENTAKE_FFMPEG` 已支持自定义路径,只差 bundle 配置 + 许可证说明(GPL 兼容) |
 | solo(#147) | `Clip.is_soloed` + 混音/合成时非 solo 轨静音/隐藏;前端轨头加 S 按钮 |
 | 布局常量(#148) | 对照上游 rulerHeight/dropZoneHeight/trackHeight 改 `theme.ts`,纯数值对齐 |
 | CSP 加固(#161) | null→非 null 白屏高风险,**必须真机逐项验证**,独立小 PR |
 | Storage/Models 设置页 | `SettingsView.tsx` 加两 pane:模型缓存管理(whisper/SigLIP 已下载模型列表+删除)、存储占用(项目/缓存目录大小) |
-| MCP 剩余 stub | `InspectMedia`(接 MediaBridge 已有通路)、`AddMotionGraphic/EditMotionGraphic`(依赖 Lottie 接线) |
+| MCP 动态能力 | `InspectMedia` 已接 MediaBridge，包含 Lottie 均匀抽帧；生成/超分按凭据动态发布；Motion add/edit 于 2026-08-01 接生产桥并按 Chromium/FFmpeg 能力动态发布 |
 | 技术债 | `fcpxml.rs` 1489 行拆分;`export_fcpxml` 名实不符(产物 XMEML)可改名 `export_xml`;`library.rs:322` remove 静默吞错补 `tracing::warn!` |
 
 ---

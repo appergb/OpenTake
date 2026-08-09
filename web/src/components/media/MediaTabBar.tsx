@@ -1,13 +1,18 @@
 /**
  * 剪映式顶部素材面板标签条。
- * - MediaTabBar：八个主标签横排（素材/音频/文本/贴纸/特效/转场/字幕/智能包裹），
+ * - MediaTabBar：九个主标签横排（素材/音频/音乐/文本/贴纸/特效/转场/字幕/智能包裹），
  *   选中=白+加粗+底部下划线；可用未选=次级灰+hover 提亮；禁用=极弱灰+不可点。
- *   目前仅「素材/音频」可用，其余为功能未做的置灰占位。
+ *   素材/音频/音乐/字幕已接真实内容，其余为功能未做的置灰占位。
  * - MediaSubTabBar：素材/音频下的「导入 / 我的」二级 pill 切换。
  * 文案全部走 i18n（dict 里 media.tab.* / media.subtab.*），不硬编码中文。
  */
 
-import { useState } from "react";
+import {
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MutableRefObject,
+} from "react";
 import { useT } from "../../i18n";
 import type { MediaTabId, MediaSubTabId } from "../../store/uiStore";
 
@@ -21,13 +26,42 @@ interface MainTab {
 const MAIN_TABS: ReadonlyArray<MainTab> = [
   { id: "material", labelKey: "media.tab.material", enabled: true },
   { id: "audio", labelKey: "media.tab.audio", enabled: true },
+  { id: "music", labelKey: "media.tab.music", enabled: true },
   { id: "text", labelKey: "media.tab.text", enabled: false },
   { id: "sticker", labelKey: "media.tab.sticker", enabled: false },
   { id: "effect", labelKey: "media.tab.effect", enabled: false },
-  { id: "transition", labelKey: "media.tab.transition", enabled: false },
+  { id: "transition", labelKey: "media.tab.transition", enabled: true },
   { id: "subtitle", labelKey: "media.tab.subtitle", enabled: true },
-  { id: "smartPack", labelKey: "media.tab.smartPack", enabled: false },
+  { id: "smartPack", labelKey: "media.tab.smartPack", enabled: true },
 ];
+
+export const MEDIA_MAIN_TAB_IDS: ReadonlyArray<MediaTabId> = MAIN_TABS.map((tab) => tab.id);
+
+function roveTab<T extends string>(
+  event: ReactKeyboardEvent<HTMLButtonElement>,
+  ids: readonly T[],
+  current: T,
+  onSelect: (id: T) => void,
+  refs: MutableRefObject<Partial<Record<T, HTMLButtonElement | null>>>,
+) {
+  let nextIndex: number | null = null;
+  const currentIndex = Math.max(0, ids.indexOf(current));
+  if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+    nextIndex = (currentIndex + 1) % ids.length;
+  } else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+    nextIndex = (currentIndex - 1 + ids.length) % ids.length;
+  } else if (event.key === "Home") {
+    nextIndex = 0;
+  } else if (event.key === "End") {
+    nextIndex = ids.length - 1;
+  }
+  if (nextIndex === null) return;
+  event.preventDefault();
+  const next = ids[nextIndex];
+  if (!next) return;
+  onSelect(next);
+  refs.current[next]?.focus();
+}
 
 export function MediaTabBar({
   active,
@@ -38,10 +72,14 @@ export function MediaTabBar({
 }) {
   const t = useT();
   const [hovered, setHovered] = useState<MediaTabId | null>(null);
+  const tabRefs = useRef<Partial<Record<MediaTabId, HTMLButtonElement | null>>>({});
+  const enabledIds = MAIN_TABS.filter((tab) => tab.enabled).map((tab) => tab.id);
 
   return (
     <div
       role="tablist"
+      aria-label={t("media.library")}
+      aria-orientation="horizontal"
       style={{
         flex: "0 0 auto",
         display: "flex",
@@ -68,16 +106,28 @@ export function MediaTabBar({
             key={tab.id}
             type="button"
             role="tab"
+            id={`media-main-tab-${tab.id}`}
+            aria-controls={`media-main-panel-${tab.id}`}
             aria-selected={selected}
             aria-disabled={!tab.enabled}
+            tabIndex={selected && tab.enabled ? 0 : -1}
             disabled={!tab.enabled}
+            ref={(element) => {
+              tabRefs.current[tab.id] = element;
+            }}
             onMouseEnter={() => tab.enabled && setHovered(tab.id)}
             onMouseLeave={() => setHovered(null)}
             onClick={() => {
               if (tab.enabled) onSelect(tab.id);
             }}
+            onKeyDown={(event) => {
+              if (tab.enabled) {
+                roveTab(event, enabledIds, tab.id, onSelect, tabRefs);
+              }
+            }}
             style={{
               position: "relative",
+              minHeight: 24,
               padding: "var(--space-sm) 2px",
               background: "transparent",
               border: "none",
@@ -134,15 +184,21 @@ export function MediaSubTabBar({
   active,
   onSelect,
   tabs = MATERIAL_SUB_TABS,
+  idPrefix = "media-subtab",
 }: {
   active: MediaSubTabId;
   onSelect: (tab: MediaSubTabId) => void;
   tabs?: ReadonlyArray<SubTab>;
+  idPrefix?: string;
 }) {
   const t = useT();
+  const tabRefs = useRef<Partial<Record<MediaSubTabId, HTMLButtonElement | null>>>({});
+  const tabIds = tabs.map((tab) => tab.id);
   return (
     <div
       role="tablist"
+      aria-label={t("media.library")}
+      aria-orientation="horizontal"
       style={{
         display: "inline-flex",
         gap: "var(--space-xs)",
@@ -159,9 +215,17 @@ export function MediaSubTabBar({
             key={tab.id}
             type="button"
             role="tab"
+            id={`${idPrefix}-${tab.id}`}
+            aria-controls={`${idPrefix}-panel-${tab.id}`}
             aria-selected={selected}
+            tabIndex={selected ? 0 : -1}
+            ref={(element) => {
+              tabRefs.current[tab.id] = element;
+            }}
             onClick={() => onSelect(tab.id)}
+            onKeyDown={(event) => roveTab(event, tabIds, tab.id, onSelect, tabRefs)}
             style={{
+              minHeight: 24,
               padding: "2px var(--space-sm-md)",
               borderRadius: "var(--radius-sm)",
               border: "none",

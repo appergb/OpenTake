@@ -12,7 +12,7 @@
 
 mod common;
 
-use opentake_domain::{ClipType, MediaSource};
+use opentake_domain::{ClipType, MediaManifest, MediaSource};
 use opentake_project::{Project, ProjectError};
 use serde_json::{json, Value};
 
@@ -241,6 +241,31 @@ fn applies_clip_defaults_for_omitted_fields() {
     assert_eq!(clip_a.end_frame(), 90);
     // source_frames_consumed = round(90 * 2.0) = 180.
     assert_eq!(clip_a.source_frames_consumed(), 180);
+
+    // A missing persisted version is the legacy schema (1), even though a
+    // newly constructed manifest starts at the current schema (2). Explicit
+    // persisted versions must never be overwritten by the compatibility path.
+    assert_eq!(project.manifest.version, 1);
+    assert_eq!(MediaManifest::default().version, 2);
+    let explicit: MediaManifest = serde_json::from_value(json!({
+        "version": 2,
+        "entries": [],
+        "folders": []
+    }))
+    .unwrap();
+    assert_eq!(explicit.version, 2);
+
+    // Persisting the upgraded representation and opening it again must keep
+    // both the decoded defaults and the legacy manifest version exactly.
+    project.save().unwrap();
+    let reopened = Project::open(&bundle).unwrap();
+    assert_eq!(reopened.timeline, project.timeline);
+    assert_eq!(reopened.manifest, project.manifest);
+    let reopened_clip = &reopened.timeline.tracks[0].clips[0];
+    assert_eq!(reopened_clip.trim_end_frame, 0);
+    assert_eq!(reopened_clip.opacity, 1.0);
+    assert!(reopened_clip.opacity_track.is_none());
+    assert!(reopened_clip.link_group_id.is_none());
 }
 
 #[test]
@@ -309,7 +334,10 @@ fn parses_manifest_with_missing_version_and_tagged_sources() {
 fn migrates_generation_log_legacy_cost_and_version() {
     let (_tmp, bundle) = make_upstream_bundle("compat-genlog");
     let project = Project::open(&bundle).unwrap();
-    let log = project.generation_log.expect("generation log present");
+    let log = project
+        .generation_log
+        .as_ref()
+        .expect("generation log present");
 
     // Missing top-level version -> 1.
     assert_eq!(log.version, 1);
@@ -330,6 +358,18 @@ fn migrates_generation_log_legacy_cost_and_version() {
     assert!(modern.created_at.is_none());
 
     assert_eq!(log.total_credits(), 342);
+
+    // The generated fallback id is synthesized only once. Saving and
+    // reopening must retain the migrated version, costs, and stable identity.
+    let expected_log = log.clone();
+    project.save().unwrap();
+    let reopened = Project::open(&bundle).unwrap();
+    assert_eq!(reopened.generation_log.as_ref(), Some(&expected_log));
+    let reopened_log = reopened.generation_log.as_ref().unwrap();
+    assert_eq!(reopened_log.version, 1);
+    assert_eq!(reopened_log.entries[0].cost_credits, Some(42));
+    assert_eq!(reopened_log.entries[1].id, modern.id);
+    assert_eq!(reopened_log.total_credits(), 342);
 }
 
 #[test]

@@ -5,7 +5,7 @@
  * the corresponding regions.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { SplitPane } from "./SplitPane";
 import { PanelShell } from "../ui/PanelShell";
 import { MediaPanel } from "../media/MediaPanel";
@@ -13,12 +13,47 @@ import { Preview } from "../preview/Preview";
 import { Inspector } from "../inspector/Inspector";
 import { AgentPanel } from "../agent/AgentPanel";
 import { TimelineRegion } from "../timeline/TimelineRegion";
-import { useEditorUiStore } from "../../store/uiStore";
+import { useEditorUiStore, type LayoutPreset } from "../../store/uiStore";
 
 // Upstream defaults (Constants.swift): mediaPanelDefault=500, inspectorDefault=260.
 const MEDIA_DEFAULT = 500;
 const INSPECTOR_DEFAULT = 260;
 const AGENT_DEFAULT = 320;
+const AGENT_MIN = 240;
+const MEDIA_MIN = 160;
+const MEDIA_LAYOUT_MEDIA_MIN = 200;
+const PREVIEW_MIN = 200;
+const INSPECTOR_MIN = 160;
+const VERTICAL_LEFT_BASE_MIN = 300;
+const VERTICAL_PREVIEW_MIN = 300;
+
+function verticalLeftMinimumWidth(mediaVisible: boolean, inspectorVisible: boolean): number {
+  const nestedMinimum =
+    (mediaVisible ? MEDIA_MIN : 0) + (inspectorVisible ? INSPECTOR_MIN : 0);
+  return Math.max(VERTICAL_LEFT_BASE_MIN, nestedMinimum);
+}
+
+function presetMinimumWidth(
+  preset: LayoutPreset,
+  mediaVisible: boolean,
+  inspectorVisible: boolean,
+): number {
+  if (preset === "media") {
+    return (
+      (mediaVisible ? MEDIA_LAYOUT_MEDIA_MIN : 0) +
+      PREVIEW_MIN +
+      (inspectorVisible ? INSPECTOR_MIN : 0)
+    );
+  }
+  if (preset === "vertical") {
+    return verticalLeftMinimumWidth(mediaVisible, inspectorVisible) + VERTICAL_PREVIEW_MIN;
+  }
+  return (
+    PREVIEW_MIN +
+    (mediaVisible ? MEDIA_MIN : 0) +
+    (inspectorVisible ? INSPECTOR_MIN : 0)
+  );
+}
 
 function useContainerSize() {
   const ref = useRef<HTMLDivElement>(null);
@@ -52,45 +87,108 @@ const InspectorPanel = () => (
 );
 
 export function EditorSplit() {
+  const { ref, size } = useContainerSize();
+  const agentSplitRef = useRef<HTMLDivElement>(null);
+  const agentContentRef = useRef<HTMLDivElement>(null);
   const agentVisible = useEditorUiStore((s) => s.agentPanelVisible);
   const maximized = useEditorUiStore((s) => s.maximizedPanel);
+  const layoutPreset = useEditorUiStore((s) => s.layoutPreset);
+  const mediaVisible = useEditorUiStore((s) => s.mediaPanelVisible);
+  const inspectorVisible = useEditorUiStore((s) => s.inspectorPanelVisible);
+  const workspaceMinimum = presetMinimumWidth(layoutPreset, mediaVisible, inspectorVisible);
+  // Preserve every editing pane before the optional Agent column. The default
+  // preset fits exactly at 760px; wider-minimum presets temporarily fold Agent.
+  const responsiveAgentCollapsed =
+    maximized === null &&
+    agentVisible &&
+    size.w > 0 &&
+    size.w < AGENT_MIN + workspaceMinimum;
+
+  useLayoutEffect(() => {
+    if (!responsiveAgentCollapsed) return;
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement)) return;
+    const outerSplit = agentSplitRef.current?.firstElementChild;
+    const outerDivider = outerSplit?.children.item(1);
+    const focusWillBeHidden = agentContentRef.current?.contains(active) ||
+      outerDivider?.contains(active);
+    if (!focusWillBeHidden) return;
+    ref.current
+      ?.querySelector<HTMLElement>("[data-editor-panel]:not([data-editor-panel='agent'])")
+      ?.focus({ preventScroll: true });
+  }, [ref, responsiveAgentCollapsed]);
 
   // Maximized panel takes the whole area.
   if (maximized) {
     return (
-      <div style={{ width: "100%", height: "100%" }}>
-        {maximized === "media" && <Media />}
-        {maximized === "preview" && <PreviewPanel />}
-        {maximized === "inspector" && <InspectorPanel />}
-        {maximized === "timeline" && <TimelineRegion />}
-        {maximized === "agent" && (
-          <PanelShell panel="agent">
-            <AgentPanel />
-          </PanelShell>
-        )}
+      <div ref={ref} style={{ width: "100%", height: "100%" }}>
+        <div data-maximized-panel={maximized} style={{ width: "100%", height: "100%" }}>
+          {maximized === "media" && <Media />}
+          {maximized === "preview" && <PreviewPanel />}
+          {maximized === "inspector" && <InspectorPanel />}
+          {maximized === "timeline" && <TimelineRegion />}
+          {maximized === "agent" && (
+            <PanelShell panel="agent">
+              <AgentPanel />
+            </PanelShell>
+          )}
+        </div>
       </div>
     );
   }
 
   const presetSubtree = <PresetSubtree />;
 
-  if (!agentVisible) {
-    return <div style={{ width: "100%", height: "100%" }}>{presetSubtree}</div>;
-  }
-
   return (
-    <SplitPane
-      mode="horizontal"
-      initial={AGENT_DEFAULT}
-      min={240}
-      secondMin={400}
-      first={
-        <PanelShell panel="agent">
-          <AgentPanel />
-        </PanelShell>
-      }
-      second={presetSubtree}
-    />
+    <div
+      ref={ref}
+      data-editor-split-root
+      data-responsive-collapsed-agent={responsiveAgentCollapsed ? "true" : undefined}
+      style={{ width: "100%", height: "100%" }}
+    >
+      {!agentVisible ? (
+        presetSubtree
+      ) : (
+        <>
+          <style>{`
+            .editor-agent-split[data-responsive-collapsed="true"] > :first-child > :first-child {
+              flex-basis: 0 !important;
+              overflow: hidden;
+              visibility: hidden;
+            }
+            .editor-agent-split[data-responsive-collapsed="true"] > :first-child > :nth-child(2) {
+              display: none;
+            }
+          `}</style>
+          <div
+            ref={agentSplitRef}
+            className="editor-agent-split"
+            data-responsive-collapsed={responsiveAgentCollapsed ? "true" : undefined}
+            style={{ width: "100%", height: "100%" }}
+          >
+            <SplitPane
+              mode="horizontal"
+              initial={AGENT_DEFAULT}
+              min={AGENT_MIN}
+              secondMin={workspaceMinimum}
+              first={
+                <div
+                  ref={agentContentRef}
+                  data-responsive-agent-content
+                  aria-hidden={responsiveAgentCollapsed ? "true" : undefined}
+                  style={{ width: "100%", height: "100%" }}
+                >
+                  <PanelShell panel="agent">
+                    <AgentPanel />
+                  </PanelShell>
+                </div>
+              }
+              second={presetSubtree}
+            />
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -120,7 +218,11 @@ function DefaultLayout() {
   );
 
   return (
-    <div ref={ref} style={{ width: "100%", height: "100%" }}>
+    <div
+      ref={ref}
+      data-layout-preset="default"
+      style={{ width: "100%", height: "100%" }}
+    >
       {size.h > 0 && (
         <SplitPane
           mode="vertical"
@@ -142,6 +244,7 @@ function MediaLayout() {
   const inspectorVisible = useEditorUiStore((s) => s.inspectorPanelVisible);
 
   const mediaWidth = Math.round(size.w * 0.3) || 1;
+  const rightMinimum = PREVIEW_MIN + (inspectorVisible ? INSPECTOR_MIN : 0);
   const right = (
     <RightVerticalSplit
       topRatio={0.55}
@@ -159,14 +262,14 @@ function MediaLayout() {
   );
 
   return (
-    <div ref={ref} style={{ width: "100%", height: "100%" }}>
+    <div ref={ref} data-layout-preset="media" style={{ width: "100%", height: "100%" }}>
       {size.w > 0 &&
         (mediaVisible ? (
           <SplitPane
             mode="horizontal"
             initial={mediaWidth}
-            min={200}
-            secondMin={400}
+            min={MEDIA_LAYOUT_MEDIA_MIN}
+            secondMin={rightMinimum}
             first={<Media />}
             second={right}
           />
@@ -184,31 +287,39 @@ function VerticalLayout() {
   const inspectorVisible = useEditorUiStore((s) => s.inspectorPanelVisible);
 
   const leftWidth = Math.round(size.w * 0.5) || 1;
+  const leftMinimum = verticalLeftMinimumWidth(mediaVisible, inspectorVisible);
   const left = (
     <RightVerticalSplit
       topRatio={0.55}
       top={
-        <ThreeColumn
-          left={mediaVisible ? <Media /> : null}
-          leftWidth={MEDIA_DEFAULT}
-          center={<InspectorPanel />}
-          right={null}
-          rightWidth={0}
-          centerIsInspector={inspectorVisible}
-        />
+        <div data-layout-slot="vertical-top" style={{ width: "100%", height: "100%" }}>
+          <ThreeColumn
+            left={mediaVisible ? <Media /> : null}
+            leftWidth={MEDIA_DEFAULT}
+            center={<InspectorPanel />}
+            right={null}
+            rightWidth={0}
+            centerIsInspector={inspectorVisible}
+            centerMin={INSPECTOR_MIN}
+          />
+        </div>
       }
       bottom={<TimelineRegion />}
     />
   );
 
   return (
-    <div ref={ref} style={{ width: "100%", height: "100%" }}>
+    <div
+      ref={ref}
+      data-layout-preset="vertical"
+      style={{ width: "100%", height: "100%" }}
+    >
       {size.w > 0 && (
         <SplitPane
           mode="horizontal"
           initial={leftWidth}
-          min={300}
-          secondMin={300}
+          min={leftMinimum}
+          secondMin={VERTICAL_PREVIEW_MIN}
           first={left}
           second={<PreviewPanel />}
         />
@@ -247,6 +358,7 @@ function ThreeColumn({
   right,
   rightWidth,
   centerIsInspector,
+  centerMin = PREVIEW_MIN,
 }: {
   left: React.ReactNode | null;
   leftWidth: number;
@@ -254,20 +366,36 @@ function ThreeColumn({
   right: React.ReactNode | null;
   rightWidth: number;
   centerIsInspector?: boolean;
+  centerMin?: number;
 }) {
   // center may itself be the inspector (vertical layout) — collapse when hidden.
   const renderedCenter = centerIsInspector === false ? null : center;
+
+  // In Vertical layout the center is the Inspector. When it is collapsed, do
+  // not retain a split whose second pane is only an empty base-colored slot;
+  // the remaining Media panel must consume the full top-left region just as a
+  // collapsed NSSplitView item does upstream.
+  if (!renderedCenter) {
+    if (left) return <div style={{ width: "100%", height: "100%" }}>{left}</div>;
+    if (right) return <div style={{ width: "100%", height: "100%" }}>{right}</div>;
+    return <div style={{ width: "100%", height: "100%", background: "var(--bg-base)" }} />;
+  }
 
   if (left && right) {
     return (
       <SplitPane
         mode="horizontal"
         initial={leftWidth}
-        min={160}
-        secondMin={200}
+        min={MEDIA_MIN}
+        secondMin={centerMin + INSPECTOR_MIN}
         first={left}
         second={
-          <SplitPaneRightAnchored rightWidth={rightWidth} center={renderedCenter} right={right} />
+          <SplitPaneRightAnchored
+            rightWidth={rightWidth}
+            center={renderedCenter}
+            right={right}
+            centerMin={centerMin}
+          />
         }
       />
     );
@@ -277,8 +405,8 @@ function ThreeColumn({
       <SplitPane
         mode="horizontal"
         initial={leftWidth}
-        min={160}
-        secondMin={200}
+        min={MEDIA_MIN}
+        secondMin={centerMin}
         first={left}
         second={renderedCenter ?? <div style={{ width: "100%", height: "100%", background: "var(--bg-base)" }} />}
       />
@@ -286,7 +414,12 @@ function ThreeColumn({
   }
   if (!left && right) {
     return (
-      <SplitPaneRightAnchored rightWidth={rightWidth} center={renderedCenter} right={right} />
+      <SplitPaneRightAnchored
+        rightWidth={rightWidth}
+        center={renderedCenter}
+        right={right}
+        centerMin={centerMin}
+      />
     );
   }
   return <div style={{ width: "100%", height: "100%" }}>{renderedCenter}</div>;
@@ -297,21 +430,27 @@ function SplitPaneRightAnchored({
   rightWidth,
   center,
   right,
+  centerMin,
 }: {
   rightWidth: number;
   center: React.ReactNode;
   right: React.ReactNode;
+  centerMin: number;
 }) {
   const { ref, size } = useContainerSize();
-  const firstWidth = Math.max(200, size.w - rightWidth) || 1;
+  const firstWidth = Math.max(centerMin, size.w - rightWidth) || 1;
   return (
-    <div ref={ref} style={{ width: "100%", height: "100%" }}>
+    <div
+      ref={ref}
+      data-layout-split="preview-inspector"
+      style={{ width: "100%", height: "100%" }}
+    >
       {size.w > 0 && (
         <SplitPane
           mode="horizontal"
           initial={firstWidth}
-          min={200}
-          secondMin={160}
+          min={centerMin}
+          secondMin={INSPECTOR_MIN}
           first={center ?? <div style={{ width: "100%", height: "100%", background: "var(--bg-base)" }} />}
           second={right}
         />

@@ -1,8 +1,12 @@
+// @vitest-environment happy-dom
+
 import { describe, expect, it } from "vitest";
 import {
+  DOCUMENTED_SHORTCUT_ROWS,
   handleAgentPanelKeyDown,
   handleProjectSaveKeyDown,
   handleTransportSpaceKeyDown,
+  resolveDocumentedShortcut,
   shouldHandleTransportSpaceKey,
 } from "./useKeyboardShortcuts";
 
@@ -28,6 +32,37 @@ describe("keyboard transport Space shortcut", () => {
 
   it("does not suppress modified Space keyup", () => {
     expect(shouldHandleTransportSpaceKey(event({ metaKey: true }), "editor")).toBe(false);
+  });
+
+  it("does not claim Space from native controls or media interaction surfaces", () => {
+    const button = document.createElement("button");
+    const buttonLabel = document.createElement("span");
+    button.append(buttonLabel);
+    const mediaCard = document.createElement("div");
+    mediaCard.dataset.mediaTile = "true";
+    const context = {
+      view: "editor" as const,
+      blocked: false,
+      focusedPanel: "timeline" as const,
+      compatibilityReadOnly: false,
+      cropEditingActive: false,
+    };
+
+    expect(shouldHandleTransportSpaceKey(event({ target: buttonLabel }), "editor")).toBe(false);
+    expect(shouldHandleTransportSpaceKey(event({ target: mediaCard }), "editor")).toBe(false);
+    expect(resolveDocumentedShortcut(event({ target: buttonLabel }), context)).toBeNull();
+    expect(
+      resolveDocumentedShortcut(event({ code: "Escape", target: buttonLabel }), context),
+    ).toEqual({ type: "escape" });
+    expect(
+      resolveDocumentedShortcut(event({ code: "Backquote", target: buttonLabel }), context),
+    ).toEqual({ type: "maximize" });
+    expect(
+      resolveDocumentedShortcut(
+        event({ code: "KeyS", metaKey: true, target: buttonLabel }),
+        context,
+      ),
+    ).toEqual({ type: "application", id: "save" });
   });
 
   it("toggles playback synchronously on Space keydown", () => {
@@ -123,6 +158,52 @@ describe("project save shortcut", () => {
     expect(handled).toBe(true);
     expect(prevented).toBe(1);
     expect(saves).toBe(0);
+  });
+
+  it("complete_documented_shortcut_table", () => {
+    expect(DOCUMENTED_SHORTCUT_ROWS).toEqual([
+      "transport",
+      "timeline-arrows",
+      "media-arrows",
+      "delete",
+      "tools",
+      "range",
+      "trim",
+      "maximize",
+      "return-escape",
+      "undo-redo",
+      "clipboard",
+      "split",
+      "file",
+      "panels",
+      "layouts",
+      "fullscreen",
+      "help",
+      "settings",
+    ]);
+
+    const context = {
+      view: "editor" as const,
+      blocked: false,
+      focusedPanel: "timeline" as const,
+      compatibilityReadOnly: false,
+      cropEditingActive: false,
+    };
+    expect(resolveDocumentedShortcut(event({ code: "BracketLeft" }), context)).toEqual({
+      type: "trimStart",
+    });
+    expect(resolveDocumentedShortcut(event({ code: "BracketRight" }), context)).toEqual({
+      type: "trimEnd",
+    });
+    expect(
+      resolveDocumentedShortcut(
+        event({ code: "KeyS", metaKey: true, shiftKey: true }),
+        context,
+      ),
+    ).toEqual({ type: "application", id: "saveAs" });
+    expect(
+      resolveDocumentedShortcut(event({ code: "Slash", ctrlKey: true, shiftKey: true }), context),
+    ).toEqual({ type: "application", id: "shortcuts" });
   });
 });
 

@@ -88,7 +88,7 @@ Compositor::render_to_rgba(device, queue, size, &frame_plan, resolver) -> Decode
 - 纯函数 `build_render_plan` + `RenderPlan::frame` + `source_frame_index`（变速/trim 源帧换算），含混合序、同轨去重、隐藏轨剔除、文字层分离、黑底 clear（`plan/`，单测见 `plan/tests.rs` + `affine.rs` 内联测试）。
 - render 层几何 helpers `affine_transform` / `compose` / `crop_to_uv` / `normalize_box`，对拍上游 `affineTransform`（已知点 + 手算矩阵单测）。
 - wgpu 合成器 `Compositor::render_to_rgba`：单 pipeline、预乘 alpha-over blend、离屏 RT 256 对齐回读；设备获取 `RenderDevice::try_new` 无 GPU 时优雅跳过（CI/headless）。
-- 进阶像素链 in-shader（ADVANCED-FEATURES A 层落地部分）：线性光调色（曝光/白平衡/LGG/对比/饱和）、绿幕色度抠图（matte + spill 抑制）、线性/圆形蒙版（SDF + 羽化 + 反相，上限 `MASK_CAP=4`），WGSL 1:1 镜像 `opentake_domain::grade`。
+- 进阶像素链 in-shader（ADVANCED-FEATURES A 层）：线性光调色（曝光/白平衡/LGG/对比/饱和）、绿幕色度抠图（matte + spill 抑制）、线性/圆形/多边形蒙版（SDF + 羽化 + 反相 + 变换，上限 `MASK_CAP=4`），以及按列表顺序执行的闭集通用 Effect，WGSL 1:1 镜像 `opentake_domain::grade`。
 - 文字栅格化两套：`NullTextRasterizer`（占位，永不 panic）+ `CosmicTextRasterizer`（cosmic-text 排版 + swash 栅格，含字号画布相对缩放、对齐、背景盒、投影 box-blur、描边，输出预乘 RGBA）。
 - 纹理上传 + content-hash LRU 缓存（`TextureCache`）；导出尺寸 `even` / `export_render_size`（720p/1080p/4K 短边，不夹 1.0）。
 - 媒体源契约 trait `SourceMetrics` / `FrameProvider` / `TextureResolver` + `DecodedFrame`（render 侧定义，带默认实现 + 单测）。
@@ -96,12 +96,16 @@ Compositor::render_to_rgba(device, queue, size, &frame_plan, resolver) -> Decode
 > 注：**整条时间线逐帧导出已在 `src-tauri` 落地**（#112 `export.rs` + `export_video`，H.264/.mp4，逐帧 `render_to_rgba` → 编码；#117 线性音频混音 AAC mux），证明「导出后端共享 RenderPlan + 合成器」已跑通——但该 spine 在 src-tauri/media，不在本 crate（见 [模块文档树](../INDEX.md) 的 src-tauri 条目）。
 
 **计划中（仅 SPEC / ROADMAP / GAP 规划，本 crate 代码尚未落地或仅占位）：**
-- **运行期预览接线**（PORT-1TO1-GAP P1-9）：`composite_frame(frame) → RGBA/PNG` 命令 + media 侧 `FrameProvider` 适配器 + 前端暂停态贴 canvas。合成器本身就绪，缺的是 Tauri 命令与前端粘合。
-- **真实播放引擎**（ROADMAP Phase 4 / GAP P1-10）：ffmpeg 连续解码 + wgpu 上屏 + cpal 音频 + A/V 同步 + 精确 seek + scrub 30Hz 节流（移植 `VideoEngine`）。本 crate 不含任何播放状态。
-- **线性光混合**：当前 PoC 在 **sRGB 非线性域**直接混合以最贴近 AVFoundation（`RT_FORMAT = Rgba8Unorm`，`color.rs` 的 sRGB↔linear 已备但合成 over 未切线性）；线性光（RGBA16F）为质量增强项，仅在像素 diff 通过后切换（SPEC §3.7）。
-- **多边形（钢笔）蒙版 in-shader**：变长点列不适配固定 uniform，编码为全画布 no-op；穿 storage buffer 是 render 侧 TODO（domain 已存储且单测）。`effects: Vec<Effect>` 链亦仅透传、尚无对应 pass。
-- **转场 transitions**（相邻 clip 重叠区 pass）：ADVANCED-FEATURES A 层 p0，尚无实现。
-- **图片 / Lottie 物化**：`TextureSource::Image / Lottie` + `source_frame_index` 取模语义已在 plan 侧；实际像素由 media 侧 `image_pixels` / `lottie_frame` 提供（接线进行中）。
+- **线性光混合**：当前合成在 **sRGB 非线性域**直接混合以最贴近 AVFoundation（`RT_FORMAT = Rgba8Unorm`，`color.rs` 的 sRGB↔linear 已备但合成 over 未切线性）；线性光（RGBA16F）为质量增强项，仅在像素 diff 通过后切换（SPEC §3.7）。
+- **转场 transitions**（相邻 clip 重叠区 pass）：ADVANCED-FEATURES A 层 p0；Beta 1 已交付 cross-dissolve 全链（含时间线标记 / Inspector 选型），扩库为后续版本项。
+- **透明 alpha / PNG sequence / 任意 TSX 动效**：Motion Canvas 透明输出与 frame-sequence 明确属于后续版本（v1 走普通视频导入/预览/导出链路）。
+
+> **2026-08-03 更新：**「运行期预览接线」「真实播放引擎」「图片/Lottie 物化」三项
+> 已随 Beta 1 落地（`composite_frame`/播放引擎在 `src-tauri/playback` 与 `web`，像素仍走本 crate
+> 合成器）；不再属于本模块待办。完整验证证据见
+> `docs/releases/1.0.0-beta.2.md` 与 `docs/audit/2026-08-02/beta-functional-verification.md`。
+
+**多边形（钢笔）蒙版与通用 Effect 链已落地**：钢笔路径使用与 domain 常量一致的定长 GPU 表示，编辑命令在写入前拒绝超过 4 个蒙版或超过 16 点的多边形；合成器仍以确定性截断作为绕过命令边界时的防御。通用 Effect 采用 `grayscale` / `sepia` / `invert` 闭集注册表，未知名称或参数在命令与渲染边界报错，禁用项跳过，启用项按持久化顺序执行。两条独立 GPU 子所有者分别覆盖蒙版的形状、边缘、羽化、反相、多蒙版交集，以及 Effect 默认/非默认参数、顺序、禁用项和预览/导出逐字节一致；无 GPU 环境按明确的 headless skip 契约退出。
 
 ## 移植铁律（Swift → Rust，本模块强约束）
 

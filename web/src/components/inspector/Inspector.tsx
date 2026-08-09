@@ -1,14 +1,14 @@
 /**
  * Inspector (SPEC §6). Title bar + one of four content states: marquee summary,
- * clip inspector (with Video/Audio tabs), media-asset source, or project
+ * clip inspector (with Text/Video/Audio/AI Edit tabs), media-asset source, or project
  * metadata. Editable fields commit via SetClipProperties; a field whose
  * property already has an active keyframe track stays editable but commits
  * via UpsertKeyframe at the playhead instead (see `../../lib/keyframeValue`).
- * The keyframe lane and Text/AI-Edit tabs are scaffolded (TODO: full parity
- * in a later pass).
+ * AI Edit proposals are reviewed here and accepted through the same undoable
+ * command layer as direct Inspector edits.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import {
   ChevronLeft,
   ChevronRight,
@@ -27,16 +27,25 @@ import { Icon } from "../ui/Icon";
 import { HoverButton } from "../ui/HoverButton";
 import { ScrubbableNumberField } from "./ScrubbableNumberField";
 import { TextTab } from "./TextTab";
+import { AiEditTab } from "./AiEditTab";
+import { MattingSection } from "./MattingSection";
+import { ObjectRemovalSection } from "./ObjectRemovalSection";
+import { ColorMatchSection } from "./ColorMatchSection";
+import { MotionTrackingSection } from "./MotionTrackingSection";
 import { KeyframesPanel } from "./KeyframesPanel";
 import { SwapMediaSection } from "./SwapMediaSection";
 import { useProjectStore } from "../../store/projectStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useMediaStore } from "../../store/mediaStore";
 import * as edit from "../../store/editActions";
+import * as api from "../../lib/api";
+import { openDialog } from "../../lib/dialog";
 import { formatTimecode } from "../../lib/geometry";
+import { assetUrl } from "../../lib/asset";
 import {
   cropAt,
   liveVolumeKfLinearAt,
+  findLogicalSingleClip,
   mediaCanvasAspect,
   rawOpacityAt,
   resizeTransformKeepingSourceAspect,
@@ -63,11 +72,13 @@ import { CROP_ASPECT_LOCKS, cropForPreset, type CropAspectLock } from "../../lib
 import { FS, RADIUS, SPACE } from "../../lib/theme";
 import { useT, type TFunction } from "../../i18n";
 import type {
+  AudioDenoise,
   ChromaKey,
   Clip,
   ClipType,
   ColorGrade,
   Crop,
+  DenoiseMode,
   GenerationInput,
   Interpolation,
   KeyframeProperty,
@@ -75,9 +86,17 @@ import type {
   MaskShape,
   MediaItem,
   Rgb,
+  HslSecondary,
   Timeline,
+  Effect,
 } from "../../lib/types";
 import { formatFileSize, formatMediaDuration } from "../../lib/mediaFormat";
+import {
+  EFFECT_REGISTRY,
+  isAdvertisedEffectName,
+  newAdvertisedEffect,
+  type AdvertisedEffectName,
+} from "../../lib/effects";
 
 function gcd(a: number, b: number): number {
   return b === 0 ? a : gcd(b, a % b);
@@ -85,7 +104,12 @@ function gcd(a: number, b: number): number {
 
 export function Inspector() {
   const t = useT();
-  const timeline = useProjectStore((s) => s.timeline);
+  const rootTimeline = useProjectStore((s) => s.timeline);
+  const activeNestedSequenceId = useEditorUiStore((s) => s.activeNestedSequenceId);
+  const timeline =
+    rootTimeline.nestedSequences?.find(
+      (sequence) => sequence.id === activeNestedSequenceId,
+    )?.timeline ?? rootTimeline;
   const selectedClipIds = useEditorUiStore((s) => s.selectedClipIds);
   const inspectorTab = useEditorUiStore((s) => s.inspectorTab);
   const setInspectorTab = useEditorUiStore((s) => s.setInspectorTab);
@@ -101,8 +125,8 @@ export function Inspector() {
   );
 
   const selectedClips = collectSelected(timeline, selectedClipIds);
-  const isMarquee = selectedClips.length > 1;
-  const single = selectedClips.length === 1 ? selectedClips[0] : null;
+  const single = findLogicalSingleClip(timeline, selectedClipIds);
+  const isMarquee = selectedClips.length > 0 && single === null;
   // State priority mirrors upstream `InspectorView.body` (:49-56):
   // marquee > clip(visual/audio) > mediaAsset > projectMetadata. Clip selection
   // is checked before the media asset, so a selected clip always wins.
@@ -135,7 +159,6 @@ export function Inspector() {
             clip={single}
             tab={inspectorTab}
             setTab={setInspectorTab}
-            hasAudio={single.mediaType === "audio"}
             keyframesOpen={keyframesPanelVisible}
             onToggleKeyframes={toggleKeyframesPanel}
             t={t}
@@ -197,7 +220,7 @@ function Row({ label, children }: { label: string; children: React.ReactNode }) 
   return (
     <div
       style={{
-        height: 22,
+        minHeight: 24,
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
@@ -270,19 +293,20 @@ function KeyframeRowControls({
   t: TFunction;
 }) {
   const setActiveFrame = useEditorUiStore((s) => s.setActiveFrame);
-  const inRange = clipContainsFrame(clip, activeFrame);
-  const onKeyframe = hasKeyframeAt(clip, property, activeFrame);
-  const prev = previousKeyframeFrame(clip, property, activeFrame);
-  const next = nextKeyframeFrame(clip, property, activeFrame);
+  const editFrame = Math.round(activeFrame);
+  const inRange = clipContainsFrame(clip, editFrame);
+  const onKeyframe = hasKeyframeAt(clip, property, editFrame);
+  const prev = previousKeyframeFrame(clip, property, editFrame);
+  const next = nextKeyframeFrame(clip, property, editFrame);
 
   const toggle = () => {
     if (!inRange) return;
     if (onKeyframe) {
-      void edit.removeKeyframe(clip.id, property, activeFrame);
+      void edit.removeKeyframe(clip.id, property, editFrame);
     } else {
       // Stamp the clip's current sampled value at the playhead (upstream's
       // `stampKeyframe`, which samples the property at `frame`).
-      void edit.stampKeyframe(clip.id, property, activeFrame);
+      void edit.stampKeyframe(clip.id, property, editFrame);
     }
   };
 
@@ -298,11 +322,11 @@ function KeyframeRowControls({
         title={t("inspector.keyframe.prev")}
         disabled={prev === null}
         onClick={() => prev !== null && setActiveFrame(prev)}
-        size={18}
+        size={24}
       >
         <Icon icon={ChevronLeft} size={12} />
       </HoverButton>
-      <HoverButton title={diamondTitle} disabled={!inRange} onClick={toggle} size={18}>
+      <HoverButton title={diamondTitle} disabled={!inRange} onClick={toggle} size={24}>
         {/* currentColor drives both stroke and (when set) fill; filled = a
             keyframe sits at the playhead, in the timecode accent (upstream
             `diamond.fill` + `timecodeColor`). */}
@@ -319,7 +343,7 @@ function KeyframeRowControls({
         title={t("inspector.keyframe.next")}
         disabled={next === null}
         onClick={() => next !== null && setActiveFrame(next)}
-        size={18}
+        size={24}
       >
         <Icon icon={ChevronRight} size={12} />
       </HoverButton>
@@ -337,14 +361,17 @@ const INTERPOLATION_KEYS: Record<Interpolation, string> = {
 function InterpolationSelect({
   value,
   onChange,
+  ariaLabel,
   t,
 }: {
   value: Interpolation;
   onChange: (v: Interpolation) => void;
+  ariaLabel: string;
   t: TFunction;
 }) {
   return (
     <select
+      aria-label={ariaLabel}
       value={value}
       onChange={(e) => onChange(e.target.value as Interpolation)}
       style={{
@@ -376,7 +403,6 @@ function ClipInspector({
   clip,
   tab,
   setTab,
-  hasAudio,
   keyframesOpen,
   onToggleKeyframes,
   t,
@@ -384,24 +410,35 @@ function ClipInspector({
   clip: Clip;
   tab: string;
   setTab: (t: "text" | "video" | "audio" | "aiEdit") => void;
-  hasAudio: boolean;
   keyframesOpen: boolean;
   onToggleKeyframes: () => void;
   t: TFunction;
 }) {
-  // Available tabs depend on selection (SPEC §6.3).
-  const tabs: Array<"text" | "video" | "audio" | "aiEdit"> = [];
-  if (clip.mediaType === "text") tabs.push("text");
-  else tabs.push("video");
-  if (hasAudio) tabs.push("audio");
-
-  const activeTab = tabs.includes(tab as never) ? tab : tabs[0];
-
   // Live sampling: read the current playhead frame so every numeric field shows
   // the value at the playhead (upstream `InspectorView.livePreview`).
   const activeFrame = useEditorUiStore((s) => s.activeFrame);
-  const timeline = useProjectStore((s) => s.timeline);
+  const editFrame = Math.round(activeFrame);
+  const rootTimeline = useProjectStore((s) => s.timeline);
+  const activeNestedSequenceId = useEditorUiStore((s) => s.activeNestedSequenceId);
+  const timeline =
+    rootTimeline.nestedSequences?.find(
+      (sequence) => sequence.id === activeNestedSequenceId,
+    )?.timeline ?? rootTimeline;
   const mediaItem = useMediaStore((s) => s.items.find((m) => m.id === clip.mediaRef) ?? null);
+  // Available tabs depend on selection (SPEC §6.3). Visual source clips expose
+  // AI Edit; video with an embedded audio stream also exposes Audio. Missing
+  // source media keeps AI Edit visible and presents a typed unavailable state
+  // inside the tab instead of silently changing the tab set.
+  const tabs: Array<"text" | "video" | "audio" | "aiEdit"> = [];
+  if (clip.mediaType === "text") tabs.push("text");
+  else if (clip.mediaType === "audio") tabs.push("audio");
+  else {
+    tabs.push("video");
+    if (mediaItem?.hasAudio) tabs.push("audio");
+    tabs.push("aiEdit");
+  }
+
+  const activeTab = tabs.includes(tab as never) ? tab : tabs[0];
   const aspect = mediaCanvasAspect(
     mediaItem?.width,
     mediaItem?.height,
@@ -426,6 +463,7 @@ function ClipInspector({
   const scaleAnimated = !!clip.scaleTrack && clip.scaleTrack.keyframes.length > 0;
   const positionAnimated = !!clip.positionTrack && clip.positionTrack.keyframes.length > 0;
   const cropAnimated = !!clip.cropTrack && clip.cropTrack.keyframes.length > 0;
+  const playheadInClip = clipContainsFrame(clip, editFrame);
 
   // Sampled values at the playhead.
   const sampledOpacity = rawOpacityAt(clip, activeFrame);
@@ -439,6 +477,8 @@ function ClipInspector({
     <div>
       {tabs.length > 1 && (
         <div
+          role="tablist"
+          aria-label={t("inspector.title")}
           style={{
             display: "flex",
             gap: "var(--space-md)",
@@ -448,12 +488,23 @@ function ClipInspector({
           {tabs.map((tabId) => (
             <button
               key={tabId}
+              type="button"
+              role="tab"
+              aria-selected={activeTab === tabId}
               onClick={() => setTab(tabId)}
               style={{
                 paddingBottom: 4,
                 fontSize: "var(--fs-sm-md)",
                 fontWeight: activeTab === tabId ? "var(--fw-medium)" : "var(--fw-regular)",
                 color: activeTab === tabId ? "var(--text-primary)" : "var(--text-tertiary)",
+                ...(tabId === "aiEdit"
+                  ? {
+                      background: "var(--ai-gradient)",
+                      WebkitBackgroundClip: "text",
+                      WebkitTextFillColor: "transparent",
+                      opacity: activeTab === tabId ? 1 : 0.6,
+                    }
+                  : {}),
                 borderBottom:
                   activeTab === tabId ? "var(--bw-medium) solid var(--text-primary)" : "none",
               }}
@@ -468,11 +519,19 @@ function ClipInspector({
         {clip.mediaType !== "text" && <SwapMediaSection clip={clip} t={t} />}
         {activeTab === "text" ? (
           <TextTab clip={clip} t={t} />
+        ) : activeTab === "aiEdit" ? (
+          <AiEditTab
+            clip={clip}
+            fps={timeline.fps}
+            unavailableReason={mediaItem?.missing ? t("inspector.aiEdit.unavailable") : null}
+          />
         ) : activeTab === "audio" ? (
           <section>
             <SectionHeader label={t("inspector.section.levels")} />
             <Row label={t("inspector.field.volume")}>
               <ScrubbableNumberField
+                ariaLabel={t("inspector.field.volume")}
+                disabled={volumeAnimated && !playheadInClip}
                 value={volumeAnimated ? sampledVolume : clip.volume}
                 min={0}
                 max={4}
@@ -483,14 +542,17 @@ function ClipInspector({
                 displayTextOverride={(v) => (v <= 0 ? "-∞ dB" : null)}
                 onCommit={(v) =>
                   volumeAnimated
-                    ? edit.upsertKeyframe(clip.id, "volume", activeFrame, volumeKeyframeValue(v))
+                    ? edit.upsertKeyframe(clip.id, "volume", editFrame, volumeKeyframeValue(v))
                     : commit({ volume: v })
                 }
               />
               {volumeAnimated && <AnimatedHint t={t} />}
-              <KeyframeRowControls clip={clip} property="volume" activeFrame={activeFrame} t={t} />
+              <KeyframeRowControls clip={clip} property="volume" activeFrame={editFrame} t={t} />
             </Row>
             <FadeSection clip={clip} commit={commit} t={t} />
+            <LoudnessSection clip={clip} t={t} />
+            <DenoiseSection clip={clip} t={t} />
+            <StemSeparationSection sourceAssetId={clip.mediaRef} t={t} />
           </section>
         ) : (
           <>
@@ -500,13 +562,15 @@ function ClipInspector({
                 <HoverButton
                   title={t("inspector.action.resetTransform")}
                   onClick={() => edit.resetTransform([clip.id])}
-                  size={18}
+                  size={24}
                 >
                   <Icon icon={RotateCcw} size={12} />
                 </HoverButton>
               </div>
               <Row label={t("inspector.field.scale")}>
                 <ScrubbableNumberField
+                  ariaLabel={t("inspector.field.scale")}
+                  disabled={scaleAnimated && !playheadInClip}
                   value={sampledScale}
                   min={0.01}
                   max={10}
@@ -519,7 +583,7 @@ function ClipInspector({
                       ? edit.upsertKeyframe(
                           clip.id,
                           "scale",
-                          activeFrame,
+                          editFrame,
                           scaleKeyframeValue(clip.transform, v, aspect),
                         )
                       : commit({
@@ -528,10 +592,12 @@ function ClipInspector({
                   }
                 />
                 {scaleAnimated && <AnimatedHint t={t} />}
-                <KeyframeRowControls clip={clip} property="scale" activeFrame={activeFrame} t={t} />
+                <KeyframeRowControls clip={clip} property="scale" activeFrame={editFrame} t={t} />
               </Row>
               <Row label={t("inspector.field.rotation")}>
                 <ScrubbableNumberField
+                  ariaLabel={t("inspector.field.rotation")}
+                  disabled={rotationAnimated && !playheadInClip}
                   value={sampledRotation}
                   min={-3600}
                   max={3600}
@@ -541,15 +607,17 @@ function ClipInspector({
                   width={56}
                   onCommit={(v) =>
                     rotationAnimated
-                      ? edit.upsertKeyframe(clip.id, "rotation", activeFrame, rotationKeyframeValue(v))
+                      ? edit.upsertKeyframe(clip.id, "rotation", editFrame, rotationKeyframeValue(v))
                       : commit({ transform: { ...clip.transform, rotation: v } })
                   }
                 />
                 {rotationAnimated && <AnimatedHint t={t} />}
-                <KeyframeRowControls clip={clip} property="rotation" activeFrame={activeFrame} t={t} />
+                <KeyframeRowControls clip={clip} property="rotation" activeFrame={editFrame} t={t} />
               </Row>
               <Row label={t("inspector.field.opacity")}>
                 <ScrubbableNumberField
+                  ariaLabel={t("inspector.field.opacity")}
+                  disabled={opacityAnimated && !playheadInClip}
                   value={opacityAnimated ? sampledOpacity : clip.opacity}
                   min={0}
                   max={1}
@@ -562,14 +630,14 @@ function ClipInspector({
                       ? edit.upsertKeyframe(
                           clip.id,
                           "opacity",
-                          activeFrame,
+                          editFrame,
                           opacityKeyframeValue(v * 100),
                         )
                       : commit({ opacity: v })
                   }
                 />
                 {opacityAnimated && <AnimatedHint t={t} />}
-                <KeyframeRowControls clip={clip} property="opacity" activeFrame={activeFrame} t={t} />
+                <KeyframeRowControls clip={clip} property="opacity" activeFrame={editFrame} t={t} />
               </Row>
             </section>
 
@@ -577,7 +645,8 @@ function ClipInspector({
               clip={clip}
               sampledTopLeft={sampledTopLeft}
               animated={positionAnimated}
-              activeFrame={activeFrame}
+              activeFrame={editFrame}
+              playheadInClip={playheadInClip}
               commit={commit}
               t={t}
             />
@@ -586,7 +655,8 @@ function ClipInspector({
               clip={clip}
               sampledCrop={sampledCrop}
               animated={cropAnimated}
-              activeFrame={activeFrame}
+              activeFrame={editFrame}
+              playheadInClip={playheadInClip}
               commit={commit}
               sourcePixelAspect={sourcePixelAspect}
               t={t}
@@ -596,10 +666,19 @@ function ClipInspector({
 
             <FadeSection clip={clip} commit={commit} t={t} />
 
+            {clip.mediaType === "video" && !clip.nestedSequenceId && (
+              <>
+                <MotionTrackingSection clip={clip} />
+                <StabilizationSection clip={clip} t={t} />
+                <MattingSection clip={clip} />
+              </>
+            )}
+
             <section>
               <SectionHeader label={t("inspector.section.playback")} />
               <Row label={t("inspector.field.speed")}>
                 <ScrubbableNumberField
+                  ariaLabel={t("inspector.field.speed")}
                   value={clip.speed}
                   min={0.25}
                   max={4}
@@ -653,6 +732,7 @@ function PositionSection({
   sampledTopLeft,
   animated,
   activeFrame,
+  playheadInClip,
   commit,
   t,
 }: {
@@ -660,17 +740,21 @@ function PositionSection({
   sampledTopLeft: { x: number; y: number };
   animated: boolean;
   activeFrame: number;
+  playheadInClip: boolean;
   commit: (props: Parameters<typeof edit.setClipProperties>[1]) => void;
   t: TFunction;
 }) {
   // Editing top-left x/y writes back through `transform.centerX/centerY`. The
   // size is preserved from the current transform (scale track writes via scale).
+  const editFrame = Math.round(activeFrame);
   const [w, h] = [clip.transform.width, clip.transform.height];
   return (
     <section>
       <SectionHeader label={t("inspector.section.position")} />
       <Row label={t("inspector.field.positionX")}>
         <ScrubbableNumberField
+          ariaLabel={t("inspector.field.positionX")}
+          disabled={animated && !playheadInClip}
           value={sampledTopLeft.x}
           min={-2}
           max={2}
@@ -682,17 +766,19 @@ function PositionSection({
               ? edit.upsertKeyframe(
                   clip.id,
                   "position",
-                  activeFrame,
+                  editFrame,
                   positionXKeyframeValue(v, sampledTopLeft.y),
                 )
               : commit({ transform: { ...clip.transform, centerX: v + w / 2 } })
           }
         />
         {animated && <AnimatedHint t={t} />}
-        <KeyframeRowControls clip={clip} property="position" activeFrame={activeFrame} t={t} />
+        <KeyframeRowControls clip={clip} property="position" activeFrame={editFrame} t={t} />
       </Row>
       <Row label={t("inspector.field.positionY")}>
         <ScrubbableNumberField
+          ariaLabel={t("inspector.field.positionY")}
+          disabled={animated && !playheadInClip}
           value={sampledTopLeft.y}
           min={-2}
           max={2}
@@ -704,7 +790,7 @@ function PositionSection({
               ? edit.upsertKeyframe(
                   clip.id,
                   "position",
-                  activeFrame,
+                  editFrame,
                   positionYKeyframeValue(sampledTopLeft.x, v),
                 )
               : commit({ transform: { ...clip.transform, centerY: v + h / 2 } })
@@ -734,6 +820,7 @@ function CropSection({
   sampledCrop,
   animated,
   activeFrame,
+  playheadInClip,
   commit,
   sourcePixelAspect,
   t,
@@ -742,10 +829,12 @@ function CropSection({
   sampledCrop: Crop;
   animated: boolean;
   activeFrame: number;
+  playheadInClip: boolean;
   commit: (props: Parameters<typeof edit.setClipProperties>[1]) => void;
   sourcePixelAspect: number | null;
   t: TFunction;
 }) {
+  const editFrame = Math.round(activeFrame);
   const cropEditingActive = useEditorUiStore((s) => s.cropEditingActive);
   const toggleCropEditingActive = useEditorUiStore((s) => s.toggleCropEditingActive);
   const cropAspectLock = useEditorUiStore((s) => s.cropAspectLock);
@@ -760,7 +849,7 @@ function CropSection({
     const next = cropForPreset(preset, sourcePixelAspect);
     if (next === null) return;
     if (animated) {
-      void edit.upsertKeyframe(clip.id, "crop", activeFrame, { kind: "crop", value: next });
+      void edit.upsertKeyframe(clip.id, "crop", editFrame, { kind: "crop", value: next });
     } else {
       commit({ crop: next });
     }
@@ -773,6 +862,8 @@ function CropSection({
   const renderEdge = (label: string, edge: keyof Crop, value: number) => (
     <Row label={label}>
       <ScrubbableNumberField
+        ariaLabel={label}
+        disabled={animated && !playheadInClip}
         value={value}
         min={0}
         max={1}
@@ -784,7 +875,7 @@ function CropSection({
             ? edit.upsertKeyframe(
                 clip.id,
                 "crop",
-                activeFrame,
+                editFrame,
                 cropEdgeKeyframeValue(sampledCrop, edge, v),
               )
             : commitEdge(edge, v)
@@ -802,12 +893,15 @@ function CropSection({
             cropEditingActive ? "inspector.action.cropEditStop" : "inspector.action.cropEditStart",
           )}
           active={cropEditingActive}
+          disabled={animated && !playheadInClip && !cropEditingActive}
           onClick={toggleCropEditingActive}
-          size={20}
+          size={24}
         >
           <Icon icon={CropIcon} size={13} />
         </HoverButton>
         <select
+          aria-label={t("inspector.field.cropAspect")}
+          disabled={animated && !playheadInClip}
           value={cropAspectLock}
           onChange={(e) => applyCropPreset(e.target.value as CropAspectLock)}
           title={t("inspector.field.cropAspect")}
@@ -826,7 +920,7 @@ function CropSection({
             </option>
           ))}
         </select>
-        <KeyframeRowControls clip={clip} property="crop" activeFrame={activeFrame} t={t} />
+        <KeyframeRowControls clip={clip} property="crop" activeFrame={editFrame} t={t} />
       </Row>
       {renderEdge(t("inspector.field.cropLeft"), "left", sampledCrop.left)}
       {renderEdge(t("inspector.field.cropTop"), "top", sampledCrop.top)}
@@ -856,6 +950,7 @@ function FlipSection({
       <SectionHeader label={t("inspector.section.flip")} />
       <Row label={t("inspector.field.flipHorizontal")}>
         <input
+          aria-label={t("inspector.field.flipHorizontal")}
           type="checkbox"
           checked={clip.transform.flipHorizontal}
           style={checkboxStyle}
@@ -864,6 +959,7 @@ function FlipSection({
       </Row>
       <Row label={t("inspector.field.flipVertical")}>
         <input
+          aria-label={t("inspector.field.flipVertical")}
           type="checkbox"
           checked={clip.transform.flipVertical}
           style={checkboxStyle}
@@ -890,6 +986,7 @@ function FadeSection({
       <SectionHeader label={t("inspector.section.fade")} />
       <Row label={t("inspector.field.fadeInFrames")}>
         <ScrubbableNumberField
+          ariaLabel={t("inspector.field.fadeInFrames")}
           value={clip.fadeInFrames}
           min={0}
           max={clip.durationFrames}
@@ -901,6 +998,7 @@ function FadeSection({
       </Row>
       <Row label={t("inspector.field.fadeInInterpolation")}>
         <InterpolationSelect
+          ariaLabel={t("inspector.field.fadeInInterpolation")}
           value={clip.fadeInInterpolation}
           onChange={(v) => commit({ fadeInInterpolation: v })}
           t={t}
@@ -908,6 +1006,7 @@ function FadeSection({
       </Row>
       <Row label={t("inspector.field.fadeOutFrames")}>
         <ScrubbableNumberField
+          ariaLabel={t("inspector.field.fadeOutFrames")}
           value={clip.fadeOutFrames}
           min={0}
           max={clip.durationFrames}
@@ -919,6 +1018,7 @@ function FadeSection({
       </Row>
       <Row label={t("inspector.field.fadeOutInterpolation")}>
         <InterpolationSelect
+          ariaLabel={t("inspector.field.fadeOutInterpolation")}
           value={clip.fadeOutInterpolation}
           onChange={(v) => commit({ fadeOutInterpolation: v })}
           t={t}
@@ -952,31 +1052,684 @@ function ShaderEffectsSection({ clip, t }: { clip: Clip; t: TFunction }) {
   return (
     <>
       <ColorGradeSection clip={clip} t={t} />
+      <ColorMatchSection clip={clip} />
       <ChromaKeySection clip={clip} t={t} />
       <MaskSection clip={clip} t={t} />
+      {clip.mediaType === "video" && !clip.nestedSequenceId && (
+        <ObjectRemovalSection clip={clip} />
+      )}
+      <GenericEffectsSection clip={clip} t={t} />
     </>
+  );
+}
+
+function GenericEffectsSection({ clip, t }: { clip: Clip; t: TFunction }) {
+  const [draft, setDraft] = useState<Effect[]>(() => clip.effects ?? []);
+  const [selectedName, setSelectedName] = useState<AdvertisedEffectName>("grayscale");
+
+  useEffect(() => setDraft(clip.effects ?? []), [clip.id, clip.effects]);
+
+  const commit = (next: Effect[]) => {
+    setDraft(next);
+    void edit.setEffects([clip.id], next);
+  };
+  const replace = (index: number, nextEffect: Effect) => {
+    const next = [...draft];
+    next[index] = nextEffect;
+    commit(next);
+  };
+  const move = (from: number, to: number) => {
+    if (to < 0 || to >= draft.length) return;
+    const next = [...draft];
+    const [moved] = next.splice(from, 1);
+    if (!moved) return;
+    next.splice(to, 0, moved);
+    commit(next);
+  };
+
+  return (
+    <section data-testid="generic-effects-section">
+      <SectionHeader label={t("inspector.section.effects")} icon={SlidersHorizontal} />
+      <div style={{ display: "flex", gap: SPACE.xs, padding: `0 ${SPACE.lg}px ${SPACE.sm}px` }}>
+        <select
+          aria-label={t("inspector.effects.add")}
+          value={selectedName}
+          onChange={(event) => setSelectedName(event.target.value as AdvertisedEffectName)}
+          style={controlStyle}
+        >
+          {EFFECT_REGISTRY.map((effect) => (
+            <option key={effect.name} value={effect.name}>{t(effect.labelKey)}</option>
+          ))}
+        </select>
+        <button type="button" style={controlStyle} onClick={() => commit([...draft, newAdvertisedEffect(selectedName)])}>
+          {t("inspector.effects.add")}
+        </button>
+      </div>
+      {draft.length === 0 && (
+        <div style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px`, color: "var(--text-tertiary)" }}>
+          {t("inspector.effects.empty")}
+        </div>
+      )}
+      {draft.map((effect, index) => {
+        const advertised = isAdvertisedEffectName(effect.name);
+        const label = advertised
+          ? t(EFFECT_REGISTRY.find((item) => item.name === effect.name)!.labelKey)
+          : `${effect.name} (${t("inspector.effects.unknown")})`;
+        const amount = effect.params.amount ?? 1;
+        return (
+          <div
+            key={`${effect.name}-${index}`}
+            data-testid="generic-effect-item"
+            style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px`, borderTop: "var(--bw-thin) solid var(--border-primary)" }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: SPACE.xs, paddingTop: SPACE.xs }}>
+              <input
+                aria-label={`${label} ${t("inspector.field.enabled")}`}
+                type="checkbox"
+                checked={effect.enabled}
+                style={checkboxStyle}
+                onChange={(event) => replace(index, { ...effect, enabled: event.target.checked })}
+              />
+              <span style={{ flex: 1 }}>{label}</span>
+              <button type="button" aria-label={t("inspector.effects.moveUp")} style={controlStyle} disabled={index === 0} onClick={() => move(index, index - 1)}>↑</button>
+              <button type="button" aria-label={t("inspector.effects.moveDown")} style={controlStyle} disabled={index === draft.length - 1} onClick={() => move(index, index + 1)}>↓</button>
+              <button type="button" aria-label={t("inspector.effects.remove")} style={controlStyle} onClick={() => commit(draft.filter((_, itemIndex) => itemIndex !== index))}>×</button>
+            </div>
+            {advertised && (
+              <Row label={t("inspector.effects.amount")}>
+                <input
+                  aria-label={`${label} ${t("inspector.effects.amount")}`}
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={amount}
+                  onChange={(event) => replace(index, {
+                    ...effect,
+                    params: { amount: Number(event.target.value) },
+                  })}
+                />
+                <span className="tabular" style={{ marginLeft: SPACE.xs }}>{Math.round(amount * 100)}%</span>
+              </Row>
+            )}
+          </div>
+        );
+      })}
+    </section>
+  );
+}
+
+function LoudnessSection({ clip, t }: { clip: Clip; t: TFunction }) {
+  const normalization = clip.loudnessNormalization;
+  const [target, setTarget] = useState(normalization?.targetLufs ?? -16);
+  const [ceiling, setCeiling] = useState(normalization?.truePeakCeilingDbtp ?? -1);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setTarget(clip.loudnessNormalization?.targetLufs ?? -16);
+    setCeiling(clip.loudnessNormalization?.truePeakCeilingDbtp ?? -1);
+    setAnalyzing(false);
+    setProgress(0);
+    setError(null);
+  }, [clip.id, clip.loudnessNormalization]);
+
+  const analyze = async () => {
+    setAnalyzing(true);
+    setProgress(0);
+    setError(null);
+    let unlisten = () => {};
+    try {
+      unlisten = await api.onLoudnessProgress(clip.id, ({ done, total }) => {
+        setProgress(total > 0 ? Math.min(1, done / total) : 0);
+      });
+      await edit.analyzeAndApplyLoudness(clip.id, target, ceiling);
+      setProgress(1);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      if (!/loudness_cancelled/i.test(message)) setError(message);
+    } finally {
+      unlisten();
+      setAnalyzing(false);
+    }
+  };
+
+  return (
+    <section data-testid="loudness-section" style={{ marginTop: SPACE.md }}>
+      <SectionHeader label={t("inspector.section.loudness")} />
+      <Row label={t("inspector.loudness.target")}>
+        <ScrubbableNumberField
+          ariaLabel={t("inspector.loudness.target")}
+          value={target}
+          min={-36}
+          max={-5}
+          sensitivity={0.5}
+          format={(value) => value.toFixed(1)}
+          suffix=" LUFS"
+          width={70}
+          onCommit={setTarget}
+        />
+      </Row>
+      <Row label={t("inspector.loudness.ceiling")}>
+        <ScrubbableNumberField
+          ariaLabel={t("inspector.loudness.ceiling")}
+          value={ceiling}
+          min={-12}
+          max={0}
+          sensitivity={0.25}
+          format={(value) => value.toFixed(1)}
+          suffix=" dBTP"
+          width={70}
+          onCommit={setCeiling}
+        />
+      </Row>
+      {normalization && (
+        <div
+          data-testid="loudness-result"
+          style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px`, color: "var(--text-tertiary)", fontSize: FS.xs }}
+        >
+          {normalization.inputIntegratedLufs.toFixed(1)} → {normalization.outputIntegratedLufs.toFixed(1)} LUFS · {normalization.gainDb >= 0 ? "+" : ""}{normalization.gainDb.toFixed(1)} dB · {normalization.outputTruePeakDbtp.toFixed(1)} dBTP
+        </div>
+      )}
+      {analyzing && (
+        <div style={{ padding: `0 ${SPACE.lg}px ${SPACE.xs}px`, color: "var(--text-tertiary)", fontSize: FS.xs }}>
+          {t("inspector.loudness.analyzing")} {Math.round(progress * 100)}%
+        </div>
+      )}
+      <div style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px` }}>
+        <button type="button" style={controlStyle} disabled={analyzing} onClick={() => void analyze()}>
+          {normalization ? t("inspector.loudness.reanalyze") : t("inspector.loudness.analyzeApply")}
+        </button>
+        {(analyzing || normalization) && (
+          <button
+            type="button"
+            style={{ ...controlStyle, marginLeft: SPACE.xs }}
+            onClick={() => void (analyzing ? edit.cancelLoudnessAnalysis() : edit.setLoudnessNormalization(clip.id, null))}
+          >
+            {analyzing ? t("inspector.loudness.cancel") : t("inspector.loudness.reset")}
+          </button>
+        )}
+      </div>
+      {error && <div role="alert" style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px`, color: "var(--danger)" }}>{error}</div>}
+    </section>
+  );
+}
+
+function DenoiseSection({ clip, t }: { clip: Clip; t: TFunction }) {
+  const denoise = clip.audioDenoise;
+  const [mode, setMode] = useState<DenoiseMode>(denoise?.mode ?? "adaptive");
+  const [strength, setStrength] = useState(denoise?.strength ?? 0.9);
+  const [previewEnabled, setPreviewEnabled] = useState(denoise?.previewEnabled ?? true);
+  const [applying, setApplying] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setMode(clip.audioDenoise?.mode ?? "adaptive");
+    setStrength(clip.audioDenoise?.strength ?? 0.9);
+    setPreviewEnabled(clip.audioDenoise?.previewEnabled ?? true);
+    setApplying(false);
+    setProgress(0);
+    setError(null);
+  }, [clip.id, clip.audioDenoise]);
+
+  const apply = async () => {
+    setApplying(true);
+    setProgress(0);
+    setError(null);
+    let unlisten = () => {};
+    try {
+      unlisten = await api.onDenoiseProgress(clip.id, ({ done, total }) => {
+        setProgress(total > 0 ? Math.min(1, done / total) : 0);
+      });
+      await edit.prepareAndApplyAudioDenoise(clip.id, mode, strength, previewEnabled);
+      setProgress(1);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      if (!/denoise_cancelled/i.test(message)) setError(message);
+    } finally {
+      unlisten();
+      setApplying(false);
+    }
+  };
+
+  const togglePreview = (enabled: boolean) => {
+    setPreviewEnabled(enabled);
+    if (denoise) {
+      const updated: AudioDenoise = { ...denoise, previewEnabled: enabled };
+      void edit.setAudioDenoise(clip.id, updated).catch((reason) => {
+        setPreviewEnabled(denoise.previewEnabled);
+        setError(reason instanceof Error ? reason.message : String(reason));
+      });
+    }
+  };
+
+  return (
+    <section data-testid="denoise-section" style={{ marginTop: SPACE.md }}>
+      <SectionHeader label={t("inspector.section.denoise")} />
+      <Row label={t("inspector.denoise.mode")}>
+        <select
+          aria-label={t("inspector.denoise.mode")}
+          value={mode}
+          disabled={applying}
+          onChange={(event) => setMode(event.target.value as DenoiseMode)}
+          style={controlStyle}
+        >
+          <option value="adaptive">{t("inspector.denoise.mode.adaptive")}</option>
+          <option value="voice">{t("inspector.denoise.mode.voice")}</option>
+        </select>
+      </Row>
+      <Row label={t("inspector.denoise.strength")}>
+        <input
+          aria-label={t("inspector.denoise.strength")}
+          type="range"
+          min={0}
+          max={1}
+          step={0.01}
+          value={strength}
+          disabled={applying}
+          onChange={(event) => setStrength(Number(event.target.value))}
+        />
+        <span className="tabular" style={{ marginLeft: SPACE.xs }}>{Math.round(strength * 100)}%</span>
+      </Row>
+      <Row label={t("inspector.denoise.preview")}>
+        <input
+          aria-label={t("inspector.denoise.preview")}
+          type="checkbox"
+          checked={previewEnabled}
+          disabled={applying}
+          onChange={(event) => togglePreview(event.target.checked)}
+        />
+      </Row>
+      {denoise && (
+        <div
+          data-testid="denoise-result"
+          style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px`, color: "var(--text-tertiary)", fontSize: FS.xs }}
+        >
+          {t(`inspector.denoise.mode.${denoise.mode}`)} · {Math.round(denoise.strength * 100)}% · {denoise.previewEnabled ? t("inspector.denoise.previewOn") : t("inspector.denoise.previewOff")}
+        </div>
+      )}
+      {applying && (
+        <div style={{ padding: `0 ${SPACE.lg}px ${SPACE.xs}px`, color: "var(--text-tertiary)", fontSize: FS.xs }}>
+          {t("inspector.denoise.processing")} {Math.round(progress * 100)}%
+        </div>
+      )}
+      <div style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px` }}>
+        <button type="button" style={controlStyle} disabled={applying} onClick={() => void apply()}>
+          {denoise ? t("inspector.denoise.reapply") : t("inspector.denoise.apply")}
+        </button>
+        {(applying || denoise) && (
+          <button
+            type="button"
+            style={{ ...controlStyle, marginLeft: SPACE.xs }}
+            onClick={() => void (applying ? edit.cancelDenoiseAnalysis() : edit.setAudioDenoise(clip.id, null))}
+          >
+            {applying ? t("inspector.denoise.cancel") : t("inspector.denoise.reset")}
+          </button>
+        )}
+      </div>
+      {error && <div role="alert" style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px`, color: "var(--danger)" }}>{error}</div>}
+    </section>
+  );
+}
+
+function StemSeparationSection({
+  sourceAssetId,
+  t,
+}: {
+  sourceAssetId: string;
+  t: TFunction;
+}) {
+  const [execution, setExecution] = useState<"local" | "hosted">("local");
+  const [provider, setProvider] = useState("");
+  const [model, setModel] = useState("");
+  const [uploadConfirmed, setUploadConfirmed] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [result, setResult] = useState<api.StemSeparationResult | null>(null);
+  const [imported, setImported] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const activeFrame = useEditorUiStore((state) => state.activeFrame);
+  const items = useMediaStore((state) => state.items);
+  const vocals = result ? items.find((item) => item.id === result.vocalsAssetId) : undefined;
+  const accompaniment = result
+    ? items.find((item) => item.id === result.accompanimentAssetId)
+    : undefined;
+
+  useEffect(() => {
+    setRunning(false);
+    setProgress(0);
+    setResult(null);
+    setImported(false);
+    setError(null);
+  }, [sourceAssetId]);
+
+  const separate = async () => {
+    setRunning(true);
+    setProgress(0);
+    setResult(null);
+    setError(null);
+    let unlisten = () => {};
+    try {
+      unlisten = await api.onStemSeparationProgress(sourceAssetId, ({ done, total }) => {
+        setProgress(total > 0 ? Math.min(1, done / total) : 0);
+      });
+      const separated = await api.separateAudioStems(
+        sourceAssetId,
+        execution,
+        execution === "hosted" ? provider : null,
+        execution === "hosted" ? model : null,
+        execution === "hosted" && uploadConfirmed,
+      );
+      setResult(separated);
+      setImported(false);
+      setProgress(1);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      if (!/stem_separation_cancelled/i.test(message)) {
+        if (/stem_hosted_privacy_confirmation_required/i.test(message)) {
+          setError(t("inspector.stems.error.confirm"));
+        } else if (/stem_hosted_provider_not_configured/i.test(message)) {
+          setError(t("inspector.stems.error.notConfigured"));
+        } else {
+          setError(message);
+        }
+      }
+    } finally {
+      unlisten();
+      setRunning(false);
+    }
+  };
+
+  const importToTracks = async () => {
+    if (!result) return;
+    setError(null);
+    try {
+      await api.importStemsToTracks(
+        result.vocalsAssetId,
+        result.accompanimentAssetId,
+        Math.max(0, Math.round(activeFrame)),
+      );
+      setImported(true);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  const undoStemImport = async () => {
+    try {
+      await edit.undo();
+      setImported(false);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  return (
+    <section data-testid="stem-separation-section" style={{ marginTop: SPACE.md }}>
+      <SectionHeader label={t("inspector.section.stems")} />
+      <Row label={t("inspector.stems.execution")}>
+        <select
+          aria-label={t("inspector.stems.execution")}
+          value={execution}
+          disabled={running}
+          onChange={(event) => setExecution(event.target.value as "local" | "hosted")}
+          style={controlStyle}
+        >
+          <option value="local">{t("inspector.stems.local")}</option>
+          <option value="hosted">{t("inspector.stems.hosted")}</option>
+        </select>
+      </Row>
+      <div style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px`, color: "var(--text-tertiary)", fontSize: FS.xs }}>
+        {execution === "local" ? t("inspector.stems.localPrivacy") : t("inspector.stems.hostedPrivacy")}
+      </div>
+      {execution === "hosted" && (
+        <>
+          <Row label={t("inspector.stems.provider")}>
+            <input
+              aria-label={t("inspector.stems.provider")}
+              value={provider}
+              disabled={running}
+              onChange={(event) => setProvider(event.target.value)}
+              style={controlStyle}
+            />
+          </Row>
+          <Row label={t("inspector.stems.model")}>
+            <input
+              aria-label={t("inspector.stems.model")}
+              value={model}
+              disabled={running}
+              onChange={(event) => setModel(event.target.value)}
+              style={controlStyle}
+            />
+          </Row>
+          <Row label={t("inspector.stems.confirmUpload")}>
+            <input
+              aria-label={t("inspector.stems.confirmUpload")}
+              type="checkbox"
+              checked={uploadConfirmed}
+              disabled={running}
+              onChange={(event) => setUploadConfirmed(event.target.checked)}
+            />
+          </Row>
+        </>
+      )}
+      {running && (
+        <div style={{ padding: `0 ${SPACE.lg}px ${SPACE.xs}px`, color: "var(--text-tertiary)", fontSize: FS.xs }}>
+          {t("inspector.stems.processing")} {Math.round(progress * 100)}%
+        </div>
+      )}
+      {result && (
+        <div data-testid="stem-separation-result" style={{ padding: `0 ${SPACE.lg}px ${SPACE.xs}px`, color: "var(--accent-primary)", fontSize: FS.xs, display: "flex", flexDirection: "column", gap: SPACE.xs }}>
+          <span>{t("inspector.stems.complete")} · {result.execution}</span>
+          {vocals?.path && <audio controls src={assetUrl(vocals.path) ?? undefined} aria-label={t("inspector.stems.auditionVocals")} />}
+          {accompaniment?.path && <audio controls src={assetUrl(accompaniment.path) ?? undefined} aria-label={t("inspector.stems.auditionAccompaniment")} />}
+          {imported ? (
+            <button type="button" style={controlStyle} onClick={() => void undoStemImport()}>
+              {t("inspector.stems.undoImport")}
+            </button>
+          ) : (
+            <button type="button" style={controlStyle} onClick={() => void importToTracks()}>
+              {t("inspector.stems.importTracks")}
+            </button>
+          )}
+        </div>
+      )}
+      <div style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px` }}>
+        <button type="button" style={controlStyle} disabled={running} onClick={() => void separate()}>
+          {t("inspector.stems.separate")}
+        </button>
+        {running && (
+          <button type="button" style={{ ...controlStyle, marginLeft: SPACE.xs }} onClick={() => void api.cancelStemSeparation()}>
+            {t("inspector.stems.cancel")}
+          </button>
+        )}
+      </div>
+      {error && <div role="alert" style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px`, color: "var(--danger)" }}>{error}</div>}
+    </section>
+  );
+}
+
+function StabilizationSection({ clip, t }: { clip: Clip; t: TFunction }) {
+  const [analyzing, setAnalyzing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const solution = clip.stabilization;
+
+  useEffect(() => {
+    setAnalyzing(false);
+    setError(null);
+  }, [clip.id]);
+
+  const analyze = async () => {
+    setAnalyzing(true);
+    setError(null);
+    try {
+      await edit.analyzeAndApplyStabilization(clip.id);
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      if (!/\bcancell?ed\b/i.test(message)) setError(message);
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  return (
+    <section data-testid="stabilization-section">
+      <SectionHeader label={t("inspector.section.stabilization")} />
+      {!solution ? (
+        <div style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px` }}>
+          <button type="button" style={controlStyle} disabled={analyzing} onClick={() => void analyze()}>
+            {analyzing
+              ? t("inspector.stabilization.analyzing")
+              : t("inspector.stabilization.analyzeApply")}
+          </button>
+          {analyzing && (
+            <button
+              type="button"
+              style={{ ...controlStyle, marginLeft: SPACE.xs }}
+              onClick={() => void edit.cancelStabilizationAnalysis()}
+            >
+              {t("inspector.stabilization.cancel")}
+            </button>
+          )}
+        </div>
+      ) : (
+        <>
+          <Row label={t("inspector.stabilization.strength")}>
+            <ScrubbableNumberField
+              ariaLabel={t("inspector.stabilization.strength")}
+              value={solution.strength * 100}
+              min={0}
+              max={100}
+              sensitivity={1}
+              format={(value) => value.toFixed(0)}
+              suffix="%"
+              width={56}
+              onCommit={(value) =>
+                void edit.adjustStabilization(clip.id, { strength: value / 100 })
+              }
+            />
+          </Row>
+          <Row label={t("inspector.stabilization.cropMargin")}>
+            <ScrubbableNumberField
+              ariaLabel={t("inspector.stabilization.cropMargin")}
+              value={solution.cropMargin * 100}
+              min={0}
+              max={50}
+              sensitivity={0.5}
+              format={(value) => value.toFixed(1)}
+              suffix="%"
+              width={56}
+              onCommit={(value) =>
+                void edit.adjustStabilization(clip.id, { cropMargin: value / 100 })
+              }
+            />
+          </Row>
+          <div
+            style={{
+              padding: `0 ${SPACE.lg}px ${SPACE.sm}px`,
+              color: "var(--text-tertiary)",
+              fontSize: FS.xs,
+            }}
+          >
+            {solution.model} v{solution.modelVersion} · {solution.keyframes.length}{" "}
+            {t("inspector.stabilization.samples")}
+          </div>
+          <div style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px` }}>
+            <button
+              type="button"
+              style={controlStyle}
+              disabled={analyzing}
+              onClick={() => void analyze()}
+            >
+              {analyzing
+                ? t("inspector.stabilization.analyzing")
+                : t("inspector.stabilization.reanalyze")}
+            </button>
+            <button
+              type="button"
+              style={{ ...controlStyle, marginLeft: SPACE.xs }}
+              onClick={() =>
+                void (analyzing
+                  ? edit.cancelStabilizationAnalysis()
+                  : edit.resetStabilization(clip.id))
+              }
+            >
+              {analyzing
+                ? t("inspector.stabilization.cancel")
+                : t("inspector.stabilization.reset")}
+            </button>
+          </div>
+        </>
+      )}
+      {error && (
+        <div role="alert" style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px`, color: "var(--danger)" }}>
+          {error}
+        </div>
+      )}
+    </section>
   );
 }
 
 function ColorGradeSection({ clip, t }: { clip: Clip; t: TFunction }) {
   const [draft, setDraft] = useState<ColorGrade>(() => completeColorGrade(clip.colorGrade));
+  const [lutIntensity, setLutIntensity] = useState(clip.lut?.intensity ?? 1);
+  const [lutError, setLutError] = useState<string | null>(null);
 
   useEffect(() => {
     setDraft(completeColorGrade(clip.colorGrade));
-  }, [clip.id, clip.colorGrade]);
+    setLutIntensity(clip.lut?.intensity ?? 1);
+  }, [clip.id, clip.colorGrade, clip.lut]);
+
+  const importLut = async () => {
+    setLutError(null);
+    try {
+      const open = await openDialog();
+      if (!open) return;
+      const selected = await open({
+        directory: false,
+        multiple: false,
+        filters: [{ name: "3D LUT", extensions: ["cube"] }],
+      });
+      if (typeof selected !== "string") return;
+      const reference = await api.importLut(selected);
+      await edit.setLut([clip.id], reference);
+    } catch (error) {
+      setLutError(error instanceof Error ? error.message : String(error));
+    }
+  };
 
   const commitGrade = (next: ColorGrade) => {
     setDraft(next);
     void edit.setColorGrade([clip.id], next);
   };
-  const updateField = (field: keyof Omit<ColorGrade, "liftGammaGain">, value: number) =>
+  const updateField = (field: keyof Omit<ColorGrade, "liftGammaGain" | "hslSecondary">, value: number) =>
     setDraft((g) => ({ ...g, [field]: value }));
-  const commitField = (field: keyof Omit<ColorGrade, "liftGammaGain">, value: number) =>
+  const commitField = (field: keyof Omit<ColorGrade, "liftGammaGain" | "hslSecondary">, value: number) =>
     commitGrade({ ...draft, [field]: value });
   const updateLgg = (band: keyof ColorGrade["liftGammaGain"], channel: keyof Rgb, value: number) =>
     setDraft((g) => setLggChannel(g, band, channel, value));
   const commitLgg = (band: keyof ColorGrade["liftGammaGain"], channel: keyof Rgb, value: number) =>
     commitGrade(setLggChannel(draft, band, channel, value));
+  const defaultSecondary = (): HslSecondary => ({
+    hueCenter: 0,
+    hueWidth: 0.24,
+    feather: 0.08,
+    hueShift: 0,
+    saturation: 0,
+    lightness: 0,
+  });
+  const secondary = draft.hslSecondary ?? defaultSecondary();
+  const setSecondaryEnabled = (enabled: boolean) =>
+    commitGrade({ ...draft, hslSecondary: enabled ? secondary : undefined });
+  const updateSecondary = (field: keyof HslSecondary, value: number) =>
+    setDraft((grade) => ({
+      ...grade,
+      hslSecondary: { ...(grade.hslSecondary ?? defaultSecondary()), [field]: value },
+    }));
+  const commitSecondary = (field: keyof HslSecondary, value: number) =>
+    commitGrade({ ...draft, hslSecondary: { ...secondary, [field]: value } });
 
   return (
     <section>
@@ -1017,7 +1770,7 @@ function ColorGradeSection({ clip, t }: { clip: Clip; t: TFunction }) {
             key={`${band}-${channel}`}
             label={t(`inspector.field.${band}${channel.toUpperCase()}`)}
             value={draft.liftGammaGain[band][channel]}
-            min={band === "lift" ? -1 : 0}
+            min={band === "lift" ? -1 : band === "gamma" ? 0.01 : 0}
             max={band === "lift" ? 1 : 4}
             sensitivity={band === "lift" ? 0.005 : 0.01}
             format={(v) => v.toFixed(2)}
@@ -1047,6 +1800,88 @@ function ColorGradeSection({ clip, t }: { clip: Clip; t: TFunction }) {
         onChange={(v) => updateField("saturation", v)}
         onCommit={(v) => commitField("saturation", v)}
       />
+      <SectionHeader label={t("inspector.section.lut")} />
+      <Row label={t("inspector.field.lutFile")}>
+        <div style={{ display: "flex", alignItems: "center", gap: SPACE.xs, minWidth: 0 }}>
+          <span
+            title={clip.lut?.name}
+            style={{ color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+          >
+            {clip.lut?.name ?? t("inspector.value.noLut")}
+          </span>
+          <button type="button" style={controlStyle} onClick={() => void importLut()}>
+            {t("inspector.action.importLut")}
+          </button>
+          {clip.lut && (
+            <button type="button" style={controlStyle} onClick={() => void edit.setLut([clip.id], null)}>
+              {t("inspector.action.removeLut")}
+            </button>
+          )}
+        </div>
+      </Row>
+      {clip.lut && (
+        <EffectNumberRow
+          label={t("inspector.field.lutIntensity")}
+          value={lutIntensity}
+          min={0}
+          max={1}
+          sensitivity={0.005}
+          format={(value) => value.toFixed(3)}
+          onChange={setLutIntensity}
+          onCommit={(intensity) => void edit.setLut([clip.id], { ...clip.lut!, intensity })}
+        />
+      )}
+      {lutError && (
+        <div role="alert" style={{ padding: `0 ${SPACE.lg}px ${SPACE.sm}px`, color: "var(--danger)" }}>
+          {lutError}
+        </div>
+      )}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <SectionHeader label={t("inspector.section.hslSecondary")} />
+        <HoverButton
+          title={t("inspector.action.resetHslSecondary")}
+          disabled={!draft.hslSecondary}
+          onClick={() => commitGrade({ ...draft, hslSecondary: undefined })}
+          size={24}
+        >
+          <Icon icon={RotateCcw} size={12} />
+        </HoverButton>
+      </div>
+      <Row label={t("inspector.field.enabled")}>
+        <input
+          aria-label={`${t("inspector.section.hslSecondary")} ${t("inspector.field.enabled")}`}
+          type="checkbox"
+          checked={draft.hslSecondary != null}
+          style={checkboxStyle}
+          onChange={(event) => setSecondaryEnabled(event.target.checked)}
+        />
+      </Row>
+      {draft.hslSecondary && (
+        <>
+          {([
+            ["hueCenter", 0, 1, 0.005],
+            ["hueWidth", 0.01, 1, 0.005],
+            ["feather", 0, 0.5, 0.005],
+            ["hueShift", -0.5, 0.5, 0.005],
+            ["saturation", -1, 1, 0.005],
+            ["lightness", -1, 1, 0.005],
+          ] as Array<[keyof HslSecondary, number, number, number]>).map(
+            ([field, min, max, sensitivity]) => (
+              <EffectNumberRow
+                key={field}
+                label={t(`inspector.field.hsl.${field}`)}
+                value={secondary[field]}
+                min={min}
+                max={max}
+                sensitivity={sensitivity}
+                format={(value) => value.toFixed(3)}
+                onChange={(value) => updateSecondary(field, value)}
+                onCommit={(value) => commitSecondary(field, value)}
+              />
+            ),
+          )}
+        </>
+      )}
     </section>
   );
 }
@@ -1084,6 +1919,7 @@ function ChromaKeySection({ clip, t }: { clip: Clip; t: TFunction }) {
       <SectionHeader label={t("inspector.section.chromaKey")} icon={Pipette} />
       <Row label={t("inspector.field.enabled")}>
         <input
+          aria-label={`${t("inspector.section.chromaKey")} ${t("inspector.field.enabled")}`}
           type="checkbox"
           checked={enabled}
           style={checkboxStyle}
@@ -1170,9 +2006,9 @@ function MaskSection({ clip, t }: { clip: Clip; t: TFunction }) {
     }
   };
   const setShape = (shape: MaskShape) => commitMask({ ...draft, shape });
-  const updateCommon = (field: keyof Omit<Mask, "shape">, value: number | boolean) =>
+  const updateCommon = (field: "feather" | "invert", value: number | boolean) =>
     setDraft((m) => ({ ...m, [field]: value }));
-  const commitCommon = (field: keyof Omit<Mask, "shape">, value: number | boolean) =>
+  const commitCommon = (field: "feather" | "invert", value: number | boolean) =>
     commitMask({ ...draft, [field]: value });
 
   return (
@@ -1180,6 +2016,7 @@ function MaskSection({ clip, t }: { clip: Clip; t: TFunction }) {
       <SectionHeader label={t("inspector.section.mask")} icon={CircleDashed} />
       <Row label={t("inspector.field.enabled")}>
         <input
+          aria-label={`${t("inspector.section.mask")} ${t("inspector.field.enabled")}`}
           type="checkbox"
           checked={enabled}
           style={checkboxStyle}
@@ -1190,17 +2027,19 @@ function MaskSection({ clip, t }: { clip: Clip; t: TFunction }) {
         <>
           <Row label={t("inspector.field.maskType")}>
             <select
+              aria-label={t("inspector.field.maskType")}
               value={draft.shape.kind}
               onChange={(e) => {
                 const kind = e.target.value;
                 if (kind === "circle") setShape(defaultCircleShape());
                 else if (kind === "linear") setShape(defaultLinearShape());
+                else if (kind === "poly") setShape(defaultPolyShape());
               }}
               style={controlStyle}
             >
               <option value="circle">{t("inspector.mask.circle")}</option>
               <option value="linear">{t("inspector.mask.linear")}</option>
-              <option value="poly" disabled>
+              <option value="poly">
                 {t("inspector.mask.polyPending")}
               </option>
             </select>
@@ -1219,7 +2058,20 @@ function MaskSection({ clip, t }: { clip: Clip; t: TFunction }) {
               setDraftShape={(shape) => setDraft((m) => ({ ...m, shape }))}
               t={t}
             />
-          ) : null}
+          ) : (
+            <PolyMaskFields
+              shape={draft.shape}
+              setShape={setShape}
+              setDraftShape={(shape) => setDraft((m) => ({ ...m, shape }))}
+              t={t}
+            />
+          )}
+          <MaskTransformFields
+            mask={draft}
+            setDraft={setDraft}
+            commitMask={commitMask}
+            t={t}
+          />
           <EffectNumberRow
             label={t("inspector.field.feather")}
             value={draft.feather}
@@ -1232,12 +2084,20 @@ function MaskSection({ clip, t }: { clip: Clip; t: TFunction }) {
           />
           <Row label={t("inspector.field.invert")}>
             <input
+              aria-label={t("inspector.field.invert")}
               type="checkbox"
               checked={draft.invert}
               style={checkboxStyle}
               onChange={(e) => commitCommon("invert", e.target.checked)}
             />
           </Row>
+          <button
+            type="button"
+            onClick={() => setMaskEnabled(false)}
+            style={{ ...controlStyle, width: "100%", marginTop: SPACE.xs, color: "#ff8f8f" }}
+          >
+            {t("inspector.mask.delete")}
+          </button>
         </>
       )}
     </section>
@@ -1344,6 +2204,109 @@ function LinearMaskFields({
   );
 }
 
+function PolyMaskFields({
+  shape,
+  setShape,
+  setDraftShape,
+  t,
+}: {
+  shape: Extract<MaskShape, { kind: "poly" }>;
+  setShape: (shape: MaskShape) => void;
+  setDraftShape: (shape: MaskShape) => void;
+  t: TFunction;
+}) {
+  const updatePoint = (index: number, axis: keyof RgbPoint, value: number, commit: boolean) => {
+    const points = shape.points.map((point, pointIndex) =>
+      pointIndex === index ? { ...point, [axis]: value } : point,
+    );
+    if (commit) setShape({ ...shape, points });
+    else setDraftShape({ ...shape, points });
+  };
+  const addPoint = () => {
+    if (shape.points.length >= 16) return;
+    const last = shape.points[shape.points.length - 1] ?? { x: 0.5, y: 0.5 };
+    setShape({
+      ...shape,
+      points: [...shape.points, { x: Math.min(1, last.x + 0.05), y: Math.min(1, last.y + 0.05) }],
+    });
+  };
+  const deletePoint = (index: number) => {
+    if (shape.points.length <= 3) return;
+    setShape({ ...shape, points: shape.points.filter((_, pointIndex) => pointIndex !== index) });
+  };
+
+  return (
+    <>
+      {shape.points.map((point, index) => (
+        <div key={index} style={{ borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: SPACE.xs }}>
+          <MaskNumberRow
+            label={`P${index + 1} X`}
+            value={point.x}
+            min={0}
+            max={1}
+            onChange={(value) => updatePoint(index, "x", value, false)}
+            onCommit={(value) => updatePoint(index, "x", value, true)}
+          />
+          <MaskNumberRow
+            label={`P${index + 1} Y`}
+            value={point.y}
+            min={0}
+            max={1}
+            onChange={(value) => updatePoint(index, "y", value, false)}
+            onCommit={(value) => updatePoint(index, "y", value, true)}
+          />
+          <button
+            type="button"
+            disabled={shape.points.length <= 3}
+            onClick={() => deletePoint(index)}
+            style={{ ...controlStyle, width: "100%", opacity: shape.points.length <= 3 ? 0.45 : 1 }}
+          >
+            {t("inspector.mask.deletePoint")} {index + 1}
+          </button>
+        </div>
+      ))}
+      <button
+        type="button"
+        disabled={shape.points.length >= 16}
+        onClick={addPoint}
+        style={{ ...controlStyle, width: "100%", marginTop: SPACE.xs }}
+      >
+        {t("inspector.mask.addPoint")}
+      </button>
+    </>
+  );
+}
+
+function MaskTransformFields({
+  mask,
+  setDraft,
+  commitMask,
+  t,
+}: {
+  mask: Mask;
+  setDraft: Dispatch<SetStateAction<Mask>>;
+  commitMask: (mask: Mask) => void;
+  t: TFunction;
+}) {
+  const transform = completeMaskTransform(mask.transform);
+  const update = (next: typeof transform, commit: boolean) => {
+    if (commit) commitMask({ ...mask, transform: next });
+    else setDraft((current) => ({ ...current, transform: next }));
+  };
+  const pointField = (field: "offset" | "scale", axis: keyof RgbPoint, value: number, commit: boolean) =>
+    update({ ...transform, [field]: { ...transform[field], [axis]: value } }, commit);
+
+  return (
+    <>
+      <MaskNumberRow label={t("inspector.mask.offsetX")} value={transform.offset.x} onChange={(v) => pointField("offset", "x", v, false)} onCommit={(v) => pointField("offset", "x", v, true)} />
+      <MaskNumberRow label={t("inspector.mask.offsetY")} value={transform.offset.y} onChange={(v) => pointField("offset", "y", v, false)} onCommit={(v) => pointField("offset", "y", v, true)} />
+      <MaskNumberRow label={t("inspector.mask.scaleX")} value={transform.scale.x} min={0.05} max={4} onChange={(v) => pointField("scale", "x", v, false)} onCommit={(v) => pointField("scale", "x", v, true)} />
+      <MaskNumberRow label={t("inspector.mask.scaleY")} value={transform.scale.y} min={0.05} max={4} onChange={(v) => pointField("scale", "y", v, false)} onCommit={(v) => pointField("scale", "y", v, true)} />
+      <EffectNumberRow label={t("inspector.mask.rotation")} value={transform.rotationDegrees} min={-180} max={180} sensitivity={0.5} format={(v) => `${v.toFixed(1)}°`} onChange={(v) => update({ ...transform, rotationDegrees: v }, false)} onCommit={(v) => update({ ...transform, rotationDegrees: v }, true)} />
+    </>
+  );
+}
+
 function EffectNumberRow({
   label,
   value,
@@ -1368,6 +2331,7 @@ function EffectNumberRow({
   return (
     <Row label={label}>
       <ScrubbableNumberField
+        ariaLabel={label}
         value={value}
         min={min}
         max={max}
@@ -1432,6 +2396,7 @@ function completeColorGrade(grade: ColorGrade | undefined): ColorGrade {
     },
     contrast: grade?.contrast ?? 0,
     saturation: grade?.saturation ?? 1,
+    hslSecondary: grade?.hslSecondary ? { ...grade.hslSecondary } : undefined,
   };
 }
 
@@ -1449,6 +2414,15 @@ function completeMask(mask: Mask | undefined): Mask {
     shape: mask?.shape ?? defaultCircleShape(),
     feather: mask?.feather ?? 0,
     invert: mask?.invert ?? false,
+    transform: completeMaskTransform(mask?.transform),
+  };
+}
+
+function completeMaskTransform(transform: Mask["transform"]) {
+  return {
+    offset: { x: transform?.offset.x ?? 0, y: transform?.offset.y ?? 0 },
+    scale: { x: transform?.scale.x ?? 1, y: transform?.scale.y ?? 1 },
+    rotationDegrees: transform?.rotationDegrees ?? 0,
   };
 }
 
@@ -1465,6 +2439,18 @@ function defaultLinearShape(): Extract<MaskShape, { kind: "linear" }> {
     kind: "linear",
     point: { x: 0.5, y: 0.5 },
     normal: { x: 1, y: 0 },
+  };
+}
+
+function defaultPolyShape(): Extract<MaskShape, { kind: "poly" }> {
+  return {
+    kind: "poly",
+    points: [
+      { x: 0.25, y: 0.25 },
+      { x: 0.75, y: 0.25 },
+      { x: 0.75, y: 0.75 },
+      { x: 0.25, y: 0.75 },
+    ],
   };
 }
 
@@ -1581,10 +2567,93 @@ function MediaAssetSource({ asset, t }: { asset: MediaItem; t: TFunction }) {
           <MetaRow label={t("inspector.source.size")} value={formatFileSize(asset.fileSize)} />
         )}
         {asset.path && <MetaRow label={t("inspector.source.path")} value={asset.path} />}
+        {asset.isHdr && (
+          <MetaRow
+            label={t("inspector.source.hdr")}
+            value={t("inspector.source.hdrDelivery", {
+              transfer: asset.color?.transfer ?? "HDR",
+            })}
+          />
+        )}
       </section>
+
+      {asset.type === "video" && <ProxyMediaSection asset={asset} t={t} />}
 
       {gen && <GenerationSections gen={gen} t={t} />}
     </div>
+  );
+}
+
+function ProxyMediaSection({ asset, t }: { asset: MediaItem; t: TFunction }) {
+  const [running, setRunning] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setRunning(false);
+    setProgress(0);
+    setError(null);
+  }, [asset.id]);
+
+  const create = async () => {
+    setRunning(true);
+    setProgress(0);
+    setError(null);
+    let unlisten = () => {};
+    try {
+      unlisten = await api.onMediaProxyProgress(asset.id, ({ done, total }) => {
+        setProgress(total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0);
+      });
+      await api.createMediaProxy(asset.id);
+      setProgress(100);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      unlisten();
+      setRunning(false);
+    }
+  };
+
+  const remove = async () => {
+    setError(null);
+    try {
+      await api.removeMediaProxy(asset.id);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
+
+  return (
+    <section data-testid="media-proxy-section">
+      <SectionHeader label={t("inspector.source.proxy")} />
+      {asset.proxyPath ? (
+        <MetaRow
+          label={t("inspector.source.proxy")}
+          value={t("inspector.source.proxyReady", {
+            width: asset.proxyWidth ?? 0,
+            height: asset.proxyHeight ?? 0,
+          })}
+        />
+      ) : null}
+      <button
+        type="button"
+        disabled={running || asset.missing}
+        onClick={() => void (asset.proxyPath ? remove() : create())}
+        style={controlStyle}
+      >
+        {running
+          ? t("inspector.source.proxyCreating", { progress })
+          : asset.proxyPath
+            ? t("inspector.source.proxyRemove")
+            : t("inspector.source.proxyCreate")}
+      </button>
+      {running && (
+        <button type="button" onClick={() => void api.cancelMediaProxy()} style={controlStyle}>
+          {t("common.cancel")}
+        </button>
+      )}
+      {error && <div style={{ color: "var(--destructive)", fontSize: FS.xs }}>{error}</div>}
+    </section>
   );
 }
 
@@ -1619,11 +2688,14 @@ function GenerationSections({ gen, t }: { gen: GenerationInput; t: TFunction }) 
     ...(gen.referenceVideoAssetIds ?? []),
     ...(gen.referenceAudioAssetIds ?? []),
   ];
-  const references = useMediaStore((s) =>
-    referenceIds
-      .map((id) => s.items.find((m) => m.id === id))
-      .filter((m): m is MediaItem => m != null),
-  );
+  // Select the stable catalog array, then derive references during render.
+  // Returning a freshly allocated array from the Zustand selector makes
+  // useSyncExternalStore treat every snapshot as changed and sends generated
+  // assets into an infinite render loop (blanking the whole WebView).
+  const mediaItems = useMediaStore((s) => s.items);
+  const references = referenceIds
+    .map((id) => mediaItems.find((m) => m.id === id))
+    .filter((m): m is MediaItem => m != null);
   return (
     <>
       {references.length > 0 && (

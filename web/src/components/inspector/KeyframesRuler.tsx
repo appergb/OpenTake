@@ -19,8 +19,9 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { chooseTicks } from "../../lib/ruler";
 import { formatTimecode } from "../../lib/geometry";
+import { LAYOUT } from "../../lib/theme";
 
-const RULER_HEIGHT = 18; // upstream KeyframesMetrics.rulerHeight (KeyframesLane.swift:5)
+const RULER_HEIGHT = LAYOUT.keyframeRulerHeight;
 
 export function KeyframesRuler({ duration, fps }: { duration: number; fps: number }) {
   const ref = useRef<HTMLDivElement>(null);

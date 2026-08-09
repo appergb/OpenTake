@@ -225,15 +225,41 @@ mod tests {
 
     #[test]
     fn core_event_serializes_with_kind_tag() {
-        let json = serde_json::to_string(&CoreEvent::TimelineChanged {
-            project_epoch: 3,
-            version: 7,
-        })
-        .unwrap();
-        assert_eq!(
-            json,
-            r#"{"kind":"timeline_changed","projectEpoch":3,"version":7}"#
-        );
+        let cases = [
+            (
+                CoreEvent::TimelineChanged {
+                    project_epoch: 3,
+                    version: 7,
+                },
+                r#"{"kind":"timeline_changed","projectEpoch":3,"version":7}"#,
+            ),
+            (
+                CoreEvent::ProjectOpened {
+                    path: "/project.otk".into(),
+                    project_epoch: 4,
+                    version: 0,
+                },
+                r#"{"kind":"project_opened","path":"/project.otk","projectEpoch":4,"version":0}"#,
+            ),
+            (
+                CoreEvent::ProjectSaved {
+                    path: "/project.otk".into(),
+                    project_epoch: 4,
+                },
+                r#"{"kind":"project_saved","path":"/project.otk","projectEpoch":4}"#,
+            ),
+            (
+                CoreEvent::MediaChanged {
+                    project_epoch: 4,
+                    count: 2,
+                },
+                r#"{"kind":"media_changed","projectEpoch":4,"count":2}"#,
+            ),
+        ];
+
+        for (event, expected) in cases {
+            assert_eq!(serde_json::to_string(&event).unwrap(), expected);
+        }
     }
 
     #[test]

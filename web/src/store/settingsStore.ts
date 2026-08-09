@@ -8,10 +8,17 @@
  */
 
 import { create } from "zustand";
-import { isTauri } from "../lib/api";
+import { isTauri, setProxyPlaybackEnabled as setProxyPlaybackEnabledNative } from "../lib/api";
 
 export type Theme = "dark" | "light";
-export type ByokProvider = "anthropic" | "openai" | "google";
+export type ByokProvider =
+  | "codex"
+  | "anthropic"
+  | "fal"
+  | "replicate"
+  | "openai"
+  | "elevenlabs"
+  | "google";
 export type WindowSizeOpt = "standard" | "compact";
 
 const LS = {
@@ -19,6 +26,7 @@ const LS = {
   defaultImportFolder: "defaultImportFolder",
   byokProvider: "byokProvider",
   windowSize: "windowSize",
+  proxyPlaybackEnabled: "proxyPlaybackEnabled",
 } as const;
 
 function loadTheme(): Theme {
@@ -31,11 +39,22 @@ function loadString(key: string): string | null {
 }
 function loadProvider(): ByokProvider {
   const v = loadString(LS.byokProvider);
-  return v === "openai" || v === "google" ? v : "anthropic";
+  return v === "codex" ||
+    v === "fal" ||
+    v === "replicate" ||
+    v === "openai" ||
+    v === "elevenlabs" ||
+    v === "google"
+    ? v
+    : "anthropic";
 }
 function loadWindowSize(): WindowSizeOpt {
   if (typeof localStorage === "undefined") return "standard";
   return localStorage.getItem(LS.windowSize) === "compact" ? "compact" : "standard";
+}
+function loadProxyPlaybackEnabled(): boolean {
+  if (typeof localStorage === "undefined") return false;
+  return localStorage.getItem(LS.proxyPlaybackEnabled) === "true";
 }
 function persist(key: string, value: string | null) {
   if (typeof localStorage === "undefined") return;
@@ -48,10 +67,12 @@ interface SettingsState {
   defaultImportFolder: string | null;
   byokProvider: ByokProvider;
   windowSize: WindowSizeOpt;
+  proxyPlaybackEnabled: boolean;
   setTheme: (theme: Theme) => void;
   setDefaultImportFolder: (path: string | null) => void;
   setByokProvider: (provider: ByokProvider) => void;
   setWindowSize: (size: WindowSizeOpt) => void;
+  setProxyPlaybackEnabled: (enabled: boolean) => void;
 }
 
 export const useSettingsStore = create<SettingsState>((set) => ({
@@ -59,6 +80,7 @@ export const useSettingsStore = create<SettingsState>((set) => ({
   defaultImportFolder: loadString(LS.defaultImportFolder),
   byokProvider: loadProvider(),
   windowSize: loadWindowSize(),
+  proxyPlaybackEnabled: loadProxyPlaybackEnabled(),
   setTheme: (theme) => {
     persist(LS.theme, theme);
     applyTheme(theme);
@@ -76,6 +98,11 @@ export const useSettingsStore = create<SettingsState>((set) => ({
     persist(LS.windowSize, windowSize);
     void applyWindowSize(windowSize);
     set({ windowSize });
+  },
+  setProxyPlaybackEnabled: (proxyPlaybackEnabled) => {
+    persist(LS.proxyPlaybackEnabled, String(proxyPlaybackEnabled));
+    void setProxyPlaybackEnabledNative(proxyPlaybackEnabled);
+    set({ proxyPlaybackEnabled });
   },
 }));
 
@@ -124,4 +151,8 @@ export function initTheme(): void {
 
 export function initWindowSize(): void {
   void applyWindowSize(useSettingsStore.getState().windowSize);
+}
+
+export function initProxyPlayback(): void {
+  void setProxyPlaybackEnabledNative(useSettingsStore.getState().proxyPlaybackEnabled);
 }

@@ -44,7 +44,7 @@ web                                  React/TS 前端（只读镜像）
   [总览](opentake-media/OVERVIEW.md) · [规格 SPEC](opentake-media/SPEC.md)
 - **[opentake-motion](opentake-motion/INDEX.md)** — Lottie / web 动态图形渲染、沙箱、缓存、与渲染管线集成。
   [总览](opentake-motion/OVERVIEW.md) · [Motion Graphics 插件设计](opentake-motion/MOTION-GRAPHICS-PLUGIN.md)
-- **[opentake-agent](opentake-agent/INDEX.md)** — MCP server(rmcp, 44 工具)、工具派发、Context Signal、工作流插件、内置 Agent 提示。
+- **[opentake-agent](opentake-agent/INDEX.md)** — MCP/Agent（当前最多 44 个可发布工具：38 基础 + 4 生成 + 2 动效，能力门控后按能力发布；KNOWN wire 名共 54）、工具派发、Context Signal、工作流插件、内置 Agent 聊天（Codex/ChatGPT 登录）。
   [总览](opentake-agent/OVERVIEW.md) · [规格 SPEC](opentake-agent/SPEC.md) · [Context Signal](opentake-agent/AGENT-CONTEXT-SIGNAL.md) · [工作流插件](opentake-agent/WORKFLOW-PLUGIN-SYSTEM.md)
 - **[opentake-gen](opentake-gen/INDEX.md)** — 生成式 AI 客户端(fal.ai/Replicate/OpenAI/ElevenLabs)、模型目录、生成参数、BYOK 密钥（无后端）。
   [总览](opentake-gen/OVERVIEW.md) · [规格 SPEC](opentake-gen/SPEC.md)

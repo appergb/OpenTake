@@ -11,7 +11,6 @@ require "tmpdir"
 
 ROOT = File.expand_path("../..", __dir__)
 POLICY = JSON.parse(File.read(File.join(ROOT, "scripts/c1b-evidence-policy.json")))
-VALIDATOR = File.join(ROOT, "scripts/validate-c1b-evidence.rb")
 
 def assert(condition, message)
   raise message unless condition
@@ -21,10 +20,35 @@ assert(POLICY.fetch("bootstrap_paths") == [".github/workflows/ci.yml", "scripts/
   "bootstrap allowlist")
 assert(POLICY.fetch("dispatcher_ref") == "refs/heads/main", "trusted dispatcher ref")
 
-def git(*arguments)
-  output, status = Open3.capture2("git", "-C", ROOT, *arguments)
+def git(repo, *arguments)
+  output, status = Open3.capture2("git", "-C", repo, *arguments)
   raise "git #{arguments.join(' ')} failed" unless status.success?
   output.strip
+end
+
+def prepare_bootstrap_repository(temporary)
+  repo = File.join(temporary, "repository")
+  _stdout, stderr, status = Open3.capture3("git", "clone", "--shared", "--no-hardlinks", ROOT, repo)
+  raise "git clone failed: #{stderr}" unless status.success?
+
+  %w[
+    validate-c1b-ci.rb
+    validate-c1b-evidence.rb
+    c1b-evidence-policy.json
+    check_windows_product_ci.py
+    workflow_yaml.py
+  ].each do |name|
+    FileUtils.cp(File.join(ROOT, "scripts", name), File.join(repo, "scripts", name))
+  end
+  FileUtils.cp(File.join(ROOT, ".github/workflows/ci.yml"),
+    File.join(repo, ".github/workflows/ci.yml"))
+  File.write(File.join(repo, "scripts", ".c1b-evidence-test-bootstrap"),
+    "synthetic bootstrap commit for validator tests\n")
+  git(repo, "config", "user.name", "OpenTake C1B Tests")
+  git(repo, "config", "user.email", "c1b-tests@opentake.invalid")
+  git(repo, "add", ".github/workflows/ci.yml", "scripts/")
+  git(repo, "commit", "-m", "test: create synthetic C1B bootstrap range")
+  File.realpath(repo)
 end
 
 def write_json(path, value)
@@ -65,16 +89,16 @@ def install_fake_gh(root)
   bin
 end
 
-def build_fixture(root, label)
-  expected = git("rev-parse", "HEAD")
-  anchor = git("rev-parse", "HEAD^")
+def build_fixture(root, label, repo, policy)
+  expected = git(repo, "rev-parse", "HEAD")
+  anchor = git(repo, "rev-parse", "HEAD^")
   nonce = Digest::SHA256.hexdigest(label)[0, 16]
   gate = File.join(root, "c1b-bootstrap-#{expected}-#{nonce}")
   fixture = File.join(root, "#{label}-live")
   FileUtils.mkdir_p([gate, fixture, File.join(gate, "reviews")])
   run_id = "424242"
   dispatcher_sha = "f" * 40
-  dispatcher_ref = POLICY.fetch("dispatcher_ref")
+  dispatcher_ref = policy.fetch("dispatcher_ref")
   File.write(File.join(gate, "run-id.txt"), "#{run_id}\n")
   File.write(File.join(gate, "pre-status.txt"), "")
   File.write(File.join(gate, "post-status.txt"), "")
@@ -88,11 +112,11 @@ def build_fixture(root, label)
   File.write(File.join(gate, implementation), report.call("implementation"))
 
   timestamp = "2026-07-17T00:00:00Z"
-  ledger = POLICY.fetch("local_commands").map do |row|
+  ledger = policy.fetch("local_commands").map do |row|
     id = row.fetch("id")
     File.write(File.join(gate, "#{id}.log"), "synthetic #{id}\n")
     File.write(File.join(gate, "#{id}.raw-exit"), "0\n")
-    row.merge("cwd" => ROOT, "started_at_utc" => timestamp,
+    row.merge("cwd" => repo, "started_at_utc" => timestamp,
       "finished_at_utc" => timestamp, "exit_code" => 0,
       "log" => "#{id}.log", "raw_exit" => "#{id}.raw-exit")
   end
@@ -102,12 +126,12 @@ def build_fixture(root, label)
     "id" => run_id.to_i, "run_attempt" => 1, "head_sha" => dispatcher_sha,
     "head_branch" => "main", "event" => "workflow_dispatch",
     "status" => "completed", "conclusion" => "success", "name" => "CI",
-    "path" => POLICY.fetch("workflow_file"),
+    "path" => policy.fetch("workflow_file"),
     "display_title" => "证据验证",
     "pull_requests" => [],
-    "repository" => { "full_name" => POLICY.fetch("repository") },
+    "repository" => { "full_name" => policy.fetch("repository") },
   }
-  jobs = POLICY.fetch("receipts").each_with_index.map do |receipt, index|
+  jobs = policy.fetch("receipts").each_with_index.map do |receipt, index|
     {
       "id" => 7000 + index, "run_id" => run_id.to_i, "run_attempt" => 1,
       "head_sha" => dispatcher_sha, "name" => "Safe filesystem (#{receipt.fetch('id')})",
@@ -115,11 +139,11 @@ def build_fixture(root, label)
     }
   end
   artifacts = []
-  POLICY.fetch("receipts").each_with_index do |receipt_policy, index|
+  policy.fetch("receipts").each_with_index do |receipt_policy, index|
     id = receipt_policy.fetch("id")
     directory = File.join(gate, "native-receipts", run_id, id)
     FileUtils.mkdir_p(directory)
-    commands = POLICY.fetch("native_commands").map do |row|
+    commands = policy.fetch("native_commands").map do |row|
       command_id = row.fetch("id")
       File.write(File.join(directory, "#{command_id}.log"), "synthetic #{command_id} 验证\n")
       File.write(File.join(directory, "#{command_id}.raw-exit"), "0\n")
@@ -129,8 +153,8 @@ def build_fixture(root, label)
     File.write(File.join(directory, "final-aggregate.raw-exit"), "0\n")
     receipt = {
       "schema" => "opentake-c1b-native-receipt-v1", "receipt_id" => id,
-      "repository" => POLICY.fetch("repository"), "workflow" => POLICY.fetch("workflow"),
-      "workflow_file" => POLICY.fetch("workflow_file"), "job_id" => POLICY.fetch("job_id"),
+      "repository" => policy.fetch("repository"), "workflow" => policy.fetch("workflow"),
+      "workflow_file" => policy.fetch("workflow_file"), "job_id" => policy.fetch("job_id"),
       "event_name" => "workflow_dispatch", "run_id" => run_id, "run_attempt" => "1",
       "runner_label" => receipt_policy.fetch("runner"), "runner_os" => receipt_policy.fetch("os"),
       "runner_arch" => receipt_policy.fetch("arch"), "requested_sha" => expected,
@@ -165,7 +189,7 @@ def build_fixture(root, label)
   end
   write_json(File.join(fixture, "workflow-content.json"),
     { "encoding" => "base64", "content" => Base64.strict_encode64(
-      File.binread(File.join(ROOT, POLICY.fetch("workflow_file")))) })
+      File.binread(File.join(repo, policy.fetch("workflow_file")))) })
   results = [
     "Task: evidence-bootstrap", "Anchor SHA: #{anchor}", "Final SHA: #{expected}",
     "Run ID: #{run_id}", "Pre-status: clean", "Post-status: clean",
@@ -175,18 +199,23 @@ def build_fixture(root, label)
   [gate, expected, anchor, spec, implementation, fixture]
 end
 
-def run_validator(gate, expected, anchor, spec, implementation, fixture, fake_bin, extra_env = {})
+def run_validator(gate, expected, anchor, spec, implementation, fixture, fake_bin, repo,
+    validator, extra_env = {})
   env = { "PATH" => "#{fake_bin}#{File::PATH_SEPARATOR}#{ENV.fetch('PATH', '')}",
     "C1B_FAKE_GH_ROOT" => fixture }.merge(extra_env)
-  Open3.capture3(env, RbConfig.ruby, VALIDATOR, gate, expected, anchor,
-    spec, implementation, ROOT)
+  Open3.capture3(env, RbConfig.ruby, validator, gate, expected, anchor,
+    spec, implementation, repo)
 end
 
 Dir.mktmpdir("c1b-evidence-test") do |temporary|
+  repo = prepare_bootstrap_repository(temporary)
+  policy = JSON.parse(File.read(File.join(repo, "scripts/c1b-evidence-policy.json")))
+  validator = File.join(repo, "scripts/validate-c1b-evidence.rb")
   fake_bin = install_fake_gh(temporary)
-  gate, expected, anchor, spec, implementation, fixture = build_fixture(temporary, "canonical")
+  gate, expected, anchor, spec, implementation, fixture =
+    build_fixture(temporary, "canonical", repo, policy)
   stdout, stderr, status = run_validator(gate, expected, anchor, spec, implementation,
-    fixture, fake_bin)
+    fixture, fake_bin, repo, validator)
   if !status.success? && stderr.include?("C1B evidence validator not implemented")
     abort "C1B evidence validator not implemented"
   end
@@ -299,10 +328,10 @@ Dir.mktmpdir("c1b-evidence-test") do |temporary|
   }
   mutations.each do |label, mutate|
     copy, copy_expected, copy_anchor, copy_spec, copy_implementation, copy_fixture =
-      build_fixture(temporary, label)
+      build_fixture(temporary, label, repo, policy)
     mutate.call(copy, copy_fixture)
     out, err, result = run_validator(copy, copy_expected, copy_anchor, copy_spec,
-      copy_implementation, copy_fixture, fake_bin)
+      copy_implementation, copy_fixture, fake_bin, repo, validator)
     assert(!result.success?, "validator accepted mutation #{label}")
     expected_error = expected_errors[label]
     assert("#{out}#{err}".include?(expected_error),
@@ -310,20 +339,20 @@ Dir.mktmpdir("c1b-evidence-test") do |temporary|
   end
 
   missing_env = { "PATH" => File.join(temporary, "missing-gh") }
-  _out, _err, missing = Open3.capture3(missing_env, RbConfig.ruby, VALIDATOR,
-    gate, expected, anchor, spec, implementation, ROOT)
+  _out, _err, missing = Open3.capture3(missing_env, RbConfig.ruby, validator,
+    gate, expected, anchor, spec, implementation, repo)
   assert(!missing.success?, "validator accepted missing authenticated gh")
 
   _out, _err, unauthenticated = run_validator(gate, expected, anchor, spec, implementation,
-    fixture, fake_bin, "C1B_FAKE_GH_AUTH_FAIL" => "1")
+    fixture, fake_bin, repo, validator, "C1B_FAKE_GH_AUTH_FAIL" => "1")
   assert(!unauthenticated.success?, "validator accepted unauthenticated gh")
 
   _out, _err, api_failure = run_validator(gate, expected, anchor, spec, implementation,
-    fixture, fake_bin, "C1B_FAKE_GH_API_FAIL" => "1")
+    fixture, fake_bin, repo, validator, "C1B_FAKE_GH_API_FAIL" => "1")
   assert(!api_failure.success?, "validator accepted GitHub API failure")
 
   _out, _err, absolute_review = run_validator(gate, expected, anchor,
-    File.join(gate, spec), implementation, fixture, fake_bin)
+    File.join(gate, spec), implementation, fixture, fake_bin, repo, validator)
   assert(!absolute_review.success?, "validator accepted absolute review path")
 end
 

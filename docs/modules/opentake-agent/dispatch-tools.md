@@ -33,27 +33,33 @@
 - `apply(cmd)` → `apply_raw` 调 `handle.apply`；若 `res.changed`，把 `action_name` 压入 agent-undo 栈。
 - `undo()` 只在栈非空（即本会话 Agent 真改过）时弹栈并 `apply_raw(EditCommand::Undo)`；否则 `"undo: no agent edits to revert"`。这保护用户的手动编辑不被 Agent 撤销（照搬上游 `agentUndoStack` 守卫）。
 
-### body 分类（44 工具）
+### body 分类（最多 38 个基础工具；KNOWN wire 名 54）
 
-- **读类（序列化状态）**：`get_timeline`（[紧凑编码](#encode_timelinersget_timeline-紧凑编码)）、`get_media`、`list_folders`、`list_models`（[投影 gen 目录](core-handle-convert.md)）。
+- **读类（序列化状态/媒体桥）**：`get_timeline`、`get_media`、`list_folders`、`list_models`、`inspect_media`、`get_transcript`、`inspect_timeline`、`search_media`。
 - **编辑类（→ EditCommand → CoreHandle::apply）**：`add_clips`（含 `AddClipsAutoTrack` 自动建轨）、`insert_clips`、`move_clips`、`remove_clips`、`remove_tracks`、`split_clip`、`set_keyframes`、`ripple_delete_ranges`、`add_texts`、`set_clip_properties`、`create_folder`、`move_to_folder`、`rename_media`、`rename_folder`、`delete_media`、`delete_folder`、`set_color_grade`、`chroma_key`、`set_mask`、`apply_effect`、`undo`。
 - **工作流插件类**：`list_workflows` / `activate_workflow` / `deactivate_workflow`（操作 `PluginRegistry`，激活时回发插件 `instructions.md`）。
-- **分析驱动类（预览/建议，`applied:false`）**：`detect_beats` / `auto_cut_to_beats` / `tighten_silences`。经 `CoreHandle::extract_analysis_pcm` 抽 16k 单声道 PCM，调 `opentake-media` 的 `detect_beats` / `detect_silences`，把结果折算回项目帧后**返回建议**（节拍帧 / 切点 / 待执行的 `ripple_delete_ranges` 命令列表），由模型再调编辑工具落地——不直接改时间线。
-- **honest stub（解码后返回 "not yet implemented"）**：`inspect_media`、`get_transcript`、`inspect_timeline`、`search_media`、`generate_video`、`generate_image`、`generate_audio`、`upscale_media`、`import_media`、`add_captions`、`add_motion_graphic`、`edit_motion_graphic`。
-- **返回错误**：`smart_reframe`（需视觉/显著性后端，`CoreHandle` 未暴露采样帧）。
+- **分析驱动类（预览/建议，`applied:false`）**：`detect_beats` / `auto_cut_to_beats` / `tighten_silences` / `remove_filler_words`。前三者经 `CoreHandle::extract_analysis_pcm` 抽 16k 单声道 PCM；`remove_filler_words` 经真实媒体桥读取词级项目帧转写，匹配可配置多词语气词表。四者都返回待审阅建议/`ripple_delete_ranges` 命令，不直接改时间线。
+- **桌面媒体桥**：`inspect_media`、`get_transcript`、`inspect_timeline`、`search_media`、`import_media`、`add_captions` 执行真实 Tauri/媒体路径；`inspect_media` 的 Lottie 分支返回明确不支持。
+- **能力门控（VISION）**：`smart_reframe`（需视觉/显著性后端）——不在基础发现面，仅主机提供后端能力时追加，否则 fail-closed 隐藏。
+- **动态生成类**：存在兼容托管或 BYOK 凭据时，`generate_video`、`generate_image`、`generate_audio`、`upscale_media` 进入发现面并走持久化任务、进度/取消/重试/结果导入链路；无可用授权时不发布。
+- **动态 Motion 类**：`add_motion_graphic`、`edit_motion_graphic` 在主机存在生产 Motion 桥时进入目录，执行 Motion Canvas/本地 fallback 渲染、验证、原子导入/落轨或替换；无能力主机 fail-closed 隐藏。
 
 帧/秒折算、`speed` 归一、`source↔timeline` 帧映射等纯数学集中在本文件的自由函数（如 `source_seconds_to_timeline_frame_clamped`），遵循移植铁律的取整方向。
 
 ## 工具层文件（`tools/`）
 
-### names.rs：44 工具枚举
+### names.rs：54 工具枚举
 
-`ToolName` 枚举 + `as_str()`（线名，与上游/规格逐字一致）+ `FromStr`。两个常量：
+`ToolName` 枚举 + `as_str()`（线名，与上游/规格逐字一致）+ `FromStr`。六个常量：
 
-- **`ALL: [ToolName; 44]`** — 全部工具，注册顺序。
+- **`ALL: [ToolName; 38]`** — 最大基础发现面，注册顺序；其中 7 个媒体桥工具按主机能力 fail-closed 过滤。
+- **`GENERATION: [ToolName; 4]`** — 生成工具，仅存在兼容托管/BYOK 凭据时追加。
+- **`MOTION: [ToolName; 2]`** — Motion 工具，仅生产渲染桥可用时追加（其余主机 fail-closed）。
+- **`VISION: [ToolName; 1]`** — Vision 工具（`smart_reframe`），仅主机提供视觉/显著性后端能力时追加（其余主机 fail-closed）。
+- **`KNOWN: [ToolName; 54]`** — 全部已知 wire 名：`ALL` 38 + 生成 4 + Motion 2 + 高级 AI 9 + Vision 1（`ADVANCED_AI` schema 已知但不主动发布）。
 - **`UPSTREAM: [ToolName; 31]`** — 上游对齐子集（Issue #9 的"31 工具"）。
 
-13 个 OpenTake 扩展 = `ALL` − `UPSTREAM`：分析驱动 4 + 工作流 3 + A-tier 效果 4 + Motion Canvas 2（详见 [总览](OVERVIEW.md)）。
+13 个可发布 OpenTake 扩展由分析驱动 4 + 工作流 3 + A-tier 效果 4 + Motion Canvas 2 组成；另有能力门控的 Vision 1（`smart_reframe`）与 9 个高级 AI 工具仅 schema 已知、按能力发布（详见 [总览](OVERVIEW.md)）。
 
 ### args.rs：类型化参数
 
@@ -94,7 +100,7 @@ token 友好的时间线表示（1:1 上游 `ToolExecutor+Timeline.swift`）：�
 ## 完成状态
 
 - 已实现：完整八步管线、21 类编辑/读工具接线、3 分析工具（预览式）、3 工作流工具、agent-undo 栈、工具层全文件。
-- 计划中：12 个 honest stub（媒体读 / 生成 / 导入 / 字幕 / Motion Canvas）+ `smart_reframe` 报错 + `create_folder`/`move_to_folder` 批量形式 + `get_timeline` 的 `canGenerate` 恒 `false`。详见 [总览](OVERVIEW.md) 完成状态。
+- 剩余能力缺口：`inspect_media` 的 Lottie 分支、`smart_reframe` 视觉后端，以及 `create_folder`/`move_to_folder` 的批量形式。生成、导入、字幕与 Motion 路径已由实时能力门控并接生产实现。详见 [总览](OVERVIEW.md) 完成状态。
 
 ---
 

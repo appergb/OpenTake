@@ -35,6 +35,11 @@ pub enum MotionError {
     #[error("render timed out after {0:?}")]
     Timeout(std::time::Duration),
 
+    /// The caller cancelled an in-flight render. Browser/profile/output cleanup
+    /// is complete before this error is returned.
+    #[error("render cancelled")]
+    Cancelled,
+
     /// A sandbox policy was violated (e.g. a disallowed network origin).
     #[error("sandbox violation: {0}")]
     Sandbox(String),

@@ -68,7 +68,9 @@ tauri::Builder::default()
 | `ProjectSaved` | `project_saved` |
 | `MediaChanged` | `media_changed` |
 
-payload 即事件本身（带 `kind` tag 形状）。`emit` best-effort：WebView 缺失（拆卸期）失败被忽略，不 panic。
+payload 即事件本身（带 `kind` tag 形状）。事件名映射与 best-effort 策略由不依赖 live
+`AppHandle` 的 `forward_core_event` 边界持有；`forward_event` 完成本地会话副作用后调用该边界。
+`emit` 失败（包括 WebView 拆卸期）被忽略，不 panic，也不会中断同一 `EventBus` 中后续观察者。
 
 ## 窗口生命周期（关窗不退 + Dock 重开）
 

@@ -10,10 +10,25 @@
 
 use std::path::PathBuf;
 
-use opentake_core::AppCore;
+use opentake_core::{AppCore, OwnedUndoResult, ProjectRevision};
 use opentake_domain::{MediaManifest, MediaResolver, Timeline};
 use opentake_media::{extract_pcm, PcmBuffer, PcmSpec};
 use opentake_ops::command::{EditCommand, EditResult};
+
+/// Project/document identity captured at a dispatcher commit boundary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoreRevision {
+    pub project_epoch: u64,
+    pub project_dir: Option<PathBuf>,
+    pub timeline_version: u64,
+}
+
+/// Exact history transaction currently eligible for Undo.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoreUndoHead {
+    pub action_name: String,
+    pub transaction_version: u64,
+}
 
 /// The narrow document surface the dispatch shell needs. `Send + Sync` so a
 /// `Dispatcher` holding `Arc<dyn CoreHandle>` stays shareable across threads
@@ -30,6 +45,45 @@ pub trait CoreHandle: Send + Sync {
     /// Apply one editing command, mapping the core error into `anyhow` so the
     /// shell can turn any failure into a single `ToolResult::error`.
     fn apply(&self, cmd: EditCommand) -> anyhow::Result<EditResult>;
+
+    /// One-lock project/document identity when the host exposes it. Lightweight
+    /// test handles may return `None`; production must return an exact revision.
+    fn current_revision(&self) -> Option<CoreRevision> {
+        None
+    }
+
+    /// Apply only if the captured project identity and version remain current.
+    fn apply_at_revision(
+        &self,
+        expected: &CoreRevision,
+        cmd: EditCommand,
+    ) -> anyhow::Result<EditResult> {
+        if self.current_revision().as_ref() != Some(expected) {
+            anyhow::bail!("stale project revision");
+        }
+        self.apply(cmd)
+    }
+
+    /// Exact top-level undo transaction, or `None` when history is empty or this
+    /// handle cannot expose ownership metadata.
+    fn undo_head(&self) -> Option<CoreUndoHead> {
+        None
+    }
+
+    /// One-lock revision + undo-head snapshot when supported. The default is
+    /// suitable only for deterministic test handles; production overrides it.
+    fn revision_and_undo_head(&self) -> Option<(CoreRevision, CoreUndoHead)> {
+        Some((self.current_revision()?, self.undo_head()?))
+    }
+
+    /// Atomically compare the complete owner marker and Undo it.
+    fn undo_if_owned(
+        &self,
+        _expected: &CoreRevision,
+        _expected_head: &CoreUndoHead,
+    ) -> anyhow::Result<OwnedUndoResult> {
+        Ok(OwnedUndoResult::NoHistory)
+    }
 
     /// The open project's bundle directory, or `None` for an unsaved project.
     fn project_dir(&self) -> Option<PathBuf>;
@@ -81,6 +135,69 @@ impl CoreHandle for AppCoreHandle {
 
     fn apply(&self, cmd: EditCommand) -> anyhow::Result<EditResult> {
         self.0.apply(cmd).map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    fn current_revision(&self) -> Option<CoreRevision> {
+        let snapshot = self.0.runtime_snapshot();
+        Some(CoreRevision {
+            project_epoch: snapshot.project_epoch,
+            project_dir: snapshot.project_dir,
+            timeline_version: snapshot.version,
+        })
+    }
+
+    fn apply_at_revision(
+        &self,
+        expected: &CoreRevision,
+        cmd: EditCommand,
+    ) -> anyhow::Result<EditResult> {
+        self.0
+            .apply_at_project_revision(
+                ProjectRevision {
+                    project_epoch: expected.project_epoch,
+                    version: expected.timeline_version,
+                },
+                expected.project_dir.as_deref(),
+                cmd,
+            )
+            .map_err(|error| anyhow::anyhow!("{error}"))
+    }
+
+    fn undo_head(&self) -> Option<CoreUndoHead> {
+        self.revision_and_undo_head().map(|(_, head)| head)
+    }
+
+    fn revision_and_undo_head(&self) -> Option<(CoreRevision, CoreUndoHead)> {
+        let snapshot = self.0.project_undo_snapshot()?;
+        Some((
+            CoreRevision {
+                project_epoch: snapshot.revision.project_epoch,
+                project_dir: snapshot.project_path,
+                timeline_version: snapshot.revision.version,
+            },
+            CoreUndoHead {
+                action_name: snapshot.action_name,
+                transaction_version: snapshot.transaction_version,
+            },
+        ))
+    }
+
+    fn undo_if_owned(
+        &self,
+        expected: &CoreRevision,
+        expected_head: &CoreUndoHead,
+    ) -> anyhow::Result<OwnedUndoResult> {
+        self.0
+            .undo_if_owned(
+                ProjectRevision {
+                    project_epoch: expected.project_epoch,
+                    version: expected.timeline_version,
+                },
+                expected.project_dir.as_deref(),
+                &expected_head.action_name,
+                expected_head.transaction_version,
+            )
+            .map_err(|error| anyhow::anyhow!("{error}"))
     }
 
     fn project_dir(&self) -> Option<PathBuf> {
@@ -152,6 +269,8 @@ mod tests {
             source_height: None,
             source_fps: None,
             has_audio: None,
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,

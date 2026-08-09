@@ -7,6 +7,9 @@
 //! ffprobe.
 
 use std::path::Path;
+use std::time::Duration;
+
+use opentake_domain::MediaColorMetadata;
 
 use crate::error::{MediaError, Result};
 use crate::ff;
@@ -24,10 +27,18 @@ pub struct MediaProbe {
     pub fps: Option<f64>,
     pub has_audio: bool,
     pub has_video: bool,
+    /// ffprobe `codec_name` of the primary (non-cover-art) video stream.
+    /// Post-encode verification compares this against the requested encoder.
+    pub video_codec: Option<String>,
+    /// ffprobe `codec_name` of the first audio stream.
+    pub audio_codec: Option<String>,
     /// ffprobe's comma-separated demuxer names (for example
     /// `mov,mp4,m4a,3gp,3g2,mj2`). Security-sensitive import boundaries use
     /// this to verify that downloaded bytes match their declared container.
     pub format_name: Option<String>,
+    /// Source video color signalling retained for HDR-aware decode and durable
+    /// project metadata. Absent only when the stream reports no color fields.
+    pub color: Option<MediaColorMetadata>,
 }
 
 /// Open the container and read the first video stream + audio presence.
@@ -47,6 +58,17 @@ pub fn probe(path: &Path) -> Result<MediaProbe> {
 /// rebinding.
 pub fn probe_file(file: &std::fs::File) -> Result<MediaProbe> {
     let json = ff::ffprobe_json_file(file)?;
+    Ok(parse_probe(&json))
+}
+
+/// Probe a retained regular file with cooperative cancellation and a hard
+/// helper-process deadline.
+pub fn probe_file_cancellable(
+    file: &std::fs::File,
+    cancel: &crate::MediaCancelToken,
+    timeout: Duration,
+) -> Result<MediaProbe> {
+    let json = ff::ffprobe_json_file_cancellable(file, cancel, timeout)?;
     Ok(parse_probe(&json))
 }
 
@@ -114,9 +136,16 @@ pub fn parse_probe(json: &serde_json::Value) -> MediaProbe {
     // makes a dropped video spawn a phantom linked audio clip (the user's "no
     // audio but it split" report), so require channels > 0 when reported. Streams
     // that don't report `channels` are kept as audio (conservative default).
+    let mut audio_codec = None;
     let has_audio = streams.iter().any(|s| {
         if s.get("codec_type").and_then(|v| v.as_str()) != Some("audio") {
             return false;
+        }
+        if audio_codec.is_none() {
+            audio_codec = s
+                .get("codec_name")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned);
         }
         s.get("channels").and_then(|v| v.as_u64()) != Some(0)
     });
@@ -125,8 +154,14 @@ pub fn parse_probe(json: &serde_json::Value) -> MediaProbe {
     let mut height = None;
     let mut fps = None;
     let mut video_duration = None;
+    let mut color = None;
+    let mut video_codec = None;
 
     if let Some(v) = video {
+        video_codec = v
+            .get("codec_name")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned);
         let w = v.get("width").and_then(|x| x.as_u64()).map(|x| x as u32);
         let h = v.get("height").and_then(|x| x.as_u64()).map(|x| x as u32);
         let rot = stream_rotation(v);
@@ -152,6 +187,28 @@ pub fn parse_probe(json: &serde_json::Value) -> MediaProbe {
             .get("duration")
             .and_then(|x| x.as_str())
             .and_then(|s| s.parse::<f64>().ok());
+
+        let metadata = MediaColorMetadata {
+            primaries: v
+                .get("color_primaries")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned),
+            transfer: v
+                .get("color_transfer")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned),
+            matrix: v
+                .get("color_space")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned),
+            range: v
+                .get("color_range")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned),
+        };
+        if !metadata.is_empty() {
+            color = Some(metadata);
+        }
     }
 
     let container_duration = json
@@ -174,7 +231,10 @@ pub fn parse_probe(json: &serde_json::Value) -> MediaProbe {
         fps,
         has_audio,
         has_video,
+        video_codec,
+        audio_codec,
         format_name,
+        color,
     }
 }
 
@@ -243,6 +303,28 @@ mod tests {
         assert!(p.has_video && !p.has_audio);
         // video stream duration wins over container.
         assert_eq!(p.duration_secs, 12.5);
+    }
+
+    #[test]
+    fn codec_names_carried_for_post_encode_verification() {
+        let p = parse_probe(&json!({
+            "streams": [
+                {"codec_type": "video", "codec_name": "h264", "width": 640, "height": 360,
+                 "avg_frame_rate": "30/1", "duration": "2.0"},
+                {"codec_type": "audio", "codec_name": "aac", "channels": 2}
+            ],
+            "format": {"duration": "2.0"}
+        }));
+        assert_eq!(p.video_codec.as_deref(), Some("h264"));
+        assert_eq!(p.audio_codec.as_deref(), Some("aac"));
+        assert!(p.has_video && p.has_audio);
+    }
+
+    #[test]
+    fn no_streams_means_no_codec_names() {
+        let p = parse_probe(&json!({"streams": [], "format": {}}));
+        assert_eq!(p.video_codec, None);
+        assert_eq!(p.audio_codec, None);
     }
 
     #[test]

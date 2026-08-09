@@ -40,7 +40,15 @@ impl FrameRange {
 
     /// `end - start`.
     pub fn length(&self) -> i32 {
-        self.end - self.start
+        self.checked_length().unwrap_or(0)
+    }
+
+    /// Checked interval length. Invalid or unrepresentable ranges return
+    /// `None` instead of panicking in debug builds.
+    pub fn checked_length(&self) -> Option<i32> {
+        self.end
+            .checked_sub(self.start)
+            .filter(|length| *length >= 0)
     }
 }
 
@@ -58,17 +66,28 @@ impl RippleEngine {
     /// After removing clips from a track, compute new start frames for remaining
     /// clips that should shift backward to close the gap.
     pub fn compute_ripple_shifts(clips: &[Clip], removed_ids: &HashSet<String>) -> Vec<ClipShift> {
+        Self::try_compute_ripple_shifts(clips, removed_ids).unwrap_or_default()
+    }
+
+    pub fn try_compute_ripple_shifts(
+        clips: &[Clip],
+        removed_ids: &HashSet<String>,
+    ) -> Option<Vec<ClipShift>> {
         let removed_ranges: Vec<FrameRange> = clips
             .iter()
             .filter(|c| removed_ids.contains(&c.id))
-            .map(|c| FrameRange::new(c.start_frame, c.end_frame()))
-            .collect();
+            .map(|c| {
+                c.start_frame
+                    .checked_add(c.duration_frames)
+                    .map(|end| FrameRange::new(c.start_frame, end))
+            })
+            .collect::<Option<_>>()?;
         let remaining: Vec<Clip> = clips
             .iter()
             .filter(|c| !removed_ids.contains(&c.id))
             .cloned()
             .collect();
-        Self::compute_ripple_shifts_for_ranges(&remaining, &removed_ranges)
+        Self::try_compute_ripple_shifts_for_ranges(&remaining, &removed_ranges)
     }
 
     /// Shift clips leftward to close the gaps defined by `removed_ranges`. Used
@@ -77,9 +96,18 @@ impl RippleEngine {
         clips: &[Clip],
         removed_ranges: &[FrameRange],
     ) -> Vec<ClipShift> {
+        Self::try_compute_ripple_shifts_for_ranges(clips, removed_ranges).unwrap_or_default()
+    }
+
+    /// Checked counterpart used by mutating ripple operations. `None` means a
+    /// range sum or resulting start frame is not representable as `i32`.
+    pub fn try_compute_ripple_shifts_for_ranges(
+        clips: &[Clip],
+        removed_ranges: &[FrameRange],
+    ) -> Option<Vec<ClipShift>> {
         let merged = Self::merge_ranges(removed_ranges);
         if merged.is_empty() {
-            return Vec::new();
+            return Some(Vec::new());
         }
 
         let mut sorted: Vec<&Clip> = clips.iter().collect();
@@ -87,16 +115,20 @@ impl RippleEngine {
 
         let mut shifts = Vec::new();
         for clip in sorted {
-            let shift: i32 = merged
+            let shift = merged
                 .iter()
-                .filter(|r| r.end <= clip.start_frame)
-                .map(|r| r.length())
-                .sum();
+                .filter(|range| range.end <= clip.start_frame)
+                .try_fold(0_i32, |total, range| {
+                    total.checked_add(range.checked_length()?)
+                })?;
             if shift > 0 {
-                shifts.push(ClipShift::new(clip.id.clone(), clip.start_frame - shift));
+                shifts.push(ClipShift::new(
+                    clip.id.clone(),
+                    clip.start_frame.checked_sub(shift)?,
+                ));
             }
         }
-        shifts
+        Some(shifts)
     }
 
     /// Push all clips at or after `insert_frame` forward by `push_amount` frames.
@@ -109,7 +141,11 @@ impl RippleEngine {
         clips
             .iter()
             .filter(|c| !exclude_ids.contains(&c.id) && c.start_frame >= insert_frame)
-            .map(|c| ClipShift::new(c.id.clone(), c.start_frame + push_amount))
+            .filter_map(|c| {
+                c.start_frame
+                    .checked_add(push_amount)
+                    .map(|start| ClipShift::new(c.id.clone(), start))
+            })
             .collect()
     }
 

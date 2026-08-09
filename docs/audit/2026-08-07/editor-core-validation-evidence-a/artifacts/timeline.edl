@@ -1,0 +1,7 @@
+TITLE: Timeline Export
+FCM: DROP FRAME
+* CMX3600 EDL — video track only; audio, effects, transforms, and
+* multi-track layering are not representable. Use XMEML / OTIO / FCPXML
+* for full fidelity.
+001  AX       V    C        00:00:00;10 00:00:02;10 00:00:00;00 00:00:02;00
+* FROM CLIP NAME: audit-4k60-h264.mp4

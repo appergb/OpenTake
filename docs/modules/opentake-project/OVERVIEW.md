@@ -18,7 +18,7 @@ opentake-core          会话 / DI / 事件总线（命令路由层，调用本�
 src-tauri / web        Tauri 壳 + React 只读镜像
 ```
 
-依赖**只向下**：本 crate 仅依赖 `opentake-domain`，外部依赖只有 `serde` / `serde_json` / `thiserror`（见 [`Cargo.toml`](../../../crates/opentake-project/Cargo.toml)）。它被 `opentake-core` 装配进会话后，再经 `src-tauri` 命令暴露给前端。`Timeline` / `MediaManifest` / `MediaManifestEntry` / `MediaSource` 等值类型都来自 domain，本 crate 通过 `lib.rs` 把它们 re-export，使下游只需依赖 `opentake-project` 就能完成持久化工作。
+依赖**只向下**：本 crate 仅依赖 `opentake-domain`；外部依赖除 `serde` / `serde_json` / `thiserror` 外，还含 `serde_ignored`（宽松解析降级）、`cap-std` / `cap-fs-ext` / `same-file`（能力化文件系统基元）、`uuid` / `sha2`，以及平台条件依赖 `rustix` / `libc`（unix）与 `windows-sys`（windows，见 [`Cargo.toml`](../../../crates/opentake-project/Cargo.toml)）。它被 `opentake-core` 装配进会话后，再经 `src-tauri` 命令暴露给前端。`Timeline` / `MediaManifest` / `MediaManifestEntry` / `MediaSource` 等值类型都来自 domain，本 crate 通过 `lib.rs` 把它们 re-export，使下游只需依赖 `opentake-project` 就能完成持久化工作。
 
 ## 职责边界
 
@@ -29,6 +29,7 @@ src-tauri / web        Tauri 壳 + React 只读镜像
 - 自包含归档（[`archive`]）：把所有可解析的媒体引用拷进目标包的 `media/`，并把清单 source 改写为工程相对路径；对拍上游 `PalmierProjectExporter`。
 - 时间线导出（[`export_xmeml`]）：把 `Timeline` 序列化为 XMEML 4（FCP7 XML），覆盖位置 / 裁剪 / 变速 / 音量 / 不透明度 / 变换 / 裁切 / 淡入淡出 / A·V 链接；对拍上游 `XMLExporter`。
 - 生成日志类型（[`GenerationLog`] / [`GenerationLogEntry`]）：domain 层（刻意零 IO）省略的 AI 生成审计日志，含旧版「美元 → credits」迁移。
+- **工程路径安全**：`path_policy.rs`（包内资产相对路径的可移植校验，拒绝绝对/越界/特殊组件）、`project_root.rs`（`cap-std` 能力根 `ProjectRoot`：有界读取 + 组件大小上限 + nofollow + 发布标记 + 事务日志，`bundle.rs` 的 open/save 均经它落盘）、`safe_fs/`（内部能力化 FS 基元 facade，unix/windows 平台实现）。
 - 包内文件名契约（`layout`）与统一错误类型（`error`）。
 
 **不做：**
@@ -98,12 +99,12 @@ Name.opentake/
 
 **计划中 / 不在本 crate（代码暂无或归他处）：**
 
-- 🔄 **新建即落盘 + 自动保存**：上游"新建先选盘再 `save`"与 `autosavesInPlace` 等价物（[PORT-1TO1-GAP.md](../../architecture/PORT-1TO1-GAP.md) P0-1 / P1-1 / P1-14）。`Project::save` 已具备能力，但触发时机（`session.rs` 落盘、tokio 防抖自动保存）在 `opentake-core` / `src-tauri`，且依赖前端先选定路径。
-- 🔄 **缩略图生成**：上游 `captureThumbnail` 的抽帧→JPEG（GAP P2-1）。`save` 只接受现成字节；抽帧逻辑待落到 `opentake-media`（FFmpeg seek 单帧）。
-- 🔄 **最近工程注册表 `ProjectRegistry`**：JSON 持久化 + 废纸篓删除 + 挂起变更队列。本 crate **未实现**；前端有 recents store 雏形（GAP P2-2/P2-3）。
+- ✅ **新建即落盘 + 自动保存**（已随 Beta 1 交付）：`Project::save` 能力 + 触发时机（`session.rs` 落盘、tokio/前端防抖自动保存、退出 flush）已在 `opentake-core` / `src-tauri` / `web` 落地（`useAutosave`）。
+- ✅ **缩略图生成**（已随 Beta 1 交付）：抽帧→JPEG 在 `opentake-media`（FFmpeg seek 单帧）+ `src-tauri` 导入路径；首帧海报已接入（GAP P2-1 关闭）。
+- ✅ **最近工程注册表**（已随 Beta 1 交付）：前端 recents store + Home 最近工程入口 + 缺失路径处理（GAP P2-2/P2-3 关闭）；本 crate 仍不持该注册表。
 - 🔄 **示例工程 `SampleProjectService`**：依赖闭源 Convex 后端；按移植策略归 cloud-rebuild，本 crate **未实现**。
 - 🔄 **FPS 重采样 / 分辨率自动适配 / 设置不匹配判定**（`applyTimelineSettings` / `checkProjectSettings`）：纯算术，按移植图归领域/会话层，本 crate **不含**。
-- 🔄 **导出接线**：`export_xmeml` 是纯逻辑且**已实现**，但成片视频导出（H.264/H.265/ProRes，逐帧合成）在 `src-tauri/src/export.rs` + `opentake-render`/`opentake-media`，不在本 crate（ROADMAP Phase 5）。
+- ✅ **导出接线**：成片视频导出（H.264/H.265/ProRes，逐帧合成 + 进度/取消 + 字幕/交换格式导出）已在 `src-tauri/src/export.rs` + `opentake-render`/`opentake-media` 落地（ROADMAP Phase 5）；`export_xmeml` 纯逻辑在本 crate 且已实现。
 
 ## 移植铁律（本模块重点）
 
@@ -113,6 +114,8 @@ Name.opentake/
 4. **一切以整数帧为单位**：导出里 `secondsToFrame` 用截断 `Int(s*fps)` 而非四舍五入（[`fcpxml.rs`](../../../crates/opentake-project/src/fcpxml.rs) 的 `seconds_to_frame`）；`source_frames_consumed` 的 round 方向与上游一致。
 5. **路径语义对齐 Foundation**：归档去重用**纯词法** `standardize`（不 stat、不解符号链接，两条指向同一文件的符号链接各拷一份）；扩展名提取用 Swift `URL.pathExtension` 规则而非 `Path::extension`（`foo. mp4`、`..mp4` 均判**无扩展名**）。
 6. **日期是 Apple 参考日秒**：`created_at` 是 `f64`（Apple-reference-date 秒，`JSONEncoder` 默认 `Date` 编码），墙钟换算归上层。
+
+上述 serde 边界由 `upstream_compat` 的精确所有者用例验证：旧工程缺失字段与缺失版本按约定降级，显式版本保持不变，旧美元成本向上取整迁移为 credits；保存后重新打开时，迁移结果和一次性生成的日志 ID 必须完全相等。
 
 ---
 

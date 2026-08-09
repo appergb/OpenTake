@@ -41,7 +41,7 @@ BYOK（Bring Your Own Key）密钥的存取层。提供商 API key **绝不硬�
 - **明文单向**：WebView 仅在 `secret_save` 时发出明文 key；**永不回传前端**——`secret_load` 只给**掩码**表示（复刻上游 `AgentPane.mask`：≤4 字符显 32 个圆点，否则 36 圆点 + 末 4 位）。
 - **provider 白名单**：`account_for` 校验 provider，未知值无法寻址任意钥匙串项。
 
-> **现状差异（诚实标注）**：`secret.rs` 的命令目前只对**聊天 LLM provider** 开放白名单——`anthropic` / `openai` / `google`（账户串沿用 `<prefix>-api-key` 约定）。也就是说，底层 `KeyringStore` 能力已接线，但**生成专用的 `fal` / `replicate` / `elevenlabs` key 暂无对应 Tauri 命令写入**。这与「`generate_*` 仍待 async + BYOK 接线」一致（见 [client-transport.md](client-transport.md) 完成状态）。`opentake-gen::keys::ProviderKey` 已为五个键备好 account/env/prefix，前端接线时按此口径补命令即可。
+> **现状（与 `secret.rs` 对齐）**：`secret.rs` 的 `account_for` 白名单已放开**全部 6 个账户**——`anthropic` / `fal` / `replicate` / `openai` / `elevenlabs` / `google`（账户串沿用 `<prefix>-api-key` 约定），即**聊天与生成 provider 的 key 均可由前端 `secret_save` 写入钥匙串**（3 聊天 + 3 生成）。注意：`opentake-gen::keys::ProviderKey` 目前只定义 5 个受管键（Fal/Replicate/OpenAI/ElevenLabs/Anthropic），`google` 账户仅由 `secret.rs` 单独映射到钥匙串账户串。
 
 ## 安全要点（移植铁律 + 安全）
 
@@ -59,18 +59,16 @@ BYOK（Bring Your Own Key）密钥的存取层。提供商 API key **绝不硬�
 
 ## 完成状态
 
-- **已实现**：`ProviderKey` 五键 + 三派生、`KeyStore` trait、跨平台 `KeyringStore`、`MemoryKeyStore`、归一化与 debug env 覆盖（均有单测）；`src-tauri` 三命令（save/load/delete）+ 掩码 + provider 白名单已接线并测试。
+- **已实现**：`ProviderKey` 五键 + 三派生、`KeyStore` trait、跨平台 `KeyringStore`、`MemoryKeyStore`、归一化与 debug env 覆盖（均有单测）；`src-tauri` 三命令（save/load/delete）+ 掩码 + provider 白名单（6 账户：3 聊天 + 3 生成）已接线并测试；生成 key 经钥匙串 → `GenClient::byok`（`src-tauri/src/generation.rs` 的 `configured_byok_prefixes` / `build`）装配驱动四个生成工具，已随生成桥接线交付。
 - **计划中**：
-  - 生成 provider（fal/replicate/elevenlabs）key 的前端写入命令尚未开放（当前白名单只含聊天三 provider）。
   - 上游 `ModelPreferences`（本地持久化被禁用模型 id）属 `ui-rebuild`，尚未实现。
-  - key 落地后驱动 `GenClient::byok` 构造 `ProviderRegistry` 的装配链路待补（与 `generate_*` 接线一并，ROADMAP Phase 8/9）。
 
 ## 源码
 
 | 文件 | 内容 |
 |---|---|
 | [`keys.rs`](../../../crates/opentake-gen/src/keys.rs) | `ProviderKey` / `SERVICE` / `KeyStore` trait + `load_key` 便捷 / `KeyringStore` / `MemoryKeyStore` / `normalize` |
-| [`../src-tauri/src/secret.rs`](../../../src-tauri/src/secret.rs) | `secret_save`/`secret_load`/`secret_delete` 命令 + `mask` + provider 白名单（聊天 key） |
+| [`../src-tauri/src/secret.rs`](../../../src-tauri/src/secret.rs) | `secret_save`/`secret_load`/`secret_delete` 命令 + `mask` + provider 白名单（6 账户：3 聊天 + 3 生成） |
 
 ---
 

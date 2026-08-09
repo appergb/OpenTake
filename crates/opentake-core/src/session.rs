@@ -32,12 +32,19 @@
 //! are a media-layer concern injected via [`crate::deps`] and are not performed
 //! here.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
-use opentake_domain::{ClipType, MediaAsset, MediaManifest, MediaManifestEntry, Timeline};
+use opentake_domain::{
+    ClipType, GenerationInput, GenerationJobStatus, MediaAsset, MediaColorMetadata, MediaManifest,
+    MediaManifestEntry, MediaProxy, MediaSource, Timeline,
+};
 use opentake_ops::command::{self, EditCommand, EditResult};
 use opentake_ops::{EditorState, IdGen};
-use opentake_project::{GenerationLog, Project, ProjectCompatibility, ProjectRoot};
+use opentake_project::{
+    GenerationLog, GenerationLogEntry, Project, ProjectCompatibility, ProjectRoot,
+    ProjectRootIdentity,
+};
 use same_file::Handle;
 
 use crate::error::{CoreError, Result};
@@ -63,6 +70,69 @@ pub struct ProbedMedia {
     pub fps: Option<f64>,
     /// Whether the file carries an audio track.
     pub has_audio: bool,
+    /// Source color signalling for HDR-aware decode and durable project state.
+    pub color: Option<MediaColorMetadata>,
+}
+
+/// Non-secret provenance attached when a separated audio stem re-enters the
+/// ordinary media manifest. Content/model hashes make the derivation auditable
+/// without persisting provider credentials or result URLs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DerivedStemProvenance {
+    pub source_asset_id: String,
+    pub source_sha256: String,
+    pub execution: String,
+    pub model_sha256: Option<String>,
+    pub stem: String,
+}
+
+/// Validated provider-neutral generation job prepared by the Agent/Tauri host.
+/// Credentials, signed URLs, and provider diagnostics are deliberately absent.
+#[derive(Clone, Debug)]
+pub struct PreparedGenerationJob {
+    pub name: String,
+    pub kind: ClipType,
+    pub folder_id: Option<String>,
+    pub provider: String,
+    pub input: GenerationInput,
+    pub output_count: usize,
+    pub source_asset_id: Option<String>,
+    pub source_clip_id: Option<String>,
+    pub estimated_cost_credits: Option<i64>,
+    pub created_at: Option<f64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GenerationJobCommit {
+    pub job_id: String,
+    pub placeholder_asset_ids: Vec<String>,
+}
+
+/// One durable lifecycle update. Provider messages are reduced to a fixed
+/// application-owned `error_code` before reaching this boundary.
+#[derive(Clone, Debug)]
+pub struct GenerationStateUpdate {
+    pub status: GenerationJobStatus,
+    pub progress: Option<f64>,
+    pub error_code: Option<String>,
+    pub provider_job_id: Option<String>,
+    pub cost_credits: Option<i64>,
+    pub created_at: Option<f64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PreparedGenerationOutput {
+    pub asset_id: String,
+    pub relative_path: String,
+    pub probe: ProbedMedia,
+    pub created_at: Option<f64>,
+}
+
+#[derive(Clone)]
+pub(crate) struct GenerationStateCheckpoint {
+    manifest: MediaManifest,
+    log: GenerationLog,
+    component_present: bool,
 }
 
 /// File extensions the importer accepts, grouped by the [`ClipType`] they map to.
@@ -103,6 +173,108 @@ pub fn importable_clip_type(path: &Path) -> Option<ClipType> {
     } else {
         None
     }
+}
+
+fn safe_provider_prefix(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn safe_generation_error_code(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 80
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn validate_generation_update(update: &GenerationStateUpdate) -> Result<()> {
+    if update.cost_credits.is_some_and(|credits| credits < 0) {
+        return Err(CoreError::Media(
+            "generation cost must not be negative".to_string(),
+        ));
+    }
+    if let Some(progress) = update.progress {
+        if !progress.is_finite() || !(0.0..=1.0).contains(&progress) {
+            return Err(CoreError::Media(
+                "generation progress must be finite and between 0 and 1".to_string(),
+            ));
+        }
+    }
+    if let Some(error_code) = update.error_code.as_deref() {
+        if !safe_generation_error_code(error_code) {
+            return Err(CoreError::Media(
+                "generation failure code is invalid".to_string(),
+            ));
+        }
+    }
+    if update.status == GenerationJobStatus::Failed && update.error_code.is_none() {
+        return Err(CoreError::Media(
+            "failed generation status requires an error code".to_string(),
+        ));
+    }
+    if update.status != GenerationJobStatus::Failed && update.error_code.is_some() {
+        return Err(CoreError::Media(
+            "generation error code is only valid for failed status".to_string(),
+        ));
+    }
+    if let Some(provider_job_id) = update.provider_job_id.as_deref() {
+        if provider_job_id.is_empty()
+            || provider_job_id.len() > 512
+            || provider_job_id.chars().any(char::is_control)
+            || provider_job_id.contains("://")
+        {
+            return Err(CoreError::Media(
+                "provider job identity is invalid".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn valid_generation_transition(
+    current: Option<GenerationJobStatus>,
+    next: GenerationJobStatus,
+) -> bool {
+    use GenerationJobStatus as Status;
+    match (current, next) {
+        (None, Status::Queued) => true,
+        (Some(current), next) if current == next => true,
+        (Some(Status::Queued), Status::Generating | Status::Failed | Status::Cancelled) => true,
+        (Some(Status::Generating), Status::Downloading | Status::Failed | Status::Cancelled) => {
+            true
+        }
+        (
+            Some(Status::Downloading),
+            Status::Finalizing | Status::Ready | Status::Failed | Status::Cancelled,
+        ) => true,
+        (Some(Status::Finalizing), Status::Ready | Status::Failed | Status::Cancelled) => true,
+        (Some(Status::Failed | Status::Cancelled), Status::Queued) => true,
+        (Some(Status::Ready), Status::Ready) => true,
+        _ => false,
+    }
+}
+
+fn validate_project_media_relative_path(value: &str) -> Result<()> {
+    let path = Path::new(value);
+    let mut components = path.components();
+    if components.next() != Some(std::path::Component::Normal("media".as_ref()))
+        || components.clone().next().is_none()
+        || path.is_absolute()
+        || components.any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Err(CoreError::Media(
+            "generated output path must be a safe media-relative path".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 /// The open document plus its project-level metadata.
@@ -325,6 +497,98 @@ impl EditorSession {
         self.import_media_file_checked(path, id, name, probe, || Ok(()))
     }
 
+    /// Import a ready vocals/accompaniment file through the shared media path
+    /// and attach durable provenance. The original asset remains immutable.
+    pub fn import_derived_stem_file(
+        &mut self,
+        path: impl AsRef<Path>,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        probe: &ProbedMedia,
+        provenance: DerivedStemProvenance,
+    ) -> Result<MediaManifestEntry> {
+        self.ensure_mutable()?;
+        let source = self
+            .state
+            .manifest
+            .entries
+            .iter()
+            .find(|entry| entry.id == provenance.source_asset_id)
+            .ok_or_else(|| {
+                CoreError::Media(format!(
+                    "stem source asset does not exist: {}",
+                    provenance.source_asset_id
+                ))
+            })?;
+        if !matches!(source.kind, ClipType::Audio | ClipType::Video)
+            || !source.has_audio.unwrap_or(source.kind == ClipType::Audio)
+        {
+            return Err(CoreError::Media(
+                "stem source asset has no audio".to_string(),
+            ));
+        }
+        if !valid_sha256(&provenance.source_sha256)
+            || provenance
+                .model_sha256
+                .as_deref()
+                .is_some_and(|digest| !valid_sha256(digest))
+        {
+            return Err(CoreError::Media(
+                "stem provenance checksum is invalid".to_string(),
+            ));
+        }
+        let (provider, model) = provenance.execution.split_once(':').ok_or_else(|| {
+            CoreError::Media("stem execution must be '<provider>:<model>'".to_string())
+        })?;
+        if !safe_provider_prefix(provider) || model.trim().is_empty() {
+            return Err(CoreError::Media(
+                "stem execution provider or model is invalid".to_string(),
+            ));
+        }
+        let output_index = match provenance.stem.as_str() {
+            "vocals" => 0,
+            "accompaniment" => 1,
+            _ => {
+                return Err(CoreError::Media(
+                    "stem kind must be vocals or accompaniment".to_string(),
+                ))
+            }
+        };
+
+        let before = self.state.manifest.clone();
+        let result = (|| {
+            let entry = self.import_media_file(path, id, name, probe)?;
+            let target = self
+                .state
+                .manifest
+                .entries
+                .iter_mut()
+                .find(|candidate| candidate.id == entry.id)
+                .ok_or_else(|| CoreError::Media("imported stem disappeared".to_string()))?;
+            target.generation_input = Some(GenerationInput {
+                prompt: format!("stem:{}", provenance.stem),
+                model: model.to_string(),
+                duration: probe.duration_secs.max(0.0).round() as i32,
+                aspect_ratio: "audio".to_string(),
+                quality: provenance
+                    .model_sha256
+                    .map(|digest| format!("model-sha256:{digest}")),
+                reference_audio_urls: Some(vec![format!("sha256:{}", provenance.source_sha256)]),
+                provider: Some(provider.to_string()),
+                status: Some(GenerationJobStatus::Ready),
+                progress: Some(1.0),
+                output_index: Some(output_index),
+                source_asset_id: Some(provenance.source_asset_id),
+                ..GenerationInput::default()
+            });
+            Ok(target.clone())
+        })();
+        if result.is_err() {
+            self.state.manifest = before;
+        }
+        result
+    }
+
     /// Import one file and roll the manifest back if `postcondition` fails.
     /// Save-as-media uses this to bind its final retained-file identity check to
     /// the live manifest mutation: an attacker-triggered swap can never leave a
@@ -340,23 +604,7 @@ impl EditorSession {
         self.ensure_mutable()?;
         let manifest_before = self.state.manifest.clone();
         let path = path.as_ref();
-        let kind = importable_clip_type(path).ok_or(CoreError::Unsupported("media"))?;
-
-        let mut asset = MediaAsset::new(id, path, kind, name, probe.duration_secs);
-        asset.source_width = probe.width;
-        asset.source_height = probe.height;
-        asset.source_fps = probe.fps;
-        // Video defaults to having audio (MediaAsset::new); refine from the probe.
-        // Non-video never carries a video-track-linked audio flag upstream.
-        asset.has_audio = match kind {
-            ClipType::Audio => true,
-            ClipType::Video => probe.has_audio,
-            _ => false,
-        };
-
-        // `now = 0`: a freshly imported local file has no cached remote URL, so
-        // the freshness clock is irrelevant to the produced entry.
-        let entry = asset.to_manifest_entry(self.project_dir.as_deref(), 0.0);
+        let entry = self.prepare_media_file_entry(path, id, name, probe)?;
         // Dedup (#91 "素材重复出现"): importing a file that is already in the
         // manifest reuses the existing entry — keeping its id so any clip that
         // references it stays valid — instead of appending a second entry for the
@@ -379,6 +627,39 @@ impl EditorSession {
             return Err(error);
         }
         Ok(entry)
+    }
+
+    /// Build the manifest representation of a validated local file without
+    /// mutating the manifest, history, or version. Deferred render workflows
+    /// use this to prepare a command that will later register the entry and
+    /// edit the timeline in one revision-bound transaction.
+    pub fn prepare_media_file_entry(
+        &self,
+        path: impl AsRef<Path>,
+        id: impl Into<String>,
+        name: impl Into<String>,
+        probe: &ProbedMedia,
+    ) -> Result<MediaManifestEntry> {
+        self.ensure_mutable()?;
+        let path = path.as_ref();
+        let kind = importable_clip_type(path).ok_or(CoreError::Unsupported("media"))?;
+
+        let mut asset = MediaAsset::new(id, path, kind, name, probe.duration_secs);
+        asset.source_width = probe.width;
+        asset.source_height = probe.height;
+        asset.source_fps = probe.fps;
+        asset.color = probe.color.clone();
+        // Video defaults to having audio (MediaAsset::new); refine from the probe.
+        // Non-video never carries a video-track-linked audio flag upstream.
+        asset.has_audio = match kind {
+            ClipType::Audio => true,
+            ClipType::Video => probe.has_audio,
+            _ => false,
+        };
+
+        // `now = 0`: a freshly prepared local file has no cached remote URL, so
+        // the freshness clock is irrelevant to the produced entry.
+        Ok(asset.to_manifest_entry(self.project_dir.as_deref(), 0.0))
     }
 
     /// Relink an existing asset to a new on-disk file, **keeping the same id** so
@@ -420,6 +701,8 @@ impl EditorSession {
         entry.source_width = probe.width;
         entry.source_height = probe.height;
         entry.source_fps = probe.fps;
+        entry.color = probe.color.clone();
+        entry.proxy = None;
         entry.has_audio = Some(match kind {
             ClipType::Audio => true,
             ClipType::Video => probe.has_audio,
@@ -436,6 +719,47 @@ impl EditorSession {
     pub fn set_media_favorite(&mut self, asset_ids: &[String], favorite: bool) -> Result<usize> {
         self.ensure_mutable()?;
         Ok(self.state.manifest.set_favorites(asset_ids, favorite))
+    }
+
+    /// Attach or clear a project-local playback proxy without changing the
+    /// authoritative source used by export. The proxy path is deliberately
+    /// constrained to `media/proxies/` and the source digest is fixed-width so
+    /// corrupt or externally-authored manifests cannot redirect playback.
+    pub fn set_media_proxy(
+        &mut self,
+        asset_id: &str,
+        proxy: Option<MediaProxy>,
+    ) -> Result<MediaManifestEntry> {
+        self.ensure_mutable()?;
+        if let Some(proxy) = proxy.as_ref() {
+            let path = Path::new(&proxy.relative_path);
+            let components: Vec<_> = path.components().collect();
+            if path.is_absolute()
+                || components.len() != 3
+                || components[0] != std::path::Component::Normal("media".as_ref())
+                || components[1] != std::path::Component::Normal("proxies".as_ref())
+                || !matches!(components[2], std::path::Component::Normal(_))
+                || path.extension().and_then(|extension| extension.to_str()) != Some("mp4")
+                || proxy.width == 0
+                || proxy.height == 0
+                || proxy.source_sha256.len() != 64
+                || !proxy
+                    .source_sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+            {
+                return Err(CoreError::Media("invalid media proxy metadata".to_string()));
+            }
+        }
+        let entry = self
+            .state
+            .manifest
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == asset_id)
+            .ok_or_else(|| CoreError::Media(format!("unknown media asset: {asset_id}")))?;
+        entry.proxy = proxy;
+        Ok(entry.clone())
     }
 
     /// Set or clear one asset's content-addressed global favorite id. This is a
@@ -511,6 +835,16 @@ impl EditorSession {
         self.state.can_undo()
     }
 
+    /// Label of the current top-level undo transaction.
+    pub fn undo_action_name(&self) -> Option<&str> {
+        self.state.undo_action_name()
+    }
+
+    /// Stable version identity of the undo transaction at the top of history.
+    pub fn undo_transaction_version(&self) -> Option<u64> {
+        self.state.undo_transaction_version()
+    }
+
     /// Whether a redo is available.
     pub fn can_redo(&self) -> bool {
         self.state.can_redo()
@@ -521,6 +855,16 @@ impl EditorSession {
         self.project_dir.as_deref()
     }
 
+    /// Open a project-local asset through the retained no-follow bundle
+    /// authority. Reads never re-resolve [`Self::project_dir`], so an ambient
+    /// rename or replacement of the bundle pathname cannot redirect the open
+    /// to a rebound bundle. The returned file is read-only and opened with
+    /// no-follow semantics on every directory component and the final leaf.
+    pub fn open_asset_file(&self, relative: &Path) -> Result<fs::File> {
+        let root = self.project_root.as_ref().ok_or(CoreError::NoProjectOpen)?;
+        Ok(root.open_asset_file(relative)?)
+    }
+
     /// Compare a caller's retained no-follow bundle handle with the handle
     /// retained when this exact session opened or saved the project.
     pub(crate) fn matches_project_root_identity(&self, current: &Handle) -> Result<bool> {
@@ -529,9 +873,446 @@ impl EditorSession {
         Ok(expected.matches_identity(current))
     }
 
+    pub(crate) fn project_root_identity(&self) -> Option<ProjectRootIdentity> {
+        self.project_root.as_ref().map(ProjectRoot::stable_identity)
+    }
+
+    pub(crate) fn project_root_is_current_namespace(&self) -> Result<bool> {
+        self.project_root
+            .as_ref()
+            .ok_or(CoreError::NoProjectOpen)?
+            .is_current_namespace()
+            .map_err(CoreError::from)
+    }
+
     /// Read-only access to the generation log.
     pub fn generation_log(&self) -> &GenerationLog {
         &self.generation_log
+    }
+
+    /// Create durable manifest placeholders and append the corresponding
+    /// queued audit events. The caller persists the returned in-memory state in
+    /// the same critical section before exposing the placeholder ids.
+    pub(crate) fn begin_generation_job(
+        &mut self,
+        mut plan: PreparedGenerationJob,
+        ids: &dyn IdGen,
+    ) -> Result<GenerationJobCommit> {
+        self.ensure_mutable()?;
+        if self.project_dir.is_none() {
+            return Err(CoreError::NoProjectOpen);
+        }
+        if !(1..=4).contains(&plan.output_count) {
+            return Err(CoreError::Media(
+                "generation output count must be between 1 and 4".to_string(),
+            ));
+        }
+        if plan.input.model.trim().is_empty() || plan.provider.trim().is_empty() {
+            return Err(CoreError::Media(
+                "generation model and provider are required".to_string(),
+            ));
+        }
+        if !safe_provider_prefix(&plan.provider) {
+            return Err(CoreError::Media(
+                "generation provider prefix is invalid".to_string(),
+            ));
+        }
+        if let Some(folder_id) = plan.folder_id.as_deref() {
+            if !self
+                .state
+                .manifest
+                .folders
+                .iter()
+                .any(|folder| folder.id == folder_id)
+            {
+                return Err(CoreError::Media(format!(
+                    "generation folder does not exist: {folder_id}"
+                )));
+            }
+        }
+        if let Some(source_asset_id) = plan.source_asset_id.as_deref() {
+            if !self
+                .state
+                .manifest
+                .entries
+                .iter()
+                .any(|entry| entry.id == source_asset_id)
+            {
+                return Err(CoreError::Media(format!(
+                    "generation source asset does not exist: {source_asset_id}"
+                )));
+            }
+        }
+
+        let job_id = ids.next_id();
+        plan.input.job_id = Some(job_id.clone());
+        plan.input.provider = Some(plan.provider.clone());
+        plan.input.provider_job_id = None;
+        plan.input.status = Some(GenerationJobStatus::Queued);
+        plan.input.progress = Some(0.0);
+        plan.input.error_code = None;
+        plan.input.source_asset_id = plan.source_asset_id.clone();
+        plan.input.source_clip_id = plan.source_clip_id.clone();
+        plan.input.estimated_cost_credits = plan.estimated_cost_credits;
+        plan.input.created_at = plan.created_at;
+
+        let mut placeholder_asset_ids = Vec::with_capacity(plan.output_count);
+        for output_index in 0..plan.output_count {
+            let asset_id = ids.next_id();
+            let mut input = plan.input.clone();
+            input.output_index = Some(output_index);
+            let display_name = if plan.output_count == 1 {
+                plan.name.clone()
+            } else {
+                format!("{} {}", plan.name, output_index + 1)
+            };
+            self.state.manifest.entries.push(MediaManifestEntry {
+                id: asset_id.clone(),
+                name: display_name,
+                kind: plan.kind,
+                source: MediaSource::Project {
+                    relative_path: format!("media/{asset_id}.pending"),
+                },
+                duration: (input.duration.max(0)) as f64,
+                generation_input: Some(input.clone()),
+                source_width: None,
+                source_height: None,
+                source_fps: None,
+                has_audio: Some(
+                    plan.kind == ClipType::Audio
+                        || (plan.kind == ClipType::Video && input.generate_audio.unwrap_or(true)),
+                ),
+                color: None,
+                proxy: None,
+                folder_id: plan.folder_id.clone(),
+                cached_remote_url: None,
+                cached_remote_url_expires_at: None,
+            });
+            self.generation_log
+                .entries
+                .push(GenerationLogEntry::job_event(
+                    ids.next_id(),
+                    job_id.clone(),
+                    input.model.clone(),
+                    None,
+                    plan.provider.clone(),
+                    None,
+                    asset_id.clone(),
+                    GenerationJobStatus::Queued,
+                    Some(0.0),
+                    None,
+                    plan.created_at,
+                    plan.source_asset_id.clone(),
+                    plan.source_clip_id.clone(),
+                ));
+            placeholder_asset_ids.push(asset_id);
+        }
+        self.generation_log_component_present = true;
+        Ok(GenerationJobCommit {
+            job_id,
+            placeholder_asset_ids,
+        })
+    }
+
+    pub(crate) fn update_generation_job(
+        &mut self,
+        job_id: &str,
+        update: GenerationStateUpdate,
+        ids: &dyn IdGen,
+    ) -> Result<usize> {
+        self.ensure_mutable()?;
+        validate_generation_update(&update)?;
+        let mut events = Vec::new();
+        for entry in &mut self.state.manifest.entries {
+            let Some(input) = entry.generation_input.as_mut() else {
+                continue;
+            };
+            if input.job_id.as_deref() != Some(job_id) {
+                continue;
+            }
+            if !valid_generation_transition(input.status, update.status) {
+                return Err(CoreError::Media(format!(
+                    "invalid generation transition from {:?} to {:?}",
+                    input.status, update.status
+                )));
+            }
+            input.status = Some(update.status);
+            input.progress = update.progress;
+            input.error_code = update.error_code.clone();
+            if update.provider_job_id.is_some() {
+                input.provider_job_id = update.provider_job_id.clone();
+            }
+            events.push((entry.id.clone(), input.clone()));
+        }
+        if events.is_empty() {
+            return Err(CoreError::Media(format!(
+                "generation job does not exist: {job_id}"
+            )));
+        }
+        for (event_index, (asset_id, input)) in events.iter().enumerate() {
+            self.append_generation_event(
+                ids,
+                asset_id,
+                input,
+                update.status,
+                update.progress,
+                update.error_code.clone(),
+                (event_index == 0).then_some(update.cost_credits).flatten(),
+                update.created_at,
+            );
+        }
+        Ok(events.len())
+    }
+
+    pub(crate) fn finalize_generation_output(
+        &mut self,
+        output: PreparedGenerationOutput,
+        ids: &dyn IdGen,
+    ) -> Result<()> {
+        self.ensure_mutable()?;
+        validate_project_media_relative_path(&output.relative_path)?;
+        let entry = self
+            .state
+            .manifest
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == output.asset_id)
+            .ok_or_else(|| {
+                CoreError::Media(format!(
+                    "generation placeholder does not exist: {}",
+                    output.asset_id
+                ))
+            })?;
+        let input = entry.generation_input.as_mut().ok_or_else(|| {
+            CoreError::Media("generation placeholder has no provenance".to_string())
+        })?;
+        if !valid_generation_transition(input.status, GenerationJobStatus::Ready) {
+            return Err(CoreError::Media(format!(
+                "generation placeholder cannot finalize from {:?}",
+                input.status
+            )));
+        }
+        entry.source = MediaSource::Project {
+            relative_path: output.relative_path,
+        };
+        entry.duration = output.probe.duration_secs;
+        entry.source_width = output.probe.width;
+        entry.source_height = output.probe.height;
+        entry.source_fps = output.probe.fps;
+        entry.has_audio = Some(output.probe.has_audio);
+        entry.color = output.probe.color.clone();
+        entry.proxy = None;
+        input.status = Some(GenerationJobStatus::Ready);
+        input.progress = Some(1.0);
+        input.error_code = None;
+        let asset_id = entry.id.clone();
+        let input = input.clone();
+        self.append_generation_event(
+            ids,
+            &asset_id,
+            &input,
+            GenerationJobStatus::Ready,
+            Some(1.0),
+            None,
+            None,
+            output.created_at,
+        );
+        Ok(())
+    }
+
+    pub(crate) fn fail_generation_output(
+        &mut self,
+        asset_id: &str,
+        error_code: &str,
+        created_at: Option<f64>,
+        ids: &dyn IdGen,
+    ) -> Result<()> {
+        if !safe_generation_error_code(error_code) {
+            return Err(CoreError::Media(
+                "generation failure code is invalid".to_string(),
+            ));
+        }
+        let entry = self
+            .state
+            .manifest
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == asset_id)
+            .ok_or_else(|| {
+                CoreError::Media(format!("generation placeholder does not exist: {asset_id}"))
+            })?;
+        let input = entry.generation_input.as_mut().ok_or_else(|| {
+            CoreError::Media("generation placeholder has no provenance".to_string())
+        })?;
+        if matches!(input.status, Some(GenerationJobStatus::Ready)) {
+            return Ok(());
+        }
+        input.status = Some(GenerationJobStatus::Failed);
+        input.progress = None;
+        input.error_code = Some(error_code.to_string());
+        let input = input.clone();
+        self.append_generation_event(
+            ids,
+            asset_id,
+            &input,
+            GenerationJobStatus::Failed,
+            None,
+            Some(error_code.to_string()),
+            None,
+            created_at,
+        );
+        Ok(())
+    }
+
+    pub(crate) fn cancel_generation_output(
+        &mut self,
+        asset_id: &str,
+        created_at: Option<f64>,
+        ids: &dyn IdGen,
+    ) -> Result<()> {
+        let entry = self
+            .state
+            .manifest
+            .entries
+            .iter_mut()
+            .find(|entry| entry.id == asset_id)
+            .ok_or_else(|| {
+                CoreError::Media(format!("generation placeholder does not exist: {asset_id}"))
+            })?;
+        let input = entry.generation_input.as_mut().ok_or_else(|| {
+            CoreError::Media("generation placeholder has no provenance".to_string())
+        })?;
+        if matches!(
+            input.status,
+            Some(
+                GenerationJobStatus::Ready
+                    | GenerationJobStatus::Failed
+                    | GenerationJobStatus::Cancelled
+            )
+        ) {
+            return Ok(());
+        }
+        input.status = Some(GenerationJobStatus::Cancelled);
+        input.progress = None;
+        input.error_code = None;
+        let input = input.clone();
+        self.append_generation_event(
+            ids,
+            asset_id,
+            &input,
+            GenerationJobStatus::Cancelled,
+            None,
+            None,
+            None,
+            created_at,
+        );
+        Ok(())
+    }
+
+    pub(crate) fn save_generation_state(&mut self) -> Result<PathBuf> {
+        self.ensure_mutable()?;
+        let target = self.project_dir.clone().ok_or(CoreError::NoProjectOpen)?;
+        let mut project =
+            Project::new_with_compatibility(target.clone(), self.compatibility.clone());
+        project.timeline = self.state.timeline.clone();
+        project.manifest = self.state.manifest.clone();
+        project.generation_log = Some(self.generation_log.clone());
+        // Generation spans media.json + generation-log.json. Publish a complete
+        // sibling bundle so both become visible at one rename commit point.
+        // The source root carries media/chat/thumbnail into the fresh stage.
+        let source_root = self.project_root.take().ok_or(CoreError::NoProjectOpen)?;
+        let new_root = match project.publish_complete_replacing_root(&target, source_root) {
+            Ok(root) => root,
+            Err(error) => {
+                // A pre-commit failure restores the original target; recover
+                // retained authority when possible while preserving the exact
+                // publication error for the caller. Post-commit ambiguity stays
+                // fail-closed if the target cannot be reopened.
+                self.project_root = ProjectRoot::open(&target).ok();
+                return Err(error.into());
+            }
+        };
+        self.project_root = Some(new_root);
+        self.generation_log_component_present = true;
+        Ok(target)
+    }
+
+    pub(crate) fn save_generation_state_with_media(
+        &mut self,
+        media_leaf: &str,
+        media_byte_size: u64,
+        media: &mut dyn std::io::Read,
+    ) -> Result<PathBuf> {
+        self.ensure_mutable()?;
+        let target = self.project_dir.clone().ok_or(CoreError::NoProjectOpen)?;
+        let mut project =
+            Project::new_with_compatibility(target.clone(), self.compatibility.clone());
+        project.timeline = self.state.timeline.clone();
+        project.manifest = self.state.manifest.clone();
+        project.generation_log = Some(self.generation_log.clone());
+        let source_root = self.project_root.take().ok_or(CoreError::NoProjectOpen)?;
+        let new_root = match project.publish_complete_replacing_root_with_media(
+            &target,
+            source_root,
+            media_leaf,
+            media_byte_size,
+            media,
+        ) {
+            Ok(root) => root,
+            Err(error) => {
+                self.project_root = ProjectRoot::open(&target).ok();
+                return Err(error.into());
+            }
+        };
+        self.project_root = Some(new_root);
+        self.generation_log_component_present = true;
+        Ok(target)
+    }
+
+    pub(crate) fn checkpoint_generation_state(&self) -> GenerationStateCheckpoint {
+        GenerationStateCheckpoint {
+            manifest: self.state.manifest.clone(),
+            log: self.generation_log.clone(),
+            component_present: self.generation_log_component_present,
+        }
+    }
+
+    pub(crate) fn restore_generation_state(&mut self, checkpoint: GenerationStateCheckpoint) {
+        self.state.manifest = checkpoint.manifest;
+        self.generation_log = checkpoint.log;
+        self.generation_log_component_present = checkpoint.component_present;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_generation_event(
+        &mut self,
+        ids: &dyn IdGen,
+        asset_id: &str,
+        input: &GenerationInput,
+        status: GenerationJobStatus,
+        progress: Option<f64>,
+        error_code: Option<String>,
+        cost_credits: Option<i64>,
+        created_at: Option<f64>,
+    ) {
+        self.generation_log
+            .entries
+            .push(GenerationLogEntry::job_event(
+                ids.next_id(),
+                input.job_id.clone().unwrap_or_default(),
+                input.model.clone(),
+                cost_credits,
+                input.provider.clone().unwrap_or_default(),
+                input.provider_job_id.clone(),
+                asset_id.to_string(),
+                status,
+                progress,
+                error_code,
+                created_at,
+                input.source_asset_id.clone(),
+                input.source_clip_id.clone(),
+            ));
+        self.generation_log_component_present = true;
     }
 
     /// Compatibility state inherited from the opened project.
@@ -793,6 +1574,7 @@ mod tests {
             height: Some(1080),
             fps: Some(30.0),
             has_audio: true,
+            color: None,
         };
         let entry = s
             .import_media_file("/abs/clip.mp4", "asset-1", "clip", &probe)
@@ -825,6 +1607,48 @@ mod tests {
     }
 
     #[test]
+    fn derived_stem_import_reuses_media_path_and_persists_provenance() {
+        let mut session = EditorSession::new_project();
+        let source_probe = ProbedMedia {
+            duration_secs: 5.0,
+            has_audio: true,
+            ..ProbedMedia::default()
+        };
+        session
+            .import_media_file("/abs/source.wav", "source-asset", "Source", &source_probe)
+            .unwrap();
+        let stem = session
+            .import_derived_stem_file(
+                "/abs/source-vocals.wav",
+                "stem-asset",
+                "Source Vocals",
+                &source_probe,
+                DerivedStemProvenance {
+                    source_asset_id: "source-asset".into(),
+                    source_sha256: "a".repeat(64),
+                    execution: "local:opentake-center-v1".into(),
+                    model_sha256: Some("b".repeat(64)),
+                    stem: "vocals".into(),
+                },
+            )
+            .unwrap();
+        let provenance = stem.generation_input.expect("derived provenance");
+        assert_eq!(provenance.prompt, "stem:vocals");
+        assert_eq!(provenance.provider.as_deref(), Some("local"));
+        assert_eq!(provenance.model, "opentake-center-v1");
+        assert_eq!(provenance.source_asset_id.as_deref(), Some("source-asset"));
+        assert_eq!(
+            provenance.reference_audio_urls,
+            Some(vec![format!("sha256:{}", "a".repeat(64))])
+        );
+        assert_eq!(
+            provenance.quality,
+            Some(format!("model-sha256:{}", "b".repeat(64)))
+        );
+        assert_eq!(provenance.status, Some(GenerationJobStatus::Ready));
+    }
+
+    #[test]
     fn reimporting_the_same_file_reuses_the_entry_instead_of_duplicating() {
         // #91: importing a file already in the manifest must not append a second
         // entry (the "素材重复出现" bug). The existing entry — id and all — is
@@ -836,6 +1660,7 @@ mod tests {
             height: Some(480),
             fps: Some(24.0),
             has_audio: true,
+            color: None,
         };
         let first = s
             .import_media_file("/abs/clip.mp4", "asset-1", "clip", &probe)
@@ -852,6 +1677,55 @@ mod tests {
     }
 
     #[test]
+    fn media_proxy_metadata_is_confined_and_never_replaces_source() {
+        let mut session = EditorSession::new_project();
+        let source = "/abs/source.mp4";
+        let entry = session
+            .import_media_file(source, "asset", "source", &ProbedMedia::default())
+            .unwrap();
+        let original_source = entry.source;
+        let proxy = MediaProxy {
+            relative_path: "media/proxies/asset.mp4".into(),
+            source_sha256: "a".repeat(64),
+            width: 640,
+            height: 360,
+        };
+        let updated = session
+            .set_media_proxy("asset", Some(proxy.clone()))
+            .unwrap();
+        assert_eq!(updated.source, original_source);
+        assert_eq!(updated.proxy, Some(proxy));
+
+        assert!(session
+            .set_media_proxy(
+                "asset",
+                Some(MediaProxy {
+                    relative_path: "../outside.mp4".into(),
+                    source_sha256: "a".repeat(64),
+                    width: 640,
+                    height: 360,
+                }),
+            )
+            .is_err());
+        assert!(session
+            .set_media_proxy(
+                "asset",
+                Some(MediaProxy {
+                    relative_path: "media/proxies/nested/asset.mp4".into(),
+                    source_sha256: "a".repeat(64),
+                    width: 640,
+                    height: 360,
+                }),
+            )
+            .is_err());
+        assert!(session
+            .set_media_proxy("asset", None)
+            .unwrap()
+            .proxy
+            .is_none());
+    }
+
+    #[test]
     fn import_image_has_no_audio_regardless_of_probe() {
         let mut s = EditorSession::new_project();
         let probe = ProbedMedia {
@@ -860,6 +1734,7 @@ mod tests {
             height: Some(600),
             fps: None,
             has_audio: true, // probe lies; an image never has audio
+            color: None,
         };
         let entry = s
             .import_media_file("/abs/pic.png", "img-1", "pic", &probe)
@@ -961,6 +1836,8 @@ mod tests {
             source_height: Some(2),
             source_fps: None,
             has_audio: None,
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,

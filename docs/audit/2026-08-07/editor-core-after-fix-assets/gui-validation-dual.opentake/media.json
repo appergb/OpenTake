@@ -1,0 +1,36 @@
+{
+  "version": 2,
+  "entries": [
+    {
+      "id": "audit-dual-source-a",
+      "name": "audit-4k60-source-a",
+      "type": "video",
+      "source": {
+        "external": {
+          "absolutePath": "/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-generation/docs/audit/2026-08-07/editor-core-validation-evidence-a/artifacts/audit-4k60-h264.mp4"
+        }
+      },
+      "duration": 4.0,
+      "sourceWidth": 3840,
+      "sourceHeight": 2160,
+      "sourceFPS": 60.0,
+      "hasAudio": false
+    },
+    {
+      "id": "audit-dual-source-b",
+      "name": "audit-4k60-source-b-hflip",
+      "type": "video",
+      "source": {
+        "external": {
+          "absolutePath": "/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake-generation/docs/audit/2026-08-07/editor-core-after-fix-assets/audit-4k60-h264-hflip.mp4"
+        }
+      },
+      "duration": 4.0,
+      "sourceWidth": 3840,
+      "sourceHeight": 2160,
+      "sourceFPS": 60.0,
+      "hasAudio": false
+    }
+  ],
+  "folders": []
+}

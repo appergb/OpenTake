@@ -8,7 +8,7 @@ AppShell (Tauri window chrome)
 │   ├─ TitleBarLeading      ← TitleBarView.swift:3  (Agent 切换)
 │   └─ TitleBarTrailing     ← TitleBarView.swift:22 (Export, Avatar)
 └─ EditorSplit              ← EditorView / EditorSplitViewController
-    ├─ AgentPanel           ← AgentPanelView      (另一 Issue,占位)
+    ├─ AgentPanel           ← AgentPanelView      (实时会话、生成确认与草稿交接)
     └─ PresetRoot           ← buildDefault/Media/VerticalLayout
         ├─ MediaPanel       ← MediaPanelView.swift
         ├─ PreviewContainer ← PreviewContainerView.swift
@@ -35,6 +35,7 @@ AppShell (Tauri window chrome)
 | `SnapIndicatorOverlay` | `SnapIndicator` | zIndex 90,虚线 | 拖拽时显隐 |
 | `ClipGeneratingOverlay` | `ClipGeneratingOverlay` | 覆盖在 clip rect 上 | 生成中动画 |
 | `InspectorView` | `Inspector` | 标题栏 + tab + 滚动内容 | tab 切换、字段编辑 |
+| `AIEditView` | `AiEditTab` | Inspector 的 AI Edit tab | 生成建议、审阅、拒绝、一次命令应用、撤销/取消/失败恢复 |
 | `ScrubbableNumberField` | `ScrubbableNumberField` | 行内 | 拖拽改值/点击输入 |
 | `InspectorPositionFields` | `PositionFields` | 行内双字段 | X/Y 拖拽 |
 | `KeyframesPanel`/`KeyframesLane` | `KeyframesPanel` | Inspector 右半 | 关键帧 ruler+lane 拖拽/右键 |
@@ -43,12 +44,27 @@ AppShell (Tauri window chrome)
 | `AssetThumbnailView` | `AssetTile` | grid cell | 拖到时间线、双击、右键 |
 | `FolderTileView` | `FolderTile` | grid cell | 双击进入、拖入、重命名 |
 | `CaptionTab` | `CaptionTab` | 表单 + 预览 | 字幕生成参数 |
-| `MusicTab` | `MusicTab` | 列表/生成 | 音乐选取/生成 |
+| `MusicTab` | `MusicTab` | 项目音乐 + 全局音乐库 + 生成入口 | 搜索、导入、放入时间线；生成前把模型/成本确认草稿交给 Agent |
+| `TransitionTab` | `TransitionTab` | 相邻可视片段切点编辑器 | 交叉溶解、时长钳制、应用/移除、撤销；时间线显示切点标记 |
 | `PreviewContainerView` | `PreviewContainer` | tab栏 + 画布 + scrub + transport | 见§8 |
 | `PreviewView`/`TransformOverlayView`/`CropOverlayView` | `PreviewCanvas`+`TransformOverlay`+`CropOverlay` | 画布层叠 | 拖动变换/裁剪手柄 |
 | `CapsuleButtonStyle` | `CapsuleButton` | —— | hover/press |
 | `HoverHighlight` | `useHoverHighlight`/`<HoverArea>` | —— | hover 背景渐显 |
 | `GeneratingOverlay` | `GeneratingOverlay` | 覆盖 | 生成中 |
+
+### 3.2.1 当前精确所有权与实时边界
+
+以下条目是本组件地图的可执行所有权索引。组件不能维护第二套编辑状态；所有持久化编辑都进入共享命令链，预览与导出读取同一项目模型。
+
+| 能力 | 精确 React 所有者 | 实时命令/状态边界 | 可见验收所有者 |
+|---|---|---|---|
+| AI Edit 建议与审阅 | `AiEditTab` → `web/src/components/inspector/AiEditTab.tsx` | `edit.setClipProperties` / `edit.undo`；AbortSignal 取消不提交命令 | `AiEditTab.test.tsx`、`Inspector.test.tsx` |
+| 音乐浏览、导入与放置 | `MusicTab` → `web/src/components/media/MusicTab.tsx` | `addMediaToTimeline`、`libraryStore.importToProject`、`chatStore.composerDraft` | `MusicTab.test.tsx` |
+| 转场选择与应用 | `TransitionTab` → `web/src/components/media/TransitionTab.tsx` | `setTransition` → Tauri `edit_apply` → Rust `EditCommand::SetTransition` | `TransitionTab.test.tsx`、`timelineOverlays.test.ts` |
+| 画布变换覆盖层 | `TransformOverlay` → `web/src/components/preview/TransformOverlay.tsx` | `edit.setTransformAtFrame`（有动画轨时写当前帧；一次指针提交对应一次撤销项） | `TransformOverlay.test.tsx`、`TransformOverlay.interaction.test.tsx` |
+| 画布裁剪覆盖层 | `CropOverlay` → `web/src/components/preview/CropOverlay.tsx` | 静态裁剪用 `edit.setClipProperties`；动画裁剪用 `edit.upsertKeyframe` | `cropOverlay.test.ts`、`Preview.test.tsx` |
+
+转场模型由 `crates/opentake-domain/src/transition.rs` 持久化；命令验证、相邻关系清理与撤销由 `crates/opentake-ops/src/command.rs` 所有；交叉溶解的预览/导出帧计划由 `crates/opentake-render/src/plan/build.rs` 所有。这样 UI 标记、保存重开、预览和导出不会各自形成不一致的旁路。
 
 ### 3.3 SF Symbol → 前端图标映射（逐处复刻；用统一 SVG 图标集）
 

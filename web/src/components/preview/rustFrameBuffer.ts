@@ -165,7 +165,15 @@ export function failRustFrame(
   }
   const pending = state.slots[slot];
   const slots = cloneSlots(state);
-  if (pending.frame?.terminal && pending.retryCount < 2) {
+  // Live frames fail with 204 when the request arrives after the engine has
+  // already published a newer frame (slow render / fast publish). A single
+  // retry re-issues the same URL, which the backend now resolves to the newest
+  // published frame, so transient races do not freeze the preview on the idle
+  // still. Terminal frames keep their two retries.
+  const retryable = pending.frame?.terminal
+    ? pending.retryCount < 2
+    : pending.retryCount < 1;
+  if (retryable) {
     const retryCount = pending.retryCount + 1;
     slots[slot] = {
       ...pending,

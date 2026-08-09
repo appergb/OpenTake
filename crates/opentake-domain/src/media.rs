@@ -23,6 +23,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::clip_type::ClipType;
 
+/// Durable provider-neutral lifecycle for an asynchronous generated output.
+/// Stored with `GenerationInput` so the manifest is the recovery source of
+/// truth and never needs provider credentials or signed result URLs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GenerationJobStatus {
+    Queued,
+    Generating,
+    Downloading,
+    Finalizing,
+    Ready,
+    Failed,
+    Cancelled,
+}
+
 /// Where a media file lives. Encoded externally-tagged to match Swift's
 /// synthesized `Codable` for an enum with associated values:
 /// `{"external":{"absolutePath":"..."}}` / `{"project":{"relativePath":"..."}}`.
@@ -33,6 +48,54 @@ pub enum MediaSource {
     External { absolute_path: String },
     #[serde(rename_all = "camelCase")]
     Project { relative_path: String },
+}
+
+/// Source color signalling retained from the first playable video stream.
+/// Values use FFmpeg's stable tokens (`bt709`, `bt2020`, `smpte2084`,
+/// `arib-std-b67`, ...). Keeping the original tokens makes older/newer codecs
+/// forward-compatible while helpers can still identify the HDR transfers that
+/// require explicit tone mapping in the current SDR compositor.
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaColorMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primaries: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matrix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub range: Option<String>,
+}
+
+impl MediaColorMetadata {
+    pub fn is_hdr(&self) -> bool {
+        self.transfer.as_deref().is_some_and(|transfer| {
+            matches!(
+                transfer.to_ascii_lowercase().as_str(),
+                "smpte2084" | "pq" | "arib-std-b67" | "hlg"
+            )
+        })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.primaries.is_none()
+            && self.transfer.is_none()
+            && self.matrix.is_none()
+            && self.range.is_none()
+    }
+}
+
+/// Project-local low-resolution media used only for interactive playback.
+/// Export always resolves [`MediaManifestEntry::source`]. The source digest
+/// prevents a stale proxy being paired with bytes that changed in place.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MediaProxy {
+    pub relative_path: String,
+    pub source_sha256: String,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// Full serializable input snapshot for a generated asset. 1:1 port of
@@ -100,6 +163,48 @@ pub struct GenerationInput {
     /// Apple-reference-date seconds (see module note on dates).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_at: Option<f64>,
+    /// Local durable job identity. Provider job ids remain private to the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    /// Non-secret provider routing prefix (`fal`, `replicate`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Provider job identity required for restart recovery. This is not a
+    /// credential and must never contain a result URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<GenerationJobStatus>,
+    /// Normalized 0..1 progress. Providers without progress report phase-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<f64>,
+    /// Fixed application-owned failure code; provider messages are never stored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    /// Stable ordered output index for N-result generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_index: Option<usize>,
+    /// Source asset provenance for upscale/edit flows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_asset_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_clip_id: Option<String>,
+    /// Timeline span provenance for video-to-audio generation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_start_frame: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_end_frame: Option<i32>,
+    /// Client-side estimate shown before submission; actual settled cost is
+    /// recorded once in the generation log when a provider supplies it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_cost_credits: Option<i64>,
+    /// Explicit user-consent record supplied for identity-bearing generation.
+    /// This is an opaque local audit id, never a credential.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consent_id: Option<String>,
+    /// SHA-256 of the canonical, non-secret provider request inputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_hash: Option<String>,
 }
 
 /// Serializable manifest entry. 1:1 port of `MediaManifestEntry`.
@@ -123,6 +228,10 @@ pub struct MediaManifestEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub has_audio: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<MediaColorMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<MediaProxy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub folder_id: Option<String>,
     #[serde(
         rename = "cachedRemoteURL",
@@ -136,6 +245,17 @@ pub struct MediaManifestEntry {
         skip_serializing_if = "Option::is_none"
     )]
     pub cached_remote_url_expires_at: Option<f64>,
+}
+
+impl MediaManifestEntry {
+    /// Generated local matting derivatives contain straight RGBA from FFmpeg's
+    /// ProRes 4444 decoder. The render adapters use this non-secret provenance
+    /// to request one premultiplication before blending.
+    pub fn carries_straight_alpha(&self) -> bool {
+        self.generation_input.as_ref().is_some_and(|input| {
+            input.provider.as_deref() == Some("opentake-matting") && input.model.starts_with("rvm-")
+        })
+    }
 }
 
 /// A media library folder. 1:1 port of `MediaFolder`.
@@ -292,6 +412,9 @@ impl MediaManifest {
     }
 }
 
+/// Decode a persisted manifest without confusing the current constructor
+/// version with the legacy wire fallback: an omitted version means schema 1,
+/// while every explicitly stored version is retained verbatim.
 impl<'de> Deserialize<'de> for MediaManifest {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -396,6 +519,10 @@ pub struct MediaAsset {
     #[serde(default)]
     pub has_audio: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<MediaColorMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<MediaProxy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generation_input: Option<GenerationInput>,
     #[serde(default)]
     pub generation_status: GenerationStatus,
@@ -437,6 +564,8 @@ impl MediaAsset {
             source_height: None,
             source_fps: None,
             has_audio: kind == ClipType::Video,
+            color: None,
+            proxy: None,
             generation_input: None,
             generation_status: GenerationStatus::None,
             folder_id: None,
@@ -459,8 +588,31 @@ impl MediaAsset {
             source_height: entry.source_height,
             source_fps: entry.source_fps,
             has_audio: entry.has_audio.unwrap_or(false),
+            color: entry.color.clone(),
+            proxy: entry.proxy.clone(),
             generation_input: entry.generation_input.clone(),
-            generation_status: GenerationStatus::None,
+            generation_status: match entry
+                .generation_input
+                .as_ref()
+                .and_then(|input| input.status)
+            {
+                Some(GenerationJobStatus::Queued | GenerationJobStatus::Generating) => {
+                    GenerationStatus::Generating
+                }
+                Some(GenerationJobStatus::Downloading) => GenerationStatus::Downloading,
+                Some(GenerationJobStatus::Finalizing) => GenerationStatus::Rendering,
+                Some(GenerationJobStatus::Failed) => GenerationStatus::Failed(
+                    entry
+                        .generation_input
+                        .as_ref()
+                        .and_then(|input| input.error_code.clone())
+                        .unwrap_or_else(|| "GENERATION_FAILED".to_string()),
+                ),
+                Some(GenerationJobStatus::Cancelled) => {
+                    GenerationStatus::Failed("GENERATION_CANCELLED".to_string())
+                }
+                Some(GenerationJobStatus::Ready) | None => GenerationStatus::None,
+            },
             folder_id: entry.folder_id.clone(),
             pending_download_url: None,
             cached_remote_url: entry.cached_remote_url.clone(),
@@ -501,10 +653,13 @@ impl MediaAsset {
     pub fn to_manifest_entry(&self, project_base: Option<&Path>, now: f64) -> MediaManifestEntry {
         let source = match project_base {
             Some(base) if self.url.starts_with(base) => {
+                // Bundle paths must be portable between host platforms; the
+                // stripped path uses the host separator ('\' on Windows),
+                // which `path_policy` rejects — emit forward slashes everywhere.
                 let relative = self
                     .url
                     .strip_prefix(base)
-                    .map(|p| p.to_string_lossy().into_owned())
+                    .map(|p| p.to_string_lossy().replace('\\', "/"))
                     .unwrap_or_default();
                 MediaSource::Project {
                     relative_path: relative,
@@ -531,6 +686,8 @@ impl MediaAsset {
             source_height: self.source_height,
             source_fps: self.source_fps,
             has_audio: Some(self.has_audio),
+            color: self.color.clone(),
+            proxy: self.proxy.clone(),
             folder_id: self.folder_id.clone(),
             cached_remote_url: fresh,
             cached_remote_url_expires_at: expires,
@@ -648,6 +805,8 @@ mod tests {
             source_height: Some(1080),
             source_fps: Some(30.0),
             has_audio: Some(true),
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: Some("https://x".into()),
             cached_remote_url_expires_at: Some(700_000_000.0),
@@ -783,6 +942,8 @@ mod tests {
             source_height: None,
             source_fps: None,
             has_audio: None,
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
@@ -800,6 +961,8 @@ mod tests {
             source_height: None,
             source_fps: None,
             has_audio: None,
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
@@ -909,6 +1072,19 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn to_manifest_entry_project_relative_uses_forward_slashes_on_windows() {
+        let a = MediaAsset::new("a", "C:\\proj\\media\\x.mp4", ClipType::Video, "X", 2.0);
+        let e = a.to_manifest_entry(Some(Path::new("C:\\proj")), 0.0);
+        assert_eq!(
+            e.source,
+            MediaSource::Project {
+                relative_path: "media/x.mp4".into()
+            }
+        );
+    }
+
     #[test]
     fn to_manifest_entry_drops_expired_cached_url() {
         let mut a = MediaAsset::new("a", "/elsewhere/x.mp4", ClipType::Video, "X", 2.0);
@@ -939,6 +1115,8 @@ mod tests {
             source_height: Some(720),
             source_fps: Some(24.0),
             has_audio: Some(true),
+            color: None,
+            proxy: None,
             folder_id: Some("f1".into()),
             cached_remote_url: None,
             cached_remote_url_expires_at: None,

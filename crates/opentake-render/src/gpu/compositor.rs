@@ -9,39 +9,55 @@ use std::rc::Rc;
 
 use bytemuck::{Pod, Zeroable};
 
-use opentake_domain::{ColorGrade, LiftGammaGain, MaskShape};
+use opentake_domain::{
+    validate_effect_chain, ColorGrade, LiftGammaGain, LutReference, MaskShape, MAX_EFFECTS_PER_CLIP,
+};
 
-use crate::gpu::texture::GpuTexture;
+use crate::gpu::texture::{GpuLutTexture, GpuTexture};
 use crate::gpu::RenderError;
 use crate::plan::{FramePlan, LayerDraw, RenderSize, TextureSource};
 use crate::source::DecodedFrame;
+use opentake_domain::{MAX_MASKS_PER_CLIP, MAX_POLYGON_MASK_POINTS};
 
 /// Maximum masks evaluated in-shader per draw (mirrors `MASK_CAP` in
-/// `shader.wgsl`). Extra masks on a clip beyond this are ignored by the
-/// compositor (the domain still stores and unit-tests all of them).
-const MASK_CAP: usize = 4;
+/// `shader.wgsl`). The shared edit-command validation prevents authored data
+/// from exceeding this fixed uniform capacity.
+const MASK_CAP: usize = MAX_MASKS_PER_CLIP;
 
 /// Flag bits packed into `canvas_op_flags[3]` (bitcast to u32 in WGSL).
 const FLAG_PREMULTIPLY: u32 = 1;
 const FLAG_GRADE: u32 = 2;
 const FLAG_CHROMA: u32 = 4;
 
-/// Mask kind tags (mirror `MaskShape` / the WGSL `MASK_*` consts). Polygon masks
-/// are not rendered in-shader (see shader TODO); they encode as `MASK_NOOP` which
-/// the shader treats as a full-coverage circle (no clipping).
+/// Mask kind tags and polygon point cap mirror the WGSL constants.
 const MASK_LINEAR: f32 = 0.0;
 const MASK_CIRCLE: f32 = 1.0;
-/// A circle large enough to cover the whole canvas — used to make an unsupported
-/// (polygon) mask a no-op instead of silently clipping.
-const MASK_NOOP_GEO: [f32; 4] = [0.5, 0.5, 8.0, 8.0];
+const MASK_POLY: f32 = 2.0;
+const POLY_POINT_CAP: usize = MAX_POLYGON_MASK_POINTS;
+
+/// Effect kind tags mirror the closed registry and WGSL implementation.
+const EFFECT_GRAYSCALE: f32 = 0.0;
+const EFFECT_SEPIA: f32 = 1.0;
+const EFFECT_INVERT: f32 = 2.0;
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Default)]
+struct EffectGpu {
+    // (kind, amount, pad, pad)
+    data: [f32; 4],
+}
 
 /// One mask in the uniform (mirrors WGSL `MaskGpu`): `head = (kind, feather,
-/// invert, pad)`, `geo` packs the shape geometry.
+/// invert, polygon-point-count)`, `geo` packs linear/circle geometry, and
+/// `points` carries a bounded pen path.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable, Default)]
 struct MaskGpu {
     head: [f32; 4],
     geo: [f32; 4],
+    transform: [f32; 4],
+    transform_meta: [f32; 4],
+    points: [[f32; 4]; POLY_POINT_CAP],
 }
 
 /// Uniform mirror of WGSL `struct U` (SPEC §3.2), extended with the A-tier color
@@ -50,59 +66,99 @@ struct MaskGpu {
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Uniforms {
-    affine0: [f32; 4],         // a, b, c, d
-    crop_uv: [f32; 4],         // u0, v0, u1, v1
-    affine1_nat: [f32; 4],     // tx, ty, natW, natH
-    canvas_op_flags: [f32; 4], // canvasW, canvasH, opacity, flags-as-f32
-    grade_exp_wb: [f32; 4],    // exposure, wb_r, wb_g, wb_b
-    grade_lift: [f32; 4],      // lift_r, lift_g, lift_b, contrast
-    grade_gamma: [f32; 4],     // gamma_r, gamma_g, gamma_b, saturation
-    grade_gain: [f32; 4],      // gain_r, gain_g, gain_b, pad
-    chroma0: [f32; 4],         // key_r, key_g, key_b, similarity
-    chroma1: [f32; 4],         // smoothness, spill, pad, pad
-    mask_meta: [f32; 4],       // mask_count, pad, pad, pad
+    affine0: [f32; 4],              // a, b, c, d
+    crop_uv: [f32; 4],              // u0, v0, u1, v1
+    affine1_nat: [f32; 4],          // tx, ty, natW, natH
+    canvas_op_flags: [f32; 4],      // canvasW, canvasH, opacity, flags-as-f32
+    grade_exp_wb: [f32; 4],         // exposure, wb_r, wb_g, wb_b
+    grade_lift: [f32; 4],           // lift_r, lift_g, lift_b, contrast
+    grade_gamma: [f32; 4],          // gamma_r, gamma_g, gamma_b, saturation
+    grade_gain: [f32; 4],           // gain_r, gain_g, gain_b, pad
+    hsl_secondary_meta: [f32; 4],   // enabled, hue center, full width, feather
+    hsl_secondary_adjust: [f32; 4], // hue shift, saturation, lightness, pad
+    lut_meta: [f32; 4],             // enabled, intensity, table size, pad
+    lut_domain_min: [f32; 4],       // min r/g/b, pad
+    lut_domain_scale: [f32; 4],     // reciprocal domain span r/g/b, pad
+    chroma0: [f32; 4],              // key_r, key_g, key_b, similarity
+    chroma1: [f32; 4],              // smoothness, spill, pad, pad
+    mask_meta: [f32; 4],            // mask_count, pad, pad, pad
     masks: [MaskGpu; MASK_CAP],
+    effect_meta: [f32; 4], // effect_count, pad, pad, pad
+    effects: [EffectGpu; MAX_EFFECTS_PER_CLIP],
+}
+
+#[derive(Clone, Copy)]
+struct GradeBlocks {
+    exp_wb: [f32; 4],
+    lift: [f32; 4],
+    gamma: [f32; 4],
+    gain: [f32; 4],
+    hsl_meta: [f32; 4],
+    hsl_adjust: [f32; 4],
 }
 
 /// Identity color-grade uniform block (exposure 0, wb/gain 1, lift 0, gamma 1,
 /// contrast 0, saturation 1). Used when a draw has no grade.
-fn identity_grade_blocks() -> ([f32; 4], [f32; 4], [f32; 4], [f32; 4]) {
-    (
-        [0.0, 1.0, 1.0, 1.0], // exposure, wb
-        [0.0, 0.0, 0.0, 0.0], // lift, contrast
-        [1.0, 1.0, 1.0, 1.0], // gamma, saturation
-        [1.0, 1.0, 1.0, 0.0], // gain, pad
-    )
+fn identity_grade_blocks() -> GradeBlocks {
+    GradeBlocks {
+        exp_wb: [0.0, 1.0, 1.0, 1.0],   // exposure, wb
+        lift: [0.0, 0.0, 0.0, 0.0],     // lift, contrast
+        gamma: [1.0, 1.0, 1.0, 1.0],    // gamma, saturation
+        gain: [1.0, 1.0, 1.0, 0.0],     // gain, pad
+        hsl_meta: [0.0, 0.0, 1.0, 0.0], // disabled, center, width, feather
+        hsl_adjust: [0.0; 4],           // hue shift, saturation, lightness, pad
+    }
 }
 
-/// Pack a [`ColorGrade`] into the four uniform vec4 blocks the shader reads. The
+/// Pack a [`ColorGrade`] into the six uniform vec4 blocks the shader reads. The
 /// white balance is resolved to per-channel gain CPU-side (the shader multiplies
 /// it directly), keeping the WGSL mirror of `ColorGrade::apply_linear` simple.
-fn grade_blocks(g: &ColorGrade) -> ([f32; 4], [f32; 4], [f32; 4], [f32; 4]) {
+fn grade_blocks(g: &ColorGrade) -> GradeBlocks {
     let wb = g.white_balance_gain();
     let LiftGammaGain { lift, gamma, gain } = g.lift_gamma_gain;
-    (
-        [g.exposure as f32, wb.r as f32, wb.g as f32, wb.b as f32],
-        [
+    let (hsl_meta, hsl_adjust) =
+        g.hsl_secondary
+            .map_or(([0.0, 0.0, 1.0, 0.0], [0.0; 4]), |secondary| {
+                (
+                    [
+                        1.0,
+                        secondary.hue_center as f32,
+                        secondary.hue_width as f32,
+                        secondary.feather as f32,
+                    ],
+                    [
+                        secondary.hue_shift as f32,
+                        secondary.saturation as f32,
+                        secondary.lightness as f32,
+                        0.0,
+                    ],
+                )
+            });
+    GradeBlocks {
+        exp_wb: [g.exposure as f32, wb.r as f32, wb.g as f32, wb.b as f32],
+        lift: [
             lift.r as f32,
             lift.g as f32,
             lift.b as f32,
             g.contrast as f32,
         ],
-        [
+        gamma: [
             gamma.r as f32,
             gamma.g as f32,
             gamma.b as f32,
             g.saturation as f32,
         ],
-        [gain.r as f32, gain.g as f32, gain.b as f32, 0.0],
-    )
+        gain: [gain.r as f32, gain.g as f32, gain.b as f32, 0.0],
+        hsl_meta,
+        hsl_adjust,
+    }
 }
 
 /// Pack a draw's masks into the fixed-capacity uniform array, returning the count
-/// the shader should evaluate. Linear + circle masks encode directly; polygon
-/// masks (unsupported in-shader) encode as a full-coverage no-op so they neither
-/// clip nor crash. Masks beyond [`MASK_CAP`] are dropped.
+/// the shader should evaluate. Polygon paths are bounded to [`POLY_POINT_CAP`]
+/// points. The shared edit-command validation prevents authored data from
+/// exceeding either fixed GPU capacity; the `min`/`break` here is a deterministic
+/// defensive fallback for an in-memory timeline that bypassed that boundary.
 fn pack_masks(draw: &LayerDraw<'_>) -> ([MaskGpu; MASK_CAP], f32) {
     let mut out = [MaskGpu::default(); MASK_CAP];
     let mut n = 0usize;
@@ -111,7 +167,8 @@ fn pack_masks(draw: &LayerDraw<'_>) -> ([MaskGpu; MASK_CAP], f32) {
             break;
         }
         let invert = if mask.invert { 1.0 } else { 0.0 };
-        let (kind, geo) = match &mask.shape {
+        let mut points = [[0.0; 4]; POLY_POINT_CAP];
+        let (kind, geo, point_count) = match &mask.shape {
             MaskShape::Linear { point, normal } => (
                 MASK_LINEAR,
                 [
@@ -120,6 +177,7 @@ fn pack_masks(draw: &LayerDraw<'_>) -> ([MaskGpu; MASK_CAP], f32) {
                     normal.x as f32,
                     normal.y as f32,
                 ],
+                0,
             ),
             MaskShape::Circle { center, radius } => (
                 MASK_CIRCLE,
@@ -129,19 +187,57 @@ fn pack_masks(draw: &LayerDraw<'_>) -> ([MaskGpu; MASK_CAP], f32) {
                     radius.x as f32,
                     radius.y as f32,
                 ],
+                0,
             ),
-            // Polygon masks are unsupported in-shader (TODO: storage buffer for
-            // points). Encode as a full-canvas circle so they are a visual no-op
-            // rather than silently clipping.
-            MaskShape::Poly { .. } => (MASK_CIRCLE, MASK_NOOP_GEO),
+            MaskShape::Poly { points: path } => {
+                let point_count = path.len().min(POLY_POINT_CAP);
+                for (target, point) in points.iter_mut().zip(path).take(point_count) {
+                    *target = [point.x as f32, point.y as f32, 0.0, 0.0];
+                }
+                (MASK_POLY, [0.0; 4], point_count)
+            }
         };
         out[n] = MaskGpu {
-            head: [kind, mask.feather as f32, invert, 0.0],
+            head: [kind, mask.feather as f32, invert, point_count as f32],
             geo,
+            transform: [
+                mask.transform.offset.x as f32,
+                mask.transform.offset.y as f32,
+                mask.transform.scale.x as f32,
+                mask.transform.scale.y as f32,
+            ],
+            transform_meta: [
+                mask.transform.rotation_degrees.to_radians() as f32,
+                0.0,
+                0.0,
+                0.0,
+            ],
+            points,
         };
         n += 1;
     }
     (out, n as f32)
+}
+
+fn pack_effects(
+    draw: &LayerDraw<'_>,
+) -> Result<([EffectGpu; MAX_EFFECTS_PER_CLIP], f32), RenderError> {
+    validate_effect_chain(draw.effects)?;
+    let mut out = [EffectGpu::default(); MAX_EFFECTS_PER_CLIP];
+    let mut count = 0usize;
+    for effect in draw.effects.iter().filter(|effect| effect.enabled) {
+        let kind = match effect.name.as_str() {
+            "grayscale" => EFFECT_GRAYSCALE,
+            "sepia" => EFFECT_SEPIA,
+            "invert" => EFFECT_INVERT,
+            _ => unreachable!("validate_effect_chain accepts only registered effects"),
+        };
+        out[count] = EffectGpu {
+            data: [kind, effect.registered_param("amount")? as f32, 0.0, 0.0],
+        };
+        count += 1;
+    }
+    Ok((out, count as f32))
 }
 
 /// Working color format. The PoC composites in the sRGB non-linear domain
@@ -149,11 +245,102 @@ fn pack_masks(draw: &LayerDraw<'_>) -> ([MaskGpu; MASK_CAP], f32) {
 /// directly, matching AVFoundation most closely. Read-back returns those bytes.
 const RT_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
+/// Frame reconstruction requested from the media resolver when source and
+/// project rates differ.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextureInterpolationMode {
+    Nearest,
+    Blend,
+    OpticalFlow,
+}
+
+/// Deterministic recovery policy when the requested optical-flow backend is
+/// unavailable for a resolver/device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextureInterpolationFallback {
+    Nearest,
+    Blend,
+    Error,
+}
+
+/// Explicit source/target-rate contract shared by preview and export.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextureInterpolationConfig {
+    pub source_fps: f64,
+    pub target_fps: f64,
+    pub mode: TextureInterpolationMode,
+    pub fallback: TextureInterpolationFallback,
+}
+
+impl TextureInterpolationConfig {
+    pub fn new(
+        source_fps: f64,
+        target_fps: f64,
+        mode: TextureInterpolationMode,
+        fallback: TextureInterpolationFallback,
+    ) -> Result<Self, &'static str> {
+        if !source_fps.is_finite() || source_fps <= 0.0 {
+            return Err("source_fps must be finite and greater than zero");
+        }
+        if !target_fps.is_finite() || target_fps <= 0.0 {
+            return Err("target_fps must be finite and greater than zero");
+        }
+        Ok(Self {
+            source_fps,
+            target_fps,
+            mode,
+            fallback,
+        })
+    }
+
+    /// Backward-compatible resolver behavior for callers that have not selected
+    /// a rate-conversion mode.
+    pub const fn passthrough() -> Self {
+        Self {
+            source_fps: 1.0,
+            target_fps: 1.0,
+            mode: TextureInterpolationMode::Nearest,
+            fallback: TextureInterpolationFallback::Nearest,
+        }
+    }
+}
+
+/// Complete per-layer texture request. Keeping the interpolation contract on
+/// the request prevents preview/export adapters from silently selecting
+/// different reconstruction modes.
+#[derive(Clone, Copy, Debug)]
+pub struct TextureResolveRequest<'a> {
+    pub source: &'a TextureSource,
+    pub source_frame: i64,
+    pub interpolation: TextureInterpolationConfig,
+}
+
 /// Resolves a draw's [`TextureSource`] + source frame to a GPU texture. The
 /// compositor is decode-agnostic; the integrating layer (or a test) supplies
 /// pixels (e.g. via [`crate::source::FrameProvider`] + a cache).
 pub trait TextureResolver {
     fn resolve(&mut self, source: &TextureSource, source_frame: i64) -> Option<Rc<GpuTexture>>;
+
+    /// Resolve through an explicit rate-conversion contract. Existing
+    /// resolvers remain nearest-frame compatible; optical-flow-aware resolvers
+    /// override this method and apply the requested fallback policy before GPU
+    /// upload.
+    fn resolve_with_interpolation(
+        &mut self,
+        request: TextureResolveRequest<'_>,
+    ) -> Option<Rc<GpuTexture>> {
+        self.resolve(request.source, request.source_frame)
+    }
+
+    /// Resolve a validated project-managed LUT reference. The default keeps
+    /// source-only resolvers source-compatible; the compositor still fails a
+    /// draw carrying a LUT when no asset is returned.
+    fn resolve_lut(
+        &mut self,
+        _reference: &LutReference,
+    ) -> Result<Option<Rc<GpuLutTexture>>, RenderError> {
+        Ok(None)
+    }
 }
 
 /// A textured-quad compositor bound to one device.
@@ -161,6 +348,7 @@ pub struct Compositor {
     pipeline: wgpu::RenderPipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    fallback_lut: GpuLutTexture,
 }
 
 impl Compositor {
@@ -196,6 +384,22 @@ impl Compositor {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D3,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
@@ -264,10 +468,38 @@ impl Compositor {
             ..Default::default()
         });
 
+        // A bound texture is required even when a draw has no active LUT. The
+        // shader never samples this uninitialized 1x1 fallback when disabled.
+        let fallback_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("opentake-render inactive LUT binding"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D3,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let fallback_view = fallback_texture.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D3),
+            ..Default::default()
+        });
+
         Compositor {
             pipeline,
             bind_group_layout,
             sampler,
+            fallback_lut: GpuLutTexture {
+                texture: fallback_texture,
+                view: fallback_view,
+                size: 1,
+                domain_min: [0.0; 3],
+                domain_max: [1.0; 3],
+            },
         }
     }
 
@@ -284,6 +516,28 @@ impl Compositor {
         size: RenderSize,
         frame_plan: &FramePlan<'_>,
         resolver: &mut dyn TextureResolver,
+    ) -> Result<DecodedFrame, RenderError> {
+        self.render_to_rgba_with_interpolation(
+            device,
+            queue,
+            size,
+            frame_plan,
+            resolver,
+            TextureInterpolationConfig::passthrough(),
+        )
+    }
+
+    /// Render with an explicit source/target-rate interpolation policy. Preview
+    /// and export pass the same value here so their resolver behavior cannot
+    /// drift independently.
+    pub fn render_to_rgba_with_interpolation(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        size: RenderSize,
+        frame_plan: &FramePlan<'_>,
+        resolver: &mut dyn TextureResolver,
+        interpolation: TextureInterpolationConfig,
     ) -> Result<DecodedFrame, RenderError> {
         let rt = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("opentake-render target"),
@@ -306,11 +560,26 @@ impl Compositor {
         struct Prepared {
             bind_group: wgpu::BindGroup,
             _tex: Rc<GpuTexture>,
+            _lut: Option<Rc<GpuLutTexture>>,
         }
         let mut prepared: Vec<Prepared> = Vec::with_capacity(frame_plan.draws.len());
 
         for draw in &frame_plan.draws {
-            let Some(tex) = resolver.resolve(draw.source, draw.source_frame) else {
+            // Reject invalid persisted data even when the source is offline;
+            // an unknown effect or malformed grade must never degrade into an
+            // unchanged frame or reach the GPU as NaN/Inf uniforms.
+            let (effects, effect_count) = pack_effects(draw)?;
+            if let Some(grade) = draw.color_grade {
+                grade.validate()?;
+            }
+            if let Some(reference) = draw.lut {
+                reference.validate()?;
+            }
+            let Some(tex) = resolver.resolve_with_interpolation(TextureResolveRequest {
+                source: draw.source,
+                source_frame: draw.source_frame,
+                interpolation,
+            }) else {
                 continue;
             };
             // Assemble flags + the A-tier parameter blocks for this draw.
@@ -319,7 +588,7 @@ impl Compositor {
             } else {
                 0
             };
-            let (grade_exp_wb, grade_lift, grade_gamma, grade_gain) = match draw.color_grade {
+            let grade = match draw.color_grade {
                 Some(g) if !g.is_identity() => {
                     flags |= FLAG_GRADE;
                     grade_blocks(g)
@@ -342,6 +611,33 @@ impl Compositor {
                 None => ([0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]),
             };
             let (masks, mask_count) = pack_masks(draw);
+            let resolved_lut = match draw.lut {
+                Some(reference) => Some(
+                    resolver
+                        .resolve_lut(reference)?
+                        .ok_or_else(|| RenderError::MissingLut(reference.id.clone()))?,
+                ),
+                None => None,
+            };
+            let (lut_meta, lut_domain_min, lut_domain_scale) = match draw.lut {
+                Some(reference) => {
+                    let parsed = resolved_lut.as_ref().expect("resolved above");
+                    let domain_scale: [f32; 3] = std::array::from_fn(|channel| {
+                        1.0 / (parsed.domain_max[channel] - parsed.domain_min[channel])
+                    });
+                    (
+                        [1.0, reference.intensity as f32, parsed.size as f32, 0.0],
+                        [
+                            parsed.domain_min[0],
+                            parsed.domain_min[1],
+                            parsed.domain_min[2],
+                            0.0,
+                        ],
+                        [domain_scale[0], domain_scale[1], domain_scale[2], 0.0],
+                    )
+                }
+                None => ([0.0; 4], [0.0; 4], [1.0, 1.0, 1.0, 0.0]),
+            };
             let u = Uniforms {
                 affine0: [
                     draw.affine[0] as f32,
@@ -374,14 +670,21 @@ impl Compositor {
                     draw.opacity as f32,
                     f32::from_bits(flags),
                 ],
-                grade_exp_wb,
-                grade_lift,
-                grade_gamma,
-                grade_gain,
+                grade_exp_wb: grade.exp_wb,
+                grade_lift: grade.lift,
+                grade_gamma: grade.gamma,
+                grade_gain: grade.gain,
+                hsl_secondary_meta: grade.hsl_meta,
+                hsl_secondary_adjust: grade.hsl_adjust,
+                lut_meta,
+                lut_domain_min,
+                lut_domain_scale,
                 chroma0,
                 chroma1,
                 mask_meta: [mask_count, 0.0, 0.0, 0.0],
                 masks,
+                effect_meta: [effect_count, 0.0, 0.0, 0.0],
+                effects,
             };
             let ubuf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("opentake-render uniform"),
@@ -390,6 +693,10 @@ impl Compositor {
                 mapped_at_creation: false,
             });
             queue.write_buffer(&ubuf, 0, bytemuck::bytes_of(&u));
+
+            let lut_view = resolved_lut
+                .as_ref()
+                .map_or(&self.fallback_lut.view, |lut| &lut.view);
 
             let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("opentake-render bind group"),
@@ -407,11 +714,20 @@ impl Compositor {
                         binding: 2,
                         resource: wgpu::BindingResource::Sampler(&self.sampler),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(lut_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
                 ],
             });
             prepared.push(Prepared {
                 bind_group,
                 _tex: tex,
+                _lut: resolved_lut,
             });
         }
 

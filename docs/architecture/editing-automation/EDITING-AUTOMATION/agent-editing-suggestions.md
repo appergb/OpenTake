@@ -23,9 +23,9 @@ V1 automation tools:
 - `smart_reframe`: proposal or write mode, applies crop/transform commands.
 - `tighten_silences`: detects low-energy PCM ranges and maps them to `RippleDeleteRanges`.
 
-Deferred:
+Transcript-backed:
 
-- `remove_filler_words`: depends on word-level `get_transcript` being truly wired through timeline frames. Until then, it must report unavailable rather than guessing from captions or segments.
+- `remove_filler_words`: reads word-level `get_transcript` project frames, matches a configurable multi-word lexicon, and returns reviewable cuts plus `ripple_delete_ranges` commands. It is fail-closed and undiscoverable without the transcript bridge.
 
 ## Suggestion Shape
 
@@ -62,7 +62,7 @@ Workflow plugin rules are additive. Built-in signal rules still apply.
 
 ## Current Tool Availability
 
-The analysis-driven tool names are intentionally visible in MCP. `detect_beats`, `auto_cut_to_beats`, and `tighten_silences` validate args and use PCM analysis through the `CoreHandle` boundary to return preview data or candidate edit commands. `smart_reframe` validates args but still returns a vision-backend diagnostic until sampled-frame/saliency access is available.
+The analysis-driven tool names are capability-gated in MCP. `detect_beats`, `auto_cut_to_beats`, and `tighten_silences` validate args and use PCM analysis through the `CoreHandle` boundary to return preview data or candidate edit commands. `remove_filler_words` appears only with a live media/transcript bridge. `smart_reframe` validates args but still returns a vision-backend diagnostic until sampled-frame/saliency access is available.
 
 ## Acceptance Hooks
 
@@ -72,4 +72,4 @@ See [acceptance tests](acceptance-tests.md). Required checks:
 - `write=false` never calls `CoreHandle::apply()`;
 - successful writes return shortened IDs;
 - `context_signal` survives both success and no-op proposal paths;
-- `remove_filler_words` is unavailable until transcript is wired.
+- `remove_filler_words` returns stable, word-aligned review cuts; applying only accepted ranges leaves rejected words untouched and one undo restores the exact prior timeline.

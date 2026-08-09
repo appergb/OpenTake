@@ -1,0 +1,52 @@
+{
+  "schema": "opentake-ffmpeg-sidecars-v2",
+  "release": "Per-target, checksum-pinned redistributable FFmpeg builds",
+  "targets": {
+    "aarch64-apple-darwin": {
+      "ffmpeg": {
+        "url": "https://www.osxexperts.net/ffmpeg7arm.zip",
+        "sha256": "326895b16940f238d76e902fc71150f10c388c281985756f9850ff800a2f1499",
+        "version": "7.0",
+        "archive": {
+          "format": "zip",
+          "member": "ffmpeg",
+          "sha256": "563111a239fe70d2e5c84a5382204a7d0bf0a332385a92a44baff36d313e27f2"
+        }
+      },
+      "ffprobe": {
+        "url": "https://www.osxexperts.net/ffprobe7arm.zip",
+        "sha256": "307e09bc01bd72bde5f441a1a6df68769da3b2b6e431accfbfc9cf3893ad00c4",
+        "version": "7.0",
+        "archive": {
+          "format": "zip",
+          "member": "ffprobe",
+          "sha256": "e5ae34ee2f0b3594892a695fd733646904bbc7eb40af3b359ed91538ddcb5513"
+        }
+      }
+    },
+    "x86_64-apple-darwin": {
+      "ffmpeg": {
+        "url": "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-darwin-x64",
+        "sha256": "ebdddc936f61e14049a2d4b549a412b8a40deeff6540e58a9f2a2da9e6b18894",
+        "version": "6.1.1"
+      },
+      "ffprobe": {
+        "url": "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffprobe-darwin-x64",
+        "sha256": "fa3add0ce901f7241abe0dfc0155d958fc834aca3f8ce61f87cc712ae669c1e0",
+        "version": "6.1.1"
+      }
+    },
+    "x86_64-pc-windows-msvc": {
+      "ffmpeg": {
+        "url": "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffmpeg-win32-x64",
+        "sha256": "04e1307997530f9cf2fe35cba2ca7e8875ca91da02f89d6c7243df819c94ad00",
+        "version": "6.1.1"
+      },
+      "ffprobe": {
+        "url": "https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1/ffprobe-win32-x64",
+        "sha256": "3a7e2dc003dc2cd1472827e4c7c4f056ae1ae0ae7c5bbc580c99b49827351ba4",
+        "version": "6.1.1"
+      }
+    }
+  }
+}

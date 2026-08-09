@@ -142,14 +142,18 @@ core 编排但不实现的能力（preview / export / media import / generation�
 - Tauri 边界 DTO + handler（`dto.rs`，**无 tauri 依赖**）：`get_timeline` / `edit_apply` / `undo` / `redo` / `project_open` / `project_save` / `project_new`，及 `CmdError`（`code` = `validation` | `internal`）。
 
 **计划中（SPEC 草拟、代码尚未落地）：**
-- **能力相关的 Tauri 命令尚未在 `dto.rs` 出现**：`seek` / `import_media`（异步后端版）/ `export_start`——它们依赖 `PreviewBackend` / `MediaImporter` / `ExportBackend` 的真实实现（`opentake-render` / `opentake-media`，后续阶段）。当前只有 trait 接缝 + `Unsupported` 占位。
 - **更多 `CoreEvent` 变体**：`PreviewFrame` / `ExportProgress` / `ExportDone` / `ExportFailed` / `GenerationProgress`（随 render / export / gen 后端落地补齐）。
-- **`preview_frame` 像素旁路**：事件只带元数据、像素走 Channel/asset 协议——契约属 core，传输属 `src-tauri` + `opentake-render` 协商（后续阶段）。
-- **`src-tauri` 的 `#[tauri::command]` 薄壳 + 事件桥 task**：本 crate 已备好无 tauri 依赖的 handler 与 `EventBus::subscribe`，桥接代码在 `src-tauri`（后续阶段）。
 - **`GenBackend`** 整体可选，早期为 `None`。
-- **助手专属 undo 游标**（`AgentUndoCursor`）：属 `opentake-agent`，**不在 core**；core 只暴露通用 `undo()`/`redo()`。
 
-> 结论：装配层的**纯逻辑核**（会话、命令路由、事务透传、版本、事件、工程读写、同步媒体导入、边界 DTO）已写通且可单测；待收口集中在**能力后端接线**（render/media/gen 的真实实现 + 对应 Tauri 命令与事件）。
+> **2026-08-03 更新：**以下曾列为「计划中」的项已随 Beta 1/2 落地，不再属于本模块待办：
+> 能力命令（`seek`/播放控制、异步 `import_media`、`export_start`/`export_video`）已由
+> `src-tauri` + `opentake-media`/`opentake-render`/`opentake-gen` 真实实现并注册；事件桥、
+> 像素旁路（asset/JPEG 通道）、`GenBackend`（BYOK）、助手专属 undo 游标
+> （`OwnedUndoResult` / `ChatTurnGate`，见 `opentake-agent`）均已交付。完整证据见
+> `docs/releases/1.0.0-beta.2.md` 与 `docs/audit/2026-08-02/beta-functional-verification.md`。
+
+> 结论：装配层（会话、命令路由、事务透传、版本、事件、工程读写、媒体导入、边界 DTO）已全部写通
+> 并接入真实能力后端；Beta 收尾集中在验证与发布，不再有装配层大项。
 
 ## 移植铁律（Swift → Rust，本模块强约束）
 

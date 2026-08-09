@@ -20,6 +20,8 @@ fn entry(id: &str, name: &str, kind: ClipType, duration: f64) -> MediaManifestEn
         source_height: Some(1080),
         source_fps: Some(30.0),
         has_audio: Some(kind == ClipType::Video || kind == ClipType::Audio),
+        color: None,
+        proxy: None,
         folder_id: None,
         cached_remote_url: None,
         cached_remote_url_expires_at: None,

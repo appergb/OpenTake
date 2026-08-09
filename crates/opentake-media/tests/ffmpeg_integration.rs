@@ -14,7 +14,7 @@ use opentake_media::decode::spawn_video_stream;
 use opentake_media::ffmpeg_status::{ffmpeg_available, ffprobe_available};
 use opentake_media::{
     decode_frame_at, encode, extract_pcm, probe, video_thumbnails, waveform, ExportPreset,
-    ExportResolution, FrameRequest, PcmFormat, PcmSpec, VideoCodec, VideoEncoder,
+    ExportResolution, FrameRequest, PcmFormat, PcmSpec, RgbaFrame, VideoCodec, VideoEncoder,
     VideoStreamRequest,
 };
 
@@ -424,6 +424,46 @@ fn encode_h265_roundtrip_produces_hevc_mp4() {
 #[test]
 fn encode_prores_roundtrip_produces_prores_mov() {
     encode_codec_roundtrip(VideoCodec::ProRes422, "mov", "prores");
+}
+
+#[test]
+fn prores_4444_roundtrip_preserves_alpha_plane() {
+    if !ffmpeg_available() || !ffprobe_available() {
+        eprintln!("SKIP: ffmpeg/ffprobe unavailable");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let output = root.path().join("alpha.mov");
+    let preset = ExportPreset::new(VideoCodec::ProRes4444, ExportResolution::P720);
+    let mut encoder = VideoEncoder::new(&output, 2, 2, 1, &preset).unwrap();
+    encoder
+        .push_frame(&RgbaFrame {
+            width: 2,
+            height: 2,
+            rgba: vec![
+                255, 0, 0, 0, 0, 255, 0, 85, 0, 0, 255, 170, 255, 255, 255, 255,
+            ],
+        })
+        .unwrap();
+    encoder.finish().unwrap();
+    let decoded = decode_frame_at(
+        &output,
+        &FrameRequest {
+            max_size: (2, 2),
+            tolerance_secs: 0.0,
+            ..FrameRequest::default()
+        },
+    )
+    .unwrap()
+    .1;
+    let alpha = decoded
+        .rgba
+        .chunks_exact(4)
+        .map(|pixel| pixel[3])
+        .collect::<Vec<_>>();
+    for (actual, expected) in alpha.iter().zip([0_u8, 85, 170, 255]) {
+        assert!(actual.abs_diff(expected) <= 3, "{alpha:?}");
+    }
 }
 
 #[test]

@@ -1,5 +1,19 @@
 # OpenTake 进阶能力设计(对标剪映模块 1–5 的差距深化)
 
+> **2026-08-01 Beta 对账附录（覆盖下表“现状”列）**：本文的 `missing` / `partial`
+> 是实现前的历史快照，继续保留作为设计来源，不再表示当前代码状态。首个 Beta 已闭环：
+> 通用特效、交叉溶解、线性光调色、Lift/Gamma/Gain、HSL、3D LUT、绿幕、圆形/线性/
+> 钢笔蒙版、参考色彩匹配、RVM 抠像、防抖、运动追踪、光流补帧、智能擦除、响度、降噪、
+> 声部分离、嵌套时间线、字幕样式同步与 SRT/VTT、口播清理、图文成片、字幕翻译、数字人和
+> 音色克隆。代码与实机证据以
+> `docs/audit/2026-07-14/runtime-artifacts/automated/` 及
+> `docs/releases/1.0.0-beta.1.md` 为准。
+>
+> 后续 Beta 明确保留的扩展是：Bezier/Spring 物理 easing、RGB 多维曲线、wipe/slide/zoom
+> 等通用双源转场、本地神经超分、任意混音的神经语义分轨、高阶曲线变速、多机位自动对齐、
+> 任意 Motion Canvas TSX 与透明 frame sequence。这些是产品路线，不属于
+> `1.0.0-beta.1` 可用性门禁；当前 UI 不把它们伪装成已可用能力。
+
 > 来源:`docs/CAPCUT-GAP.md`(5 个子 Agent 对照剪映模块 1–5 与上游源码的逐特性差距分析)。
 > 范围:**不含**剪映模块 6(自然语言交互/语音助手 —— OpenTake 已有 Agent)与模块 7(云生态/企业协作)。
 > 现状:33 项中 已有 2 / 部分 7 / 缺失 24。上游 Palmier Pro 自述「尚无:特效/转场/调色/蒙版/图形」,源码核对完全坐实。
@@ -76,7 +90,7 @@ OpenTake 补齐这些进阶能力,**几乎不需要新建基础设施**,全部�
 | 复合片段嵌套 nested clip | missing | high | p2 | **过渡方案先做**:`saveTimelineRange` 用 FFmpeg/wgpu 重写为「打组烧成内部媒体 + content-hash 缓存」满足「精简图层」;**完整方案后做**:domain 新增 `MediaSource::Nested(child_timeline_id)`,RenderPlan 递归展开或子序列离屏渲染成单层 |
 | 多机位自动对齐 multicam | missing | medium | p2 | 纯本地:各机位音轨 → PCM → rustfft **互相关**求最佳时移 → ops 整体平移到同一时基;多角度切换面板作后续 UI |
 | 字幕样式全局批量同步 | partial(共享样式在,批量算子缺) | low | p1 | 新增「改一处 → 批量回写整 captionGroup」编辑命令 |
-| 导出 .srt 字幕文件 | missing | low | p1 | 从 caption 模型按时码序列化 SubRip;顺带支持 .vtt |
+| 导出 .srt 字幕文件 | **已有** | low | p1 | caption 模型按时码序列化 SubRip/WebVTT；TitleBar 原生保存对话框接 `export_subtitles`，SRT/VTT 均有 Rust 与 UI 路由测试 |
 
 ---
 
@@ -88,8 +102,8 @@ OpenTake 补齐这些进阶能力,**几乎不需要新建基础设施**,全部�
 |---|---|---|---|---|
 | 智能剪口播(剔除停顿/语气词) | partial(已规划) | medium | p1 | **本地为主**:词级 `get_transcript` + 静音检测 → Rust 内一次算好 ripple 区间(高阶工具 `remove_filler_words`/`tighten_silences`,避免把帧算术外包给 LLM) |
 | 图文成片 script-to-video | partial(地基在) | high | p1 | agent 编排既有工具:脚本 → `generate_image`→`generate_video`→`generate_audio`(配音)→`add_clips`/`add_texts`/`set_transition`;素材匹配用 SigLIP2 搜索 + import_media 接 stock |
-| 音色克隆 voice cloning | missing | high | p2 | 外部 API(ElevenLabs 等)经 opentake-gen,扩展 audio 生成参数支持自定义音色 |
-| 虚拟数字人 digital avatar | missing | high | p3 | 外部 API(HeyGen/fal 等)经 opentake-gen,新增 catalog kind |
+| 音色克隆 voice cloning | **has** | high | p2 | ElevenLabs IVC 注册/TTS/永久撤销生产桥；参考音频、同意记录、请求哈希和 provider voice id 持久化，生成音频原子导入落轨并可试听/撤销 |
+| 虚拟数字人 digital avatar | **has** | high | p3 | fal Sync Lipsync v3 image-to-video 生产桥；人像+驱动音频、同意与成本确认、结果探测、原子导入落轨和预览/撤销完整接入 |
 | 多语种翻译(字幕) | partial(靠 agent) | medium | p2 | 一等公民:离线 MT 或外部 API + LLM 兜底,翻译后保持时码 |
 
 ---

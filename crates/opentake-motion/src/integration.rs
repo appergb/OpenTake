@@ -11,13 +11,15 @@
 //!
 //! Decoding a frame file back to RGBA is deliberately *not* hard-wired to a PNG
 //! library here. Frames may be produced by the [`StubRenderer`](crate::renderer)
-//! (our tiny stored-block PNG), by the later native headless-Chromium fallback
+//! (our tiny stored-block PNG), by the native headless-Chromium fallback
 //! (standard PNG), by Motion Canvas image-sequence output, or by a future
 //! raw-RGBA fast path. So [`MotionClipSource`] takes a
 //! `FrameDecoder` — a `Fn(&Path) -> Option<DecodedFrame>` — supplied by the
 //! integrating layer (which already owns an image/codec stack). Tests inject the
-//! stub's own decoder; the app injects `image`/ffmpeg. This keeps this crate's
-//! default dependency surface free of a decoder while still being fully testable.
+//! stub's own decoder, and the feature-gated Chromium acceptance decodes a live
+//! browser PNG through this same boundary; the app injects `image`/ffmpeg. This
+//! keeps this crate's default dependency surface free of a decoder while still
+//! being fully testable.
 
 use std::path::Path;
 
@@ -59,6 +61,8 @@ impl<'a> MotionClipSource<'a> {
 
     /// Decode the frame at a 0-based index, clamping past-the-end to the last
     /// frame (freeze-frame hold, consistent with [`RenderedClip::frame_path`]).
+    /// Missing/corrupt input remains an absent frame (`None`); this adapter does
+    /// not repair, replace, or otherwise mutate the frame cache.
     pub fn frame(&self, frame: i64) -> Option<DecodedFrame> {
         let idx = if frame < 0 { 0usize } else { frame as usize };
         let path = self.clip.frame_path(idx)?;
@@ -167,9 +171,29 @@ mod tests {
     #[test]
     fn missing_decoder_result_is_none() {
         let (clip, _tmp) = render_clip(true);
-        // A decoder that always fails surfaces None (compositor treats as absent).
-        let src = MotionClipSource::new(clip, |_p: &Path| None);
-        assert!(src.decoded_frame("ref", 0).is_none());
+        let valid_path = clip.frames[0].clone();
+        let corrupt_path = clip.frames[1].clone();
+        let missing_path = clip.frames[2].clone();
+        let cache_dir = valid_path.parent().unwrap().to_path_buf();
+        let src = MotionClipSource::new(clip, image_decoder);
+
+        let valid = src
+            .decoded_frame("ref", 0)
+            .expect("valid frame remains decodable");
+        assert_eq!((valid.width, valid.height), (6, 4));
+
+        std::fs::write(&corrupt_path, b"not a png").unwrap();
+        std::fs::remove_file(&missing_path).unwrap();
+        let entries_before = std::fs::read_dir(&cache_dir).unwrap().count();
+
+        assert!(src.decoded_frame("ref", 1).is_none());
+        assert_eq!(std::fs::read(&corrupt_path).unwrap(), b"not a png");
+        assert!(src.decoded_frame("ref", 2).is_none());
+        assert!(!missing_path.exists());
+        assert_eq!(
+            std::fs::read_dir(&cache_dir).unwrap().count(),
+            entries_before
+        );
     }
 
     #[test]

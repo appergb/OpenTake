@@ -136,6 +136,22 @@ fn safe_public_detail(kind: PublicErrorKind, private_detail: &str) -> Option<Str
         PublicErrorKind::InvalidArguments(tool) => {
             Some(safe_invalid_argument_detail(tool, private_detail))
         }
+        PublicErrorKind::ResourceNotFound(tool) => Some(format!(
+            "{} could not resolve the referenced project resource.",
+            tool.as_str()
+        )),
+        PublicErrorKind::CapabilityUnavailable(tool) => Some(format!(
+            "{} cannot inspect this source in the current build or source state.",
+            tool.as_str()
+        )),
+        PublicErrorKind::PathAuthorityRequired(tool) => Some(format!(
+            "{} cannot use a model-supplied local path without user-granted file access.",
+            tool.as_str()
+        )),
+        PublicErrorKind::AnalysisLowConfidence(tool) => Some(format!(
+            "{} could not identify the selected subject reliably.",
+            tool.as_str()
+        )),
     }
 }
 
@@ -312,6 +328,41 @@ mod tests {
         assert!(wire.contains("entries[3].startFrame"));
         assert!(wire.contains("wrong type"));
         assert!(!wire.contains("expected i32"));
+    }
+
+    #[test]
+    fn typed_unavailable_error_exposes_only_fixed_recovery_contract() {
+        let private = "inspect_media: /Users/alice/private.mov is offline";
+        let result = ToolResult::public_error(
+            PublicErrorKind::CapabilityUnavailable(ToolName::InspectMedia),
+            private,
+        );
+        let value = safe_tool_result_for_llm(&result);
+        assert_eq!(value["code"], "MCP_CAPABILITY_UNAVAILABLE");
+        assert_eq!(
+            value["message"],
+            "This capability is unavailable for the referenced media."
+        );
+        assert_eq!(
+            value["details"],
+            "inspect_media cannot inspect this source in the current build or source state."
+        );
+        assert!(!value.to_string().contains("/Users/alice"));
+    }
+
+    #[test]
+    fn low_confidence_error_has_a_fixed_safe_retry_contract() {
+        let result = ToolResult::public_error(
+            PublicErrorKind::AnalysisLowConfidence(ToolName::TrackMotion),
+            "confidence=0.02 path=/private/source.mp4",
+        );
+        let value = safe_tool_result_for_llm(&result);
+        assert_eq!(value["code"], "MCP_ANALYSIS_LOW_CONFIDENCE");
+        assert_eq!(
+            value["details"],
+            "track_motion could not identify the selected subject reliably."
+        );
+        assert!(!value.to_string().contains("/private/source.mp4"));
     }
 
     #[test]

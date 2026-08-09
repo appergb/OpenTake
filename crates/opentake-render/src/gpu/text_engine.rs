@@ -16,16 +16,17 @@
 //! - **Rich text** (multi-span styles): cosmic-text `Buffer::set_rich_text` takes
 //!   an iterator of `(text, Attrs)` spans; the current path uses `set_text`
 //!   (single style per clip) — switching needs a `TextRasterRequest` shape change.
-//! - **Emoji / CJK fallback**: cosmic-text 0.12 `Attrs` has no `family_emoji` /
-//!   `family_asian` (added in 0.14+); fallback relies on fontdb's default
-//!   sans-serif. TODO when the crate is bumped.
+//! - **Emoji / CJK selection hints**: cosmic-text 0.12 `Attrs` has no
+//!   `family_emoji` / `family_asian` (added in 0.14+), so fallback uses its
+//!   script-aware fontdb search rather than an explicit preferred family.
 //! - **Vertical text**: unsupported (upstream doesn't expose it via `TextStyle`);
 //!   v1 leaves it horizontal.
 
 use std::cell::RefCell;
 
 use cosmic_text::{
-    Align, Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, Style, SwashCache, Weight,
+    fontdb, Align, Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, Style, SwashCache,
+    Weight,
 };
 use opentake_domain::{Rgba, TextAlignment};
 
@@ -57,9 +58,23 @@ impl CosmicTextRasterizer {
     /// directories once and is mildly expensive (~tens of ms); construct it once
     /// and reuse.
     pub fn new() -> Self {
+        Self::from_font_system(FontSystem::new())
+    }
+
+    /// Build the deterministic no-font fallback used by headless runtimes and
+    /// tests. Text requests still yield a correctly sized premultiplied frame;
+    /// glyph coverage is empty while background and border styles remain live.
+    pub fn without_system_fonts() -> Self {
+        Self::from_font_system(FontSystem::new_with_locale_and_db(
+            "en-US".to_string(),
+            fontdb::Database::new(),
+        ))
+    }
+
+    fn from_font_system(font_system: FontSystem) -> Self {
         CosmicTextRasterizer {
             inner: RefCell::new(Inner {
-                font_system: FontSystem::new(),
+                font_system,
                 swash_cache: SwashCache::new(),
             }),
         }
@@ -180,6 +195,22 @@ fn rasterize_box(inner: &mut Inner, req: &TextRasterRequest<'_>) -> Option<Decod
     let fs = &mut inner.font_system;
     let swash = &mut inner.swash_cache;
 
+    // cosmic-text 0.12 assumes a default font exists and panics while shaping
+    // an empty database. Preserve the public non-crashing headless contract by
+    // rendering the non-glyph box styles directly when no face is available.
+    if fs.db().faces().next().is_none() {
+        let mut out = vec![0u8; (bw * bh * 4) as usize];
+        if style.background.enabled {
+            fill_rect(&mut out, bw, bh, 0, 0, bw, bh, style.background.color);
+        }
+        if style.border.enabled {
+            let scale = req.canvas.1 as f64 / CANVAS_BASIS_HEIGHT;
+            let thickness = (2.0 * scale).round().max(1.0) as u32;
+            stroke_rect(&mut out, bw, bh, thickness, style.border.color);
+        }
+        return Some(DecodedFrame::new(bw, bh, out, true));
+    }
+
     // Canvas-relative font size (upstream basis) — at least 1px.
     let font_px =
         (style.font_size * style.font_scale * (req.canvas.1 as f64 / CANVAS_BASIS_HEIGHT)).max(1.0);
@@ -262,7 +293,9 @@ fn rasterize_box(inner: &mut Inner, req: &TextRasterRequest<'_>) -> Option<Decod
     composite_mask(&mut out, bw, bh, &mask, 0, 0, style.color);
 
     if style.border.enabled {
-        stroke_rect(&mut out, bw, bh, style.border.color);
+        let scale = req.canvas.1 as f64 / CANVAS_BASIS_HEIGHT;
+        let thickness = (2.0 * scale).round().max(1.0) as u32;
+        stroke_rect(&mut out, bw, bh, thickness, style.border.color);
     }
 
     Some(DecodedFrame::new(bw, bh, out, true))
@@ -321,9 +354,10 @@ fn fill_rect(out: &mut [u8], w: u32, h: u32, x0: u32, y0: u32, rw: u32, rh: u32,
     }
 }
 
-/// Stroke the box perimeter (2px) with a straight-alpha color.
-fn stroke_rect(out: &mut [u8], w: u32, h: u32, color: Rgba) {
-    let t = 2u32.min(w).min(h);
+/// Stroke the box perimeter with a straight-alpha color. Thickness is already
+/// scaled from the upstream 2px-at-1080p basis by the caller.
+fn stroke_rect(out: &mut [u8], w: u32, h: u32, thickness: u32, color: Rgba) {
+    let t = thickness.min(w).min(h);
     fill_rect(out, w, h, 0, 0, w, t, color); // top
     fill_rect(out, w, h, 0, h.saturating_sub(t), w, t, color); // bottom
     fill_rect(out, w, h, 0, 0, t, h, color); // left

@@ -159,7 +159,7 @@ export function LibraryView() {
 
           <div style={{ flex: 1 }} />
 
-          <SearchBox value={search} onChange={setSearch} placeholder={t("library.search")} />
+          <LibrarySearchBox value={search} onChange={setSearch} placeholder={t("library.search")} />
           <SortSelect value={sort} onChange={setSort} />
         </header>
 
@@ -207,10 +207,10 @@ function CategoryTree({ custom }: { custom: ReadonlyArray<string> }) {
         style={{
           padding: "0 var(--space-sm) var(--space-md)",
           fontSize: "var(--fs-xs)",
-          fontWeight: "var(--fw-semibold)",
-          letterSpacing: "var(--tracking-wide)",
-          textTransform: "uppercase",
-          color: "var(--text-muted)",
+            fontWeight: "var(--fw-semibold)",
+            letterSpacing: "var(--tracking-wide)",
+            textTransform: "uppercase",
+            color: "var(--text-muted)",
         }}
       >
         {t("library.libraries")}
@@ -294,7 +294,7 @@ function CategoryRow({
   );
 }
 
-function SearchBox({
+export function LibrarySearchBox({
   value,
   onChange,
   placeholder,
@@ -319,13 +319,19 @@ function SearchBox({
     >
       <Icon icon={Search} size={13} />
       <input
+        type="search"
+        aria-label={placeholder}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
         style={{
           width: 160,
+          height: "100%",
+          minHeight: 24,
+          padding: 0,
           border: "none",
           outline: "none",
+          appearance: "none",
           background: "transparent",
           color: "var(--text-primary)",
           fontSize: "var(--fs-sm)",
@@ -382,7 +388,7 @@ export function LibraryEntryGrid({
           display: "flex",
           alignItems: "center",
           justifyContent: "center",
-          color: "var(--text-muted)",
+          color: "var(--text-tertiary)",
           fontSize: "var(--fs-sm-md)",
         }}
       >
@@ -421,6 +427,7 @@ export function LibraryEntryCard({ entry }: { entry: LibraryEntry }) {
   const unfavorite = useLibraryStore((s) => s.unfavorite);
   const categorize = useLibraryStore((s) => s.categorize);
   const [hovered, setHovered] = useState(false);
+  const [actionsFocused, setActionsFocused] = useState(false);
   const [busy, setBusy] = useState(false);
   // Lazy-mount the thumbnail: a video entry without a cached poster falls back
   // to the full source file, so mounting every card's <video> at once loads
@@ -471,6 +478,12 @@ export function LibraryEntryCard({ entry }: { entry: LibraryEntry }) {
       ref={cardRef}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
+      onFocusCapture={() => setActionsFocused(true)}
+      onBlurCapture={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          setActionsFocused(false);
+        }
+      }}
       title={name}
       style={{ display: "flex", flexDirection: "column", gap: 4, position: "relative" }}
     >
@@ -479,7 +492,7 @@ export function LibraryEntryCard({ entry }: { entry: LibraryEntry }) {
           position: "relative",
           aspectRatio: "5 / 4",
           background: "var(--bg-placeholder)",
-          border: `var(--bw-thin) solid ${hovered ? "var(--border-divider)" : "var(--border-primary)"}`,
+          border: `var(--bw-thin) solid ${hovered || actionsFocused ? "var(--border-divider)" : "var(--border-primary)"}`,
           borderRadius: "var(--radius-sm)",
           display: "flex",
           alignItems: "center",
@@ -506,32 +519,33 @@ export function LibraryEntryCard({ entry }: { entry: LibraryEntry }) {
           <Icon icon={typeIcon(entry.type)} size={26} strokeWidth={1.4} />
         )}
 
-        {/* hover 操作行:导入 / 改分类 / 取消收藏 */}
-        {hovered && (
-          <div
-            style={{
-              position: "absolute",
-              top: "var(--space-xs)",
-              right: "var(--space-xs)",
-              display: "flex",
-              gap: 4,
-            }}
-          >
-            <CardAction
-              icon={Import}
-              title={t("library.import")}
-              onClick={() => void handleImport()}
-              disabled={busy}
-            />
-            <CardAction icon={Tag} title={t("library.categorize")} onClick={handleCategorize} />
-            <CardAction
-              icon={Trash2}
-              title={t("library.unfavorite")}
-              danger
-              onClick={() => void unfavorite(entry.id)}
-            />
-          </div>
-        )}
+        {/* 操作行常驻 tab 顺序；鼠标悬停或键盘焦点进入卡片时显现。 */}
+        <div
+          style={{
+            position: "absolute",
+            top: "var(--space-xs)",
+            right: "var(--space-xs)",
+            display: "flex",
+            gap: 4,
+            opacity: hovered || actionsFocused ? 1 : 0,
+            pointerEvents: hovered || actionsFocused ? "auto" : "none",
+            transition: "opacity var(--anim-hover, 150ms) ease-out",
+          }}
+        >
+          <CardAction
+            icon={Import}
+            title={t("library.import")}
+            onClick={() => void handleImport()}
+            disabled={busy}
+          />
+          <CardAction icon={Tag} title={t("library.categorize")} onClick={handleCategorize} />
+          <CardAction
+            icon={Trash2}
+            title={t("library.unfavorite")}
+            danger
+            onClick={() => void unfavorite(entry.id)}
+          />
+        </div>
       </div>
 
       <div

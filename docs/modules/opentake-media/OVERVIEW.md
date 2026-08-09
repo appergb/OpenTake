@@ -52,7 +52,7 @@ opentake-core / src-tauri / opentake-agent / opentake-render   调用方
 ## 3. 关键概念与数据流
 
 ### FFmpeg sidecar 编解码（与 SPEC 的关键实现偏差）
-**实现走 `ffmpeg` / `ffprobe` 命令行二进制（ffmpeg-sidecar），不链接 `libav*`。** 原因：本机工具链为 ffmpeg 8.1（libavcodec 62），C 绑定 crate（`ffmpeg-next` / `ffmpeg-the-third`）不支持，且 `pkg-config` 缺失。`ff.rs` 封装二进制发现与一次性 ffprobe JSON 查询，上层解码模块用裸 stdin/stdout 管道交换原始像素/PCM。这与多处架构文档（[ARCHITECTURE.md](../../architecture/ARCHITECTURE.md) §1、[ROADMAP.md](../../architecture/ROADMAP.md) Phase 2、本模块 [SPEC.md](SPEC.md) §1.2 仍写 `ffmpeg-next`）存在偏差——以代码为准，详见 [probe-ff.md](probe-ff.md)。
+**实现走 `ffmpeg` / `ffprobe` 命令行二进制（ffmpeg-sidecar），不链接 `libav*`。** 原因：本机工具链为 ffmpeg 8.1（libavcodec 62），C 绑定 crate（`ffmpeg-next` / `ffmpeg-the-third`）不支持，且 `pkg-config` 缺失。`ff.rs` 封装二进制发现与一次性 ffprobe JSON 查询，上层解码模块用裸 stdin/stdout 管道交换原始像素/PCM。路径优先级为显式 `OPENTAKE_FFMPEG` / `OPENTAKE_FFPROBE`、应用可执行文件旁的非符号链接常规文件、开发环境 `PATH`。与多处仍写 `ffmpeg-next` 的历史架构文档相比，以这个已测试的 CLI 边界为准，详见 [probe-ff.md](probe-ff.md)。
 
 ### 缩略图 / 波形 / 转写 / 语义搜索的总体管线
 
@@ -108,14 +108,13 @@ opentake-core / src-tauri / opentake-agent / opentake-render   调用方
 - 全局素材库（内容寻址去重 + 原子 manifest，#104；Tauri 命令层在 src-tauri，#106）。
 - 后台索引调度内核（`work_needed` / `visual_share` / `ExportPause`）。
 
-**计划中 / 待收口：**
-- **whisper / ort 后端真实接线**：trait + feature 后端已就位，模型托管与端到端验证属 Phase 8。`model_download` 的 `Manifest` sha256/bytes 仍为占位空值，待填实际 ONNX 资产。
-- **自动裁剪升级**：当前 `autocrop` 仅做黑边/透明区扫描，**未集成人脸/显著性 ML**（SPEC 的 `smart_reframe` 完整语义为计划中）。
-- **编码导出**：H.264/.mp4 全分辨率逐帧导出 spine 已落地（#112），**H.265/ProRes 预设 + 进度/取消**待补；音频重采样曲线 / pan / 立体声 / 动态处理为后续。
-- **进阶 AI 推理（ADVANCED-FEATURES B 层，复用 `ort_worker`）**：超分 / 抠像 / 运动追踪 / 防抖 / 补帧——`ort_worker` 通用面已铺好，特性本身计划中。
-- **进阶音频工程（C 层）**：loudnorm/EBU R128、降噪、人声分离（FFmpeg 滤镜 / Demucs via ort）计划中。
-- **缩略图接线 gap**：底层 `video_thumbnails`/`image_thumbnail` 已实现，但导入路径 `MediaItemDto.thumbnail` 一度写死 `None`——属上层接线问题（[PORT-1TO1-GAP.md](../../architecture/PORT-1TO1-GAP.md) P1-2/P1-3），不是本模块缺能力。
-- **素材库前端**（#37-C/#56）未做；后端存储层已完成。
+**计划中 / 后续版本（Beta 1/2 已交付之外）：**
+- **whisper / ort 后端真实接线**：whisper-rs 本地转写（word/segment 时间戳）已交付；SigLIP2 + ort 语义搜索的推理/索引/排名链路已接入产品路径（Captions / Moments / `search_media`）。⚠️ **SigLIP2 ONNX 模型资产待外部托管**：`search/config.rs` 的 `Manifest` sha256/bytes 仍为空占位（`MODEL_DOWNLOAD_BASE_URL` 指向 `huggingface.co/opentake/siglip2-base-patch16-256-onnx`），在 ONNX 资产正式托管并填实校验值前，`download_search_model`（Tauri 命令）/ `model_download::install` 无法通过 SHA-256 校验完成真实下载——语义搜索**不是开箱即用**，模型首次下载需联网。
+- **自动裁剪升级**：当前 `autocrop` 仅做黑边/透明区扫描，**未集成人脸/显著性 ML**（SPEC 的 `smart_reframe` 完整语义为后续版本）。
+- **编码导出**：H.264/H.265/ProRes + 进度/取消已随 Beta 1 交付（`src-tauri/export.rs`，预览与导出共享 RenderPlan）；音频重采样曲线 / pan / 立体声 / 动态处理为后续。
+- **进阶 AI 推理（ADVANCED-FEATURES B 层，复用 `ort_worker`）**：Beta 1 已交付 RVM 抠像、防抖、补帧、智能擦除、参考色彩匹配与可视化运动追踪；超分 / 真实显著性自动裁剪为后续。
+- **进阶音频工程（C 层）**：Beta 1 已交付响度统一（loudnorm/EBU R128）、降噪、声部分离（试听 + 独立落轨）；DeepFilterNet 升级为后续。
+- **素材库前端**：全局素材库前端（LibraryView / 收藏 / 音效库）已随 Beta 1 交付；库→时间线拖拽接线为后续收尾项。
 
 ---
 

@@ -1,4 +1,5 @@
 import type { Clip, Timeline } from "../../lib/types";
+import { isAdvertisedEffectName } from "../../lib/effects";
 
 export interface PlaybackRouteRuntime {
   rustAvailable: boolean;
@@ -9,8 +10,7 @@ export interface PlaybackRouteRuntime {
 
 export type UnsupportedPlaybackReason =
   | { code: "lottie"; clipId: string }
-  | { code: "enabled-effect"; clipId: string; effect: string }
-  | { code: "polygon-mask"; clipId: string }
+  | { code: "unknown-effect"; clipId: string; effect: string }
   | { code: "mask-overflow"; clipId: string; count: number; limit: 4 }
   | { code: "composited-reverse"; clipId: string }
   | { code: "composited-speed"; clipId: string; speed: number }
@@ -46,26 +46,27 @@ function inspectClip(
   reasons: UnsupportedPlaybackReason[],
 ): ClipCapabilities {
   const masks = clip.masks ?? [];
-  const enabledEffects = (clip.effects ?? []).filter((effect) => effect.enabled);
+  const effects = clip.effects ?? [];
+  const enabledEffects = effects.filter((effect) => effect.enabled);
   const isLottie = clip.mediaType === "lottie" || clip.sourceClipType === "lottie";
   const needsRust =
     clip.mediaType === "text" ||
     clip.sourceClipType === "text" ||
     clip.colorGrade !== undefined ||
     clip.chromaKey !== undefined ||
-    masks.length > 0;
+    clip.stabilization !== undefined ||
+    masks.length > 0 ||
+    enabledEffects.length > 0;
 
   if (isLottie) reasons.push({ code: "lottie", clipId: clip.id });
-  for (const effect of enabledEffects) {
-    reasons.push({ code: "enabled-effect", clipId: clip.id, effect: effect.name });
+  for (const effect of effects) {
+    if (!isAdvertisedEffectName(effect.name)) {
+      reasons.push({ code: "unknown-effect", clipId: clip.id, effect: effect.name });
+    }
   }
   if (masks.length > 4) {
     reasons.push({ code: "mask-overflow", clipId: clip.id, count: masks.length, limit: 4 });
   }
-  if (masks.some((mask) => mask.shape.kind === "poly")) {
-    reasons.push({ code: "polygon-mask", clipId: clip.id });
-  }
-
   return {
     clip,
     needsRust,

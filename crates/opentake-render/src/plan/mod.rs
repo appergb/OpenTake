@@ -10,5 +10,8 @@ pub mod types;
 mod tests;
 
 pub use affine::{affine_transform, compose, crop_to_uv};
-pub use build::{build_render_plan, source_frame_index};
-pub use types::{ClipPlan, FramePlan, LayerDraw, RenderPlan, RenderSize, TextureSource};
+pub use build::{build_render_plan, source_frame_index, try_build_render_plan};
+pub use types::{
+    AudioClipPlan, ClipPlan, CompoundAncestor, FramePlan, LayerDraw, RenderPlan, RenderSize,
+    TextureSource,
+};

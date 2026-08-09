@@ -28,6 +28,9 @@ pub const THUMBNAIL_FILE: &str = "thumbnail.jpg";
 /// convention point inside this directory.
 pub const MEDIA_DIR: &str = "media";
 
+/// `media/luts/` — content-addressed, project-managed `.cube` files.
+pub const LUTS_DIR: &str = "luts";
+
 /// `chat-sessions/` — one `<session>.json` per agent chat session.
 ///
 /// OpenTake-specific: upstream stores these under `chat/`
@@ -59,6 +62,11 @@ pub fn thumbnail_path(bundle: &Path) -> PathBuf {
 /// Absolute path to the `media/` directory inside `bundle`.
 pub fn media_dir(bundle: &Path) -> PathBuf {
     bundle.join(MEDIA_DIR)
+}
+
+/// Absolute path to the project-managed LUT directory.
+pub fn luts_dir(bundle: &Path) -> PathBuf {
+    media_dir(bundle).join(LUTS_DIR)
 }
 
 /// Absolute path to the `chat-sessions/` directory inside `bundle`.

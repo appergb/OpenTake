@@ -618,36 +618,40 @@
   - Visible/returned assertion: assert the exact success payload for the valid case and a stable typed error for the invalid case, including zero partial side effects and no leaked internal path or credential.
   - Evidence required: after the deterministic test passes, record code:<tracked-file>#<declared-symbol> and test:<tracked-test-file>#<exact-test-name>; proposed concrete evidence is test:crates/opentake-render/tests/completion_457715e9d0e73d1b.rs#completion_457715e9d0e73d1b_captions_export_as_valid_srt_through_the_ui_comm.
 
-- [ ] **Step 1: Write or extend every reviewed owning test**
+- [x] **Step 1: Write or extend every reviewed owning test**
 
   - `src-tauri/src/commands.rs#exports_non_empty_srt_with_cue_count` (existing-owned) — Exact named test already exists in the reviewed owning runner and records current boundary behavior.
   - `web/src/components/shell/TitleBar.visual.test.ts#subtitle export menu routes srt and vtt` (reviewed-planned) — Reviewed planned test belongs in this tracked owning runner beside the mapped product boundary.
 
   Each assertion must exercise every covered candidate through the mapped product boundary; an existing-owned test may be extended, while a reviewed-planned test must be added at the declared runner path.
 
-- [ ] **Step 2: Run all focused tests and verify RED**
+- [x] **Step 2: Run all focused tests and verify the baseline**
 
   - Run: `cargo test -p opentake-tauri exports_non_empty_srt_with_cue_count`
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.visual.test.ts -t "subtitle export menu routes srt and vtt"`
 
-  Expected: FAIL because one or more of the 1 candidate-bound contracts are not yet satisfied.
+  Observed: the production UI/API/Tauri slice already existed, so the newly registered owning test passed immediately. No artificial production failure was introduced; the audit gap was missing evidence rather than missing runtime behavior.
 
-- [ ] **Step 3: Implement the minimal vertical slice**
+- [x] **Step 3: Implement the minimal vertical slice**
 
   Modify only `web/src/components/shell/TitleBar.tsx#onExportSubtitles`, `web/src/lib/api.ts#exportSubtitles`, `src-tauri/src/commands.rs#export_subtitles`, `docs/architecture/CAPCUT-GAP.md` as required to satisfy every listed acceptance criterion, including visible success and explicit failure/recovery behavior.
 
-- [ ] **Step 4: Run all focused tests and verify GREEN**
+  Observed: production code required no change. The source-of-truth status documentation and focused UI/real-device evidence were corrected instead.
+
+- [x] **Step 4: Run all focused tests and verify GREEN**
 
   - Run: `cargo test -p opentake-tauri exports_non_empty_srt_with_cue_count`
   - Run: `pnpm -C web test -- --run src/components/shell/TitleBar.visual.test.ts -t "subtitle export menu routes srt and vtt"`
 
   Expected: PASS with every candidate-bound assertion executed.
 
-- [ ] **Step 5: Run the subsystem regression gate**
+- [x] **Step 5: Run the subsystem regression gate**
 
   Run: `cargo fmt --all -- --check && cargo test --workspace --no-fail-fast`
 
   Expected: PASS with no new warnings or unrelated changes.
+
+  Result: PASS. See `docs/audit/2026-07-14/runtime-artifacts/automated/subtitle-export-real-device-2026-07-30.md` for focused, regression, native-UI, output-content, and hash evidence.
 
 ### Task 8: safe-preview-font-catalog (implementation-slice-bbb6af2d5d755acb)
 

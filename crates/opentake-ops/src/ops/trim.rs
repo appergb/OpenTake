@@ -6,7 +6,7 @@
 //! frames; their deltas are translated to timeline frames via `round(delta /
 //! speed)` before touching `start_frame` / `duration_frames`.
 
-use opentake_domain::{ClipType, Timeline};
+use opentake_domain::{Clip, ClipType, Timeline};
 
 /// Which edge a trim drag grabs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -23,35 +23,79 @@ pub fn trim_clip_internal(
     trim_start_frame: i32,
     trim_end_frame: i32,
 ) {
+    let _ = trim_clip_internal_checked(timeline, clip_id, trim_start_frame, trim_end_frame);
+}
+
+fn trim_clip_internal_checked(
+    timeline: &mut Timeline,
+    clip_id: &str,
+    trim_start_frame: i32,
+    trim_end_frame: i32,
+) -> bool {
     let Some((ti, ci)) = find(timeline, clip_id) else {
-        return;
+        return true;
     };
     let clip = &timeline.tracks[ti].clips[ci];
+    if !clip_arithmetic_is_safe(clip)
+        || (!matches!(clip.media_type, ClipType::Image | ClipType::Text)
+            && (trim_start_frame < 0 || trim_end_frame < 0))
+    {
+        return false;
+    }
     let prev_start = clip.trim_start_frame;
     let prev_end = clip.trim_end_frame;
     let prev_duration = clip.duration_frames;
     let speed = clip.speed;
     let reversed = clip.reversed;
 
-    let delta_start_source = trim_start_frame - prev_start;
-    let delta_end_source = trim_end_frame - prev_end;
-    let delta_start_timeline = (delta_start_source as f64 / speed).round() as i32;
-    let delta_end_timeline = (delta_end_source as f64 / speed).round() as i32;
-    let new_duration = prev_duration - delta_start_timeline - delta_end_timeline;
-    let new_start_frame = clip.start_frame
-        + if reversed {
-            delta_end_timeline
-        } else {
-            delta_start_timeline
-        };
+    let Some(delta_start_source) = trim_start_frame.checked_sub(prev_start) else {
+        return false;
+    };
+    let Some(delta_end_source) = trim_end_frame.checked_sub(prev_end) else {
+        return false;
+    };
+    let delta_start_timeline = (delta_start_source as f64 / speed).round();
+    let delta_end_timeline = (delta_end_source as f64 / speed).round();
+    if !(i32::MIN as f64..=i32::MAX as f64).contains(&delta_start_timeline)
+        || !(i32::MIN as f64..=i32::MAX as f64).contains(&delta_end_timeline)
+    {
+        return false;
+    }
+    let delta_start_timeline = delta_start_timeline as i32;
+    let delta_end_timeline = delta_end_timeline as i32;
+    let Some(new_duration) = prev_duration
+        .checked_sub(delta_start_timeline)
+        .and_then(|duration| duration.checked_sub(delta_end_timeline))
+    else {
+        return false;
+    };
+    let timeline_delta = if reversed {
+        delta_end_timeline
+    } else {
+        delta_start_timeline
+    };
+    let Some(new_start_frame) = clip.start_frame.checked_add(timeline_delta) else {
+        return false;
+    };
+
+    let mut updated = clip.clone();
+    updated.trim_start_frame = trim_start_frame;
+    updated.trim_end_frame = trim_end_frame;
+    updated.start_frame = new_start_frame;
+    updated.duration_frames = new_duration;
+    if !clip_arithmetic_is_safe(&updated) {
+        return false;
+    }
 
     let c = &mut timeline.tracks[ti].clips[ci];
     c.trim_start_frame = trim_start_frame;
     c.trim_end_frame = trim_end_frame;
+    c.loudness_normalization = None;
     c.start_frame = new_start_frame;
     c.set_duration(new_duration);
 
     sort_track(timeline, ti);
+    true
 }
 
 /// A `(clip_id, trim_start, trim_end)` edit, in source frames.
@@ -59,10 +103,45 @@ pub type TrimEdit = (String, i32, i32);
 
 /// Apply a batch of trim edits (one undo group upstream; here just sequential).
 /// 1:1 port of `trimClips(_:)`.
-pub fn trim_clips(timeline: &mut Timeline, edits: &[TrimEdit]) {
+pub fn trim_clips(timeline: &mut Timeline, edits: &[TrimEdit]) -> bool {
+    let mut candidate = timeline.clone();
     for (id, ts, te) in edits {
-        trim_clip_internal(timeline, id, *ts, *te);
+        if !trim_clip_internal_checked(&mut candidate, id, *ts, *te) {
+            return false;
+        }
     }
+    *timeline = candidate;
+    true
+}
+
+fn clip_arithmetic_is_safe(clip: &Clip) -> bool {
+    if clip.start_frame < 0
+        || clip.duration_frames < 1
+        || (!matches!(clip.media_type, ClipType::Image | ClipType::Text)
+            && (clip.trim_start_frame < 0 || clip.trim_end_frame < 0))
+        || !clip.speed.is_finite()
+        || clip.speed <= 0.0
+        || clip.start_frame.checked_add(clip.duration_frames).is_none()
+        || clip
+            .duration_frames
+            .checked_add(clip.trim_start_frame)
+            .and_then(|value| value.checked_add(clip.trim_end_frame))
+            .is_none()
+    {
+        return false;
+    }
+    let consumed = (clip.duration_frames as f64 * clip.speed).round();
+    if !(0.0..=i32::MAX as f64).contains(&consumed) {
+        return false;
+    }
+    let consumed = consumed as i32;
+    clip.trim_start_frame.checked_add(consumed).is_some()
+        && clip.trim_end_frame.checked_add(consumed).is_some()
+        && clip
+            .trim_start_frame
+            .checked_add(consumed)
+            .and_then(|value| value.checked_add(clip.trim_end_frame))
+            .is_some()
 }
 
 /// Compute the new source-frame `(trim_start, trim_end)` for an edge drag of
@@ -80,7 +159,7 @@ pub fn trim_values(
     let unbounded = media_type == ClipType::Image || media_type == ClipType::Text;
     match edge {
         TrimEdge::Left => {
-            let new_start = cur_trim_start + source_delta;
+            let new_start = cur_trim_start.saturating_add(source_delta);
             (
                 if unbounded {
                     new_start
@@ -91,7 +170,7 @@ pub fn trim_values(
             )
         }
         TrimEdge::Right => {
-            let new_end = cur_trim_end - source_delta;
+            let new_end = cur_trim_end.saturating_sub(source_delta);
             (
                 cur_trim_start,
                 if unbounded { new_end } else { new_end.max(0) },
@@ -177,6 +256,33 @@ mod tests {
         // right edge: newEnd = cur_trim_end - round(delta*speed).
         let (ts, te) = trim_values(ClipType::Video, 1.0, 0, 50, TrimEdge::Right, 10);
         assert_eq!((ts, te), (0, 40));
+    }
+
+    #[test]
+    fn trim_values_extremes_never_overflow() {
+        let left = std::panic::catch_unwind(|| {
+            trim_values(
+                ClipType::Image,
+                f64::MAX,
+                i32::MAX,
+                i32::MIN,
+                TrimEdge::Left,
+                i32::MAX,
+            )
+        });
+        assert_eq!(left.unwrap(), (i32::MAX, i32::MIN));
+
+        let right = std::panic::catch_unwind(|| {
+            trim_values(
+                ClipType::Text,
+                f64::MAX,
+                i32::MAX,
+                i32::MIN,
+                TrimEdge::Right,
+                i32::MIN,
+            )
+        });
+        assert_eq!(right.unwrap(), (i32::MAX, 0));
     }
 
     #[test]

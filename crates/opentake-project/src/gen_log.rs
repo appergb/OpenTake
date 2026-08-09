@@ -17,6 +17,8 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use opentake_domain::GenerationJobStatus;
+
 fn default_version() -> i64 {
     1
 }
@@ -79,6 +81,26 @@ pub struct GenerationLogEntry {
     /// Apple-reference-date seconds. `None` when unknown.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<f64>,
+    /// Provider-neutral durable job identity. Never a signed URL or credential.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<GenerationJobStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<f64>,
+    /// Fixed application-owned code only; provider diagnostic text is private.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_asset_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_clip_id: Option<String>,
 }
 
 impl GenerationLogEntry {
@@ -94,6 +116,49 @@ impl GenerationLogEntry {
             model: model.into(),
             cost_credits,
             created_at,
+            job_id: None,
+            provider: None,
+            provider_job_id: None,
+            asset_id: None,
+            status: None,
+            progress: None,
+            error_code: None,
+            source_asset_id: None,
+            source_clip_id: None,
+        }
+    }
+
+    /// Construct one append-only job lifecycle event without provider secrets.
+    #[allow(clippy::too_many_arguments)]
+    pub fn job_event(
+        id: impl Into<String>,
+        job_id: impl Into<String>,
+        model: impl Into<String>,
+        cost_credits: Option<i64>,
+        provider: impl Into<String>,
+        provider_job_id: Option<String>,
+        asset_id: impl Into<String>,
+        status: GenerationJobStatus,
+        progress: Option<f64>,
+        error_code: Option<String>,
+        created_at: Option<f64>,
+        source_asset_id: Option<String>,
+        source_clip_id: Option<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            job_id: Some(job_id.into()),
+            model: model.into(),
+            provider: Some(provider.into()),
+            provider_job_id,
+            asset_id: Some(asset_id.into()),
+            status: Some(status),
+            progress,
+            error_code,
+            cost_credits,
+            created_at,
+            source_asset_id,
+            source_clip_id,
         }
     }
 }
@@ -114,6 +179,15 @@ impl<'de> Deserialize<'de> for GenerationLogEntry {
             created_at: Option<f64>,
             // Legacy: dollars as a float. Only consulted when costCredits is absent.
             cost: Option<f64>,
+            job_id: Option<String>,
+            provider: Option<String>,
+            provider_job_id: Option<String>,
+            asset_id: Option<String>,
+            status: Option<GenerationJobStatus>,
+            progress: Option<f64>,
+            error_code: Option<String>,
+            source_asset_id: Option<String>,
+            source_clip_id: Option<String>,
         }
         let raw = Raw::deserialize(deserializer)?;
         let cost_credits = match raw.cost_credits {
@@ -128,6 +202,15 @@ impl<'de> Deserialize<'de> for GenerationLogEntry {
             model: raw.model,
             cost_credits,
             created_at: raw.created_at,
+            job_id: raw.job_id,
+            provider: raw.provider,
+            provider_job_id: raw.provider_job_id,
+            asset_id: raw.asset_id,
+            status: raw.status,
+            progress: raw.progress,
+            error_code: raw.error_code,
+            source_asset_id: raw.source_asset_id,
+            source_clip_id: raw.source_clip_id,
         })
     }
 }

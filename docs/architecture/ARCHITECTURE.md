@@ -77,7 +77,7 @@ OpenTake/
 │   ├── opentake-motion/      # 原生 motion fallback:RGBA frame cache / sandbox / StubRenderer / 后续 alpha source
 │   └── opentake-core/        # 组装:EditorState(持有 timeline+manifest)、command 路由、事件总线
 ├── plugins/
-│   └── motion-canvas-studio/ # 待新增:Motion Canvas(MIT) fork/plugin,渲染 mp4 后导入落轨
+│   └── motion-canvas-studio/ # Motion Canvas 3.17.2 MIT wrapper,确定性渲染 mp4 后导入落轨
 ├── src-tauri/                # Tauri 2 app:#[tauri::command] 薄封装 + 窗口/菜单/生命周期
 ├── web/                      # React + TS 前端(Vite)
 ├── services/
@@ -87,7 +87,7 @@ OpenTake/
 
 依赖法则(经上游验证):`domain` 零依赖叶子;`ops` 只依赖 `domain`;`command` 是唯一编辑入口;UI/Agent/MCP 是命令层三个对等客户端。
 
-> Motion / AI Video 主线改为 `plugins/motion-canvas-studio/`:fork Motion Canvas(MIT),渲染 materialized mp4 后由 OpenTake 当普通媒体导入并落轨。`crates/opentake-motion/` 已有 scaffold 保留为后续透明 alpha / PNG sequence / HTML-CSS fallback,不作为 v1 主渲染器 blocker。
+> Motion / AI Video v1 已由 `plugins/motion-canvas-studio/` 落地：锁定 Motion Canvas 3.17.2(MIT)，渲染 materialized mp4 后由 OpenTake 当普通媒体原子导入并落轨。`crates/opentake-motion/` 同时提供离线 Chromium 宿主与 HTML/CSS fallback；透明 alpha / PNG sequence 留给后续版本。
 
 ## 4. 领域模型(可直接复刻,见 MODULE-PORT-MAP.md「Models」)
 
@@ -150,7 +150,10 @@ struct EditResult { changed: bool, action_name: String, affected_clip_ids: Vec<S
 
 ## 7. MCP + Agent(单一能力层、双前端)
 
-- **MCP server**:用官方 **`rmcp`**(streamable-http-server feature,基于 axum)起在 `127.0.0.1:19789`。**只绑 loopback + Origin 校验**(DNS-rebinding 防护,用 tower layer 复刻),Claude Desktop 经 stdio→HTTP shim 接入。
+- **MCP server**:能力层使用官方 **`rmcp`**（streamable-http-server feature，基于 axum）。
+  Beta 2 的产品入口仅供官方 Codex / ChatGPT 每轮创建：随机 loopback 端口 + 256-bit
+  Bearer + 当前工程身份，并在取消、deadline、切工程或轮次结束后销毁。早期固定、未认证的
+  `127.0.0.1:19789` 外部入口已禁用；Claude/Cursor 等客户端等待带认证的显式配对 UX。
 - **31 个工具**(读 7 / 时间线编辑 11 / 生成导入 5 / 库组织 7 / Resources 2)全是 `EditorCore` 方法的薄包装——见 MODULE-PORT-MAP.md「Agent」与横切报告 04。工具描述字符串(承载行为契约)**原样照搬**。
 - **必须复刻的三个横切机制**:① 短 ID 系统(出站缩短 UUID 到唯一最短前缀≥8 字符、入站展开,省 token)② 统一执行壳(快照→展开ID→执行→变更则压 agentUndoStack→遥测→缩短ID)③ 面向 LLM 的精确路径错误(`entries[3].startFrame: missing required field`,用 `serde_path_to_error`)。
 - **应用内 chat 与 MCP 共享同一套工具 + 同一系统提示词**;chat 走 reqwest→Anthropic(BYOK)或自建代理;复刻 prompt caching(system+tools+会话前缀打 ephemeral)。

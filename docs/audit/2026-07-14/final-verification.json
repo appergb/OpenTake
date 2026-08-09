@@ -2,11 +2,11 @@
   "schema": 1,
   "scope": "all",
   "auditDirectory": "docs/audit/2026-07-14",
-  "ok": true,
-  "passed": true,
+  "ok": false,
+  "passed": false,
   "counts": {
-    "tracked": 796,
-    "files": 796,
+    "tracked": 881,
+    "files": 881,
     "documents": 2704,
     "requirements": 2704,
     "controls": 259,
@@ -73,7 +73,7 @@
     }
   },
   "scopeHashes": {
-    "files": "30dd6cebd521d34d65b29278aaa53e0f3d9ce77e110e84a07a027b6774670dd5",
+    "files": "0e21fa62d378c032b092b8426107a4656a0e8188fddb89120d233a75de09a82b",
     "documents": "0a16bb223006674f1606a1a7ce28ad54982dcbaa3ccdf9da3868ae97ebca4202",
     "controls": "b3117d6ef9db5b39867989d8cca4c046229b50d927755aeca77b03ef21be1994",
     "sources": "7ad8d78f87a494b0489599049c0b39968c6a857b28061c6b1b8cdfad8597ed7c",
@@ -84,16 +84,16 @@
     "files": {
       "passed": true,
       "counts": {
-        "tracked": 796,
-        "inventoried": 796,
+        "tracked": 881,
+        "inventoried": 881,
         "missing": 0,
         "orphan": 0,
         "hashMismatches": 0,
-        "deferred": 4
+        "deferred": 1
       }
     },
     "documents": {
-      "passed": true,
+      "passed": false,
       "counts": {
         "candidates": 2704,
         "records": 2704,
@@ -112,7 +112,7 @@
       }
     },
     "controls": {
-      "passed": true,
+      "passed": false,
       "counts": {
         "candidates": 259,
         "records": 259,
@@ -131,7 +131,7 @@
       }
     },
     "sources": {
-      "passed": true,
+      "passed": false,
       "counts": {
         "sources": 4,
         "changedPaths": 132,
@@ -142,5 +142,2216 @@
       }
     }
   },
-  "errors": []
+  "errors": [
+    {
+      "code": "document-candidate-ledger-drift",
+      "candidateId": null,
+      "message": "document-candidates.json differs from a full current-source re-extraction",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-4c6ebcb2ccfec8db",
+      "message": "candidate signal is absent at CLAUDE.md:79",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-404f1d1126d8665b",
+      "message": "candidate signal is absent at docs/architecture/BUGS.md:42",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-id-mismatch",
+      "candidateId": "doc-404f1d1126d8665b",
+      "message": "candidate ID does not derive from current semantic source: doc-404f1d1126d8665b",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-0d70354c07036fd0",
+      "message": "candidate signal is absent at docs/architecture/BUGS.md:62",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-id-mismatch",
+      "candidateId": "doc-0d70354c07036fd0",
+      "message": "candidate ID does not derive from current semantic source: doc-0d70354c07036fd0",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-3c2b1bdd46d20078",
+      "message": "candidate signal is absent at docs/architecture/BUGS.md:67",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-457715e9d0e73d1b",
+      "message": "candidate signal is absent at docs/architecture/CAPCUT-GAP.md:197",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-ee70be7aba4166b3",
+      "message": "candidate signal is absent at docs/architecture/FULL_PROJECT_SCAN_REPORT.md:97",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-a9ca85cdc22c88d8",
+      "message": "candidate signal is absent at docs/architecture/FULL_PROJECT_SCAN_REPORT.md:100",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-445290562fb2b28f",
+      "message": "candidate signal is absent at docs/architecture/FULL_PROJECT_SCAN_REPORT.md:125",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-7a1eaa5cce0fa7ea",
+      "message": "candidate signal is absent at docs/architecture/FULL_PROJECT_SCAN_REPORT.md:145",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-d4af138e98e3b504",
+      "message": "candidate signal is absent at docs/architecture/HANDOFF-2026-07.md:146",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-id-mismatch",
+      "candidateId": "doc-d4af138e98e3b504",
+      "message": "candidate ID does not derive from current semantic source: doc-d4af138e98e3b504",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-b6561533456f47b0",
+      "message": "candidate signal is absent at docs/architecture/HANDOFF-2026-07.md:151",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-id-mismatch",
+      "candidateId": "doc-b6561533456f47b0",
+      "message": "candidate ID does not derive from current semantic source: doc-b6561533456f47b0",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-e2f5d13fe630a705",
+      "message": "candidate signal is absent at docs/architecture/HANDOFF-2026-07.md:201",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-f5044a046aaa65d8",
+      "message": "candidate signal is absent at docs/architecture/MODULE-PORT-MAP.md:122",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-id-mismatch",
+      "candidateId": "doc-f5044a046aaa65d8",
+      "message": "candidate ID does not derive from current semantic source: doc-f5044a046aaa65d8",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-df1706c5a1ff3f67",
+      "message": "candidate signal is absent at docs/modules/opentake-agent/OVERVIEW.md:122",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-id-mismatch",
+      "candidateId": "doc-df1706c5a1ff3f67",
+      "message": "candidate ID does not derive from current semantic source: doc-df1706c5a1ff3f67",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-a936d6ca69fb1768",
+      "message": "candidate signal is absent at docs/modules/opentake-agent/OVERVIEW.md:124",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-107089ca7c128cf4",
+      "message": "candidate signal is absent at docs/modules/opentake-agent/OVERVIEW.md:130",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-5f4c21fe798697e4",
+      "message": "candidate signal is absent at docs/modules/opentake-agent/SPEC.md:118",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-49175d48852d43c0",
+      "message": "candidate signal is absent at docs/modules/opentake-agent/SPEC.md:188",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-9b90bbb501eeed4a",
+      "message": "candidate signal is absent at docs/modules/opentake-agent/SPEC.md:189",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-7232a0984ac6a908",
+      "message": "candidate signal is absent at docs/modules/opentake-agent/SPEC.md:191",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-122beba700691cb7",
+      "message": "candidate signal is absent at docs/modules/opentake-agent/SPEC.md:1071",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-e13f2cbc316a11fa",
+      "message": "candidate signal is absent at docs/modules/opentake-agent/SPEC.md:1072",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-be1f9acc4527e225",
+      "message": "candidate signal is absent at docs/modules/opentake-agent/dispatch-tools.md:36",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-id-mismatch",
+      "candidateId": "doc-be1f9acc4527e225",
+      "message": "candidate ID does not derive from current semantic source: doc-be1f9acc4527e225",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-d5c3ee38efee7249",
+      "message": "candidate signal is absent at docs/modules/opentake-agent/dispatch-tools.md:42",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-6b772ba1f1530730",
+      "message": "candidate signal is absent at docs/modules/opentake-agent/dispatch-tools.md:49",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-id-mismatch",
+      "candidateId": "doc-6b772ba1f1530730",
+      "message": "candidate ID does not derive from current semantic source: doc-6b772ba1f1530730",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-633cb649fbb10f3c",
+      "message": "candidate signal is absent at docs/modules/opentake-core/SPEC.md:1",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-id-mismatch",
+      "candidateId": "doc-633cb649fbb10f3c",
+      "message": "candidate ID does not derive from current semantic source: doc-633cb649fbb10f3c",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-d0e72203255f0a41",
+      "message": "candidate signal is absent at docs/modules/opentake-core/SPEC.md:423",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-1cb2f0539425a14e",
+      "message": "candidate signal is absent at docs/modules/opentake-media/SPEC.md:163",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-f67f7b3bb62f249d",
+      "message": "candidate signal is absent at docs/modules/web/SPEC.md:1263",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-2a61d6818d85d37f",
+      "message": "candidate signal is absent at docs/modules/web/SPEC.md:1289",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-2505e846ef691f9a",
+      "message": "candidate signal is absent at docs/specs/agent/10-implementation.md:51",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-id-mismatch",
+      "candidateId": "doc-2505e846ef691f9a",
+      "message": "candidate ID does not derive from current semantic source: doc-2505e846ef691f9a",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-f1f44c10c40acb1f",
+      "message": "candidate signal is absent at docs/specs/agent/2-tools.md:44",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-3027240e8af0de72",
+      "message": "candidate signal is absent at docs/specs/agent/2-tools.md:45",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-e951ead2b99303c9",
+      "message": "candidate signal is absent at docs/specs/agent/2-tools.md:47",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-8faa0d04f0c889c1",
+      "message": "candidate signal is absent at docs/specs/core/1-editor-state.md:9",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-cf44660f6e5bd373",
+      "message": "candidate signal is absent at docs/specs/core/1-editor-state.md:49",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-b2159a4af40efa5d",
+      "message": "candidate signal is absent at docs/specs/core/2-command-routing.md:3",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-id-mismatch",
+      "candidateId": "doc-b2159a4af40efa5d",
+      "message": "candidate ID does not derive from current semantic source: doc-b2159a4af40efa5d",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-149099f8c0e60570",
+      "message": "candidate signal is absent at docs/specs/core/2-command-routing.md:15",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-dc4980e1cf95b7d2",
+      "message": "candidate signal is absent at docs/specs/core/2-command-routing.md:52",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-97047ee2cef7bff4",
+      "message": "candidate signal is absent at docs/specs/core/2-command-routing.md:102",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-c95515ae8f048e8a",
+      "message": "candidate signal is absent at docs/specs/core/2-command-routing.md:140",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-5a5785b4e46c5875",
+      "message": "candidate signal is absent at docs/specs/core/5-assembly.md:1",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-id-mismatch",
+      "candidateId": "doc-5a5785b4e46c5875",
+      "message": "candidate ID does not derive from current semantic source: doc-5a5785b4e46c5875",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-13a1d8111c7e9441",
+      "message": "candidate signal is absent at docs/specs/core/5-assembly.md:5",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-7be80db04be852c6",
+      "message": "candidate signal is absent at docs/specs/core/5-assembly.md:21",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-8fb894b0ea5ce82e",
+      "message": "candidate signal is absent at docs/specs/core/5-assembly.md:36",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-e286de761da93671",
+      "message": "candidate signal is absent at docs/specs/core/5-assembly.md:48",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-10feadcab19f56dd",
+      "message": "candidate signal is absent at docs/specs/core/5-assembly.md:54",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-c5eeda123dd2c6ca",
+      "message": "candidate signal is absent at docs/specs/core/5-assembly.md:58",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-2b26469de8b23218",
+      "message": "candidate signal is absent at docs/specs/frontend/13-implementation.md:20",
+      "scope": "documents"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "doc-1daa44ecea72d622",
+      "message": "candidate signal is absent at docs/specs/frontend/13-implementation.md:46",
+      "scope": "documents"
+    },
+    {
+      "code": "control-candidate-ledger-drift",
+      "candidateId": null,
+      "message": "control-candidates.json differs from a full current-source re-extraction",
+      "scope": "controls"
+    },
+    {
+      "code": "verifier-revision-not-two-stage-parent",
+      "candidateId": null,
+      "message": "verifierRevision must be current HEAD or the direct parent of the evidence commit",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-source-aggregate-mismatch",
+      "candidateId": null,
+      "message": "candidate TSX sources differ from audited provenance",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:crates/opentake-core/src/core.rs#AppCore",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:crates/opentake-media/src/library.rs#LibraryStore",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:crates/opentake-ops/src/command.rs#EditCommand",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/account.rs#account_login",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/account.rs#account_logout",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/account.rs#account_set_backend_url",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/captions.rs#generate_captions",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/chat.rs#chat_cancel",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/chat.rs#chat_send",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/commands.rs#edit_apply",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/commands.rs#export_subtitles",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/commands.rs#get_default_project_dir",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/commands.rs#project_new",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/commands.rs#project_open",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/commands.rs#redo",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/commands.rs#undo",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/export.rs#cancel_export",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/export.rs#export_video",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/library.rs#library_categorize",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/library.rs#library_import_to_project",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/library.rs#library_unfavorite",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/media.rs#extract_audio",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/media.rs#import_folder",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/media.rs#import_media",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/media.rs#preload_media",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/media.rs#relink_media",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/media.rs#toggle_favorite",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/render.rs#capture_frame_to_media",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/search.rs#download_search_model",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/search.rs#search_index_start",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/search.rs#search_query",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/secret.rs#secret_delete",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/secret.rs#secret_load",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/secret.rs#secret_save",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/transcribe.rs#download_transcribe_model",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:src-tauri/src/transcribe.rs#transcribe_model_status",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/agent/AgentPanel.tsx#AgentPanel",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/agent/AgentPanel.tsx#cancel",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/home/HomeView.tsx#HomeView",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/home/HomeView.tsx#ProjectLauncher",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/inspector/Inspector.tsx#ClipInspector",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/inspector/Inspector.tsx#CropSection",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/inspector/Inspector.tsx#Inspector",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/inspector/Inspector.tsx#KeyframeRowControls",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/inspector/Inspector.tsx#applyCropPreset",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/media/MediaPanel.tsx#MediaCard",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/media/MediaPanel.tsx#MediaFavoriteButton",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/media/MediaPanel.tsx#MediaPanel",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/media/MediaPanel.tsx#onExtractAudio",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/media/MediaSearch.tsx#FileCard",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/media/MediaSearch.tsx#MediaSearchResults",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/media/MediaSearch.tsx#MomentCard",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/media/MediaSearch.tsx#SpokenRow",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/media/MediaSearch.tsx#onDownload",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/media/MediaSearch.tsx#onIndex",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/media/MediaTabBar.tsx#MediaTabBar",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/media/SoundLibraryTab.tsx#SoundLibraryTab",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/preview/Preview.tsx#BadgeMenu",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/preview/Preview.tsx#Preview",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/preview/Preview.tsx#PreviewTabs",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/preview/Preview.tsx#ScrubBar",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/preview/Preview.tsx#captureFrame",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/settings/SettingsView.tsx#AiPane",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/settings/SettingsView.tsx#ImportPane",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/settings/SettingsView.tsx#McpPane",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/settings/SettingsView.tsx#SettingsView",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/shell/SplitPane.tsx#SplitPane",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/shell/TitleBar.tsx#INTERCHANGE_FORMATS",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/shell/TitleBar.tsx#TitleBar",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/shell/TitleBar.tsx#onExportSubtitles",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/shell/ViewMenu.tsx#ViewMenu",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/timeline/TimelineContainer.tsx#TimelineContainer",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/timeline/TimelineContainer.tsx#onMediaDragOver",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/timeline/TimelineContainer.tsx#onPointerDown",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/timeline/TimelineContainer.tsx#volumeKeyframeMenuItems",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/components/ui/PanelShell.tsx#PanelShell",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#accountLogin",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#accountLogout",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#accountSetBackendUrl",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#cancelExport",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#captureFrameToMedia",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#chatCancel",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#chatSend",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#downloadSearchModel",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#downloadTranscribeModel",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#editApply",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#exportSubtitles",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#exportVideo",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#extractAudio",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#generateCaptions",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#getDefaultProjectDir",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#importFolder",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#importMedia",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#preloadMedia",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#projectNew",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#projectOpen",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#redo",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#relinkMedia",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#searchIndexStart",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#searchQuery",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#secretDelete",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#secretLoad",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#secretSave",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#toggleFavorite",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#transcribeModelStatus",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/lib/api.ts#undo",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#addMediaToTimeline",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#addTextClip",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#applyAndRefresh",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#cancelSaveAsMedia",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#copyClips",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#generateCaptions",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#insertClips",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#moveKeyframe",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#redo",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#removeKeyframe",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#resetTransform",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#saveMarkedRangeAsMedia",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#setChromaKey",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#setClipProperties",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#setColorGrade",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#setKeyframeInterpolation",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#setKeyframes",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#setMasks",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#setTimelineSettings",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#setTrackProps",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#splitAtPlayhead",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#splitClip",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#stampKeyframe",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#swapMedia",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#swapTracks",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#trimEndToPlayhead",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#trimStartToPlayhead",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#undo",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/editActions.ts#upsertKeyframe",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/projectActions.ts#newProjectAndEnter",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/projectActions.ts#openProjectPath",
+      "scope": "controls"
+    },
+    {
+      "code": "backend-source-hash-mismatch",
+      "candidateId": null,
+      "message": "backend source hash drifted: code:web/src/store/projectActions.ts#openProjectViaDialog",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "control-70d50e82dbf11502",
+      "message": "control is absent at web/src/components/agent/AgentPanel.tsx:146:9",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-fc7930fda5a1a124",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-9276ea9d0a1578bb",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-14c7a2b773381f0d",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-1caee0ff811948b1",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-7a3ce16dc3806574",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-f3d4846ff119b22c",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "control-e2d0f1ed3415ea45",
+      "message": "control is absent at web/src/components/home/HomeView.tsx:102:9",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "control-ef78873f98fcab84",
+      "message": "control is absent at web/src/components/home/HomeView.tsx:103:9",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-f4a6b4f8789ea013",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-810a7d793fcd8323",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-d1af8af15aefbf47",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-d1af8af15aefbf47",
+      "message": "current source changed candidate field disabled",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "control-575978f9bced5959",
+      "message": "control is absent at web/src/components/home/HomeView.tsx:234:11",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "control-2121d7b9fdc279b9",
+      "message": "control is absent at web/src/components/home/HomeView.tsx:235:11",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-5b33b5690caa424a",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-5b33b5690caa424a",
+      "message": "current source changed candidate field disabled",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-acd6238c08e790cc",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "control-1d62091a642fb0da",
+      "message": "control is absent at web/src/components/home/HomeView.tsx:323:7",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "control-9697b53d4d2cf1ca",
+      "message": "control is absent at web/src/components/home/HomeView.tsx:351:11",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "control-74f414d717baaed3",
+      "message": "control is absent at web/src/components/home/HomeView.tsx:421:9",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-ab109c708bb0efbf",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-ab109c708bb0efbf",
+      "message": "current source changed candidate field disabled",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "control-d2db7352af75d157",
+      "message": "control is absent at web/src/components/home/HomeView.tsx:446:5",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "control-ec1cd7a2d49bb97a",
+      "message": "control is absent at web/src/components/home/HomeView.tsx:521:9",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-db3a9892a919460f",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-287044a170afa328",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-cae48d1cbb87b634",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-e99f1fdf89f06557",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-8d29dda7bc88e53e",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "control-ff45bd17a9877c19",
+      "message": "control is absent at web/src/components/inspector/Inspector.tsx:449:13",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-90b6142c9b28af54",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-96a5dfea7df05ba9",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-08376197cc04d5c7",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-081219e1fb457cfe",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-16114827f9ea0a12",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-bcede743dbdd39c4",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-239a5889cdb86de3",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-cd756dccc56343eb",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-11ebd75be0f93008",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-f8d159f2ffe6aa33",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-23078cfa22cdc9a5",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-5c3e9ca9c1713a09",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-8e3c200b9433f78e",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-c188975bcfe4ec9b",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-1e99a2bcbd62178e",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-870eaf3988273d41",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-82d3756769e4c60c",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-eda8168f82218100",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-483d3b87f9c031f5",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-d613004ab99583b3",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-be09ebcb1166277c",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-d9ed469bc367deec",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-e5ff7853d43491f6",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-58ec257f601a9924",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-d31487647c9706fc",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-a250e4a089de997f",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-40101f7c25e4854c",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-10bd77bd011e8aaf",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-ee79ef68fe15ab96",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-8b0f987c8bf46a8a",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-3f99a53815fd9130",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-0c7a02c6dae89f87",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-b77d7a7eb91fedfa",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-fd4203443df4adcb",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-18136ab8e305f7a7",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-09ca7bab665f84ed",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-9e9cf7fd25863d20",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-47bf4ee974f14505",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-4b61e7b97ade8478",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-bc82a346093bae7c",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-d60d607d7448918f",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-7b85c2f53f12cc88",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-6071e0b1bf8a62e3",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-dc077f7003ebc75b",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-74cf95e67ddd9208",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-ab30577032b1dc4c",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-fbc0598258d77d6a",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-b2ddee9974c7b88f",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-5409108a04e7cf1c",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-874419d78bdb9c98",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-f9d215c076164576",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-b9f833d55c68cf40",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-c283a16e1d1b190f",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-fee61dd27bb05b04",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-9ddccdace2f550dc",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-d2d6cba7e151c478",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-4f239be002df8094",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-35bf776459532f2f",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-8f804b393c015a5e",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-e4b24808655562b1",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-4bb077c70718eeda",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "control-56870ea51c57d201",
+      "message": "control is absent at web/src/components/media/MediaPanel.tsx:888:5",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-23954f3f7bc7fd96",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-23e08673fb5d2f66",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-421046c542a4e315",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-12917008f22749ee",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-4eccac72d0056b24",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-fd319d3edab2c00d",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-a98e8f89678dd470",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-d79545153721a517",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-5e42760fbbe049cc",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-05ae62fc3145ea7e",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-0ee3b0454ad2624a",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-bb633f7e6c8e3fe2",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-575921b92e2f3135",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-baaf4052cb5bdc8e",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-37ea2cd22696fd55",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-c6f5ed51aa2b00c2",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-9812bb3e84b940c5",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-d3805a1e5b0f0237",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-f87f5291a1a74dcc",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "control-200c9fd6ec3f0f35",
+      "message": "control is absent at web/src/components/preview/Preview.tsx:724:5",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-0d59d3bb27911a7c",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-38902ec9a22f4dc1",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-fc5baa4f457e8778",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-ca0fb9e4faf6c987",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-678b422a24a44a34",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-6fcdff2d800c882d",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-290b8eafa8851b2c",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-b019554a5961fa7a",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-323d35d24ceb5ab2",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-1f8b140411e09e22",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-a6a47152d4fc53e0",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-fe4bfbcf3bec4054",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-408c771762a48a6a",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-c51942132f080af2",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-66d58acb1e9d254b",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-6c6ad1d93d3c1f6c",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-bc7e07c8d75e1cd2",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "control-d88c7103e09bb382",
+      "message": "control is absent at web/src/components/shell/SplitPane.tsx:82:7",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-f52cc89817361a19",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-4bda8f075e1f3a14",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-ff132f94a8c87906",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-d7ba227c6447e43e",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-c035467e6746e570",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-f54f4037ab7bffbe",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-229710d0115f07bc",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-02d1bf7fff7c1e3a",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-0d98e5e5a0c417ed",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-d826a0ad433703cb",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-a2d1b5cb37952878",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-d606f9c3adb8762a",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-acd9e30dacf466b6",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-fb7422e825128973",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-c38719af10d24035",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-c38719af10d24035",
+      "message": "current source changed candidate field disabled",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-224e0433b0aefb2a",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-68307f78b80da87e",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-54b7338ed4253568",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-695aa63ff9c6c909",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-788172a804cc0142",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-55e45e308be653d6",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-field-drift",
+      "candidateId": "control-554409b9d0b8d6bf",
+      "message": "current source changed candidate field line",
+      "scope": "controls"
+    },
+    {
+      "code": "candidate-source-signal-missing",
+      "candidateId": "control-bbc125bbbf2275f2",
+      "message": "control is absent at web/src/components/ui/PanelShell.tsx:22:5",
+      "scope": "controls"
+    },
+    {
+      "code": "canonical-source-drift",
+      "candidateId": null,
+      "message": "canonical dirty checkout differs from captured source provenance",
+      "scope": "sources"
+    },
+    {
+      "code": "identity-migration-not-two-stage-parent",
+      "candidateId": null,
+      "message": "migration revision must be current HEAD or its direct parent"
+    },
+    {
+      "code": "implementation-plan-drift",
+      "candidateId": null,
+      "message": "implementation plan differs from authoritative records: docs/audit/2026-07-14/implementation-plans/data-safety-design.md"
+    },
+    {
+      "code": "implementation-plan-drift",
+      "candidateId": null,
+      "message": "implementation plan differs from authoritative records: docs/audit/2026-07-14/implementation-plans/data-safety-implementation.md"
+    },
+    {
+      "code": "implementation-plan-drift",
+      "candidateId": null,
+      "message": "implementation plan differs from authoritative records: docs/audit/2026-07-14/implementation-plans/home-shell-implementation.md"
+    },
+    {
+      "code": "implementation-plan-drift",
+      "candidateId": null,
+      "message": "implementation plan differs from authoritative records: docs/audit/2026-07-14/implementation-plans/inspector-text-keyframes-implementation.md"
+    },
+    {
+      "code": "implementation-plan-drift",
+      "candidateId": null,
+      "message": "implementation plan differs from authoritative records: docs/audit/2026-07-14/implementation-plans/agent-settings-generation-implementation.md"
+    },
+    {
+      "code": "implementation-plan-drift",
+      "candidateId": null,
+      "message": "implementation plan differs from authoritative records: docs/audit/2026-07-14/implementation-plans/accessibility-polish-implementation.md"
+    },
+    {
+      "code": "plan-ownership-drift",
+      "candidateId": null,
+      "message": "plan-ownership.json differs from reviewed record ownership and clustered slices"
+    },
+    {
+      "code": "completion-ledger-drift",
+      "candidateId": null,
+      "message": "completion-ledger.json differs from its current hashed inputs"
+    },
+    {
+      "code": "completion-report-drift",
+      "candidateId": null,
+      "message": "completion-report.md differs from completion ledger"
+    }
+  ]
 }

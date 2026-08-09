@@ -1,12 +1,12 @@
-//! Spawns the loopback MCP server (#36) on the Tauri async runtime, and wires the
-//! agent's render + import side-door ([`MediaBridge`]).
+//! Tauri host adapters for the agent's render + import side-door
+//! ([`MediaBridge`]).
 //!
-//! The server exposes the in-process tool dispatcher over Streamable-HTTP at
-//! `http://127.0.0.1:19789/mcp` so external agents (`claude mcp add --transport
-//! http opentake http://127.0.0.1:19789/mcp`, Cursor, Codex, …) can drive the
-//! same [`AppCore`] the UI edits. The plugin registry seeds the bundled
-//! workflows (e.g. the default audio-first Skill) plus any user-authored plugins
-//! under `<app_data_dir>/workflows`.
+//! The old fixed-port external MCP listener is disabled for Beta because it has
+//! no authenticated pairing UX. Official Codex turns instead create an
+//! authenticated, loopback-only endpoint with a fresh bearer token for that
+//! single turn. The plugin registry still seeds the bundled workflows (e.g. the
+//! default audio-first Skill) plus user-authored plugins under
+//! `<app_data_dir>/workflows`.
 //!
 //! `inspect_timeline` and `import_media` need capabilities that live outside
 //! `opentake-core` — GPU compositing (`opentake-render`) and the user-facing
@@ -17,10 +17,15 @@
 //! built from the same cache/models dirs the UI uses, so imports produce the exact
 //! same posters / manifest entries / `MediaChanged` events as the media panel.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Seek, SeekFrom, Write};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+#[cfg(test)]
+use std::sync::Mutex;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -28,26 +33,34 @@ use std::time::Duration;
 use std::io::Read;
 
 use base64::Engine as _;
+use cap_fs_ext::{ambient_authority, FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::fs::{Dir, OpenOptions};
+use same_file::Handle;
 
-use opentake_agent::mcp::core_handle::{AppCoreHandle, CoreHandle};
+use opentake_agent::chat::ChatTurnGate;
+use opentake_agent::mcp::dispatch::Dispatcher;
 use opentake_agent::mcp::media_bridge::{
-    BridgeError, ImportOutcome, ImportSource, InspectResult, InspectedFrame, MediaBridge,
-    SearchCandidate, SearchIndexState, SearchMediaResult, SearchSpokenHit, SearchVisualHit,
-    TranscriptSource, TranscriptSourceResult, IMPORT_BYTES_DECODED_MAX,
+    BridgeError, ImportOutcome, ImportSource, InspectMediaRequest, InspectMediaResult,
+    InspectResult, InspectedFrame, InspectedMediaFrame, MediaBridge, SearchCandidate,
+    SearchIndexState, SearchMediaResult, SearchSpokenHit, SearchVisualHit, TranscriptSource,
+    TranscriptSourceResult, IMPORT_BYTES_DECODED_MAX,
 };
-use opentake_agent::mcp::server;
+use opentake_agent::mcp::server::{bind_ephemeral_gated, EphemeralMcpEndpoint, EphemeralMcpError};
 use opentake_agent::plugin::registry::PluginRegistry;
+#[cfg(test)]
+use opentake_agent::tools::result::ToolResult;
 use opentake_core::{
     importable_clip_type, AppCore, CoreError, DeferredCoreEvents, ProbedMedia,
     ProjectRuntimeSnapshot,
 };
-use opentake_domain::{ClipType, MediaSource, TextStyle};
-use opentake_media::{decode_frame_at, FrameRequest, MediaEngine};
+use opentake_domain::{ClipType, LutReference, MediaSource, TextStyle};
+use opentake_media::{decode_frame_at, decode_frames_at, FrameRequest, MediaEngine, RgbaFrame};
+use opentake_project::ProjectRoot;
 use opentake_render::gpu::texture::upload_rgba;
 use opentake_render::{
-    build_render_plan, even, Compositor, CosmicTextRasterizer, DecodedFrame, GpuTexture,
-    RenderDevice, RenderSize, SourceMetrics, TextRasterRequest, TextRasterizer, TextureCache,
-    TextureResolver, TextureSource,
+    even, try_build_render_plan, Compositor, CosmicTextRasterizer, DecodedFrame, FramePlan,
+    GpuLutTexture, GpuTexture, LayerDraw, RenderDevice, RenderSize, SourceMetrics,
+    TextRasterRequest, TextRasterizer, TextureCache, TextureResolver, TextureSource,
 };
 
 use crate::library::ProjectMediaCapability;
@@ -55,6 +68,11 @@ use crate::library::ProjectMediaCapability;
 /// JPEG quality `inspect_timeline` encodes composited frames at (upstream
 /// `inspectTimelineJPEGQuality = 0.7`). `image` takes a 0–100 byte.
 const INSPECT_JPEG_QUALITY: u8 = 70;
+const INSPECT_MEDIA_FRAME_MAX_DIMENSION: u32 = 512;
+const INSPECT_MEDIA_OVERVIEW_TILES: usize = 36;
+const INSPECT_MEDIA_OVERVIEW_COLUMNS: u32 = 6;
+const INSPECT_MEDIA_OVERVIEW_TILE: (u32, u32) = (192, 108);
+const MCP_MEDIA_PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Per-frame texture cache size — bounds VRAM during a multi-frame inspect.
 const TEXTURE_CACHE_CAP: usize = 64;
@@ -83,26 +101,17 @@ trait UrlFetcher {
 }
 
 struct ReqwestUrlFetcher {
-    client: reqwest::Client,
     runtime: Arc<tokio::runtime::Runtime>,
 }
 
 impl ReqwestUrlFetcher {
     fn new() -> Result<Self, BridgeError> {
-        let client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(15))
-            .timeout(Duration::from_secs(5 * 60))
-            .build()
-            .map_err(|error| {
-                BridgeError::new(format!("Failed to initialize HTTPS client: {error}"))
-            })?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map(Arc::new)
             .map_err(|_| BridgeError::new("Failed to initialize HTTPS runtime"))?;
-        Ok(Self { client, runtime })
+        Ok(Self { runtime })
     }
 }
 
@@ -112,8 +121,21 @@ impl UrlFetcher for ReqwestUrlFetcher {
         url: &reqwest::Url,
         cancel: &opentake_media::MediaCancelToken,
     ) -> Result<UrlFetchResponse, BridgeError> {
-        let client = self.client.clone();
         let url = url.clone();
+        let (host, pinned) = self.runtime.block_on(resolve_public_target(&url, cancel))?;
+        let mut builder = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            // A configured proxy could resolve the hostname again or reach an
+            // internal target on our behalf, bypassing local address checks.
+            .no_proxy()
+            .connect_timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(5 * 60));
+        if let Some(pinned) = pinned {
+            builder = builder.resolve(&host, pinned);
+        }
+        let client = builder
+            .build()
+            .map_err(|_| BridgeError::new("Failed to initialize the secure HTTPS client"))?;
         let response = self.runtime.block_on(async {
             tokio::select! {
                 result = client.get(url).send() => result.map_err(safe_reqwest_error),
@@ -214,6 +236,122 @@ async fn wait_for_media_cancel(cancel: &opentake_media::MediaCancelToken) {
     }
 }
 
+async fn resolve_public_target(
+    url: &reqwest::Url,
+    cancel: &opentake_media::MediaCancelToken,
+) -> Result<(String, Option<SocketAddr>), BridgeError> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| BridgeError::new("source.url must include a host"))?
+        .to_string();
+    let port = url.port_or_known_default().unwrap_or(443);
+    if let Some(ip) = literal_host_ip(&host) {
+        ensure_public_ip(ip)?;
+        return Ok((host, None));
+    }
+
+    let addresses = {
+        let lookup = tokio::net::lookup_host((host.as_str(), port));
+        tokio::pin!(lookup);
+        let timeout = tokio::time::sleep(Duration::from_secs(10));
+        tokio::pin!(timeout);
+        tokio::select! {
+            result = &mut lookup => result.map_err(|_| BridgeError::new("source.url DNS resolution failed"))?,
+            () = wait_for_media_cancel(cancel) => return Err(BridgeError::new("source.url import was cancelled")),
+            () = &mut timeout => return Err(BridgeError::new("source.url DNS resolution timed out")),
+        }
+    };
+    let addresses = addresses.collect::<Vec<_>>();
+    Ok((host, Some(pin_public_address(addresses)?)))
+}
+
+fn pin_public_address(mut addresses: Vec<SocketAddr>) -> Result<SocketAddr, BridgeError> {
+    addresses.sort_unstable();
+    addresses.dedup();
+    if addresses.is_empty() {
+        return Err(BridgeError::new("source.url DNS returned no addresses"));
+    }
+    // Reject mixed public/private answers rather than choosing the public one:
+    // this makes split-horizon and rebinding responses fail closed.
+    for address in &addresses {
+        ensure_public_ip(address.ip())?;
+    }
+    Ok(addresses[0])
+}
+
+fn ensure_public_ip(ip: IpAddr) -> Result<(), BridgeError> {
+    if public_ip(ip) {
+        Ok(())
+    } else {
+        Err(BridgeError::new(
+            "source.url resolved to a non-public network address",
+        ))
+    }
+}
+
+fn literal_host_ip(host: &str) -> Option<IpAddr> {
+    host.strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host)
+        .parse()
+        .ok()
+}
+
+fn public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => public_ipv4(ip),
+        IpAddr::V6(ip) => public_ipv6(ip),
+    }
+}
+
+fn public_ipv4(ip: Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    !matches!(
+        (a, b, c),
+        (0, _, _)
+            | (10, _, _)
+            | (100, 64..=127, _)
+            | (127, _, _)
+            | (169, 254, _)
+            | (172, 16..=31, _)
+            | (192, 0, 0)
+            | (192, 0, 2)
+            | (192, 88, 99)
+            | (192, 168, _)
+            | (198, 18..=19, _)
+            | (198, 51, 100)
+            | (203, 0, 113)
+            | (224..=255, _, _)
+    )
+}
+
+fn public_ipv6(ip: Ipv6Addr) -> bool {
+    if let Some(ipv4) = ip.to_ipv4() {
+        return public_ipv4(ipv4);
+    }
+    let segments = ip.segments();
+    let first = segments[0];
+    if ip.is_unspecified()
+        || ip.is_loopback()
+        || (first & 0xfe00) == 0xfc00 // unique-local
+        || (first & 0xfe00) == 0xfe00 // link/site-local and reserved
+        || (first & 0xff00) == 0xff00 // multicast
+        || (first & 0xe000) != 0x2000
+    // fail closed outside global unicast 2000::/3
+    {
+        return false;
+    }
+    let is_special_purpose = matches!(
+        (segments[0], segments[1]),
+        (0x2001, 0x0000) // Teredo
+            | (0x2001, 0x0002) // benchmarking
+            | (0x2001, 0x0db8) // documentation
+            | (0x2002, _) // 6to4 transition
+    ) || (segments[0] == 0x2001
+        && matches!(segments[1] & 0xfff0, 0x0010 | 0x0020));
+    !is_special_purpose
+}
+
 fn safe_reqwest_error(error: reqwest::Error) -> BridgeError {
     if error.is_timeout() {
         BridgeError::new("source.url download timed out")
@@ -242,27 +380,205 @@ pub(crate) fn build_registry(workflows_dir: &Path) -> PluginRegistry {
     registry
 }
 
-/// Spawn the MCP server. `core` is a clone that shares the live session;
-/// `workflows_dir` is `<app_data_dir>/workflows`; `cache_root` / `models_dir` are
-/// the same paths the UI's [`MediaEngine`] uses, so the bridge's imports land in
-/// the same caches. A bind failure (port in use) is logged, not fatal — the app
-/// keeps running without the agent network face.
-pub fn spawn(core: AppCore, workflows_dir: PathBuf, cache_root: PathBuf, models_dir: PathBuf) {
-    let handle: Arc<dyn CoreHandle> = Arc::new(AppCoreHandle::new(core.clone()));
-    let bridge = build_media_bridge(core, cache_root, models_dir);
-    let registry = Arc::new(RwLock::new(build_registry(&workflows_dir)));
-    tauri::async_runtime::spawn(async move {
-        let addr = match server::DEFAULT_ADDR.parse() {
-            Ok(addr) => addr,
-            Err(e) => {
-                eprintln!("[mcp] invalid bind address {}: {e}", server::DEFAULT_ADDR);
-                return;
+/// Spawn the authenticated, project-gated MCP endpoint used by one official
+/// Codex turn. The legacy fixed-port listener deliberately remains disabled;
+/// every call gets a fresh loopback port and bearer credential whose lifetime
+/// is owned by the returned endpoint.
+pub(crate) async fn spawn(
+    dispatcher: Arc<Dispatcher>,
+    registry: Arc<RwLock<PluginRegistry>>,
+    gate: Arc<dyn ChatTurnGate>,
+) -> Result<EphemeralMcpEndpoint, EphemeralMcpError> {
+    bind_ephemeral_gated(dispatcher, registry, gate).await
+}
+
+#[cfg(test)]
+struct LiveProjectMcpGate {
+    core: AppCore,
+    transition_depth: Arc<AtomicUsize>,
+    identity_generation: Arc<AtomicU64>,
+    next_dispatch_id: AtomicU64,
+    active_dispatches: Arc<Mutex<HashMap<u64, opentake_media::MediaCancelToken>>>,
+}
+
+#[cfg(test)]
+struct LiveDispatchPermit {
+    id: u64,
+    active_dispatches: Arc<Mutex<HashMap<u64, opentake_media::MediaCancelToken>>>,
+}
+
+#[cfg(test)]
+impl Drop for LiveDispatchPermit {
+    fn drop(&mut self) {
+        self.active_dispatches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.id);
+    }
+}
+
+#[cfg(test)]
+impl LiveProjectMcpGate {
+    fn new(core: AppCore) -> Arc<Self> {
+        let transition_depth = Arc::new(AtomicUsize::new(0));
+        let identity_generation = Arc::new(AtomicU64::new(0));
+        let active_dispatches = Arc::new(Mutex::new(HashMap::<
+            u64,
+            opentake_media::MediaCancelToken,
+        >::new()));
+        let transition_depth_for_hook = transition_depth.clone();
+        let identity_generation_for_hook = identity_generation.clone();
+        let active_dispatches_for_hook = active_dispatches.clone();
+        core.subscribe_project_identity_transition(move |pending| {
+            if pending {
+                identity_generation_for_hook.fetch_add(1, Ordering::AcqRel);
+                transition_depth_for_hook.fetch_add(1, Ordering::AcqRel);
+                for cancel in active_dispatches_for_hook
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .values()
+                {
+                    cancel.cancel();
+                }
+            } else {
+                let _ = transition_depth_for_hook.fetch_update(
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                    |depth| Some(depth.saturating_sub(1)),
+                );
             }
-        };
-        if let Err(e) = server::serve_with_bridge(addr, handle, registry, Some(bridge)).await {
-            eprintln!("[mcp] server stopped: {e}");
+        });
+        Arc::new(Self {
+            core,
+            transition_depth,
+            identity_generation,
+            next_dispatch_id: AtomicU64::new(1),
+            active_dispatches,
+        })
+    }
+
+    fn transition_pending(&self) -> bool {
+        self.transition_depth.load(Ordering::Acquire) > 0
+    }
+
+    fn register_dispatch(
+        &self,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Option<LiveDispatchPermit> {
+        if self.transition_pending() {
+            return None;
         }
-    });
+        let id = self.next_dispatch_id.fetch_add(1, Ordering::Relaxed);
+        self.active_dispatches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id, cancel.clone());
+        let permit = LiveDispatchPermit {
+            id,
+            active_dispatches: self.active_dispatches.clone(),
+        };
+        if self.transition_pending() {
+            cancel.cancel();
+            return None;
+        }
+        Some(permit)
+    }
+
+    fn with_live_project<T>(&self, operation: impl FnOnce() -> T) -> Option<T> {
+        let _identity = self.core.lock_project_identity_workflow();
+        if self.transition_pending() || self.core.runtime_snapshot().project_dir.is_none() {
+            return None;
+        }
+        Some(operation())
+    }
+
+    fn with_live_dispatch<T>(
+        &self,
+        cancel: &opentake_media::MediaCancelToken,
+        operation: impl FnOnce() -> T,
+    ) -> Option<T> {
+        self.with_live_dispatch_after_admission(cancel, || {}, operation)
+    }
+
+    fn with_live_dispatch_after_admission<T>(
+        &self,
+        cancel: &opentake_media::MediaCancelToken,
+        after_admission: impl FnOnce(),
+        operation: impl FnOnce() -> T,
+    ) -> Option<T> {
+        let admitted_generation = self.identity_generation.load(Ordering::Acquire);
+        if self.transition_pending() || cancel.is_cancelled() {
+            return None;
+        }
+        after_admission();
+        // Acquire the identity lease before admission. A transition announces
+        // `pending=true` before waiting for this reader, so registration and the
+        // second pending check cannot fall through from project A into B.
+        let _identity = self.core.lock_project_identity_workflow();
+        if self.transition_pending()
+            || cancel.is_cancelled()
+            || self.identity_generation.load(Ordering::Acquire) != admitted_generation
+        {
+            return None;
+        }
+        let expected = self.core.runtime_snapshot();
+        expected.project_dir.as_ref()?;
+        let _permit = self.register_dispatch(cancel)?;
+        if self.transition_pending() || cancel.is_cancelled() {
+            return None;
+        }
+        let result = operation();
+        let current = self.core.runtime_snapshot();
+        if current.project_epoch != expected.project_epoch
+            || current.project_dir != expected.project_dir
+        {
+            cancel.cancel();
+            return None;
+        }
+        Some(result)
+    }
+}
+
+#[cfg(test)]
+impl ChatTurnGate for LiveProjectMcpGate {
+    fn timeline(&self, dispatcher: &Dispatcher) -> Option<opentake_domain::Timeline> {
+        self.with_live_project(|| dispatcher.timeline())
+    }
+
+    fn dispatch(
+        &self,
+        dispatcher: &Dispatcher,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Option<ToolResult> {
+        let cancel = opentake_media::MediaCancelToken::new();
+        self.dispatch_cancellable(dispatcher, name, args, &cancel)
+    }
+
+    fn dispatch_cancellable(
+        &self,
+        dispatcher: &Dispatcher,
+        name: &str,
+        args: serde_json::Value,
+        request_cancel: &opentake_media::MediaCancelToken,
+    ) -> Option<ToolResult> {
+        self.with_live_dispatch(request_cancel, || {
+            dispatcher.dispatch_cancellable(name, args, request_cancel)
+        })
+    }
+
+    fn dispatch_cancellable_scoped(
+        &self,
+        dispatcher: &Dispatcher,
+        name: &str,
+        args: serde_json::Value,
+        undo_scope: &str,
+        request_cancel: &opentake_media::MediaCancelToken,
+    ) -> Option<ToolResult> {
+        self.with_live_dispatch(request_cancel, || {
+            dispatcher.dispatch_cancellable_scoped(undo_scope, name, args, request_cancel)
+        })
+    }
 }
 
 pub(crate) fn build_media_bridge(
@@ -282,6 +598,94 @@ struct TauriMediaBridge {
     /// import go through this, so imported assets are cached exactly like the
     /// panel's. Built here (the engine is not `Clone`) from the same paths.
     engine: MediaEngine,
+}
+
+struct RetainedExternalSource {
+    path: PathBuf,
+    parent: Dir,
+    name: std::ffi::OsString,
+    handle: Handle,
+}
+
+fn retained_external_open_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        };
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    }
+    options
+}
+
+impl RetainedExternalSource {
+    fn open(path: &Path) -> Result<Self, BridgeError> {
+        let name = path
+            .file_name()
+            .ok_or_else(|| BridgeError::new("source.path must name one regular file"))?
+            .to_owned();
+        let parent_path = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty());
+        let parent = Dir::open_ambient_dir(
+            parent_path.unwrap_or_else(|| Path::new(".")),
+            ambient_authority(),
+        )
+        .map_err(|_| {
+            BridgeError::new("MCP_SOURCE_PATH_UNREADABLE: source.path parent is unavailable")
+        })?;
+        let options = retained_external_open_options();
+        let file = parent.open_with(&name, &options).map_err(|_| {
+            BridgeError::new(
+                "MCP_SOURCE_PATH_UNREADABLE: source.path is not a readable no-follow file",
+            )
+        })?;
+        let metadata = file
+            .metadata()
+            .map_err(|_| BridgeError::new("MCP_SOURCE_PATH_UNREADABLE: metadata failed"))?;
+        if crate::media::capability_metadata_is_symlink_or_reparse(&metadata) || !metadata.is_file()
+        {
+            return Err(BridgeError::new(
+                "MCP_SOURCE_PATH_UNREADABLE: source.path must be a regular file",
+            ));
+        }
+        let handle = Handle::from_file(file.into_std()).map_err(|_| {
+            BridgeError::new("MCP_SOURCE_PATH_UNREADABLE: source.path identity unavailable")
+        })?;
+        Ok(Self {
+            path: path.to_owned(),
+            parent,
+            name,
+            handle,
+        })
+    }
+
+    fn file(&self) -> &std::fs::File {
+        self.handle.as_file()
+    }
+
+    fn matches_path(&self) -> Result<bool, String> {
+        let options = retained_external_open_options();
+        let current = self
+            .parent
+            .open_with(&self.name, &options)
+            .map_err(|error| error.to_string())?;
+        let metadata = current.metadata().map_err(|error| error.to_string())?;
+        if crate::media::capability_metadata_is_symlink_or_reparse(&metadata) || !metadata.is_file()
+        {
+            return Ok(false);
+        }
+        let current = Handle::from_file(current.into_std()).map_err(|error| error.to_string())?;
+        Ok(current == self.handle)
+    }
 }
 
 impl TauriMediaBridge {
@@ -314,6 +718,13 @@ fn resolve_transcript_batch(
 }
 
 impl MediaBridge for TauriMediaBridge {
+    fn inspect_media(
+        &self,
+        request: &InspectMediaRequest,
+    ) -> Result<InspectMediaResult, BridgeError> {
+        inspect_source_media(&self.core, &self.engine, request)
+    }
+
     fn inspect_timeline(
         &self,
         frames: &[i32],
@@ -451,12 +862,19 @@ impl MediaBridge for TauriMediaBridge {
         cancel: &opentake_media::MediaCancelToken,
     ) -> Result<ImportOutcome, BridgeError> {
         match source {
-            ImportSource::Path(path) => {
-                self.import_from_path(&path, name.as_deref(), folder_id.as_deref())
-            }
-            ImportSource::Bytes { base64, mime_type } => {
-                self.import_from_bytes(&base64, &mime_type, name.as_deref(), folder_id.as_deref())
-            }
+            ImportSource::Path(path) => self.import_from_path_cancellable(
+                &path,
+                name.as_deref(),
+                folder_id.as_deref(),
+                cancel,
+            ),
+            ImportSource::Bytes { base64, mime_type } => self.import_from_bytes_cancellable(
+                &base64,
+                &mime_type,
+                name.as_deref(),
+                folder_id.as_deref(),
+                cancel,
+            ),
             ImportSource::Url { url, mime_type } => {
                 let fetcher = ReqwestUrlFetcher::new()?;
                 self.import_from_url_with(
@@ -615,6 +1033,7 @@ impl TauriMediaBridge {
             height: probe.height.map(|value| value as i32),
             fps: probe.fps,
             has_audio: probe.has_audio,
+            color: probe.color,
         })
     }
 
@@ -682,7 +1101,7 @@ impl TauriMediaBridge {
             break (current, response);
         };
 
-        let (extension, response_mime, expected_kind) =
+        let (extension, _response_mime, expected_kind) =
             resolve_url_media_type(&final_url, requested_mime, response.content_type.as_deref())?;
         if let Some(length) = response.content_length {
             if length > decoded_limit {
@@ -801,18 +1220,11 @@ impl TauriMediaBridge {
             .map_err(|error| BridgeError::new(error.to_string()))?;
         staged.commit();
         self.core.emit_deferred(events);
-        let warning = commit.warning.map_or(String::new(), |warning| {
-            format!(" Warning: retained commit required recovery: {warning:?}.")
-        });
+        let recovery_required = commit.warning.is_some();
         Ok(ImportOutcome {
-            message: format!(
-                "Imported '{}' (id: {}, type: {}, {} bytes, {}). Available now in get_media.{warning}",
-                commit.entry.name,
-                commit.entry.id,
-                clip_type_name(commit.entry.kind),
-                total,
-                response_mime.unwrap_or_else(|| format!(".{extension}"))
-            ),
+            asset_count: 1,
+            folder_count: 0,
+            recovery_required,
         })
     }
 
@@ -820,21 +1232,60 @@ impl TauriMediaBridge {
     /// `crate::media` path the media panel uses (`import_one` / `mirror_dir`), so
     /// posters/manifest/events stay consistent. 1:1 with upstream
     /// `ToolExecutor+Import.importFromPath`.
+    #[cfg(test)]
     fn import_from_path(
         &self,
         path: &str,
         name: Option<&str>,
         folder_id: Option<&str>,
     ) -> Result<ImportOutcome, BridgeError> {
+        self.import_from_path_cancellable(
+            path,
+            name,
+            folder_id,
+            &opentake_media::MediaCancelToken::new(),
+        )
+    }
+
+    fn import_from_path_cancellable(
+        &self,
+        path: &str,
+        name: Option<&str>,
+        folder_id: Option<&str>,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<ImportOutcome, BridgeError> {
+        self.import_from_path_cancellable_with_hook(path, name, folder_id, cancel, || {})
+    }
+
+    fn import_from_path_cancellable_with_hook(
+        &self,
+        path: &str,
+        name: Option<&str>,
+        folder_id: Option<&str>,
+        cancel: &opentake_media::MediaCancelToken,
+        before_commit: impl FnOnce(),
+    ) -> Result<ImportOutcome, BridgeError> {
+        cancelled_checkpoint(cancel)?;
         self.core
             .ensure_project_mutable()
             .map_err(|error| BridgeError::new(error.to_string()))?;
+        let project = self.core.runtime_snapshot();
+        let project_dir = project
+            .project_dir
+            .clone()
+            .ok_or_else(|| BridgeError::new("No project is open; cannot import source.path"))?;
         let file_url = PathBuf::from(path);
-        let meta = std::fs::metadata(&file_url).map_err(|_| {
+        let meta = std::fs::symlink_metadata(&file_url).map_err(|_| {
             BridgeError::new(
                 "MCP_SOURCE_PATH_UNREADABLE: source.path does not exist or is not readable",
             )
         })?;
+
+        if meta.file_type().is_symlink() {
+            return Err(BridgeError::new(
+                "MCP_SOURCE_PATH_UNREADABLE: source.path symbolic links are not allowed",
+            ));
+        }
 
         if meta.is_dir() {
             // Recursive directory import (剪注-style folder mirroring). Reuse the
@@ -843,8 +1294,16 @@ impl TauriMediaBridge {
             let before_folders = self.core.media().folders.len();
             let mut skipped = Vec::new();
             let parent = folder_id.map(|s| s.to_string());
-            crate::media::mirror_dir(&self.core, &self.engine, &file_url, parent, &mut skipped)
-                .map_err(|error| BridgeError::new(error.to_string()))?;
+            before_commit();
+            crate::media::mirror_dir_cancellable(
+                &self.core,
+                &self.engine,
+                &file_url,
+                parent,
+                &mut skipped,
+                cancel,
+            )
+            .map_err(|error| BridgeError::new(error.to_string()))?;
             let after = self.core.media();
             let asset_count = after.entries.len().saturating_sub(before_entries);
             let folder_count = after.folders.len().saturating_sub(before_folders);
@@ -853,15 +1312,17 @@ impl TauriMediaBridge {
                     "No supported media found in folder: {path}"
                 )));
             }
-            let dir_name = file_url
-                .file_name()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_default();
             return Ok(ImportOutcome {
-                message: format!(
-                    "Imported {asset_count} file(s) into {folder_count} folder(s) from '{dir_name}', mirroring its structure. Available now in get_media / list_folders."
-                ),
+                asset_count,
+                folder_count,
+                recovery_required: false,
             });
+        }
+
+        if !meta.is_file() {
+            return Err(BridgeError::new(
+                "MCP_SOURCE_PATH_UNREADABLE: source.path must be a regular file or directory",
+            ));
         }
 
         // Single file. Validate the extension up front for upstream's precise
@@ -876,31 +1337,93 @@ impl TauriMediaBridge {
                 "Unsupported file extension '.{ext}'. Supported: mov/mp4/m4v, mp3/wav/aac/m4a, png/jpg/jpeg/tiff/heic."
             )));
         }
-        let entry = crate::media::import_one(&self.core, &self.engine, &file_url)
-            .map_err(|_| {
-                BridgeError::new(
-                    "MCP_SOURCE_IMPORT_FAILED: source.path could not be imported; verify the file type and permissions",
-                )
-            })?
-            .ok_or_else(|| {
-                BridgeError::new(
-                    "MCP_SOURCE_IMPORT_FAILED: source.path could not be imported; verify the file type and permissions",
-                )
+        let source = RetainedExternalSource::open(&file_url)?;
+        cancelled_checkpoint(cancel)?;
+        let probe =
+            match self
+                .engine
+                .probe_file_cancellable(source.file(), cancel, MCP_MEDIA_PROBE_TIMEOUT)
+            {
+                Ok(probe) => ProbedMedia {
+                    duration_secs: probe.duration_secs,
+                    width: probe.width.map(|value| value as i32),
+                    height: probe.height.map(|value| value as i32),
+                    fps: probe.fps,
+                    has_audio: probe.has_audio,
+                    color: probe.color,
+                },
+                Err(opentake_media::MediaError::Cancelled) => {
+                    return Err(BridgeError::new("source.path import was cancelled"));
+                }
+                Err(_) => ProbedMedia::default(),
+            };
+        cancelled_checkpoint(cancel)?;
+        let display_name = name
+            .map(str::to_owned)
+            .unwrap_or_else(|| crate::media::display_name(&file_url));
+        before_commit();
+        let project_media = ProjectMediaCapability::open_verified(
+            &self.core,
+            project.project_epoch,
+            &project_dir,
+            true,
+        )
+        .map_err(BridgeError::new)?;
+        let mut events = DeferredCoreEvents::default();
+        let commit = self
+            .core
+            .import_retained_media_for_project_deferred_with_manifest_writer(
+                project.project_epoch,
+                &project_dir,
+                &source.path,
+                display_name,
+                &probe,
+                folder_id,
+                &mut events,
+                |manifest| {
+                    project_media
+                        .write_manifest(manifest)
+                        .map_err(CoreError::Media)
+                },
+                || {
+                    if cancel.checkpoint() {
+                        return Err(CoreError::Media(
+                            "source.path import was cancelled before commit".to_string(),
+                        ));
+                    }
+                    match source.matches_path() {
+                        Ok(true) => Ok(()),
+                        Ok(false) => Err(CoreError::Media(
+                            "source.path identity changed before commit".to_string(),
+                        )),
+                        Err(error) => Err(CoreError::Media(format!(
+                            "source.path identity check failed before commit: {error}"
+                        ))),
+                    }
+                },
+            )
+            .map_err(|error| {
+                if cancel.is_cancelled() {
+                    BridgeError::new(error.to_string())
+                } else {
+                    BridgeError::new(
+                        "MCP_SOURCE_IMPORT_FAILED: source.path could not be imported; verify the file type and permissions",
+                    )
+                }
             })?;
-        let entry = self.apply_import_metadata(entry, name, folder_id)?;
+        self.core.emit_deferred(events);
+        let recovery_required = commit.warning.is_some();
         Ok(ImportOutcome {
-            message: format!(
-                "Imported '{}' (id: {}, type: {}) from path. Available now in get_media.",
-                entry.name,
-                entry.id,
-                clip_type_name(entry.kind)
-            ),
+            asset_count: 1,
+            folder_count: 0,
+            recovery_required,
         })
     }
 
     /// `bytes` import: write the base64 payload into the project bundle's `media/`,
     /// then register it through the same import path. 1:1 with upstream
     /// `ToolExecutor+Import.importFromBytes`.
+    #[cfg(test)]
     fn import_from_bytes(
         &self,
         base64: &str,
@@ -908,6 +1431,43 @@ impl TauriMediaBridge {
         name: Option<&str>,
         folder_id: Option<&str>,
     ) -> Result<ImportOutcome, BridgeError> {
+        self.import_from_bytes_cancellable(
+            base64,
+            mime_type,
+            name,
+            folder_id,
+            &opentake_media::MediaCancelToken::new(),
+        )
+    }
+
+    fn import_from_bytes_cancellable(
+        &self,
+        base64: &str,
+        mime_type: &str,
+        name: Option<&str>,
+        folder_id: Option<&str>,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<ImportOutcome, BridgeError> {
+        self.import_from_bytes_cancellable_with_hook(
+            base64,
+            mime_type,
+            name,
+            folder_id,
+            cancel,
+            || {},
+        )
+    }
+
+    fn import_from_bytes_cancellable_with_hook(
+        &self,
+        base64: &str,
+        mime_type: &str,
+        name: Option<&str>,
+        folder_id: Option<&str>,
+        cancel: &opentake_media::MediaCancelToken,
+        before_commit: impl FnOnce(),
+    ) -> Result<ImportOutcome, BridgeError> {
+        cancelled_checkpoint(cancel)?;
         self.core
             .ensure_project_mutable()
             .map_err(|error| BridgeError::new(error.to_string()))?;
@@ -929,72 +1489,121 @@ impl TauriMediaBridge {
                 IMPORT_BYTES_DECODED_MAX
             )));
         }
+        cancelled_checkpoint(cancel)?;
 
-        let project_dir = self
-            .core
-            .project_dir()
+        let project = self.core.runtime_snapshot();
+        let project_dir = project
+            .project_dir
             .ok_or_else(|| BridgeError::new("No project is open; cannot import bytes"))?;
-        let media_dir = project_dir.join("media");
-        std::fs::create_dir_all(&media_dir)
-            .map_err(|e| BridgeError::new(format!("Failed to prepare media directory: {e}")))?;
-
+        let project_media = ProjectMediaCapability::open_verified(
+            &self.core,
+            project.project_epoch,
+            &project_dir,
+            true,
+        )
+        .map_err(BridgeError::new)?;
         let filename = format!("imported-{}.{file_ext}", short_uuid());
-        let dest = media_dir.join(filename);
-        std::fs::write(&dest, &data)
-            .map_err(|e| BridgeError::new(format!("Failed to write bytes to disk: {e}")))?;
-
-        let entry = match crate::media::import_one(&self.core, &self.engine, &dest) {
-            Ok(Some(entry)) => entry,
-            Ok(None) => {
-                let _ = std::fs::remove_file(&dest);
-                return Err(BridgeError::new("Failed to register imported asset"));
-            }
-            Err(error) => {
-                let _ = std::fs::remove_file(&dest);
-                return Err(BridgeError::new(error.to_string()));
-            }
-        };
-        let entry = self.apply_import_metadata(entry, name, folder_id)?;
+        let mut staged = project_media
+            .create_import(Path::new(&filename))
+            .map_err(BridgeError::new)?;
+        staged
+            .file_mut()
+            .write_all(&data)
+            .map_err(|error| BridgeError::new(format!("Failed to stage source.bytes: {error}")))?;
+        staged
+            .file_mut()
+            .flush()
+            .map_err(|error| BridgeError::new(format!("Failed to flush source.bytes: {error}")))?;
+        staged
+            .file()
+            .sync_all()
+            .map_err(|error| BridgeError::new(format!("Failed to sync source.bytes: {error}")))?;
+        staged
+            .file_mut()
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| BridgeError::new(format!("Failed to rewind source.bytes: {error}")))?;
+        cancelled_checkpoint(cancel)?;
+        if !project_media
+            .matches_leaf(&staged)
+            .map_err(BridgeError::new)?
+        {
+            return Err(BridgeError::new(
+                "source.bytes staging identity changed before probe",
+            ));
+        }
+        let probe =
+            match self
+                .engine
+                .probe_file_cancellable(staged.file(), cancel, MCP_MEDIA_PROBE_TIMEOUT)
+            {
+                Ok(probe) => ProbedMedia {
+                    duration_secs: probe.duration_secs,
+                    width: probe.width.map(|value| value as i32),
+                    height: probe.height.map(|value| value as i32),
+                    fps: probe.fps,
+                    has_audio: probe.has_audio,
+                    color: probe.color,
+                },
+                Err(opentake_media::MediaError::Cancelled) => {
+                    return Err(BridgeError::new("source.bytes import was cancelled"));
+                }
+                Err(_) => ProbedMedia::default(),
+            };
+        cancelled_checkpoint(cancel)?;
+        if !project_media
+            .matches_leaf(&staged)
+            .map_err(BridgeError::new)?
+        {
+            return Err(BridgeError::new(
+                "source.bytes staging identity changed during probe",
+            ));
+        }
+        let display_name = name
+            .map(str::to_owned)
+            .unwrap_or_else(|| crate::media::display_name(staged.path()));
+        before_commit();
+        let mut events = DeferredCoreEvents::default();
+        let commit = self
+            .core
+            .import_retained_media_for_project_deferred_with_manifest_writer(
+                project.project_epoch,
+                &project_dir,
+                staged.path(),
+                display_name,
+                &probe,
+                folder_id,
+                &mut events,
+                |manifest| {
+                    project_media
+                        .write_manifest(manifest)
+                        .map_err(CoreError::Media)
+                },
+                || {
+                    if cancel.checkpoint() {
+                        return Err(CoreError::Media(
+                            "source.bytes import was cancelled before publication".to_string(),
+                        ));
+                    }
+                    match project_media.matches_leaf(&staged) {
+                        Ok(true) => Ok(()),
+                        Ok(false) => Err(CoreError::Media(
+                            "source.bytes staging identity changed during publication".to_string(),
+                        )),
+                        Err(error) => Err(CoreError::Media(format!(
+                        "source.bytes staging identity check failed during publication: {error}"
+                    ))),
+                    }
+                },
+            )
+            .map_err(|error| BridgeError::new(error.to_string()))?;
+        staged.commit();
+        self.core.emit_deferred(events);
+        let recovery_required = commit.warning.is_some();
         Ok(ImportOutcome {
-            message: format!(
-                "Imported '{}' (id: {}, type: {}, {} bytes). Available now in get_media.",
-                entry.name,
-                entry.id,
-                clip_type_name(entry.kind),
-                data.len()
-            ),
+            asset_count: 1,
+            folder_count: 0,
+            recovery_required,
         })
-    }
-
-    /// Apply the optional display name + folder placement to a freshly imported
-    /// asset (upstream `applyImportMetadata`): rename via `RenameMedia`, place via
-    /// `MoveToFolder`. Returns the (possibly renamed) entry for the confirmation.
-    fn apply_import_metadata(
-        &self,
-        mut entry: opentake_domain::MediaManifestEntry,
-        name: Option<&str>,
-        folder_id: Option<&str>,
-    ) -> Result<opentake_domain::MediaManifestEntry, BridgeError> {
-        if let Some(name) = name {
-            self.core
-                .apply(opentake_core::EditCommand::RenameMedia {
-                    entries: vec![opentake_ops::RenameEntry {
-                        id: entry.id.clone(),
-                        name: name.to_string(),
-                    }],
-                })
-                .map_err(|error| BridgeError::new(error.to_string()))?;
-            entry.name = name.to_string();
-        }
-        if let Some(folder_id) = folder_id {
-            self.core
-                .apply(opentake_core::EditCommand::MoveToFolder {
-                    asset_ids: vec![entry.id.clone()],
-                    folder_id: Some(folder_id.to_string()),
-                })
-                .map_err(|error| BridgeError::new(error.to_string()))?;
-        }
-        Ok(entry)
     }
 }
 
@@ -1022,6 +1631,9 @@ fn validate_parsed_https_url(url: &reqwest::Url) -> Result<(), BridgeError> {
     }
     if !url.username().is_empty() || url.password().is_some() {
         return Err(BridgeError::new("source.url must not include userinfo"));
+    }
+    if let Some(ip) = url.host_str().and_then(literal_host_ip) {
+        ensure_public_ip(ip)?;
     }
     Ok(())
 }
@@ -1157,6 +1769,7 @@ fn url_display_name(url: &reqwest::Url) -> Option<String> {
 
 /// Lowercase `ClipType` name for the import confirmation (`video`/`audio`/…),
 /// matching upstream `asset.type.rawValue`.
+#[cfg(test)]
 fn clip_type_name(kind: ClipType) -> &'static str {
     match kind {
         ClipType::Video => "video",
@@ -1176,6 +1789,408 @@ fn short_uuid() -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("{:08x}", (nanos as u64) & 0xffff_ffff)
+}
+
+// MARK: - Raw-source inspection for inspect_media
+
+/// Read a project-local image through the retained no-follow bundle authority
+/// when the entry is bundle-relative, falling back to the resolved pathname
+/// for materialized external/generated assets. Returning the authority-opened
+/// file prevents an ambient rebind of the bundle pathname from redirecting the
+/// inspection to a rebound bundle (same-ID/different-path case).
+fn inspect_image_thumbnail(
+    core: &AppCore,
+    entry: &opentake_domain::MediaManifestEntry,
+    resolved_path: &Path,
+) -> opentake_media::Result<RgbaFrame> {
+    if let MediaSource::Project { relative_path } = &entry.source {
+        if let Ok(file) = core.open_project_asset(Path::new(relative_path)) {
+            return opentake_media::thumbnail::image_thumbnail_reader(
+                std::io::BufReader::new(file),
+                INSPECT_MEDIA_FRAME_MAX_DIMENSION,
+            );
+        }
+    }
+    opentake_media::thumbnail::image_thumbnail(resolved_path, INSPECT_MEDIA_FRAME_MAX_DIMENSION)
+}
+
+fn inspect_source_media(
+    core: &AppCore,
+    engine: &MediaEngine,
+    request: &InspectMediaRequest,
+) -> Result<InspectMediaResult, BridgeError> {
+    let snapshot = core.runtime_snapshot();
+    let entry = snapshot
+        .media
+        .entries
+        .iter()
+        .find(|entry| entry.id == request.media_ref)
+        .ok_or_else(|| {
+            BridgeError::not_found("inspect_media: media is not in the active project")
+        })?;
+    if entry.kind != request.kind {
+        return Err(BridgeError::unavailable(
+            "inspect_media: media type changed before inspection",
+        ));
+    }
+    if entry.kind == ClipType::Text {
+        return Err(BridgeError::unavailable(
+            "inspect_media: text clips are not source media",
+        ));
+    }
+    let (path, _) =
+        crate::transcribe::resolve_asset_from_snapshot(&snapshot, &request.media_ref)
+            .map_err(|_| BridgeError::unavailable("inspect_media: source media is offline"))?;
+    let metadata = std::fs::symlink_metadata(&path)
+        .map_err(|_| BridgeError::unavailable("inspect_media: source media is unavailable"))?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+        return Err(BridgeError::unavailable(
+            "inspect_media: source media is not a regular file",
+        ));
+    }
+    let byte_size = metadata.len();
+
+    if entry.kind == ClipType::Lottie {
+        return inspect_lottie_frames(&path, request, byte_size);
+    }
+
+    if entry.kind == ClipType::Image {
+        let frame = inspect_image_thumbnail(core, entry, &path)
+            .map_err(|_| BridgeError::new("inspect_media: failed to decode image"))?;
+        let width = frame.width;
+        let height = frame.height;
+        let bytes = encode_rgba_jpeg(&frame)
+            .ok_or_else(|| BridgeError::new("inspect_media: failed to encode image"))?;
+        return Ok(InspectMediaResult {
+            frames: vec![InspectedMediaFrame {
+                timestamp_seconds: 0.0,
+                bytes,
+                media_type: "image/jpeg".into(),
+            }],
+            overview_timestamps: Vec::new(),
+            duration_seconds: entry.duration.max(0.0),
+            width: Some(width),
+            height: Some(height),
+            fps: None,
+            has_audio: false,
+            byte_size,
+            transcript: None,
+            transcription_unavailable: false,
+        });
+    }
+
+    let probe = engine
+        .probe(&path)
+        .map_err(|_| BridgeError::new("inspect_media: failed to probe source media"))?;
+    let duration = if probe.duration_secs.is_finite() && probe.duration_secs > 0.0 {
+        probe.duration_secs
+    } else {
+        entry.duration.max(0.0)
+    };
+    let start = request.start_seconds.unwrap_or(0.0).clamp(0.0, duration);
+    let end = request.end_seconds.unwrap_or(duration).clamp(0.0, duration);
+    if start >= end {
+        return Err(BridgeError::new(
+            "inspect_media: requested time range is outside the source",
+        ));
+    }
+
+    let (frames, overview_timestamps) = if entry.kind == ClipType::Video {
+        inspect_video_frames(&path, start, end, request.max_frames, request.overview)?
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
+    let (transcript, transcription_unavailable) = if probe.has_audio {
+        match inspect_media_transcript(engine, &path, entry.kind == ClipType::Video, (start, end)) {
+            Ok(transcript) => (Some(transcript), false),
+            Err(error) => {
+                eprintln!("[mcp] inspect_media transcription unavailable: {error}");
+                (None, true)
+            }
+        }
+    } else {
+        (None, false)
+    };
+
+    Ok(InspectMediaResult {
+        frames,
+        overview_timestamps,
+        duration_seconds: duration,
+        width: probe.width,
+        height: probe.height,
+        fps: probe.fps,
+        has_audio: probe.has_audio,
+        byte_size,
+        transcript,
+        transcription_unavailable,
+    })
+}
+
+fn inspect_lottie_frames(
+    path: &Path,
+    request: &InspectMediaRequest,
+    byte_size: u64,
+) -> Result<InspectMediaResult, BridgeError> {
+    struct FixedResolver(Rc<GpuTexture>);
+
+    impl TextureResolver for FixedResolver {
+        fn resolve(
+            &mut self,
+            _source: &TextureSource,
+            _source_frame: i64,
+        ) -> Option<Rc<GpuTexture>> {
+            Some(self.0.clone())
+        }
+    }
+
+    let dev = RenderDevice::try_new()
+        .map_err(|_| BridgeError::unavailable("inspect_media: Lottie GPU rendering unavailable"))?;
+    let mut materializer = crate::render::LottieMaterializer::new();
+    let metadata = materializer
+        .metadata(path)
+        .map_err(|_| BridgeError::unavailable("inspect_media: invalid Lottie document"))?;
+    let start = request
+        .start_seconds
+        .unwrap_or(0.0)
+        .clamp(0.0, metadata.duration_seconds);
+    let end = request
+        .end_seconds
+        .unwrap_or(metadata.duration_seconds)
+        .clamp(0.0, metadata.duration_seconds);
+    if start >= end {
+        return Err(BridgeError::new(
+            "inspect_media: requested time range is outside the Lottie animation",
+        ));
+    }
+
+    let count = if request.overview {
+        INSPECT_MEDIA_OVERVIEW_TILES
+    } else {
+        request.max_frames.max(1)
+    };
+    let timestamps = (0..count)
+        .map(|index| start + (end - start) * (index as f64 + 0.5) / count as f64)
+        .collect::<Vec<_>>();
+    let render_size = fit_render_size(
+        metadata.width as i32,
+        metadata.height as i32,
+        INSPECT_MEDIA_FRAME_MAX_DIMENSION,
+    );
+    let source = TextureSource::Lottie {
+        media_ref: request.media_ref.clone(),
+    };
+    let compositor = Compositor::new(&dev.device);
+    let mut cache = TextureCache::new(TEXTURE_CACHE_CAP);
+    let mut rendered = Vec::with_capacity(timestamps.len());
+    for &timestamp in &timestamps {
+        let source_frame = (timestamp * metadata.frame_rate)
+            .floor()
+            .clamp(0.0, (metadata.frame_count - 1) as f64) as i64;
+        let texture = materializer
+            .resolve(
+                &dev.device,
+                &dev.queue,
+                &mut cache,
+                path,
+                source_frame,
+                (render_size.width, render_size.height),
+                "inspect-media-lottie",
+            )
+            .map_err(|_| BridgeError::new("inspect_media: failed to render Lottie frame"))?;
+        let draw = LayerDraw {
+            source: &source,
+            source_frame,
+            affine: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            nat_size: (render_size.width as f64, render_size.height as f64),
+            crop_uv: (0.0, 0.0, 1.0, 1.0),
+            opacity: 1.0,
+            needs_premultiply: false,
+            clip_id: "inspect-media-lottie",
+            color_grade: None,
+            lut: None,
+            chroma_key: None,
+            masks: &[],
+            effects: &[],
+        };
+        let plan = FramePlan {
+            // Lottie inspection deliberately exposes transparency over neutral
+            // gray, matching the public tool description and upstream behavior.
+            clear_rgba: [0.5, 0.5, 0.5, 1.0],
+            draws: vec![draw],
+        };
+        let frame = compositor
+            .render_to_rgba(
+                &dev.device,
+                &dev.queue,
+                render_size,
+                &plan,
+                &mut FixedResolver(texture),
+            )
+            .map_err(|_| BridgeError::new("inspect_media: failed to composite Lottie frame"))?;
+        rendered.push((
+            timestamp,
+            RgbaFrame::new(frame.width, frame.height, frame.rgba),
+        ));
+    }
+
+    let (frames, overview_timestamps) = if request.overview {
+        let (bytes, _, _) = encode_storyboard_jpeg(&rendered)
+            .ok_or_else(|| BridgeError::new("inspect_media: failed to encode Lottie overview"))?;
+        (
+            vec![InspectedMediaFrame {
+                timestamp_seconds: start,
+                bytes,
+                media_type: "image/jpeg".into(),
+            }],
+            timestamps,
+        )
+    } else {
+        let frames = rendered
+            .iter()
+            .map(|(timestamp_seconds, frame)| {
+                encode_rgba_jpeg(frame)
+                    .map(|bytes| InspectedMediaFrame {
+                        timestamp_seconds: *timestamp_seconds,
+                        bytes,
+                        media_type: "image/jpeg".into(),
+                    })
+                    .ok_or_else(|| BridgeError::new("inspect_media: failed to encode Lottie frame"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        (frames, Vec::new())
+    };
+
+    Ok(InspectMediaResult {
+        frames,
+        overview_timestamps,
+        duration_seconds: metadata.duration_seconds,
+        width: Some(metadata.width),
+        height: Some(metadata.height),
+        fps: Some(metadata.frame_rate),
+        has_audio: false,
+        byte_size,
+        transcript: None,
+        transcription_unavailable: false,
+    })
+}
+
+fn inspect_video_frames(
+    path: &Path,
+    start: f64,
+    end: f64,
+    requested_frames: usize,
+    overview: bool,
+) -> Result<(Vec<InspectedMediaFrame>, Vec<f64>), BridgeError> {
+    let count = if overview {
+        INSPECT_MEDIA_OVERVIEW_TILES
+    } else {
+        requested_frames.max(1)
+    };
+    let times = (0..count)
+        .map(|index| start + (end - start) * (index as f64 + 0.5) / count as f64)
+        .collect::<Vec<_>>();
+    let decode = FrameRequest {
+        time_secs: 0.0,
+        max_size: (
+            INSPECT_MEDIA_FRAME_MAX_DIMENSION,
+            INSPECT_MEDIA_FRAME_MAX_DIMENSION,
+        ),
+        tolerance_secs: 0.25,
+        apply_rotation: true,
+    };
+    let decoded = decode_frames_at(path, &times, &decode)
+        .into_iter()
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
+    if decoded.is_empty() {
+        return Err(BridgeError::new(
+            "inspect_media: failed to decode video frames",
+        ));
+    }
+
+    if overview {
+        let timestamps = decoded.iter().map(|(time, _)| *time).collect::<Vec<_>>();
+        let (bytes, _width, _height) = encode_storyboard_jpeg(&decoded)
+            .ok_or_else(|| BridgeError::new("inspect_media: failed to encode overview"))?;
+        return Ok((
+            vec![InspectedMediaFrame {
+                timestamp_seconds: start,
+                bytes,
+                media_type: "image/jpeg".into(),
+            }],
+            timestamps,
+        ));
+    }
+
+    let frames = decoded
+        .into_iter()
+        .filter_map(|(timestamp_seconds, frame)| {
+            encode_rgba_jpeg(&frame).map(|bytes| InspectedMediaFrame {
+                timestamp_seconds,
+                bytes,
+                media_type: "image/jpeg".into(),
+            })
+        })
+        .collect::<Vec<_>>();
+    if frames.is_empty() {
+        return Err(BridgeError::new(
+            "inspect_media: failed to encode video frames",
+        ));
+    }
+    Ok((frames, Vec::new()))
+}
+
+fn inspect_media_transcript(
+    engine: &MediaEngine,
+    path: &Path,
+    is_video: bool,
+    range: (f64, f64),
+) -> Result<opentake_media::TranscriptionResult, String> {
+    if let Some(full) = opentake_media::transcribe::cache::cached_on_disk(engine.cache_root(), path)
+    {
+        return Ok(opentake_media::transcribe::cache::filter(&full, range));
+    }
+    let backend = crate::transcribe::load_backend(engine)?;
+    let cache = opentake_media::TranscriptCache::new(engine.cache_root());
+    cache
+        .transcript(path, is_video, Some(range), &backend)
+        .map_err(|error| error.to_string())
+}
+
+fn encode_rgba_jpeg(frame: &RgbaFrame) -> Option<Vec<u8>> {
+    encode_jpeg(&DecodedFrame::new(
+        frame.width,
+        frame.height,
+        frame.rgba.clone(),
+        false,
+    ))
+}
+
+fn encode_storyboard_jpeg(frames: &[(f64, RgbaFrame)]) -> Option<(Vec<u8>, u32, u32)> {
+    let count = u32::try_from(frames.len()).ok()?;
+    let columns = count.clamp(1, INSPECT_MEDIA_OVERVIEW_COLUMNS);
+    let rows = count.div_ceil(columns);
+    let width = columns * INSPECT_MEDIA_OVERVIEW_TILE.0;
+    let height = rows * INSPECT_MEDIA_OVERVIEW_TILE.1;
+    let mut canvas = image::RgbaImage::from_pixel(width, height, image::Rgba([128, 128, 128, 255]));
+
+    for (index, (_, frame)) in frames.iter().enumerate() {
+        let image = image::RgbaImage::from_raw(frame.width, frame.height, frame.rgba.clone())?;
+        let tile = image::imageops::thumbnail(
+            &image,
+            INSPECT_MEDIA_OVERVIEW_TILE.0,
+            INSPECT_MEDIA_OVERVIEW_TILE.1,
+        );
+        let index = u32::try_from(index).ok()?;
+        let cell_x = (index % columns) * INSPECT_MEDIA_OVERVIEW_TILE.0;
+        let cell_y = (index / columns) * INSPECT_MEDIA_OVERVIEW_TILE.1;
+        let x = cell_x + (INSPECT_MEDIA_OVERVIEW_TILE.0 - tile.width()) / 2;
+        let y = cell_y + (INSPECT_MEDIA_OVERVIEW_TILE.1 - tile.height()) / 2;
+        image::imageops::overlay(&mut canvas, &tile, i64::from(x), i64::from(y));
+    }
+    let bytes = encode_rgba_jpeg(&RgbaFrame::new(width, height, canvas.into_raw()))?;
+    Some((bytes, width, height))
 }
 
 // MARK: - Timeline compositing for inspect_timeline
@@ -1213,8 +2228,24 @@ fn composite_frames_jpeg(
 
     let text = project_text(timeline);
     let (sizes, media) = project_media(manifest, project_dir);
-    let metrics = ManifestMetrics { sizes };
-    let plan = build_render_plan(timeline, render_size, &metrics);
+    let straight_alpha = manifest
+        .entries
+        .iter()
+        .filter(|entry| entry.carries_straight_alpha())
+        .map(|entry| entry.id.clone())
+        .collect();
+    let metrics = ManifestMetrics {
+        sizes,
+        straight_alpha,
+    };
+    let plan = try_build_render_plan(timeline, render_size, &metrics)
+        .map_err(|error| BridgeError::new(format!("invalid timeline graph: {error}")))?;
+
+    let project_root = project_dir
+        .as_deref()
+        .map(ProjectRoot::open)
+        .transpose()
+        .map_err(|error| BridgeError::new(format!("open project LUT storage: {error}")))?;
 
     let dev =
         RenderDevice::try_new().map_err(|e| BridgeError::new(format!("no GPU device: {e}")))?;
@@ -1225,6 +2256,8 @@ fn composite_frames_jpeg(
     }
 
     let mut out_frames: Vec<InspectedFrame> = Vec::with_capacity(frames.len());
+    let mut lut_cache = HashMap::new();
+    let mut lottie = crate::render::LottieMaterializer::new();
     for &f in frames {
         let frame_plan = plan.frame(timeline, f);
         let mut resolver = InspectResolver {
@@ -1236,6 +2269,9 @@ fn composite_frames_jpeg(
             text: &text,
             text_rasterizer: &text_rasterizer,
             render_box: (render_size.width, render_size.height),
+            project_root: project_root.as_ref(),
+            lut_cache: &mut lut_cache,
+            lottie: &mut lottie,
         };
         let composite = match compositor.render_to_rgba(
             &dev.device,
@@ -1316,17 +2352,22 @@ struct TextInfo {
 /// `SourceMetrics` backed by the media manifest (intrinsic size only).
 struct ManifestMetrics {
     sizes: HashMap<String, (u32, u32)>,
+    straight_alpha: HashSet<String>,
 }
 
 impl SourceMetrics for ManifestMetrics {
     fn natural_size(&self, media_ref: &str) -> Option<(u32, u32)> {
         self.sizes.get(media_ref).copied()
     }
+
+    fn needs_premultiply(&self, media_ref: &str) -> bool {
+        self.straight_alpha.contains(media_ref)
+    }
 }
 
-/// `TextureResolver` that decodes a layer's pixels on demand via ffmpeg and
-/// uploads them to the GPU. Mirrors the preview / export resolvers; the decode box
-/// is the downscaled inspect render size. Lottie is skipped (returns `None`).
+/// `TextureResolver` that materializes a layer's pixels on demand and uploads
+/// them to the GPU. Video/image use FFmpeg/image decode, text uses the shared
+/// rasterizer, and Lottie uses the same Velato/Vello path as preview/export.
 struct InspectResolver<'d> {
     device: &'d opentake_render::wgpu::Device,
     queue: &'d opentake_render::wgpu::Queue,
@@ -1336,6 +2377,9 @@ struct InspectResolver<'d> {
     text: &'d HashMap<String, TextInfo>,
     text_rasterizer: &'d CosmicTextRasterizer,
     render_box: (u32, u32),
+    project_root: Option<&'d ProjectRoot>,
+    lut_cache: &'d mut HashMap<String, Rc<GpuLutTexture>>,
+    lottie: &'d mut crate::render::LottieMaterializer,
 }
 
 impl InspectResolver<'_> {
@@ -1356,17 +2400,52 @@ impl InspectResolver<'_> {
         let tex = upload_rgba(self.device, self.queue, &frame, false, Some("inspect-text"));
         Some(self.cache.insert(key, tex))
     }
+
+    fn resolve_managed_lut(
+        &mut self,
+        reference: &LutReference,
+    ) -> Result<Option<Rc<GpuLutTexture>>, opentake_render::RenderError> {
+        if let Some(cached) = self.lut_cache.get(&reference.id) {
+            return Ok(Some(cached.clone()));
+        }
+        let resolved = crate::lut::resolve_project_lut(
+            self.project_root,
+            reference,
+            self.device,
+            self.queue,
+            "inspect-lut",
+        )?;
+        if let Some(texture) = &resolved {
+            self.lut_cache.insert(reference.id.clone(), texture.clone());
+        }
+        Ok(resolved)
+    }
 }
 
 impl TextureResolver for InspectResolver<'_> {
     fn resolve(&mut self, source: &TextureSource, source_frame: i64) -> Option<Rc<GpuTexture>> {
+        if let TextureSource::Lottie { media_ref } = source {
+            let info = self.media.get(media_ref)?;
+            return self
+                .lottie
+                .resolve(
+                    self.device,
+                    self.queue,
+                    &mut self.cache,
+                    &info.path,
+                    source_frame,
+                    self.render_box,
+                    "inspect-lottie",
+                )
+                .ok();
+        }
         let (media_ref, key, is_image) = match source {
             TextureSource::Decoded { media_ref } => {
                 (media_ref, format!("v:{media_ref}:{source_frame}"), false)
             }
             TextureSource::Image { media_ref } => (media_ref, format!("i:{media_ref}"), true),
             TextureSource::Text { clip_id } => return self.resolve_text(clip_id),
-            TextureSource::Lottie { .. } => return None,
+            TextureSource::Lottie { .. } => unreachable!("handled above"),
         };
 
         if let Some(tex) = self.cache.get(&key) {
@@ -1399,29 +2478,43 @@ impl TextureResolver for InspectResolver<'_> {
         );
         Some(self.cache.insert(key, tex))
     }
+
+    fn resolve_lut(
+        &mut self,
+        reference: &LutReference,
+    ) -> Result<Option<Rc<GpuLutTexture>>, opentake_render::RenderError> {
+        self.resolve_managed_lut(reference)
+    }
 }
 
 /// Project the timeline's text clips (content + style + box) into the per-clip
 /// lookup the resolver rasterizes from. Keyed by clip id.
 fn project_text(timeline: &opentake_domain::Timeline) -> HashMap<String, TextInfo> {
     let mut text: HashMap<String, TextInfo> = HashMap::new();
-    for track in &timeline.tracks {
-        for clip in &track.clips {
-            if clip.media_type != ClipType::Text {
-                continue;
+    for candidate in std::iter::once(timeline).chain(
+        timeline
+            .nested_sequences
+            .iter()
+            .map(|sequence| &sequence.timeline),
+    ) {
+        for track in &candidate.tracks {
+            for clip in &track.clips {
+                if clip.media_type != ClipType::Text {
+                    continue;
+                }
+                let (Some(content), Some(style)) = (&clip.text_content, &clip.text_style) else {
+                    continue;
+                };
+                let tl = clip.transform.top_left();
+                text.insert(
+                    clip.id.clone(),
+                    TextInfo {
+                        content: content.clone(),
+                        style: style.clone(),
+                        box_norm: (tl.x, tl.y, clip.transform.width, clip.transform.height),
+                    },
+                );
             }
-            let (Some(content), Some(style)) = (&clip.text_content, &clip.text_style) else {
-                continue;
-            };
-            let tl = clip.transform.top_left();
-            text.insert(
-                clip.id.clone(),
-                TextInfo {
-                    content: content.clone(),
-                    style: style.clone(),
-                    box_norm: (tl.x, tl.y, clip.transform.width, clip.transform.height),
-                },
-            );
         }
     }
     text
@@ -1465,6 +2558,214 @@ fn project_frame_time_secs(source_frame: i64, timeline_fps: i32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opentake_agent::mcp::core_handle::{AppCoreHandle, CoreHandle};
+    use std::sync::Condvar;
+
+    #[test]
+    fn documented_mcp_entrypoint_compiles() {
+        let _entrypoint = spawn;
+    }
+
+    struct BlockingImportBridge {
+        entered: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        released: Mutex<bool>,
+        release_changed: Condvar,
+    }
+
+    impl BlockingImportBridge {
+        fn new(entered: std::sync::mpsc::Sender<()>) -> Self {
+            Self {
+                entered: Mutex::new(Some(entered)),
+                released: Mutex::new(false),
+                release_changed: Condvar::new(),
+            }
+        }
+
+        fn release(&self) {
+            *self
+                .released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+            self.release_changed.notify_all();
+        }
+    }
+
+    impl MediaBridge for BlockingImportBridge {
+        fn import_media_cancellable(
+            &self,
+            _source: ImportSource,
+            _name: Option<String>,
+            _folder_id: Option<String>,
+            cancel: &opentake_media::MediaCancelToken,
+        ) -> Result<ImportOutcome, BridgeError> {
+            if let Some(entered) = self
+                .entered
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                let _ = entered.send(());
+            }
+            let mut released = self
+                .released
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while !*released {
+                released = self
+                    .release_changed
+                    .wait(released)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            if cancel.is_cancelled() {
+                Err(BridgeError::new("cancelled blocking import"))
+            } else {
+                Ok(ImportOutcome {
+                    asset_count: 1,
+                    folder_count: 0,
+                    recovery_required: false,
+                })
+            }
+        }
+    }
+
+    #[test]
+    fn persistent_mcp_gate_requires_a_saved_nontransitioning_project() {
+        let fixture = tempfile::tempdir().unwrap();
+        let core = AppCore::new();
+        let gate = LiveProjectMcpGate::new(core.clone());
+        let registry = Arc::new(RwLock::new(PluginRegistry::with_builtins()));
+        let handle: Arc<dyn CoreHandle> = Arc::new(AppCoreHandle::new(core.clone()));
+        let dispatcher = Dispatcher::new(handle, registry);
+
+        assert!(gate.timeline(&dispatcher).is_none());
+        core.save_project(Some(fixture.path().join("A.opentake")))
+            .unwrap();
+        assert!(gate.timeline(&dispatcher).is_some());
+
+        gate.transition_depth.store(1, Ordering::Release);
+        assert!(gate.timeline(&dispatcher).is_none());
+        gate.transition_depth.store(0, Ordering::Release);
+        assert!(gate.timeline(&dispatcher).is_some());
+    }
+
+    #[test]
+    fn persistent_mcp_request_admitted_for_old_project_cannot_write_new_project() {
+        let fixture = tempfile::tempdir().unwrap();
+        let core = AppCore::new();
+        let project_a = fixture.path().join("A.opentake");
+        let project_b = fixture.path().join("B.opentake");
+        core.save_project(Some(project_a)).unwrap();
+        let gate = LiveProjectMcpGate::new(core.clone());
+        let registry = Arc::new(RwLock::new(PluginRegistry::with_builtins()));
+        let handle: Arc<dyn CoreHandle> = Arc::new(AppCoreHandle::new(core.clone()));
+        let dispatcher = Arc::new(Dispatcher::new(handle, registry));
+        let cancel = opentake_media::MediaCancelToken::new();
+        let (admitted_tx, admitted_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker_gate = gate.clone();
+        let worker_dispatcher = dispatcher.clone();
+        let worker = std::thread::spawn(move || {
+            worker_gate.with_live_dispatch_after_admission(
+                &cancel,
+                || {
+                    admitted_tx
+                        .send(())
+                        .expect("announce old-project admission");
+                    release_rx.recv().expect("release delayed request");
+                },
+                || {
+                    worker_dispatcher.dispatch(
+                        "create_folder",
+                        serde_json::json!({ "name": "must-not-land-in-B" }),
+                    )
+                },
+            )
+        });
+
+        admitted_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("request paused after admission");
+        core.save_project(Some(project_b.clone()))
+            .expect("switch to project B while old request is delayed");
+        release_tx.send(()).expect("release delayed request");
+
+        assert!(
+            worker.join().expect("join delayed request").is_none(),
+            "old-project request must be rejected after identity generation changes"
+        );
+        assert_eq!(core.project_dir().as_deref(), Some(project_b.as_path()));
+        assert!(
+            core.media().folders.is_empty(),
+            "late old-project tool call mutated project B"
+        );
+    }
+
+    #[test]
+    fn project_transition_cancels_active_persistent_mcp_before_identity_changes() {
+        let fixture = tempfile::tempdir().unwrap();
+        let core = AppCore::new();
+        core.save_project(Some(fixture.path().join("A.opentake")))
+            .unwrap();
+        let gate = LiveProjectMcpGate::new(core.clone());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let bridge = Arc::new(BlockingImportBridge::new(entered_tx));
+        let registry = Arc::new(RwLock::new(PluginRegistry::with_builtins()));
+        let handle: Arc<dyn CoreHandle> = Arc::new(AppCoreHandle::new(core.clone()));
+        let dispatcher = Arc::new(Dispatcher::with_bridge(
+            handle,
+            registry,
+            Some(bridge.clone()),
+        ));
+        let cancel = opentake_media::MediaCancelToken::new();
+        let worker_gate = gate.clone();
+        let worker_dispatcher = dispatcher.clone();
+        let worker_cancel = cancel.clone();
+        let dispatch = std::thread::spawn(move || {
+            worker_gate.dispatch_cancellable(
+                &worker_dispatcher,
+                "import_media",
+                serde_json::json!({
+                    "source": {
+                        "bytes": "AA==",
+                        "mimeType": "image/png"
+                    }
+                }),
+                &worker_cancel,
+            )
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("persistent dispatch entered while holding identity");
+
+        let (pending_tx, pending_rx) = std::sync::mpsc::channel();
+        core.subscribe_project_identity_transition(move |pending| {
+            if pending {
+                let _ = pending_tx.send(());
+            }
+        });
+        let (saved_tx, saved_rx) = std::sync::mpsc::channel();
+        let save_core = core.clone();
+        let target = fixture.path().join("B.opentake");
+        let save = std::thread::spawn(move || {
+            let _ = saved_tx.send(save_core.save_project(Some(target)));
+        });
+        pending_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Save As announced its transition");
+        assert!(cancel.is_cancelled());
+        assert!(matches!(
+            saved_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+
+        bridge.release();
+        dispatch.join().expect("dispatch thread joined");
+        saved_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Save As completed after dispatch released identity")
+            .expect("Save As succeeded");
+        save.join().expect("Save As thread joined");
+    }
 
     fn unknown_core(root: &Path) -> AppCore {
         let bundle = root.join("Unknown.opentake");
@@ -1541,6 +2842,8 @@ mod tests {
                 source_height: None,
                 source_fps: None,
                 has_audio: Some(true),
+                color: None,
+                proxy: None,
                 folder_id: None,
                 cached_remote_url: None,
                 cached_remote_url_expires_at: None,
@@ -1623,6 +2926,310 @@ mod tests {
     }
 
     #[test]
+    fn cancelled_path_import_before_commit_changes_neither_manifest() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let bundle = tmp.path().join("CancelledPath.opentake");
+        let source = tmp.path().join("incoming.mp4");
+        std::fs::write(&source, b"video fixture").expect("write path fixture");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone()))
+            .expect("save path-import fixture");
+        let bridge = TauriMediaBridge::new(
+            core.clone(),
+            tmp.path().join("cache"),
+            tmp.path().join("models"),
+        );
+        let before_live = core.media();
+        let manifest_path = bundle.join("media.json");
+        let before_disk = std::fs::read(&manifest_path).expect("read media manifest");
+        let cancel = opentake_media::MediaCancelToken::new();
+
+        let result = bridge.import_from_path_cancellable_with_hook(
+            &source.to_string_lossy(),
+            None,
+            None,
+            &cancel,
+            || cancel.cancel(),
+        );
+
+        let error = result.expect_err("cancelled path import must fail");
+        assert!(error.message.contains("cancel"), "{}", error.message);
+        assert_eq!(core.media(), before_live, "live manifest changed");
+        assert_eq!(
+            std::fs::read(&manifest_path).expect("reread media manifest"),
+            before_disk,
+            "persisted media.json changed"
+        );
+    }
+
+    #[test]
+    fn cancelled_bytes_import_before_commit_removes_staging_and_manifest_change() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let bundle = tmp.path().join("CancelledBytes.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone()))
+            .expect("save bytes-import fixture");
+        let bridge = TauriMediaBridge::new(
+            core.clone(),
+            tmp.path().join("cache"),
+            tmp.path().join("models"),
+        );
+        let before_live = core.media();
+        let manifest_path = bundle.join("media.json");
+        let before_disk = std::fs::read(&manifest_path).expect("read media manifest");
+        let payload = base64::engine::general_purpose::STANDARD.encode(b"png fixture");
+        let cancel = opentake_media::MediaCancelToken::new();
+
+        let result = bridge.import_from_bytes_cancellable_with_hook(
+            &payload,
+            "image/png",
+            Some("cancelled"),
+            None,
+            &cancel,
+            || cancel.cancel(),
+        );
+
+        let error = result.expect_err("cancelled bytes import must fail");
+        assert!(error.message.contains("cancel"), "{}", error.message);
+        assert_eq!(core.media(), before_live, "live manifest changed");
+        assert_eq!(
+            std::fs::read(&manifest_path).expect("reread media manifest"),
+            before_disk,
+            "persisted media.json changed"
+        );
+        let media_dir = bundle.join("media");
+        assert_eq!(
+            std::fs::read_dir(media_dir)
+                .expect("bytes staging directory")
+                .count(),
+            0,
+            "cancelled staged file survived"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bytes_import_rejects_project_media_symlink_without_touching_canary() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let bundle = tmp.path().join("SymlinkBytes.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone()))
+            .expect("save bytes-import fixture");
+        let media_dir = bundle.join("media");
+        if media_dir.exists() {
+            std::fs::remove_dir_all(&media_dir).expect("remove empty media directory");
+        }
+        let external = tmp.path().join("external");
+        std::fs::create_dir(&external).expect("create external canary directory");
+        let canary = external.join("canary");
+        std::fs::write(&canary, b"untouched").expect("write canary");
+        symlink(&external, &media_dir).expect("install malicious media symlink");
+        let bridge = TauriMediaBridge::new(
+            core.clone(),
+            tmp.path().join("cache"),
+            tmp.path().join("models"),
+        );
+        let before_live = core.media();
+        let manifest_path = bundle.join("media.json");
+        let before_disk = std::fs::read(&manifest_path).expect("read media manifest");
+        let payload = base64::engine::general_purpose::STANDARD.encode(b"png fixture");
+
+        bridge
+            .import_from_bytes(&payload, "image/png", None, None)
+            .expect_err("media symlink must fail closed");
+
+        assert_eq!(std::fs::read(&canary).unwrap(), b"untouched");
+        assert_eq!(
+            std::fs::read_dir(&external).unwrap().count(),
+            1,
+            "no staged leaf may escape through the media symlink"
+        );
+        assert_eq!(core.media(), before_live);
+        assert_eq!(std::fs::read(manifest_path).unwrap(), before_disk);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bytes_import_namespace_swap_rolls_back_original_and_preserves_replacement() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let bundle = tmp.path().join("SwapBytes.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle.clone()))
+            .expect("save bytes-import fixture");
+        let bridge = TauriMediaBridge::new(
+            core.clone(),
+            tmp.path().join("cache"),
+            tmp.path().join("models"),
+        );
+        let before_live = core.media();
+        let manifest_path = bundle.join("media.json");
+        let before_disk = std::fs::read(&manifest_path).expect("read media manifest");
+        let payload = base64::engine::general_purpose::STANDARD.encode(b"png fixture");
+        let media_dir = bundle.join("media");
+        let moved_media = bundle.join("media-moved");
+
+        let result = bridge.import_from_bytes_cancellable_with_hook(
+            &payload,
+            "image/png",
+            None,
+            None,
+            &opentake_media::MediaCancelToken::new(),
+            || {
+                std::fs::rename(&media_dir, &moved_media).expect("move retained media directory");
+                std::fs::create_dir(&media_dir).expect("install replacement media directory");
+                let leaf = std::fs::read_dir(&moved_media)
+                    .expect("read moved staging directory")
+                    .next()
+                    .expect("staged leaf exists")
+                    .expect("read staged leaf")
+                    .file_name();
+                std::fs::write(media_dir.join(leaf), b"replacement-canary")
+                    .expect("install same-name replacement canary");
+            },
+        );
+
+        result.expect_err("namespace swap must abort bytes publication");
+        assert_eq!(core.media(), before_live, "live manifest changed");
+        assert_eq!(
+            std::fs::read(&manifest_path).expect("reread media manifest"),
+            before_disk,
+            "persisted manifest changed"
+        );
+        let replacement = std::fs::read_dir(&media_dir)
+            .expect("read replacement media directory")
+            .next()
+            .expect("replacement remains")
+            .expect("read replacement entry")
+            .path();
+        assert_eq!(
+            std::fs::read(replacement).expect("read replacement canary"),
+            b"replacement-canary",
+            "rollback touched an attacker-installed replacement"
+        );
+        assert_eq!(
+            std::fs::read_dir(&moved_media).unwrap().count(),
+            0,
+            "retained uncommitted leaf was not scrubbed and removed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_import_rejects_fifo_before_spawning_ffprobe() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let bundle = tmp.path().join("FifoPath.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(bundle)).expect("save path fixture");
+        let fifo = tmp.path().join("blocking.mp4");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success());
+        let bridge = TauriMediaBridge::new(
+            core.clone(),
+            tmp.path().join("cache"),
+            tmp.path().join("models"),
+        );
+        let cancel = opentake_media::MediaCancelToken::new();
+        let started = std::time::Instant::now();
+
+        bridge
+            .import_from_path_cancellable(&fifo.to_string_lossy(), None, None, &cancel)
+            .expect_err("FIFO must be rejected as non-regular");
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(
+            cancel.spawned_child_count(),
+            0,
+            "ffprobe must not receive a blocking FIFO"
+        );
+        assert!(core.media().entries.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_external_open_rejects_regular_file_swapped_to_fifo_without_blocking() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let source = tmp.path().join("swapped.mp4");
+        std::fs::write(&source, b"regular-before-check").expect("write regular source");
+        let checked = std::fs::symlink_metadata(&source).expect("initial source metadata");
+        assert!(checked.is_file(), "pre-open validation saw a regular file");
+
+        std::fs::remove_file(&source).expect("remove checked source");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&source)
+            .status()
+            .expect("replace source with FIFO");
+        assert!(status.success());
+
+        let started = std::time::Instant::now();
+        let retained = RetainedExternalSource::open(&source);
+        assert!(
+            retained.is_err(),
+            "retained open must reject the swapped FIFO"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "retained open blocked on a FIFO swapped after metadata validation"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retained_external_revalidation_rejects_fifo_swap_without_blocking() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let source = tmp.path().join("revalidated.mp4");
+        std::fs::write(&source, b"retained-regular-source").expect("write regular source");
+        let retained = RetainedExternalSource::open(&source).expect("retain regular source");
+
+        std::fs::remove_file(&source).expect("unlink retained source name");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&source)
+            .status()
+            .expect("replace retained source name with FIFO");
+        assert!(status.success());
+
+        let started = std::time::Instant::now();
+        assert!(
+            !retained.matches_path().expect("revalidate swapped source"),
+            "FIFO replacement must not match the retained regular file"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "retained identity revalidation blocked on a FIFO replacement"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn retained_external_source_rejects_windows_reparse_contract() {
+        use std::os::windows::fs::symlink_file;
+
+        assert!(crate::media::windows_file_attributes_are_reparse(0x400));
+        assert!(!crate::media::windows_file_attributes_are_reparse(0));
+
+        let tmp = tempfile::tempdir().expect("create Windows reparse fixture");
+        let target = tmp.path().join("target.mp4");
+        let reparse = tmp.path().join("reparse.mp4");
+        std::fs::write(&target, b"target").expect("write reparse target");
+        match symlink_file(&target, &reparse) {
+            Ok(()) => assert!(
+                RetainedExternalSource::open(&reparse).is_err(),
+                "a Windows file reparse point must never become a retained source"
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                // Hosted Windows configurations without Developer Mode cannot
+                // create a file symlink; the attribute predicate above remains
+                // an unconditional executable contract.
+            }
+            Err(error) => panic!("create Windows file reparse point: {error}"),
+        }
+    }
+
+    #[test]
     fn fit_render_size_downscales_to_longest_edge_keeping_aspect() {
         // 1920x1080, cap 512 → scale 512/1920 → 512x288 (even-ized).
         let rs = fit_render_size(1920, 1080, 512);
@@ -1669,6 +3276,333 @@ mod tests {
         let bytes = encode_jpeg(&frame).expect("jpeg encodes");
         // JPEG files start with the SOI marker 0xFFD8.
         assert_eq!(&bytes[..2], &[0xff, 0xd8]);
+    }
+
+    #[test]
+    fn inspect_media_decodes_an_imported_image_end_to_end() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let source = tmp.path().join("source.png");
+        image::RgbaImage::from_pixel(48, 24, image::Rgba([12, 34, 56, 255]))
+            .save(&source)
+            .expect("write image fixture");
+
+        let core = AppCore::new();
+        core.save_project(Some(tmp.path().join("Inspect.opentake")))
+            .expect("save image project");
+        let entry = core
+            .import_media_file(
+                &source,
+                "source",
+                &ProbedMedia {
+                    width: Some(48),
+                    height: Some(24),
+                    ..ProbedMedia::default()
+                },
+            )
+            .expect("import image fixture");
+        let engine = MediaEngine::new(tmp.path().join("cache"), tmp.path().join("models"));
+
+        let result = inspect_source_media(
+            &core,
+            &engine,
+            &InspectMediaRequest {
+                media_ref: entry.id,
+                kind: ClipType::Image,
+                start_seconds: None,
+                end_seconds: None,
+                max_frames: 1,
+                overview: false,
+            },
+        )
+        .expect("inspect imported image");
+
+        assert_eq!(result.width, Some(48));
+        assert_eq!(result.height, Some(24));
+        assert_eq!(result.frames.len(), 1);
+        assert_eq!(result.frames[0].media_type, "image/jpeg");
+        assert_eq!(result.frames[0].timestamp_seconds, 0.0);
+        assert_eq!(
+            image::load_from_memory(&result.frames[0].bytes)
+                .expect("decode inspected JPEG")
+                .into_rgba8()
+                .dimensions(),
+            (48, 24)
+        );
+        assert_eq!(
+            result.byte_size,
+            std::fs::metadata(source).expect("source metadata").len()
+        );
+    }
+
+    fn write_bundle(path: &Path, color: image::Rgba<u8>) {
+        let project = opentake_project::Project::new(path);
+        project.save().unwrap();
+        std::fs::create_dir_all(path.join("media")).unwrap();
+        image::RgbaImage::from_pixel(12, 12, color)
+            .save(path.join("media/source.png"))
+            .unwrap();
+        let mut manifest = opentake_domain::MediaManifest::new();
+        manifest.entries.push(opentake_domain::MediaManifestEntry {
+            id: "project-image".into(),
+            name: "source.png".into(),
+            kind: ClipType::Image,
+            source: MediaSource::Project {
+                relative_path: "media/source.png".into(),
+            },
+            duration: 0.0,
+            generation_input: None,
+            source_width: Some(12),
+            source_height: Some(12),
+            source_fps: None,
+            has_audio: Some(false),
+            color: None,
+            proxy: None,
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        });
+        std::fs::write(
+            path.join("media.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspect_project_media_reads_the_retained_bundle_after_path_rebind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let selected = tmp.path().join("Selected.opentake");
+        let retained = tmp.path().join("Retained.opentake");
+        write_bundle(&selected, image::Rgba([240, 10, 10, 255]));
+        let core = AppCore::new();
+        core.open_project(&selected).unwrap();
+        std::fs::rename(&selected, &retained).unwrap();
+        write_bundle(&selected, image::Rgba([10, 240, 10, 255]));
+        let engine = MediaEngine::new(tmp.path().join("cache"), tmp.path().join("models"));
+
+        let result = inspect_source_media(
+            &core,
+            &engine,
+            &InspectMediaRequest {
+                media_ref: "project-image".into(),
+                kind: ClipType::Image,
+                start_seconds: None,
+                end_seconds: None,
+                max_frames: 1,
+                overview: false,
+            },
+        )
+        .unwrap();
+        let pixel = image::load_from_memory(&result.frames[0].bytes)
+            .unwrap()
+            .into_rgb8()
+            .get_pixel(6, 6)
+            .0;
+
+        assert!(
+            pixel[0] > pixel[1] + 100,
+            "inspection reopened the rebound bundle instead of retained bytes: {pixel:?}"
+        );
+    }
+
+    /// cap-std retains the bundle without FILE_SHARE_DELETE: on Windows the
+    /// ambient rename fails closed while the project is open (the
+    /// retained-read-after-rebind property is Unix-verified above).
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn inspect_project_media_blocks_bundle_rebind_while_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let selected = tmp.path().join("Selected.opentake");
+        let retained = tmp.path().join("Retained.opentake");
+        write_bundle(&selected, image::Rgba([240, 10, 10, 255]));
+        let core = AppCore::new();
+        core.open_project(&selected).unwrap();
+
+        assert!(std::fs::rename(&selected, &retained).is_err());
+
+        drop(core);
+        std::fs::rename(&selected, &retained).unwrap();
+    }
+
+    fn two_frame_lottie_fixture() -> String {
+        r##"{
+  "v":"5.5.2","fr":2,"ip":0,"op":2,"w":16,"h":16,"ddd":0,"assets":[],
+  "layers":[
+    {"ddd":0,"ind":1,"ty":4,"nm":"red",
+      "ks":{"o":{"a":0,"k":100},"r":{"a":0,"k":0},"p":{"a":0,"k":[8,8,0]},
+             "a":{"a":0,"k":[8,8,0]},"s":{"a":0,"k":[100,100,100]}},
+      "shapes":[
+        {"ty":"rc","d":1,"s":{"a":0,"k":[8,8]},"p":{"a":0,"k":[8,8]},"r":{"a":0,"k":0}},
+        {"ty":"fl","c":{"a":0,"k":[1,0,0,1]},"o":{"a":0,"k":100},"r":1}
+      ],"ao":0,"ip":0,"op":1,"st":0,"bm":0},
+    {"ddd":0,"ind":2,"ty":4,"nm":"green",
+      "ks":{"o":{"a":0,"k":100},"r":{"a":0,"k":0},"p":{"a":0,"k":[8,8,0]},
+             "a":{"a":0,"k":[8,8,0]},"s":{"a":0,"k":[100,100,100]}},
+      "shapes":[
+        {"ty":"rc","d":1,"s":{"a":0,"k":[8,8]},"p":{"a":0,"k":[8,8]},"r":{"a":0,"k":0}},
+        {"ty":"fl","c":{"a":0,"k":[0,1,0,1]},"o":{"a":0,"k":100},"r":1}
+      ],"ao":0,"ip":1,"op":2,"st":0,"bm":0}
+  ]
+}"##
+        .to_string()
+    }
+
+    #[test]
+    fn inspect_media_renders_lottie_frames_over_gray_end_to_end() {
+        let Ok(_) = RenderDevice::try_new() else {
+            return;
+        };
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let bundle = tmp.path().join("InspectLottie.opentake");
+        let project = opentake_project::Project::new(&bundle);
+        project.save().expect("save Lottie project");
+        let source = bundle.join("media/animation.json");
+        std::fs::create_dir_all(source.parent().expect("media parent"))
+            .expect("create media directory");
+        std::fs::write(&source, two_frame_lottie_fixture()).expect("write Lottie fixture");
+        let mut manifest = opentake_domain::MediaManifest::new();
+        manifest.entries.push(opentake_domain::MediaManifestEntry {
+            id: "lottie-asset".into(),
+            name: "animation".into(),
+            kind: ClipType::Lottie,
+            source: MediaSource::Project {
+                relative_path: "media/animation.json".into(),
+            },
+            duration: 1.0,
+            generation_input: None,
+            source_width: Some(16),
+            source_height: Some(16),
+            source_fps: Some(2.0),
+            has_audio: Some(false),
+            color: None,
+            proxy: None,
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        });
+        std::fs::write(
+            bundle.join("media.json"),
+            serde_json::to_vec_pretty(&manifest).expect("encode Lottie manifest"),
+        )
+        .expect("write Lottie manifest");
+        let core = AppCore::new();
+        core.open_project(bundle).expect("open Lottie project");
+        let engine = MediaEngine::new(tmp.path().join("cache"), tmp.path().join("models"));
+
+        let result = inspect_source_media(
+            &core,
+            &engine,
+            &InspectMediaRequest {
+                media_ref: "lottie-asset".into(),
+                kind: ClipType::Lottie,
+                start_seconds: None,
+                end_seconds: None,
+                max_frames: 2,
+                overview: false,
+            },
+        )
+        .expect("inspect imported Lottie");
+
+        assert_eq!((result.width, result.height), (Some(16), Some(16)));
+        assert_eq!(result.fps, Some(2.0));
+        assert_eq!(result.duration_seconds, 1.0);
+        assert_eq!(result.frames.len(), 2);
+        assert_eq!(result.frames[0].timestamp_seconds, 0.25);
+        assert_eq!(result.frames[1].timestamp_seconds, 0.75);
+        let decoded = result
+            .frames
+            .iter()
+            .map(|frame| {
+                assert_eq!(frame.media_type, "image/jpeg");
+                image::load_from_memory(&frame.bytes)
+                    .expect("decode inspected Lottie JPEG")
+                    .into_rgb8()
+            })
+            .collect::<Vec<_>>();
+        assert_ne!(decoded[0].as_raw(), decoded[1].as_raw());
+        let first_center = decoded[0].get_pixel(8, 8).0;
+        let second_center = decoded[1].get_pixel(8, 8).0;
+        assert!(first_center[0] > first_center[1] + 80, "{first_center:?}");
+        assert!(
+            second_center[1] > second_center[0] + 80,
+            "{second_center:?}"
+        );
+        for frame in &decoded {
+            let corner = frame.get_pixel(0, 0).0;
+            assert!(
+                (corner[0] as i16 - corner[1] as i16).abs() < 30,
+                "{corner:?}"
+            );
+            assert!(
+                (corner[1] as i16 - corner[2] as i16).abs() < 30,
+                "{corner:?}"
+            );
+            assert!(corner[0] > 80 && corner[0] < 180, "{corner:?}");
+        }
+    }
+
+    #[test]
+    fn inspect_media_overview_encodes_the_expected_storyboard_grid() {
+        let frames = (0..7)
+            .map(|index| {
+                (
+                    f64::from(index),
+                    RgbaFrame::new(16, 9, vec![index as u8; 16 * 9 * 4]),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let (bytes, width, height) =
+            encode_storyboard_jpeg(&frames).expect("encode overview storyboard");
+
+        assert_eq!((width, height), (6 * 192, 2 * 108));
+        assert_eq!(
+            image::load_from_memory(&bytes)
+                .expect("decode overview JPEG")
+                .into_rgba8()
+                .dimensions(),
+            (width, height)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inspect_media_rejects_a_symlink_source() {
+        let tmp = tempfile::tempdir().expect("create temp root");
+        let target = tmp.path().join("target.png");
+        let source = tmp.path().join("source.png");
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 255, 255, 255]))
+            .save(&target)
+            .expect("write image target");
+        std::os::unix::fs::symlink(&target, &source).expect("create image symlink");
+
+        let core = AppCore::new();
+        core.save_project(Some(tmp.path().join("Symlink.opentake")))
+            .expect("save symlink project");
+        let entry = core
+            .import_media_file(&source, "source", &ProbedMedia::default())
+            .expect("import symlink fixture");
+        let engine = MediaEngine::new(tmp.path().join("cache"), tmp.path().join("models"));
+
+        let error = inspect_source_media(
+            &core,
+            &engine,
+            &InspectMediaRequest {
+                media_ref: entry.id,
+                kind: ClipType::Image,
+                start_seconds: None,
+                end_seconds: None,
+                max_frames: 1,
+                overview: false,
+            },
+        )
+        .expect_err("symlink source must be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "inspect_media: source media is not a regular file"
+        );
     }
 
     #[test]
@@ -1783,6 +3717,12 @@ mod tests {
             "http://example.com/a.mp4",
             "https://",
             "https://user@example.com/a.mp4",
+            "https://127.0.0.1/a.mp4",
+            "https://10.0.0.1/a.mp4",
+            "https://169.254.169.254/latest/meta-data",
+            "https://[::1]/a.mp4",
+            "https://[fc00::1]/a.mp4",
+            "https://[fe80::1]/a.mp4",
         ] {
             let fetcher = FakeFetcher::new(Vec::new());
             let err = bridge
@@ -1802,7 +3742,8 @@ mod tests {
                 err.message.contains("HTTPS")
                     || err.message.contains("host")
                     || err.message.contains("userinfo")
-                    || err.message.contains("invalid"),
+                    || err.message.contains("invalid")
+                    || err.message.contains("non-public"),
                 "{url}: {}",
                 err.message
             );
@@ -1814,6 +3755,8 @@ mod tests {
         for target in [
             "http://example.com/final.mp4",
             "https://user@example.com/final.mp4",
+            "https://127.0.0.1/final.mp4",
+            "https://[::1]/final.mp4",
         ] {
             let fetcher = FakeFetcher::new(vec![response(
                 reqwest::StatusCode::FOUND,
@@ -2098,67 +4041,63 @@ mod tests {
     }
 
     #[test]
-    fn reqwest_fetch_is_cancellable_and_redacts_signed_url_errors() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 1024];
-            let _ = stream.read(&mut request);
-            let _ = release_rx.recv_timeout(Duration::from_secs(2));
-        });
-        let cancel = opentake_media::MediaCancelToken::new();
-        let trigger = cancel.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(50));
-            trigger.cancel();
-        });
-        let fetcher = ReqwestUrlFetcher::new().unwrap();
-        let signed =
-            reqwest::Url::parse(&format!("http://{addr}/media.mp4?token=super-secret-query"))
-                .unwrap();
-        let started = std::time::Instant::now();
-        let cancelled = fetcher
-            .fetch(&signed, &cancel)
-            .err()
-            .expect("in-flight request must observe cancellation");
-        assert!(
-            cancelled.message.contains("cancelled"),
-            "{}",
-            cancelled.message
-        );
-        assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "cancellation waited for the network timeout"
-        );
-        assert!(!cancelled.message.contains("super-secret-query"));
-        let _ = release_tx.send(());
-        server.join().unwrap();
+    fn public_address_policy_rejects_private_reserved_and_mixed_dns_results() {
+        for ip in [
+            "0.0.0.0",
+            "10.1.2.3",
+            "100.64.0.1",
+            "127.0.0.1",
+            "169.254.169.254",
+            "172.16.0.1",
+            "192.168.0.1",
+            "198.18.0.1",
+            "224.0.0.1",
+            "::",
+            "::1",
+            "::ffff:127.0.0.1",
+            "fc00::1",
+            "fe80::1",
+            "2001:db8::1",
+        ] {
+            let ip = ip.parse::<IpAddr>().unwrap();
+            assert!(!public_ip(ip), "{ip} must not be treated as public");
+            assert!(ensure_public_ip(ip).is_err(), "{ip} must fail closed");
+        }
 
+        let public_v4 = "93.184.216.34:443".parse::<SocketAddr>().unwrap();
+        let public_v6 = "[2606:4700:4700::1111]:443".parse::<SocketAddr>().unwrap();
+        assert_eq!(pin_public_address(vec![public_v4]).unwrap(), public_v4);
+        assert_eq!(pin_public_address(vec![public_v6]).unwrap(), public_v6);
+        assert!(pin_public_address(Vec::new()).is_err());
+        assert!(pin_public_address(vec![public_v4, "127.0.0.1:443".parse().unwrap(),]).is_err());
+        assert!(pin_public_address(vec![public_v6, "[fc00::1]:443".parse().unwrap(),]).is_err());
+    }
+
+    #[test]
+    fn reqwest_fetch_rejects_loopback_before_connection_and_redacts_signed_url() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
         let addr = listener.local_addr().unwrap();
-        let server = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            drop(stream);
-        });
-        let signed =
-            reqwest::Url::parse(&format!("http://{addr}/media.mp4?token=another-secret")).unwrap();
-        let error = fetcher
+        let signed = reqwest::Url::parse(&format!(
+            "https://{addr}/media.mp4?token=super-secret-query"
+        ))
+        .unwrap();
+
+        let started = std::time::Instant::now();
+        let error = ReqwestUrlFetcher::new()
+            .unwrap()
             .fetch(&signed, &opentake_media::MediaCancelToken::new())
             .err()
-            .expect("closed connection fails");
-        assert!(
-            !error.message.contains("another-secret"),
-            "{}",
-            error.message
-        );
-        assert!(
-            !error.message.contains(signed.as_str()),
-            "{}",
-            error.message
-        );
-        server.join().unwrap();
+            .expect("loopback target must be rejected");
+
+        assert!(error.message.contains("non-public"), "{}", error.message);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(!error.message.contains("super-secret-query"));
+        assert!(!error.message.contains(signed.as_str()));
+        assert!(matches!(
+            listener.accept(),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+        ));
     }
 
     #[test]
@@ -2345,6 +4284,8 @@ mod tests {
             source_height: Some(h),
             source_fps: Some(30.0),
             has_audio: Some(false),
+            color: None,
+            proxy: None,
             folder_id: None,
             cached_remote_url: None,
             cached_remote_url_expires_at: None,
@@ -2414,18 +4355,19 @@ mod tests {
             eprintln!("skip: could not generate fixture media");
             return;
         }
-        // A single-file path import references the file in place (no saved bundle
-        // needed), through the same `import_one` the media panel uses.
-        let bridge = TauriMediaBridge::new(
-            AppCore::new(),
-            tmp.path().join("cache"),
-            tmp.path().join("models"),
-        );
+        // Imports are capability-bound to an open project, while the source
+        // itself remains referenced in place.
+        let core = AppCore::new();
+        core.save_project(Some(tmp.path().join("PathImport.opentake")))
+            .unwrap();
+        let bridge =
+            TauriMediaBridge::new(core, tmp.path().join("cache"), tmp.path().join("models"));
         let out = bridge
             .import_from_path(&video.to_string_lossy(), None, None)
             .expect("single-file path import");
-        assert!(out.message.contains("from path"), "{}", out.message);
-        assert!(out.message.contains("type: video"), "{}", out.message);
+        assert_eq!(out.asset_count, 1);
+        assert_eq!(out.folder_count, 0);
+        assert!(!out.recovery_required);
         // The asset is now in the shared core's manifest, named by its stem.
         let manifest = bridge.core.media();
         assert_eq!(manifest.entries.len(), 1);
@@ -2435,13 +4377,15 @@ mod tests {
 
     #[test]
     fn import_from_path_missing_file_errors() {
-        let bridge = TauriMediaBridge::new(
-            AppCore::new(),
-            std::env::temp_dir().join("cache"),
-            std::env::temp_dir().join("models"),
-        );
+        let tmp = tempfile::tempdir().unwrap();
+        let core = AppCore::new();
+        core.save_project(Some(tmp.path().join("MissingPath.opentake")))
+            .unwrap();
+        let bridge =
+            TauriMediaBridge::new(core, tmp.path().join("cache"), tmp.path().join("models"));
+        let missing = tmp.path().join("missing.mp4");
         let err = bridge
-            .import_from_path("/no/such/file.mp4", None, None)
+            .import_from_path(&missing.to_string_lossy(), None, None)
             .unwrap_err();
         assert!(
             err.message.contains("MCP_SOURCE_PATH_UNREADABLE"),
@@ -2455,11 +4399,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let doc = tmp.path().join("notes.txt");
         std::fs::write(&doc, b"x").unwrap();
-        let bridge = TauriMediaBridge::new(
-            AppCore::new(),
-            tmp.path().join("cache"),
-            tmp.path().join("models"),
-        );
+        let core = AppCore::new();
+        core.save_project(Some(tmp.path().join("UnsupportedPath.opentake")))
+            .unwrap();
+        let bridge =
+            TauriMediaBridge::new(core, tmp.path().join("cache"), tmp.path().join("models"));
         let err = bridge
             .import_from_path(&doc.to_string_lossy(), None, None)
             .unwrap_err();
@@ -2467,6 +4411,40 @@ mod tests {
             err.message.contains("Unsupported file extension"),
             "{}",
             err.message
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_import_without_project_rejects_before_fifo_source_io() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fifo = tmp.path().join("untrusted.mp4");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("create untrusted FIFO");
+        assert!(status.success());
+        let bridge = TauriMediaBridge::new(
+            AppCore::new(),
+            tmp.path().join("cache"),
+            tmp.path().join("models"),
+        );
+        let cancel = opentake_media::MediaCancelToken::new();
+        let started = std::time::Instant::now();
+
+        let error = bridge
+            .import_from_path_cancellable(&fifo.to_string_lossy(), None, None, &cancel)
+            .unwrap_err();
+
+        assert_eq!(
+            error.message,
+            "No project is open; cannot import source.path"
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(
+            cancel.spawned_child_count(),
+            0,
+            "project authorization must precede source probing"
         );
     }
 }

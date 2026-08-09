@@ -11,6 +11,79 @@ use same_file::Handle;
 
 use crate::error::{ProjectError, Result};
 
+const TIMELINE_COMPONENT_MAX_BYTES: usize = 64 * 1024 * 1024;
+const MANIFEST_COMPONENT_MAX_BYTES: usize = 32 * 1024 * 1024;
+const GENERATION_LOG_COMPONENT_MAX_BYTES: usize = 16 * 1024 * 1024;
+const THUMBNAIL_COMPONENT_MAX_BYTES: usize = 16 * 1024 * 1024;
+const PUBLISH_MARKER_FILE: &str = ".opentake-publish-marker";
+const PUBLISH_MARKER_MAX_BYTES: usize = 256;
+const TRANSACTION_JOURNAL_MAX_BYTES: usize = 4 * 1024;
+
+fn project_component_max_bytes(name: &str) -> Option<usize> {
+    match name {
+        crate::layout::TIMELINE_FILE => Some(TIMELINE_COMPONENT_MAX_BYTES),
+        crate::layout::MANIFEST_FILE => Some(MANIFEST_COMPONENT_MAX_BYTES),
+        crate::layout::GENERATION_LOG_FILE => Some(GENERATION_LOG_COMPONENT_MAX_BYTES),
+        crate::layout::THUMBNAIL_FILE => Some(THUMBNAIL_COMPONENT_MAX_BYTES),
+        PUBLISH_MARKER_FILE => Some(PUBLISH_MARKER_MAX_BYTES),
+        _ => None,
+    }
+}
+
+fn read_bounded_regular_file(
+    file: &mut cap_std::fs::File,
+    path: &Path,
+    max_bytes: usize,
+    description: &str,
+) -> Result<Vec<u8>> {
+    let metadata = file
+        .metadata()
+        .map_err(|error| ProjectError::io(path, error))?;
+    if !metadata.is_file() {
+        return Err(ProjectError::io(
+            path,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{description} is not a nofollow regular file"),
+            ),
+        ));
+    }
+    if metadata.len() > max_bytes as u64 {
+        return Err(ProjectError::io(
+            path,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{description} exceeds the {max_bytes}-byte limit"),
+            ),
+        ));
+    }
+    read_bounded_contents(file, path, metadata.len() as usize, max_bytes, description)
+}
+
+fn read_bounded_contents(
+    reader: &mut impl Read,
+    path: &Path,
+    initial_capacity: usize,
+    max_bytes: usize,
+    description: &str,
+) -> Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(initial_capacity.min(max_bytes));
+    Read::by_ref(reader)
+        .take(max_bytes as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| ProjectError::io(path, error))?;
+    if bytes.len() > max_bytes {
+        return Err(ProjectError::io(
+            path,
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("{description} grew beyond the {max_bytes}-byte limit"),
+            ),
+        ));
+    }
+    Ok(bytes)
+}
+
 /// Retained authority for one concrete `.opentake` bundle directory.
 ///
 /// The final bundle component is always opened no-follow. Consequently a path
@@ -23,6 +96,18 @@ pub struct ProjectRoot {
     name: OsString,
     dir: Dir,
     identity: Handle,
+    stable_identity: ProjectRootIdentity,
+}
+
+/// Cross-process identity of one retained project directory.
+///
+/// `volume`/`file` are `(st_dev, st_ino)` on Unix and
+/// `(volume serial number, file index)` on Windows. They are obtained from an
+/// already-open no-follow directory handle, never by trusting an ambient path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProjectRootIdentity {
+    pub volume: u64,
+    pub file: u64,
 }
 
 impl std::fmt::Debug for ProjectRoot {
@@ -64,18 +149,21 @@ impl ProjectRoot {
         let dir = parent
             .open_dir_nofollow(&name)
             .map_err(|error| ProjectError::io(path, error))?;
-        let identity = Handle::from_file(
-            dir.try_clone()
-                .map_err(|error| ProjectError::io(path, error))?
-                .into_std_file(),
-        )
-        .map_err(|error| ProjectError::io(path, error))?;
+        let identity_file = dir
+            .try_clone()
+            .map_err(|error| ProjectError::io(path, error))?
+            .into_std_file();
+        let stable_identity = stable_project_root_identity(&identity_file)
+            .map_err(|error| ProjectError::io(path, error))?;
+        let identity =
+            Handle::from_file(identity_file).map_err(|error| ProjectError::io(path, error))?;
         Ok(Self {
             path: path.to_path_buf(),
             parent,
             name,
             dir,
             identity,
+            stable_identity,
         })
     }
 
@@ -129,6 +217,77 @@ impl ProjectRoot {
         &self.identity
     }
 
+    /// Serializable identity derived from the retained root handle. This is
+    /// used to bind isolated asset-reader results back to the exact project
+    /// session that authorized them.
+    pub fn stable_identity(&self) -> ProjectRootIdentity {
+        self.stable_identity
+    }
+
+    /// Open a project-local asset through this retained bundle capability.
+    /// Every directory and the final leaf are opened no-follow, so an ambient
+    /// rename/replacement of the `.opentake` pathname cannot redirect the read.
+    pub fn open_asset_file(&self, relative: &Path) -> Result<fs::File> {
+        if relative.is_absolute() {
+            return Err(ProjectError::io(
+                self.path.join(relative),
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "project asset path must be relative",
+                ),
+            ));
+        }
+        let components = relative.components().collect::<Vec<_>>();
+        if components.is_empty()
+            || components
+                .iter()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(ProjectError::io(
+                self.path.join(relative),
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "project asset path contains an unsafe component",
+                ),
+            ));
+        }
+
+        let mut directory = self
+            .dir
+            .try_clone()
+            .map_err(|error| ProjectError::io(&self.path, error))?;
+        for component in &components[..components.len() - 1] {
+            let Component::Normal(name) = component else {
+                unreachable!("components were validated above");
+            };
+            directory = directory
+                .open_dir_nofollow(name)
+                .map_err(|error| ProjectError::io(self.path.join(relative), error))?;
+        }
+
+        let Component::Normal(name) = components[components.len() - 1] else {
+            unreachable!("components were validated above");
+        };
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        options.custom_flags(libc::O_NONBLOCK);
+        #[cfg(windows)]
+        {
+            use cap_std::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                FILE_FLAG_OPEN_NO_RECALL, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            };
+            options
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+                .custom_flags(FILE_FLAG_OPEN_NO_RECALL);
+        }
+        directory
+            .open_with(name, &options)
+            .map(cap_std::fs::File::into_std)
+            .map_err(|error| ProjectError::io(self.path.join(relative), error))
+    }
+
     /// Diagnostic comparison for a caller-supplied path alias. Same-project
     /// saves continue through this root even when the logical spelling differs.
     pub fn matches_path(&self, path: impl AsRef<Path>) -> Result<bool> {
@@ -157,6 +316,57 @@ impl ProjectRoot {
         self.copy_directory_component_to(destination, crate::layout::MEDIA_DIR, "media-copy")
     }
 
+    /// Write one fresh media leaf into this retained bundle.
+    ///
+    /// Complete generation publication uses this only on an unpublished stage,
+    /// after the existing media tree has been copied. The final leaf is created
+    /// with `create_new`, streamed without an ambient destination path, checked
+    /// against the downloader's exact byte count, synced, and kept only after
+    /// every write succeeds.
+    pub(crate) fn write_new_media_leaf(
+        &self,
+        name: &str,
+        expected_bytes: u64,
+        source: &mut dyn Read,
+    ) -> Result<()> {
+        validate_leaf(name).map_err(|error| {
+            ProjectError::io(self.path.join(crate::layout::MEDIA_DIR).join(name), error)
+        })?;
+        let media_path = self.path.join(crate::layout::MEDIA_DIR);
+        match self.dir.create_dir(crate::layout::MEDIA_DIR) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(ProjectError::io(&media_path, error)),
+        }
+        let media = self
+            .dir
+            .open_dir_nofollow(crate::layout::MEDIA_DIR)
+            .map_err(|error| ProjectError::io(&media_path, error))?;
+        let mut leaf = TransactionLeaf::create(&media, name)
+            .map_err(|error| ProjectError::io(media_path.join(name), error))?;
+        let copied = std::io::copy(
+            &mut source.take(expected_bytes.saturating_add(1)),
+            leaf.handle.as_file_mut(),
+        )
+        .map_err(|error| ProjectError::io(media_path.join(name), error))?;
+        if copied != expected_bytes {
+            return Err(ProjectError::io(
+                media_path.join(name),
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "generated media size changed before publication",
+                ),
+            ));
+        }
+        leaf.handle
+            .as_file_mut()
+            .flush()
+            .and_then(|()| leaf.handle.as_file().sync_all())
+            .map_err(|error| ProjectError::io(media_path.join(name), error))?;
+        leaf.cleanup_on_drop = false;
+        Ok(())
+    }
+
     /// Copy project-local Agent conversations during complete-bundle
     /// publication (Save As / archive) through retained no-follow roots.
     pub fn copy_chat_sessions_to(&self, destination: &ProjectRoot) -> Result<()> {
@@ -165,6 +375,14 @@ impl ProjectRoot {
             crate::layout::CHAT_SESSIONS_DIR,
             "chat-sessions-copy",
         )
+    }
+
+    /// Preserve the optional project cover across complete-bundle publication.
+    pub(crate) fn copy_thumbnail_to(&self, destination: &ProjectRoot) -> Result<()> {
+        if let Some(bytes) = self.read_optional(crate::layout::THUMBNAIL_FILE)? {
+            destination.write_atomic(crate::layout::THUMBNAIL_FILE, &bytes)?;
+        }
+        Ok(())
     }
 
     fn copy_directory_component_to(
@@ -239,6 +457,16 @@ impl ProjectRoot {
     }
 
     pub(crate) fn read_optional(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        let path = self.path.join(name);
+        let max_bytes = project_component_max_bytes(name).ok_or_else(|| {
+            ProjectError::io(
+                &path,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "project component has no configured byte limit",
+                ),
+            )
+        })?;
         let mut options = OpenOptions::new();
         options.read(true).follow(FollowSymlinks::No);
         #[cfg(unix)]
@@ -246,25 +474,9 @@ impl ProjectRoot {
         let mut file = match self.dir.open_with(name, &options) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(ProjectError::io(self.path.join(name), error)),
+            Err(error) => return Err(ProjectError::io(&path, error)),
         };
-        if !file
-            .metadata()
-            .map_err(|error| ProjectError::io(self.path.join(name), error))?
-            .is_file()
-        {
-            return Err(ProjectError::io(
-                self.path.join(name),
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "project component is not a nofollow regular file",
-                ),
-            ));
-        }
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)
-            .map_err(|error| ProjectError::io(self.path.join(name), error))?;
-        Ok(Some(bytes))
+        read_bounded_regular_file(&mut file, &path, max_bytes, "project component").map(Some)
     }
 
     pub(crate) fn write_atomic(&self, name: &str, bytes: &[u8]) -> Result<()> {
@@ -377,6 +589,99 @@ impl ProjectRoot {
         Ok(())
     }
 
+    /// Read one project-managed LUT through retained no-follow directories.
+    pub fn read_lut(&self, name: &str, max_bytes: usize) -> Result<Option<Vec<u8>>> {
+        validate_leaf(name).map_err(|error| {
+            ProjectError::io(
+                self.path
+                    .join(crate::layout::MEDIA_DIR)
+                    .join(crate::layout::LUTS_DIR)
+                    .join(name),
+                error,
+            )
+        })?;
+        let Some(directory) = self.luts_directory(false)? else {
+            return Ok(None);
+        };
+        let path = self
+            .path
+            .join(crate::layout::MEDIA_DIR)
+            .join(crate::layout::LUTS_DIR)
+            .join(name);
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        options.custom_flags(libc::O_NONBLOCK);
+        let mut file = match directory.open_with(name, &options) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(ProjectError::io(path, error)),
+        };
+        let metadata = file
+            .metadata()
+            .map_err(|error| ProjectError::io(&path, error))?;
+        if !metadata.is_file() || metadata.len() > max_bytes as u64 {
+            return Err(ProjectError::io(
+                path,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "LUT is not a bounded nofollow regular file",
+                ),
+            ));
+        }
+        let mut bytes = Vec::with_capacity(metadata.len() as usize);
+        Read::by_ref(&mut file)
+            .take(max_bytes as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| ProjectError::io(&path, error))?;
+        if bytes.len() > max_bytes {
+            return Err(ProjectError::io(
+                path,
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "LUT grew beyond the configured byte limit",
+                ),
+            ));
+        }
+        Ok(Some(bytes))
+    }
+
+    /// Atomically publish one validated, content-addressed LUT under
+    /// `media/luts/`. Callers validate both the bytes and digest before entry.
+    pub fn write_lut_atomic(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        validate_leaf(name).map_err(|error| {
+            ProjectError::io(
+                self.path
+                    .join(crate::layout::MEDIA_DIR)
+                    .join(crate::layout::LUTS_DIR)
+                    .join(name),
+                error,
+            )
+        })?;
+        let directory = self
+            .luts_directory(true)?
+            .expect("create=true returns a directory");
+        let directory_path = self
+            .path
+            .join(crate::layout::MEDIA_DIR)
+            .join(crate::layout::LUTS_DIR);
+        let tmp_name = unique_temp_name(name);
+        let mut tmp = TransactionLeaf::create(&directory, &tmp_name)
+            .map_err(|error| ProjectError::io(directory_path.join(&tmp_name), error))?;
+        tmp.handle
+            .as_file_mut()
+            .write_all(bytes)
+            .map_err(|error| ProjectError::io(directory_path.join(&tmp_name), error))?;
+        tmp.handle
+            .as_file()
+            .sync_all()
+            .map_err(|error| ProjectError::io(directory_path.join(&tmp_name), error))?;
+        tmp.replace(&directory, Path::new(name))
+            .map_err(|error| ProjectError::io(directory_path.join(name), error))?;
+        tmp.cleanup_on_drop = false;
+        Ok(())
+    }
+
     /// List no-follow regular leaves in `chat-sessions/`. Callers own the
     /// filename policy (for example selecting only `<session>.json`).
     pub fn list_chat_session_files(&self, max_entries: usize) -> Result<Vec<OsString>> {
@@ -449,6 +754,112 @@ impl ProjectRoot {
             .map(Some)
             .map_err(|error| ProjectError::io(path, error))
     }
+
+    fn luts_directory(&self, create: bool) -> Result<Option<Dir>> {
+        let media_path = self.path.join(crate::layout::MEDIA_DIR);
+        match self.dir.symlink_metadata(crate::layout::MEDIA_DIR) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => {
+                return Err(ProjectError::io(
+                    media_path,
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "media must be a nofollow directory",
+                    ),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => {
+                self.dir
+                    .create_dir(crate::layout::MEDIA_DIR)
+                    .or_else(|error| {
+                        if error.kind() == std::io::ErrorKind::AlreadyExists {
+                            Ok(())
+                        } else {
+                            Err(error)
+                        }
+                    })
+                    .map_err(|error| ProjectError::io(&media_path, error))?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(ProjectError::io(&media_path, error)),
+        }
+        let media = self
+            .dir
+            .open_dir_nofollow(crate::layout::MEDIA_DIR)
+            .map_err(|error| ProjectError::io(&media_path, error))?;
+        let luts_path = media_path.join(crate::layout::LUTS_DIR);
+        match media.symlink_metadata(crate::layout::LUTS_DIR) {
+            Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+            Ok(_) => {
+                return Err(ProjectError::io(
+                    luts_path,
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "luts must be a nofollow directory",
+                    ),
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && create => {
+                media
+                    .create_dir(crate::layout::LUTS_DIR)
+                    .or_else(|error| {
+                        if error.kind() == std::io::ErrorKind::AlreadyExists {
+                            Ok(())
+                        } else {
+                            Err(error)
+                        }
+                    })
+                    .map_err(|error| ProjectError::io(&luts_path, error))?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(ProjectError::io(&luts_path, error)),
+        }
+        media
+            .open_dir_nofollow(crate::layout::LUTS_DIR)
+            .map(Some)
+            .map_err(|error| ProjectError::io(luts_path, error))
+    }
+}
+
+#[cfg(unix)]
+fn stable_project_root_identity(file: &fs::File) -> std::io::Result<ProjectRootIdentity> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = file.metadata()?;
+    Ok(ProjectRootIdentity {
+        volume: metadata.dev(),
+        file: metadata.ino(),
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn stable_project_root_identity(file: &fs::File) -> std::io::Result<ProjectRootIdentity> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+
+    // `std::os::windows::fs::MetadataExt::volume_serial_number/file_index` are
+    // unstable (rust-lang/rust#63010); use the stable handle query instead,
+    // mirroring src-tauri's retained_file_etag.
+    let mut information = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: `file` owns a live handle and `information` is writable.
+    if unsafe {
+        GetFileInformationByHandle(
+            file.as_raw_handle() as HANDLE,
+            std::ptr::addr_of_mut!(information),
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    let file_index =
+        (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+    Ok(ProjectRootIdentity {
+        volume: u64::from(information.dwVolumeSerialNumber),
+        file: file_index,
+    })
 }
 
 /// One complete-bundle sibling publication. The persistent lock leaf
@@ -464,6 +875,8 @@ pub(crate) struct BundlePublisher {
     backup_name: OsString,
     journal_name: OsString,
     journal: PublishJournal,
+    target_identity: Option<ProjectRootIdentity>,
+    stage_identity: ProjectRootIdentity,
     stage: Option<ProjectRoot>,
     _lock: std::fs::File,
     _lock_identity: Handle,
@@ -542,8 +955,8 @@ impl BundlePublisher {
             &journal_name,
         )?;
         clear_idle_publish_marker(&parent, &parent_path, &target_name)?;
-        let target_exists = inspect_directory(&parent, &parent_path, &target_name, false)?;
-        let journal = PublishJournal::new(target_exists);
+        let target_identity = directory_identity(&parent, &parent_path, &target_name, false)?;
+        let journal = PublishJournal::new(target_identity);
         write_new_file_artifact(&parent, &parent_path, &journal_name, &journal.encode())?;
         let stage_name = stage_artifact_name(&target_name, &journal.nonce);
         parent
@@ -557,6 +970,7 @@ impl BundlePublisher {
                 .map_err(|error| ProjectError::io(&parent_path, error))?,
             stage_name.clone(),
         )?;
+        let stage_identity = stage.stable_identity();
         let publisher = Self {
             target_path: target_path.to_path_buf(),
             parent_path,
@@ -566,6 +980,8 @@ impl BundlePublisher {
             backup_name,
             journal_name,
             journal,
+            target_identity,
+            stage_identity,
             stage: Some(stage),
             _lock: lock,
             _lock_identity: lock_identity,
@@ -583,15 +999,33 @@ impl BundlePublisher {
     }
 
     pub(crate) fn publish(mut self) -> Result<ProjectRoot> {
-        #[cfg(test)]
-        if FAIL_PUBLISH_AFTER_BACKUP.with(|fail| fail.replace(false)) {
-            return self.publish_with_hook(|| {
-                Err(std::io::Error::other(
-                    "injected publication failure after backup",
-                ))
-            });
+        let result = {
+            #[cfg(test)]
+            if FAIL_PUBLISH_AFTER_BACKUP.with(|fail| fail.replace(false)) {
+                self.publish_with_hook(|| {
+                    Err(std::io::Error::other(
+                        "injected publication failure after backup",
+                    ))
+                })
+            } else {
+                self.publish_with_hook(|| Ok(()))
+            }
+
+            #[cfg(not(test))]
+            self.publish_with_hook(|| Ok(()))
+        };
+
+        // A caller may immediately start the next complete-bundle save while
+        // retaining the returned ProjectRoot. Make that successful handoff
+        // explicit instead of depending on the two cloned lock handles being
+        // dropped at the end of this function. Error paths retain the lock
+        // through Drop's staged-artifact cleanup. Closing the handles remains
+        // the fallback; an unlock error cannot safely turn an already
+        // committed publication into a reported failure.
+        if result.is_ok() {
+            let _ = self._lock.unlock();
         }
-        self.publish_with_hook(|| Ok(()))
+        result
     }
 
     fn publish_with_hook(
@@ -602,7 +1036,10 @@ impl BundlePublisher {
             .stage
             .as_ref()
             .expect("bundle publisher owns its stage before publication");
-        if !stage.is_current_namespace()? || !marker_matches(stage, &self.journal.nonce)? {
+        if stage.stable_identity() != self.stage_identity
+            || !stage.is_current_namespace()?
+            || !marker_matches(stage, &self.journal.nonce)?
+        {
             return Err(ProjectError::io(
                 self.parent_path.join(&self.stage_name),
                 std::io::Error::new(
@@ -620,17 +1057,20 @@ impl BundlePublisher {
                 .expect("validated bundle stage remains owned before publication"),
         );
 
-        let target_exists =
-            inspect_directory(&self.parent, &self.parent_path, &self.target_name, false)?;
-        if target_exists != self.journal.had_target {
+        let current_target_identity =
+            directory_identity(&self.parent, &self.parent_path, &self.target_name, false)?;
+        if current_target_identity != self.target_identity {
+            let message = if current_target_identity.is_some() != self.target_identity.is_some() {
+                "bundle target existence changed after transaction preparation"
+            } else {
+                "bundle target identity changed after transaction preparation"
+            };
             return Err(ProjectError::io(
                 &self.target_path,
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "bundle target existence changed after transaction preparation",
-                ),
+                std::io::Error::new(std::io::ErrorKind::InvalidData, message),
             ));
         }
+        let target_exists = current_target_identity.is_some();
         if inspect_directory(&self.parent, &self.parent_path, &self.backup_name, true)? {
             return Err(ProjectError::io(
                 self.parent_path.join(&self.backup_name),
@@ -737,6 +1177,22 @@ impl BundlePublisher {
             });
         }
         let backup_cleaned = if target_exists {
+            // The backup name must still denote the exact original target
+            // directory that this transaction backed up. A hook or ambient
+            // actor that rebound a foreign object at the backup name must
+            // never be deleted: fail closed and preserve it for recovery
+            // instead of silently destroying foreign data.
+            let backup_identity =
+                directory_identity(&self.parent, &self.parent_path, &self.backup_name, true)?;
+            if backup_identity != self.target_identity {
+                return Err(ProjectError::io(
+                    self.parent_path.join(&self.backup_name),
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "bundle backup identity changed after transaction preparation",
+                    ),
+                ));
+            }
             #[cfg(test)]
             if FAIL_BACKUP_CLEANUP.with(|fail| fail.replace(false)) {
                 return Ok(root);
@@ -907,8 +1363,6 @@ fn finish_aborted_publish_cleanup(
     remove_file_artifact(parent, parent_path, journal_name)
 }
 
-const PUBLISH_MARKER_FILE: &str = ".opentake-publish-marker";
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PublishPhase {
     Prepared,
@@ -920,11 +1374,12 @@ enum PublishPhase {
 struct PublishJournal {
     nonce: String,
     had_target: bool,
+    target_identity: Option<ProjectRootIdentity>,
     phase: PublishPhase,
 }
 
 impl PublishJournal {
-    fn new(had_target: bool) -> Self {
+    fn new(target_identity: Option<ProjectRootIdentity>) -> Self {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -934,16 +1389,23 @@ impl PublishJournal {
             .as_nanos();
         Self {
             nonce: format!("{:x}-{:x}-{sequence:x}", std::process::id(), nanos),
-            had_target,
+            had_target: target_identity.is_some(),
+            target_identity,
             phase: PublishPhase::Prepared,
         }
     }
 
     fn encode(&self) -> Vec<u8> {
+        let (target_volume, target_file) = match self.target_identity {
+            Some(identity) => (identity.volume.to_string(), identity.file.to_string()),
+            None => ("none".to_string(), "none".to_string()),
+        };
         format!(
-            "version=1\nnonce={}\nhad_target={}\nphase={}\n",
+            "version=2\nnonce={}\nhad_target={}\ntarget_volume={}\ntarget_file={}\nphase={}\n",
             self.nonce,
             u8::from(self.had_target),
+            target_volume,
+            target_file,
             match self.phase {
                 PublishPhase::Prepared => "prepared",
                 PublishPhase::BackedUp => "backed_up",
@@ -960,6 +1422,8 @@ impl PublishJournal {
         let mut version = None;
         let mut nonce = None;
         let mut had_target = None;
+        let mut target_volume = None;
+        let mut target_file = None;
         let mut phase = None;
         for line in document.lines() {
             let (key, value) = line.split_once('=').ok_or_else(|| {
@@ -969,6 +1433,8 @@ impl PublishJournal {
                 "version" if version.replace(value).is_none() => {}
                 "nonce" if nonce.replace(value).is_none() => {}
                 "had_target" if had_target.replace(value).is_none() => {}
+                "target_volume" if target_volume.replace(value).is_none() => {}
+                "target_file" if target_file.replace(value).is_none() => {}
                 "phase" if phase.replace(value).is_none() => {}
                 _ => {
                     return Err(std::io::Error::new(
@@ -978,7 +1444,7 @@ impl PublishJournal {
                 }
             }
         }
-        if version != Some("1") {
+        if !matches!(version, Some("1" | "2")) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "unsupported journal version",
@@ -1000,6 +1466,39 @@ impl PublishJournal {
                 ))
             }
         };
+        let target_identity = match version {
+            Some("1") if target_volume.is_none() && target_file.is_none() => None,
+            Some("2") => match (target_volume, target_file) {
+                (Some("none"), Some("none")) if !had_target => None,
+                (Some(volume), Some(file)) if had_target => {
+                    let volume = volume.parse::<u64>().map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "invalid journal target volume identity",
+                        )
+                    })?;
+                    let file = file.parse::<u64>().map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "invalid journal target file identity",
+                        )
+                    })?;
+                    Some(ProjectRootIdentity { volume, file })
+                }
+                _ => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "journal target existence and identity disagree",
+                    ))
+                }
+            },
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "legacy journal contains unexpected identity fields",
+                ))
+            }
+        };
         let phase = match phase {
             Some("prepared") => PublishPhase::Prepared,
             Some("backed_up") => PublishPhase::BackedUp,
@@ -1014,6 +1513,7 @@ impl PublishJournal {
         Ok(Self {
             nonce,
             had_target,
+            target_identity,
             phase,
         })
     }
@@ -1056,6 +1556,31 @@ fn inspect_directory(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(ProjectError::io(parent_path.join(name), error)),
     }
+}
+
+fn directory_identity(
+    parent: &Dir,
+    parent_path: &Path,
+    name: &OsStr,
+    artifact: bool,
+) -> Result<Option<ProjectRootIdentity>> {
+    if !inspect_directory(parent, parent_path, name, artifact)? {
+        return Ok(None);
+    }
+    let root = ProjectRoot::open_from_parent(
+        &parent_path.join(name),
+        parent
+            .try_clone()
+            .map_err(|error| ProjectError::io(parent_path, error))?,
+        name.to_owned(),
+    )?;
+    if !root.is_current_namespace()? {
+        return Err(ProjectError::io(
+            parent_path.join(name),
+            std::io::Error::other("bundle directory identity changed during inspection"),
+        ));
+    }
+    Ok(Some(root.stable_identity()))
 }
 
 fn remove_directory_artifact(parent: &Dir, parent_path: &Path, name: &OsStr) -> Result<()> {
@@ -1103,28 +1628,20 @@ fn remove_directory_artifact(parent: &Dir, parent_path: &Path, name: &OsStr) -> 
 }
 
 fn read_file_artifact(parent: &Dir, parent_path: &Path, name: &OsStr) -> Result<Vec<u8>> {
+    let path = parent_path.join(name);
     let mut options = OpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NONBLOCK);
     let mut file = parent
         .open_with(name, &options)
-        .map_err(|error| ProjectError::io(parent_path.join(name), error))?;
-    if !file
-        .metadata()
-        .map_err(|error| ProjectError::io(parent_path.join(name), error))?
-        .is_file()
-    {
-        return Err(ProjectError::io(
-            parent_path.join(name),
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "bundle transaction journal is not a nofollow regular file",
-            ),
-        ));
-    }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .map_err(|error| ProjectError::io(parent_path.join(name), error))?;
-    Ok(bytes)
+        .map_err(|error| ProjectError::io(&path, error))?;
+    read_bounded_regular_file(
+        &mut file,
+        &path,
+        TRANSACTION_JOURNAL_MAX_BYTES,
+        "bundle transaction journal",
+    )
 }
 
 fn write_new_file_artifact(
@@ -1806,6 +2323,198 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn project_asset_open_stays_bound_to_retained_root_after_namespace_rebind() {
+        let tmp = TmpDir::new("asset-root-rebind");
+        let selected = tmp.path().join("Selected.opentake");
+        let retained = tmp.path().join("Retained-A.opentake");
+        let relative = Path::new("media/nested/clip.mp4");
+        fs::create_dir_all(selected.join("media/nested")).unwrap();
+        fs::write(selected.join(relative), b"project-a").unwrap();
+        let root = ProjectRoot::open(&selected).unwrap();
+
+        fs::rename(&selected, &retained).unwrap();
+        fs::create_dir_all(selected.join("media/nested")).unwrap();
+        fs::write(selected.join(relative), b"project-b").unwrap();
+
+        let mut asset = root.open_asset_file(relative).unwrap();
+        let mut bytes = Vec::new();
+        asset.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"project-a");
+        assert!(!root.is_current_namespace().unwrap());
+    }
+
+    /// On Windows cap-std opens retained directory handles without
+    /// FILE_SHARE_DELETE, so while the root is retained the namespace cannot be
+    /// mutated: the rename fails closed instead of rebinding. Assert that
+    /// hardening, then prove the rename works once the root is dropped.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn project_asset_open_blocks_namespace_rebind_while_retained() {
+        let tmp = TmpDir::new("asset-root-rebind");
+        let selected = tmp.path().join("Selected.opentake");
+        let retained = tmp.path().join("Retained-A.opentake");
+        let relative = Path::new("media/nested/clip.mp4");
+        fs::create_dir_all(selected.join("media/nested")).unwrap();
+        fs::write(selected.join(relative), b"project-a").unwrap();
+        let root = ProjectRoot::open(&selected).unwrap();
+
+        assert!(fs::rename(&selected, &retained).is_err());
+        assert!(root.is_current_namespace().unwrap());
+
+        drop(root);
+        fs::rename(&selected, &retained).unwrap();
+        assert_eq!(fs::read(retained.join(relative)).unwrap(), b"project-a");
+    }
+
+    #[test]
+    fn project_asset_open_rejects_non_relative_components() {
+        let tmp = TmpDir::new("asset-invalid-relative");
+        let bundle = tmp.path().join("Selected.opentake");
+        let root = ProjectRoot::create(&bundle).unwrap();
+
+        assert!(root.open_asset_file(Path::new("../outside.mp4")).is_err());
+        assert!(root.open_asset_file(tmp.path()).is_err());
+        assert!(root.open_asset_file(Path::new(".")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_asset_open_rejects_symlinked_directories_and_leaves() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = TmpDir::new("asset-symlinks");
+        let bundle = tmp.path().join("Selected.opentake");
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&bundle).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.mp4"), b"secret").unwrap();
+        symlink(&outside, bundle.join("linked-dir")).unwrap();
+        symlink(outside.join("secret.mp4"), bundle.join("linked-file.mp4")).unwrap();
+        let root = ProjectRoot::open(&bundle).unwrap();
+
+        assert!(root
+            .open_asset_file(Path::new("linked-dir/secret.mp4"))
+            .is_err());
+        assert!(root.open_asset_file(Path::new("linked-file.mp4")).is_err());
+    }
+
+    #[test]
+    fn project_component_reads_enforce_each_configured_byte_limit() {
+        let tmp = TmpDir::new("component-read-limits");
+        let bundle = tmp.path().join("Bounded.opentake");
+        let root = ProjectRoot::create(&bundle).unwrap();
+        let cases = [
+            (crate::layout::TIMELINE_FILE, TIMELINE_COMPONENT_MAX_BYTES),
+            (crate::layout::MANIFEST_FILE, MANIFEST_COMPONENT_MAX_BYTES),
+            (
+                crate::layout::GENERATION_LOG_FILE,
+                GENERATION_LOG_COMPONENT_MAX_BYTES,
+            ),
+            (crate::layout::THUMBNAIL_FILE, THUMBNAIL_COMPONENT_MAX_BYTES),
+            (PUBLISH_MARKER_FILE, PUBLISH_MARKER_MAX_BYTES),
+        ];
+
+        for (name, max_bytes) in cases {
+            let file = fs::File::create(bundle.join(name)).unwrap();
+            file.set_len(max_bytes as u64 + 1).unwrap();
+
+            let error = match root.read_optional(name) {
+                Err(error) => error,
+                Ok(_) => panic!("metadata above the configured limit was accepted for {name}"),
+            };
+            assert!(error.to_string().contains(name), "{error}");
+            assert!(error.to_string().contains("byte limit"), "{error}");
+        }
+    }
+
+    #[test]
+    fn project_component_read_accepts_the_exact_marker_limit() {
+        let tmp = TmpDir::new("component-read-boundary");
+        let bundle = tmp.path().join("Boundary.opentake");
+        let root = ProjectRoot::create(&bundle).unwrap();
+        let marker = vec![b'a'; PUBLISH_MARKER_MAX_BYTES];
+        fs::write(bundle.join(PUBLISH_MARKER_FILE), &marker).unwrap();
+
+        assert_eq!(
+            root.read_optional(PUBLISH_MARKER_FILE).unwrap(),
+            Some(marker)
+        );
+    }
+
+    #[test]
+    fn bounded_stream_read_rejects_growth_after_the_metadata_boundary() {
+        let path = Path::new("growing-project-component");
+        let mut exact = std::io::Cursor::new(b"1234".to_vec());
+        assert_eq!(
+            read_bounded_contents(&mut exact, path, 4, 4, "project component").unwrap(),
+            b"1234"
+        );
+
+        let mut grown = std::io::Cursor::new(b"12345".to_vec());
+        let error = read_bounded_contents(&mut grown, path, 4, 4, "project component")
+            .expect_err("MAX+1 must identify a file that grew after metadata inspection");
+        assert!(error.to_string().contains("grew beyond"), "{error}");
+    }
+
+    #[test]
+    fn transaction_journal_reads_enforce_the_exact_and_over_limit_boundaries() {
+        let tmp = TmpDir::new("journal-read-boundary");
+        let parent = Dir::open_ambient_dir(tmp.path(), ambient_authority()).unwrap();
+        let name = OsStr::new(".Bounded.opentake.opentake-journal");
+        let path = tmp.path().join(name);
+        let bytes = vec![b'a'; TRANSACTION_JOURNAL_MAX_BYTES];
+        fs::write(&path, &bytes).unwrap();
+        assert_eq!(
+            read_file_artifact(&parent, tmp.path(), name).unwrap(),
+            bytes
+        );
+
+        fs::File::create(&path)
+            .unwrap()
+            .set_len(TRANSACTION_JOURNAL_MAX_BYTES as u64 + 1)
+            .unwrap();
+        let error = read_file_artifact(&parent, tmp.path(), name)
+            .expect_err("an oversized journal must be rejected before allocation");
+        assert!(error.to_string().contains("byte limit"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn transaction_journal_read_rejects_a_fifo_without_blocking() {
+        use std::process::Command;
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let tmp = TmpDir::new("journal-fifo");
+        let name = OsString::from(".Blocked.opentake.opentake-journal");
+        let fifo = tmp.path().join(&name);
+        assert!(Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        let parent_path = tmp.path().to_path_buf();
+        let parent = Dir::open_ambient_dir(&parent_path, ambient_authority()).unwrap();
+        let (sent, received) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            sent.send(read_file_artifact(&parent, &parent_path, &name))
+                .unwrap();
+        });
+        let result = match received.recv_timeout(Duration::from_millis(250)) {
+            Ok(result) => result,
+            Err(_) => {
+                let _writer = fs::OpenOptions::new().write(true).open(&fifo).unwrap();
+                let _ = received.recv_timeout(Duration::from_secs(1));
+                reader.join().unwrap();
+                panic!("transaction journal FIFO open blocked instead of failing closed");
+            }
+        };
+        reader.join().unwrap();
+        assert!(result.is_err(), "a FIFO must never be parsed as a journal");
+    }
+
     #[test]
     fn failed_atomic_replace_removes_the_capability_relative_temp_leaf() {
         let tmp = TmpDir::new("failed-replace-cleanup");
@@ -2118,6 +2827,38 @@ mod tests {
     }
 
     #[test]
+    fn publish_releases_the_transaction_lock_before_returning() {
+        let tmp = TmpDir::new("publish-lock-handoff");
+        let target = tmp.path().join("Existing.opentake");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("project.json"), b"initial timeline").unwrap();
+        let lock_path = tmp.path().join(".Existing.opentake.opentake-lock");
+
+        for generation in 0..32 {
+            let publisher = ProjectRoot::begin_replace(&target).unwrap();
+            let expected = format!("timeline generation {generation}");
+            publisher
+                .stage()
+                .write_atomic("project.json", expected.as_bytes())
+                .unwrap();
+            let root = publisher.publish().unwrap();
+
+            let lock = fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .unwrap();
+            lock.try_lock()
+                .expect("publish must hand off its transaction lock before returning");
+            lock.unlock().unwrap();
+            assert_eq!(
+                root.read_optional("project.json").unwrap().unwrap(),
+                expected.as_bytes()
+            );
+        }
+    }
+
+    #[test]
     fn postcommit_backup_cleanup_failure_returns_success_and_recovers_on_retry() {
         let tmp = TmpDir::new("postcommit-cleanup");
         let target = tmp.path().join("Existing.opentake");
@@ -2278,7 +3019,7 @@ mod tests {
         let target = tmp.path().join("New.opentake");
         let target_name = target.file_name().unwrap();
         let journal_name = artifact_name(target_name, ".opentake-journal");
-        let journal = PublishJournal::new(false);
+        let journal = PublishJournal::new(None);
         let stage_name = stage_artifact_name(target_name, &journal.nonce);
         let parent = Dir::open_ambient_dir(tmp.path(), ambient_authority()).unwrap();
         write_new_file_artifact(&parent, tmp.path(), &journal_name, &journal.encode()).unwrap();
@@ -2299,7 +3040,7 @@ mod tests {
         let target = tmp.path().join("New.opentake");
         let target_name = target.file_name().unwrap();
         let journal_name = artifact_name(target_name, ".opentake-journal");
-        let journal = PublishJournal::new(false);
+        let journal = PublishJournal::new(None);
         let parent = Dir::open_ambient_dir(tmp.path(), ambient_authority()).unwrap();
         write_new_file_artifact(&parent, tmp.path(), &journal_name, &journal.encode()).unwrap();
 
@@ -2394,7 +3135,7 @@ mod tests {
         let target = tmp.path().join("New.opentake");
         let target_name = target.file_name().unwrap();
         let journal_name = artifact_name(target_name, ".opentake-journal");
-        let journal = PublishJournal::new(false);
+        let journal = PublishJournal::new(None);
         let unknown_stage = stage_artifact_name(target_name, "dead-beef-0");
         let parent = Dir::open_ambient_dir(tmp.path(), ambient_authority()).unwrap();
         write_new_file_artifact(&parent, tmp.path(), &journal_name, &journal.encode()).unwrap();
@@ -2417,7 +3158,8 @@ mod tests {
         fs::write(target.join("project.json"), b"old timeline").unwrap();
         let target_name = target.file_name().unwrap();
         let journal_name = artifact_name(target_name, ".opentake-journal");
-        let mut journal = PublishJournal::new(true);
+        let mut journal =
+            PublishJournal::new(Some(ProjectRoot::open(&target).unwrap().stable_identity()));
         journal.phase = PublishPhase::AbortedRestored;
         let unknown_stage = stage_artifact_name(target_name, "dead-beef-0");
         let parent = Dir::open_ambient_dir(tmp.path(), ambient_authority()).unwrap();
@@ -2440,7 +3182,8 @@ mod tests {
         fs::create_dir_all(&target).unwrap();
         fs::write(target.join("project.json"), b"old timeline").unwrap();
         let target_name = target.file_name().unwrap();
-        let journal = PublishJournal::new(true);
+        let journal =
+            PublishJournal::new(Some(ProjectRoot::open(&target).unwrap().stable_identity()));
         let legacy_stage = artifact_name(target_name, ".opentake-stage");
         let legacy_path = create_recovery_stage(tmp.path(), &legacy_stage, Some(&journal.nonce));
         write_recovery_journal(tmp.path(), target_name, &journal);
@@ -2478,7 +3221,8 @@ mod tests {
             fs::create_dir_all(&target).unwrap();
             fs::write(target.join("project.json"), b"old timeline").unwrap();
             let target_name = target.file_name().unwrap();
-            let journal = PublishJournal::new(true);
+            let journal =
+                PublishJournal::new(Some(ProjectRoot::open(&target).unwrap().stable_identity()));
             let exact_stage = stage_artifact_name(target_name, &journal.nonce);
             let legacy_stage = artifact_name(target_name, ".opentake-stage");
             match case {
@@ -2523,7 +3267,14 @@ mod tests {
             let tmp = TmpDir::new(tag);
             let target = tmp.path().join("Existing.opentake");
             let target_name = target.file_name().unwrap();
-            let mut journal = PublishJournal::new(!matches!(case, Case::NoPriorTarget));
+            let mut journal = PublishJournal::new(if matches!(case, Case::NoPriorTarget) {
+                None
+            } else {
+                Some(ProjectRootIdentity {
+                    volume: u64::MAX,
+                    file: u64::MAX - 1,
+                })
+            });
             journal.phase = PublishPhase::AbortedRestored;
             let stage_name = stage_artifact_name(target_name, &journal.nonce);
             create_recovery_stage(tmp.path(), &stage_name, Some(&journal.nonce));
@@ -2804,6 +3555,72 @@ mod tests {
 
         assert!(error.to_string().contains("lock"), "{error}");
         drop(first);
+    }
+
+    #[test]
+    fn publish_refuses_a_different_target_that_rebinds_after_begin() {
+        let tmp = TmpDir::new("publish-target-rebound-after-begin");
+        let target = tmp.path().join("Existing.opentake");
+        let original = tmp.path().join("Original.opentake");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("project.json"), b"original timeline").unwrap();
+
+        let publisher = ProjectRoot::begin_replace(&target).unwrap();
+        publisher
+            .stage()
+            .write_atomic("project.json", b"staged timeline")
+            .unwrap();
+        fs::rename(&target, &original).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("project.json"), b"replacement timeline").unwrap();
+
+        let error = publisher
+            .publish()
+            .expect_err("a rebound target must fail closed before publication");
+
+        assert!(error.to_string().contains("identity"), "{error}");
+        assert_eq!(
+            fs::read(target.join("project.json")).unwrap(),
+            b"replacement timeline"
+        );
+        assert_eq!(
+            fs::read(original.join("project.json")).unwrap(),
+            b"original timeline"
+        );
+    }
+
+    #[test]
+    fn publish_never_deletes_a_foreign_bundle_rebound_at_backup_name() {
+        let tmp = TmpDir::new("publish-backup-rebound-before-cleanup");
+        let target = tmp.path().join("Existing.opentake");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("project.json"), b"original timeline").unwrap();
+
+        let mut publisher = ProjectRoot::begin_replace(&target).unwrap();
+        publisher
+            .stage()
+            .write_atomic("project.json", b"new timeline")
+            .unwrap();
+        let backup = tmp.path().join(&publisher.backup_name);
+        let preserved_original = tmp.path().join("preserved-original.opentake");
+
+        let result = publisher.publish_with_hook(|| {
+            fs::rename(&backup, &preserved_original)?;
+            fs::create_dir_all(&backup)?;
+            fs::write(backup.join("project.json"), b"foreign replacement")?;
+            Ok(())
+        });
+
+        assert!(result.is_err(), "backup identity mismatch must fail closed");
+        assert_eq!(
+            fs::read(backup.join("project.json")).unwrap(),
+            b"foreign replacement",
+            "a foreign object rebound at the backup name must survive"
+        );
+        assert_eq!(
+            fs::read(preserved_original.join("project.json")).unwrap(),
+            b"original timeline"
+        );
     }
 
     #[test]

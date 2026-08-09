@@ -109,6 +109,7 @@ impl OrtEmbedder {
 }
 
 fn build_session(path: &Path) -> Result<Session> {
+    crate::initialize_ort_backend();
     let builder = Session::builder().map_err(|e| MediaError::ModelInstall(format!("ort: {e}")))?;
     // Default EP set; ort falls back to CPU when an accelerator is unavailable.
     let builder = builder

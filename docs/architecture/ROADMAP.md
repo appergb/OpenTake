@@ -1,5 +1,11 @@
 # OpenTake 分阶段实施路线图
 
+> **2026-08-03 状态裁决：**Phase 0–10 已全部走完并交付 Beta 1（`v1.0.0-beta.1`，
+> 2026-08-01 发布）。当前处于 **Beta 2 收尾与发布验证**阶段：范围与门槛见
+> `docs/releases/1.0.0-beta.2.md`，逐项执行证据见 `docs/audit/2026-08-02/beta-functional-verification.md`。
+> 下文各 Phase 的「进度」注记为历史里程碑，不再代表阻塞项；剩余工作集中在收尾
+> （未决 finding 清零、真机/Windows 验证、候选包验收），不涉及新的大功能开发。
+
 > 原则:先把「纯逻辑层」做扎实并与上游对拍,再攻媒体引擎 blocker,最后接 UI / Agent / 生成后端。
 > 每个阶段都有明确「交付物」与「验证标准」。详见 `docs/ARCHITECTURE.md`、`docs/MODULE-PORT-MAP.md`。
 > 对标剪映的进阶能力(特效/转场/调色/蒙版/AI/音频工程等)穿插在下列阶段中,完整规划见 `docs/ADVANCED-FEATURES.md`。
@@ -60,12 +66,12 @@
   3. 应用内 chat(reqwest→Anthropic SSE,BYOK;prompt caching)。
   4. **OpenTake 增强**:分层可组合系统提示词 + 模型策略配置化;高阶工具 `remove_filler_words`/`tighten_silences`;写工具返回结构化 JSON;新增 `get_capabilities`。
 - **验证**:`claude mcp add` 能连;每个工具走通;应用内 chat 能完成多步链式编辑;助手专属 undo 正确。
-- **进度**:`list_models` 工具已从存根接到 `opentake-gen` 内置静态 catalog(#111,`?type=` 过滤 + `{ models, loaded }`,纯本地无网络/BYOK);`generate_*`/`upscale_media` 仍待 async + ProviderRegistry + BYOK。
+- **进度**:`list_models`、媒体检查/转写与口播高阶工具已接生产桥。基础集合最多 39 个真实路径工具并按媒体桥能力过滤；存在托管或兼容 BYOK 凭据时动态增加 `generate_*`/`upscale_media` 四个工具，无凭据时保持隐藏；Motion 两个兼容线名仍未发布。生成与 Chat/MCP 复用同一 Dispatcher/GenerationBridge。
 
 ## Phase 8 — 文字/字幕渲染 + 转写 + 语义搜索
 - **做**:cosmic-text + tiny-skia/Vello 文字渲染(阴影/描边/背景/对齐/换行,逐帧 opacity)接入合成器;whisper-rs 转写(word/segment 时间戳,`TranscriptionResult` 模型复用);candle/ort 跑 SigLIP2 + tokenizers 做视觉/口语搜索。
 - **验证**:字幕静态渲染像素对齐上游;转写时间码映射正确;`search_media` 视觉/口语命中合理。
-- **进度**:SRT/VTT 字幕**导出纯逻辑**已落地(#110,`crates/opentake-domain/src/subtitle_export.rs`,按 `caption_group_id` 分组序列化,16 单测);剩接导出层 + `export_captions` agent 工具 + 前端导出对话框。
+- **进度**:SRT/VTT 字幕导出端到端已落地：`opentake-domain::subtitle_export` 按 `caption_group_id` 生成标准时码，Tauri `export_subtitles` 安全落盘，TitleBar 提供 SRT/VTT 原生保存入口；Rust 导出与前端菜单/交互路由均有测试。可选 Agent `export_captions` 工具不属于本 UI 导出验收项。
 - **进阶扩展(ADVANCED-FEATURES B/C/D 层)**:
   - AI 推理特性(统一 ort worker):超分(Real-ESRGAN/SeedVR)、AI 抠像(RVM/BiRefNet)、运动追踪(CoTracker)、防抖(FFmpeg vidstab 起步)、光流补帧(RIFE/FILM,p3)、消除瑕疵(p3)。
   - 音频工程(FFmpeg):响度统一(loudnorm/EBU R128)、降噪(afftdn/arnndn→DeepFilterNet)、人声分离(Demucs via ort)。
@@ -75,13 +81,15 @@
 对应 `opentake-gen` + `services/opentake-gen-proxy`。
 - **做**:`GenClient`(复刻 `GenerationParams` 联合类型 + job 状态机);**BYOK 模式**(本地直连 fal/Replicate/OpenAI,keyring 存 key,内置静态 models catalog);**托管模式**(axum 代理 + provider adapters + 对象存储预签名 + 可选积分计费)。
 - **验证**:BYOK 下能用自己的 fal key 生图/生视频并落回时间线;模型目录数据驱动 UI;托管代理可自部署。
+- **进度(2026-07-29)**:provider-neutral 耐久作业、BYOK/托管授权、成本确认、fal/Replicate/OpenAI/ElevenLabs dispatch、N 输出终局化、进度/取消/重试/恢复、MediaPanel 状态与安全下载已完成；确定性配置 provider 测试覆盖 image/video/audio/upscale 且不发起付费网络。托管代理自部署与真实账号付费冒烟仍需在 Beta 发布验证阶段完成。
 - **进阶扩展 · AIGC 编排(ADVANCED-FEATURES E 层)**:智能剪口播(本地词级转写+静音检测→Rust 内算 ripple,高阶工具 `remove_filler_words`/`tighten_silences`)、图文成片(agent 编排既有工具+SigLIP2 选素材)、音色克隆(ElevenLabs 等)、虚拟数字人(HeyGen/fal,新增 catalog kind)、多语种字幕翻译(MT/LLM,保时码)。
 
 ## Phase 10 —(新)Motion Canvas 动效 / AI Video 插件
-对应 `plugins/motion-canvas-studio`(待新增)+ `opentake-motion` fallback。详见 [MOTION-GRAPHICS-PLUGIN.md](../modules/opentake-motion/MOTION-GRAPHICS-PLUGIN.md)。
+对应 `plugins/motion-canvas-studio` + `opentake-motion` fallback。详见 [MOTION-GRAPHICS-PLUGIN.md](../modules/opentake-motion/MOTION-GRAPHICS-PLUGIN.md)。
 - **做**:沿 issue #34,优先 fork / vendor Motion Canvas(MIT),作为独立 Motion / AI Video 插件。Agent 或 Motion Panel 生成 Motion Canvas scene/template → 插件渲染 `output.mp4` → OpenTake probe 并导入 media manifest → 单步落轨。`crates/opentake-motion` 现有 scaffold 保留为后续 PNG sequence / transparent alpha / HTML-CSS fallback,不再作为 v1 主渲染器 blocker。
 - **验证**:Motion Canvas sample template 能生成 mp4;OpenTake 自动导入并创建 timeline clip;`composite_frame` 和 `export_video` 都包含该片段;失败不污染 manifest/timeline;README/NOTICE 保留 Motion Canvas MIT license 与修改说明。
 - **时机**:v1 可复用普通视频导入/预览/导出链路,不阻塞 native alpha overlay。透明动效与 `ClipType::Motion`/frame sequence 放后续。
+- **进度(2026-08-01)**:Beta v1 竖切已完成。固定 `title-card` 使用锁定的 Motion Canvas 3.17.2 官方 `Renderer.renderFrame`，离线 Chromium 逐帧后由随包 FFmpeg 生成 `output.mp4`；Motion Panel、Agent add/edit、进度/取消、结果元数据校验、项目能力约束、单事务导入/落轨/替换/撤销/保存重开均已接通。自动化已验证重复构建与重复渲染确定性、异常/遍历/符号链接无污染，以及生成片段真实进入 `composite_frame` 和 `export_video`。透明输出、任意 TSX 和 frame-sequence 仍明确属于后续版本。
 
 ---
 

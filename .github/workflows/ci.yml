@@ -35,12 +35,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  motion-canvas:
+    name: Motion Canvas (locked build / audit / license)
+    if: github.event_name != 'workflow_dispatch' || inputs.red_task == 'none'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: plugins/motion-canvas-studio/package-lock.json
+
+      - name: Install locked Motion Canvas dependencies
+        run: npm --prefix plugins/motion-canvas-studio ci --ignore-scripts
+
+      - name: Audit dependencies and licenses
+        run: |
+          npm --prefix plugins/motion-canvas-studio audit --audit-level=moderate
+          npm --prefix plugins/motion-canvas-studio run licenses
+
+      - name: Test and reproduce embedded runner
+        run: |
+          npm --prefix plugins/motion-canvas-studio test
+          npm --prefix plugins/motion-canvas-studio run build
+          git diff --exit-code -- plugins/motion-canvas-studio/bundle/runner.html plugins/motion-canvas-studio/package-lock.json
+
   rust:
     name: Rust (fmt / clippy / test)
     if: github.event_name != 'workflow_dispatch' || inputs.red_task == 'none'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
       # The playback engine (#53) is now a DEFAULT feature, so the workspace
       # fmt/clippy/test steps below compile it (cpal + axum/tokio + the wgpu
@@ -72,19 +99,32 @@ jobs:
             fonts-dejavu-core
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Validate Windows product gate contract
         run: |
           python3 -B scripts/check_windows_product_ci.py
           python3 -B -m unittest discover -s scripts -p 'test_check_windows_product_ci.py'
+
+      - name: Validate release workflow contract
+        run: |
+          python3 -B scripts/check_release_workflow.py
+          python3 -B -m unittest discover -s scripts -p 'test_check_release_workflow.py'
+
+      - name: Validate C1B CI and evidence contracts
+        run: |
+          ruby scripts/tests/validate-c1b-ci-test.rb
+          ruby scripts/tests/validate-c1b-evidence-test.rb
+
+      - name: Provisioner unit tests (scripts/tests)
+        run: python3 -B -m unittest discover -s scripts/tests -p 'test_*.py'
 
       - name: cargo fmt
         run: cargo fmt --all --check
@@ -98,7 +138,9 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: cargo test
-        run: cargo test --workspace
+        env:
+          OPENTAKE_MOTION_TRACE: '1'
+        run: cargo test --workspace -- --test-threads=1
 
       - name: live playback transport integration (fail closed)
         run: |
@@ -129,7 +171,7 @@ jobs:
           set -euo pipefail
           [[ "$TARGET_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ env.TARGET_SHA }}
           fetch-depth: 0
@@ -144,27 +186,36 @@ jobs:
           expected="$(printf '%s' "$TARGET_SHA" | tr '[:upper:]' '[:lower:]')"
           test "$actual" = "$expected"
           git cat-file -e "${expected}^{commit}"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$(git rev-parse "${expected}^{tree}")"
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
           printf 'sha=%s\n' "$actual" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust toolchain
         run: rustup component add rustfmt clippy
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
         with:
           version: 10
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 22
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
 
-      - name: Install FFmpeg
-        run: choco install ffmpeg --no-progress -y
+      - uses: ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b
+        with:
+          ruby-version: '3.3'
+
+      - name: Provision checksum-pinned packaged FFmpeg sidecars
+        run: python scripts/provision_ffmpeg_sidecars.py --target x86_64-pc-windows-msvc
+
+      - name: Verify sidecar supply and probe/decode/encode boundary without PATH
+        shell: bash
+        run: ruby scripts/tests/packaged-sidecars-test.rb --name packaged_macos_windows_sidecars_resolve_and_execute
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
             ~/.cargo/registry
@@ -175,16 +226,260 @@ jobs:
       - name: Install locked Web dependencies
         run: pnpm -C web install --frozen-lockfile
 
+      - name: Re-assert immutable Windows product source before gates
+        shell: bash
+        env:
+          BOUND_SHA: ${{ steps.bind.outputs.sha }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          expected="$(printf '%s' "$BOUND_SHA" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected"
+          git cat-file -e "${expected}^{commit}"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$(git rev-parse "${expected}^{tree}")"
+          git diff --cached --quiet --exit-code
+          git diff --quiet --exit-code
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
       - name: Rust formatting
         run: cargo fmt --all --check
 
       - name: Rust workspace clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Windows Chromium motion capture regression
+        shell: bash
+        env:
+          OPENTAKE_MOTION_TRACE: '1'
+        run: |
+          cargo test -p opentake-motion --features chromium --lib \
+            renderer::tests::chromium_skeleton_reports_unavailable_not_panic \
+            -- --exact --nocapture --test-threads=1
+          cargo test -p opentake-motion --features chromium --test chromium \
+            virtual_time_network_csp_timeout_cleanup_and_frame_identity \
+            -- --exact --nocapture --test-threads=1
+          cargo test -p opentake-tauri --test motion_command \
+            sandbox_progress_cancel_validated_mp4_result \
+            -- --exact --nocapture --test-threads=1
+
+      - name: Windows Chromium 4K resource budget
+        shell: pwsh
+        env:
+          OPENTAKE_MOTION_TRACE: '1'
+          RECEIPT_SHA: ${{ steps.bind.outputs.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # macOS completes this focused test in 12.26s. 180s gives cold Windows CI
+          # nearly 15x headroom; 2 GiB bounds one 4K browser tree below runner capacity.
+          $elapsedLimitSeconds = 180
+          $peakLimitBytes = 2GB
+          $sampleIntervalMilliseconds = 200
+          $receiptPath = Join-Path $env:RUNNER_TEMP 'windows-motion-4k-resource-receipt.json'
+          $stdoutPath = Join-Path $env:RUNNER_TEMP 'opentake-motion-4k.stdout.log'
+          $stderrPath = Join-Path $env:RUNNER_TEMP 'opentake-motion-4k.stderr.log'
+          Remove-Item $stdoutPath, $stderrPath -Force -ErrorAction SilentlyContinue
+
+          $cargoArguments = @(
+            'test', '-p', 'opentake-motion', '--features', 'chromium',
+            '--test', 'chromium',
+            'four_k_single_frame_opaque_and_transparent_budget_smoke',
+            '--', '--exact', '--nocapture', '--test-threads=1'
+          )
+          $cargoProcess = @{
+            FilePath = 'cargo.exe'
+            ArgumentList = $cargoArguments
+            NoNewWindow = $true
+            PassThru = $true
+            RedirectStandardOutput = $stdoutPath
+            RedirectStandardError = $stderrPath
+          }
+          $browserNames = @('chrome', 'msedge')
+          $baselineSignatures = @{}
+          $monitorErrors = [System.Collections.Generic.List[string]]::new()
+          $sampleCount = 0
+          $peakProcessCount = 0
+          [int64]$peakWorkingSetBytes = 0
+          $cargoExit = -1
+          $cargo = $null
+          $abortCargo = $false
+          $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+
+          function Get-BrowserWorkingSetSnapshot {
+            param([string[]]$Names)
+            try {
+              $processes = @(Get-Process -ErrorAction Stop | Where-Object {
+                $Names -contains $_.ProcessName.ToLowerInvariant()
+              })
+            } catch {
+              throw "browser process enumeration failed: $($_.Exception.Message)"
+            }
+            $snapshot = [System.Collections.Generic.List[object]]::new()
+            foreach ($process in $processes) {
+              try {
+                if ($process.HasExited) { continue }
+                $started = $process.StartTime.ToUniversalTime().Ticks
+                $workingSet = [int64]$process.WorkingSet64
+                $snapshot.Add([pscustomobject]@{
+                  signature = "$($process.ProcessName):$($process.Id):$started"
+                  working_set_bytes = $workingSet
+                })
+              } catch [System.InvalidOperationException] {
+                # A process may exit between enumeration and property reads.
+                continue
+              } catch {
+                throw "browser process inspection failed for pid $($process.Id): $($_.Exception.Message)"
+              }
+            }
+            return @($snapshot)
+          }
+
+          try {
+            foreach ($process in @(Get-BrowserWorkingSetSnapshot -Names $browserNames)) {
+              $baselineSignatures[$process.signature] = $true
+            }
+            $cargo = Start-Process @cargoProcess
+            while (-not $cargo.HasExited) {
+              if ($stopwatch.Elapsed.TotalSeconds -gt $elapsedLimitSeconds) {
+                $monitorErrors.Add("elapsed time exceeded ${elapsedLimitSeconds}s while cargo test was running")
+                $abortCargo = $true
+                break
+              }
+              try {
+                $newBrowserProcesses = @(
+                  Get-BrowserWorkingSetSnapshot -Names $browserNames | Where-Object {
+                    -not $baselineSignatures.ContainsKey($_.signature)
+                  }
+                )
+                if ($newBrowserProcesses.Count -gt 0) {
+                  [int64]$totalWorkingSetBytes = 0
+                  foreach ($process in $newBrowserProcesses) {
+                    $totalWorkingSetBytes += [int64]$process.working_set_bytes
+                  }
+                  $sampleCount += 1
+                  $peakProcessCount = [Math]::Max($peakProcessCount, $newBrowserProcesses.Count)
+                  $peakWorkingSetBytes = [Math]::Max($peakWorkingSetBytes, $totalWorkingSetBytes)
+                  if ($peakWorkingSetBytes -gt $peakLimitBytes) {
+                    $monitorErrors.Add("peak browser WorkingSet $peakWorkingSetBytes exceeded $peakLimitBytes bytes while cargo test was running")
+                    $abortCargo = $true
+                    break
+                  }
+                }
+              } catch {
+                $monitorErrors.Add($_.Exception.Message)
+                $abortCargo = $true
+                break
+              }
+              Start-Sleep -Milliseconds $sampleIntervalMilliseconds
+              $cargo.Refresh()
+            }
+
+            if ($abortCargo -and -not $cargo.HasExited) {
+              try {
+                $killer = Start-Process -FilePath 'taskkill.exe' `
+                  -ArgumentList @('/PID', $cargo.Id, '/T', '/F') `
+                  -NoNewWindow -Wait -PassThru
+                if ($killer.ExitCode -ne 0) {
+                  $monitorErrors.Add("taskkill failed with exit $($killer.ExitCode)")
+                }
+              } catch {
+                $monitorErrors.Add("cargo process-tree cleanup failed: $($_.Exception.Message)")
+              }
+            }
+            if ($null -ne $cargo) {
+              if (-not $cargo.WaitForExit(10000)) {
+                $monitorErrors.Add('cargo process did not exit after bounded cleanup')
+              } else {
+                $cargoExit = $cargo.ExitCode
+              }
+            }
+          } catch {
+            $monitorErrors.Add("cargo launch or monitor failure: $($_.Exception.Message)")
+          } finally {
+            $stopwatch.Stop()
+            try {
+              if ($null -ne $cargo -and -not $cargo.HasExited) {
+                $killer = Start-Process -FilePath 'taskkill.exe' `
+                  -ArgumentList @('/PID', $cargo.Id, '/T', '/F') `
+                  -NoNewWindow -Wait -PassThru
+                if ($killer.ExitCode -ne 0) {
+                  $monitorErrors.Add("final taskkill failed with exit $($killer.ExitCode)")
+                }
+              }
+            } catch {
+              $monitorErrors.Add("final cargo process-tree cleanup failed: $($_.Exception.Message)")
+            }
+            try {
+              if (Test-Path $stdoutPath -PathType Leaf) {
+                Get-Content $stdoutPath | Write-Output
+              }
+            } catch {
+              $monitorErrors.Add("cargo stdout collection failed: $($_.Exception.Message)")
+            }
+            try {
+              if (Test-Path $stderrPath -PathType Leaf) {
+                Get-Content $stderrPath | Write-Output
+              }
+            } catch {
+              $monitorErrors.Add("cargo stderr collection failed: $($_.Exception.Message)")
+            }
+          }
+
+          $elapsedSeconds = [Math]::Round($stopwatch.Elapsed.TotalSeconds, 3)
+          if ($sampleCount -eq 0) { $monitorErrors.Add('no new Chrome or Edge working-set samples were captured') }
+          if ($elapsedSeconds -gt $elapsedLimitSeconds) {
+            $monitorErrors.Add("elapsed time ${elapsedSeconds}s exceeded ${elapsedLimitSeconds}s")
+          }
+          if ($peakWorkingSetBytes -gt $peakLimitBytes) {
+            $monitorErrors.Add("peak browser WorkingSet $peakWorkingSetBytes exceeded $peakLimitBytes bytes")
+          }
+          if ($env:RECEIPT_SHA -notmatch '^[0-9a-fA-F]{40}$') {
+            $monitorErrors.Add('receipt source SHA is not a 40-hex commit')
+          }
+          $sourceSha = [string]$env:RECEIPT_SHA
+          $monitorExit = if ($monitorErrors.Count -eq 0) { 0 } else { 1 }
+          $aggregateExit = if ($cargoExit -eq 0 -and $monitorExit -eq 0) { 0 } else { 1 }
+          $receipt = [ordered]@{
+            schema = 'opentake-windows-motion-4k-resource-receipt-v1'
+            repository = '${{ github.repository }}'
+            run_id = '${{ github.run_id }}'
+            run_attempt = '${{ github.run_attempt }}'
+            runner_os = '${{ runner.os }}'
+            runner_arch = '${{ runner.arch }}'
+            source_sha = $sourceSha.ToLowerInvariant()
+            test = 'four_k_single_frame_opaque_and_transparent_budget_smoke'
+            process_selection = 'all chrome/msedge identities absent from the pre-test baseline'
+            sample_interval_ms = $sampleIntervalMilliseconds
+            sample_count = $sampleCount
+            peak_browser_process_count = $peakProcessCount
+            peak_working_set_bytes = $peakWorkingSetBytes
+            peak_working_set_limit_bytes = $peakLimitBytes
+            elapsed_seconds = $elapsedSeconds
+            elapsed_limit_seconds = $elapsedLimitSeconds
+            cargo_exit = $cargoExit
+            monitor_exit = $monitorExit
+            aggregate_exit = $aggregateExit
+            monitor_errors = @($monitorErrors)
+          }
+          $receiptJson = $receipt | ConvertTo-Json -Depth 6 -Compress
+          $receiptJson | Set-Content -Encoding utf8NoBOM $receiptPath
+          Write-Output "OPENTAKE_WINDOWS_MOTION_4K_RECEIPT=$receiptJson"
+          if ($aggregateExit -ne 0) { throw 'Windows Chromium 4K resource budget failed' }
+
+      - name: Upload Windows Chromium 4K resource receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-motion-4k-resource-${{ steps.bind.outputs.sha }}
+          path: ${{ runner.temp }}/windows-motion-4k-resource-receipt.json
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Web editor behavior suite
         run: pnpm -C web test
 
       - name: Rust workspace tests
+        env:
+          OPENTAKE_MOTION_TRACE: '1'
         run: cargo test --workspace -- --test-threads=1
 
       - name: Minimal-feature Tauri clippy
@@ -199,6 +494,55 @@ jobs:
           Remove-Item 'target/release/bundle/msi' -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item 'target/release/bundle/nsis' -Recurse -Force -ErrorAction SilentlyContinue
           & .\web\node_modules\.bin\tauri.cmd build --ci --bundles msi,nsis
+
+      - name: Install NSIS package and execute installed product without PATH
+        shell: pwsh
+        run: |
+          $installer = @(Get-ChildItem 'target/release/bundle/nsis/*.exe' -File)
+          if ($installer.Count -ne 1) { throw 'expected exactly one NSIS installer' }
+          $process = Start-Process -FilePath $installer[0].FullName -ArgumentList '/S' -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "silent NSIS install failed: $($process.ExitCode)" }
+          $candidates = @(
+            (Join-Path $env:LOCALAPPDATA 'OpenTake/opentake.exe'),
+            (Join-Path $env:LOCALAPPDATA 'Programs/OpenTake/opentake.exe'),
+            (Join-Path $env:ProgramFiles 'OpenTake/opentake.exe')
+          )
+          $application = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $application) {
+            $uninstall = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*' `
+              -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -eq 'OpenTake' } | Select-Object -First 1
+            if ($uninstall.InstallLocation) {
+              $application = Get-ChildItem $uninstall.InstallLocation -Filter 'opentake.exe' -File `
+                -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName -First 1
+            }
+          }
+          if (-not $application) { throw "installed OpenTake executable not found: $($candidates -join ', ')" }
+          $installDirectory = Split-Path -Parent $application
+          ruby scripts/tests/packaged-sidecars-test.rb `
+            --name packaged_macos_windows_sidecars_resolve_and_execute `
+            --package $installDirectory
+          $app = Start-Process -FilePath $application -PassThru
+          Start-Sleep -Seconds 5
+          if ($app.HasExited) {
+            throw "installed OpenTake exited during launch smoke test: $($app.ExitCode)"
+          }
+          Stop-Process -Id $app.Id -Force
+          Wait-Process -Id $app.Id -ErrorAction SilentlyContinue
+
+      - name: Re-assert immutable Windows product source after gates
+        shell: bash
+        env:
+          BOUND_SHA: ${{ steps.bind.outputs.sha }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          expected="$(printf '%s' "$BOUND_SHA" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected"
+          git cat-file -e "${expected}^{commit}"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$(git rev-parse "${expected}^{tree}")"
+          git diff --cached --quiet --exit-code
+          git diff --quiet --exit-code
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
 
       - name: Bind installers to the exact source SHA
         shell: pwsh
@@ -229,7 +573,7 @@ jobs:
           $receipt | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8NoBOM windows-product-receipt.json
 
       - name: Upload exact-SHA Windows installers
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: opentake-windows-${{ steps.bind.outputs.sha }}
           path: |
@@ -243,57 +587,413 @@ jobs:
     name: Windows (cancel / reparse safety)
     if: github.event_name != 'workflow_dispatch' || inputs.red_task == 'none'
     runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      TARGET_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Validate immutable Windows security SHA input
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Assert exact Windows security checkout
+        id: bind-security
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          expected="$(printf '%s' "$TARGET_SHA" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected"
+          git cat-file -e "${expected}^{commit}"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$(git rev-parse "${expected}^{tree}")"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          printf 'sha=%s\n' "$actual" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust toolchain
         run: rustup component add rustfmt
 
-      - name: Install FFmpeg
-        run: choco install ffmpeg --no-progress -y
+      - name: Provision checksum-pinned packaged FFmpeg sidecars
+        run: python scripts/provision_ffmpeg_sidecars.py --target x86_64-pc-windows-msvc
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-security-cargo-${{ hashFiles('**/Cargo.toml') }}
+          key: ${{ runner.os }}-security-cargo-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}
           restore-keys: ${{ runner.os }}-security-cargo-
 
-      - name: Portable FFmpeg cancellation lifecycle
-        shell: pwsh
+      - name: Re-assert immutable Windows security source before gates
+        shell: bash
+        env:
+          BOUND_SHA: ${{ steps.bind-security.outputs.sha }}
         run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          expected="$(printf '%s' "$BOUND_SHA" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected"
+          git cat-file -e "${expected}^{commit}"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$(git rev-parse "${expected}^{tree}")"
+          git diff --cached --quiet --exit-code
+          git diff --quiet --exit-code
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Portable FFmpeg cancellation lifecycle
+        id: security-cancellation
+        shell: pwsh
+        env:
+          OPENTAKE_FFMPEG: ${{ github.workspace }}\src-tauri\binaries\ffmpeg-x86_64-pc-windows-msvc.exe
+        run: |
+          & $env:OPENTAKE_FFMPEG -version
+          if ($LASTEXITCODE -ne 0) { throw 'checksum-pinned packaged FFmpeg is not runnable' }
           cargo test -p opentake-media --lib windows_cancelling_running_pcm_child_reaps_both_pipe_readers
           cargo test -p opentake-media --lib windows_cancelling_mux_wait_reaps_child
 
+      - name: Race-free helper process-tree containment
+        id: security-process-tree
+        shell: pwsh
+        run: >-
+          cargo test -p opentake-process-tree --lib
+          tests::windows_suspended_job_contains_fast_exit_descendant
+          -- --exact --nocapture --test-threads=1
+
+      - name: Verify portable Tauri test image imports
+        id: security-native-imports
+        shell: pwsh
+        run: |
+          $securityEvidenceDir = Join-Path $env:RUNNER_TEMP 'windows-security-evidence'
+          New-Item -ItemType Directory -Force $securityEvidenceDir | Out-Null
+          $importsPath = Join-Path $securityEvidenceDir 'windows-tauri-test-imports.txt'
+          $manifestPath = Join-Path $securityEvidenceDir 'windows-tauri-test.manifest'
+          $manifestLogPath = Join-Path $securityEvidenceDir 'windows-tauri-test-manifest.txt'
+          $exportProbePath = Join-Path $securityEvidenceDir 'windows-tauri-export-probe.txt'
+          cargo test -p opentake-tauri --lib --no-run
+          $testImage = Get-ChildItem 'target/debug/deps/opentake_tauri_lib-*.exe' -File |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          if (-not $testImage) { throw 'compiled Tauri test image not found' }
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $dumpbin = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -find 'VC/Tools/MSVC/**/bin/Hostx64/x64/dumpbin.exe' |
+            Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin.exe not found' }
+          $previousVsLang = $env:VSLANG
+          try {
+            $env:VSLANG = '1033'
+            $dependentsOutput = @(& $dumpbin /DEPENDENTS $testImage.FullName 2>&1)
+            $dependentsExit = $LASTEXITCODE
+            if ($dependentsExit -ne 0) { throw "dumpbin /DEPENDENTS failed: $dependentsExit" }
+            $importOutput = @(& $dumpbin /IMPORTS $testImage.FullName 2>&1)
+            $importsExit = $LASTEXITCODE
+            if ($importsExit -ne 0) { throw "dumpbin /IMPORTS failed: $importsExit" }
+          } finally {
+            $env:VSLANG = $previousVsLang
+          }
+          $dependentsLines = @($dependentsOutput | ForEach-Object { "$_" })
+          $importLines = @($importOutput | ForEach-Object { "$_" })
+          @($dependentsLines + $importLines) | Set-Content $importsPath
+          $imports = @($dependentsLines + $importLines) -join [Environment]::NewLine
+          if ($imports -match '(?im)^\s*(MSVCP140|VCRUNTIME140(?:_1)?|api-ms-win-crt-[^\s]+|onnxruntime|DirectML)\.dll\s*$') {
+            throw 'Tauri test image retains a non-portable native runtime dependency'
+          }
+
+          $mt = Get-ChildItem (Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/bin') `
+            -Filter mt.exe -File -Recurse |
+            Where-Object { $_.FullName -match '\\x64\\mt\.exe$' } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $mt) { throw 'mt.exe not found' }
+          $manifestLog = & $mt.FullName "-inputresource:$($testImage.FullName);#1" `
+            "-out:$manifestPath" 2>&1
+          $manifestLog | Set-Content $manifestLogPath
+          if ($LASTEXITCODE -ne 0) { throw 'Tauri test image has no readable RT_MANIFEST resource #1' }
+          Get-Content $manifestPath | Add-Content $manifestLogPath
+          if ((Get-Content $manifestPath -Raw) -notmatch 'Microsoft\.Windows\.Common-Controls') {
+            throw 'Tauri test image manifest does not activate Common Controls v6'
+          }
+
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class OpenTakeNativeExportProbe {
+            [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+            public static extern IntPtr LoadLibraryExW(string path, IntPtr file, uint flags);
+            [DllImport("kernel32.dll", CharSet = CharSet.Ansi, SetLastError = true, ExactSpelling = true)]
+            public static extern IntPtr GetProcAddress(IntPtr module, string name);
+          }
+          '@
+
+          function Parse-OpenTakeDumpbinImports {
+            param([AllowEmptyCollection()][string[]] $Lines)
+            $moduleNames = [System.Collections.Generic.List[string]]::new()
+            $importsToProbe = [System.Collections.Generic.List[object]]::new()
+            $seenModules = [System.Collections.Generic.HashSet[string]]::new(
+              [System.StringComparer]::OrdinalIgnoreCase
+            )
+            $currentDll = $null
+            $inImportSection = $false
+            $importSectionCount = 0
+            $closedImportSectionCount = 0
+            foreach ($line in $Lines) {
+              if ($line -match '^\s*Section contains the following imports:\s*$') {
+                if ($inImportSection) { throw 'nested dumpbin import section' }
+                $inImportSection = $true
+                $currentDll = $null
+                $importSectionCount += 1
+                continue
+              }
+              if ($inImportSection -and $line -match '^\s*Summary\s*$') {
+                $inImportSection = $false
+                $currentDll = $null
+                $closedImportSectionCount += 1
+                continue
+              }
+              if (-not $inImportSection) { continue }
+              if ([string]::IsNullOrWhiteSpace($line)) { continue }
+              if ($line -match '^\s{4}([A-Za-z0-9_.-]+\.dll)\s*$') {
+                $currentDll = $Matches[1]
+                if ($seenModules.Add($currentDll)) { $moduleNames.Add($currentDll) }
+                continue
+              }
+              if (-not $currentDll) {
+                throw "unrecognized non-empty dumpbin import line: $line"
+              }
+              if ($line -match '^\s+[0-9A-Fa-f]+\s+(?:Import Address Table|Import Name Table|time date stamp|Index of first forwarder reference)\s*$') {
+                continue
+              }
+              if ($line -match '^\s+[0-9A-Fa-f]+\s+(\S+)\s*$') {
+                $importsToProbe.Add([pscustomobject]@{ Dll = $currentDll; Name = $Matches[1] })
+                continue
+              }
+              throw "unrecognized non-empty dumpbin import line: $line"
+            }
+            if ($inImportSection -or $closedImportSectionCount -ne $importSectionCount) {
+              throw 'dumpbin import section was not terminated by Summary'
+            }
+            if ($importSectionCount -eq 0) { throw 'dumpbin import section was not found' }
+            if ($moduleNames.Count -eq 0) { throw 'dumpbin import parser found no DLL modules' }
+            if ($importsToProbe.Count -eq 0) { throw 'dumpbin import parser found no symbols' }
+            return [pscustomobject]@{
+              ModuleNames = @($moduleNames)
+              ImportsToProbe = @($importsToProbe)
+            }
+          }
+
+          function Assert-DumpbinImportFixtureRejected {
+            param(
+              [string] $Label,
+              [AllowEmptyCollection()][string[]] $Lines,
+              [string] $ExpectedMessage
+            )
+            $failure = $null
+            try { $null = Parse-OpenTakeDumpbinImports -Lines $Lines } catch {
+              $failure = $_.Exception.Message
+            }
+            if (-not $failure) { throw "dumpbin parser accepted rejected fixture: $Label" }
+            if ($failure -notlike "*$ExpectedMessage*") {
+              throw "dumpbin parser rejected fixture '$Label' for the wrong reason: $failure"
+            }
+          }
+
+          function Assert-DumpbinImportFixtureAccepted {
+            param([string] $Label, [string[]] $Lines)
+            $parsed = Parse-OpenTakeDumpbinImports -Lines $Lines
+            if (@($parsed.ModuleNames).Count -ne 1 -or @($parsed.ImportsToProbe).Count -ne 1) {
+              throw "dumpbin parser misread accepted fixture: $Label"
+            }
+          }
+
+          Assert-DumpbinImportFixtureRejected -Label 'empty output' -Lines @() `
+            -ExpectedMessage 'import section was not found'
+          Assert-DumpbinImportFixtureRejected -Label 'localized header' -Lines @(
+            '  La sección contiene las importaciones siguientes:'
+          ) -ExpectedMessage 'import section was not found'
+          Assert-DumpbinImportFixtureRejected -Label 'unknown import layout' -Lines @(
+            '  Section contains the following imports:',
+            '    KERNEL32.dll',
+            '      localized or changed layout',
+            '  Summary'
+          ) -ExpectedMessage 'unrecognized non-empty dumpbin import line'
+          Assert-DumpbinImportFixtureAccepted -Label 'canonical import layout' -Lines @(
+            'Dump of file fixture.exe',
+            '',
+            '  Section contains the following imports:',
+            '',
+            '    KERNEL32.dll',
+            '             140001000 Import Address Table',
+            '             140002000 Import Name Table',
+            '                     0 time date stamp',
+            '                     0 Index of first forwarder reference',
+            '',
+            '                   123 GetCurrentProcessId',
+            '',
+            '  Summary'
+          )
+
+          $parsedImports = Parse-OpenTakeDumpbinImports -Lines $importLines
+          $moduleNames = @($parsedImports.ModuleNames)
+          $importsToProbe = @($parsedImports.ImportsToProbe)
+          $modules = @{}
+          $missingExports = @()
+          foreach ($moduleName in $moduleNames) {
+            $modules[$moduleName] = [OpenTakeNativeExportProbe]::LoadLibraryExW(
+              $moduleName, [IntPtr]::Zero, 0x00000800
+            )
+          }
+          foreach ($import in $importsToProbe) {
+            $currentDll = $import.Dll
+            $name = $import.Name
+            $module = $modules[$currentDll]
+            $activationContextExport =
+              $currentDll -ieq 'comctl32.dll' -and $name -eq 'TaskDialogIndirect'
+            if (-not $activationContextExport -and ($module -eq [IntPtr]::Zero -or
+                [OpenTakeNativeExportProbe]::GetProcAddress($module, $name) -eq [IntPtr]::Zero)) {
+              $missingExports += "$currentDll!$name"
+            }
+          }
+          "PARSED modules=$($moduleNames.Count) imports=$($importsToProbe.Count)" |
+            Set-Content $exportProbePath
+          $modules.GetEnumerator() | Sort-Object Name | ForEach-Object {
+            "LOAD $($_.Name)=$($_.Value)"
+          } | Add-Content $exportProbePath
+          $missingExports | ForEach-Object { "MISSING $_" } | Add-Content $exportProbePath
+          if ($missingExports.Count -ne 0) {
+            throw "Tauri test image imports unavailable system exports: $($missingExports -join ', ')"
+          }
+
       - name: Reserved output identity and reparse safety
+        id: security-reparse
         shell: pwsh
         run: |
           cargo test -p opentake-tauri --lib windows_project_media_junction_is_rejected_without_writing_target
           cargo test -p opentake-tauri --lib windows_directory_handoff_blocks_junction_replacement_before_child_create
           cargo test -p opentake-tauri --lib windows_retained_output_handle_blocks_final_name_replacement
+          cargo test -p opentake-tauri --lib retained_external_source_rejects_windows_reparse_contract
+
+      - name: Re-assert immutable Windows security source after gates
+        if: always()
+        shell: bash
+        env:
+          BOUND_SHA: ${{ steps.bind-security.outputs.sha }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          expected="$(printf '%s' "$BOUND_SHA" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected"
+          git cat-file -e "${expected}^{commit}"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$(git rev-parse "${expected}^{tree}")"
+          git diff --cached --quiet --exit-code
+          git diff --quiet --exit-code
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Build Windows security JSON receipt
+        if: always()
+        shell: pwsh
+        env:
+          RECEIPT_SHA: ${{ steps.bind-security.outputs.sha }}
+        run: |
+          $requested = $env:TARGET_SHA.ToLowerInvariant()
+          $checkedOut = $env:RECEIPT_SHA.ToLowerInvariant()
+          if ($requested -notmatch '^[0-9a-f]{40}$') { throw 'requested SHA is not immutable 40-hex' }
+          if ($checkedOut -notmatch '^[0-9a-f]{40}$') { throw 'checked-out SHA receipt binding is missing' }
+          if ($checkedOut -ne $requested) { throw 'requested and checked-out SHA differ' }
+          $commands = @(
+            [ordered]@{
+              id = 'cancellation'
+              command = 'packaged FFmpeg -version; cargo test opentake-media Windows cancellation lifecycle'
+              result = '${{ steps.security-cancellation.outcome }}'
+            },
+            [ordered]@{
+              id = 'process-tree'
+              command = 'cargo test -p opentake-process-tree --lib tests::windows_suspended_job_contains_fast_exit_descendant -- --exact --nocapture --test-threads=1'
+              result = '${{ steps.security-process-tree.outcome }}'
+            },
+            [ordered]@{
+              id = 'native-imports'
+              command = 'cargo test -p opentake-tauri --lib --no-run; verify imports, manifest, and native exports'
+              result = '${{ steps.security-native-imports.outcome }}'
+            },
+            [ordered]@{
+              id = 'reparse-safety'
+              command = 'cargo test opentake-tauri Windows retained-output and reparse safety contracts'
+              result = '${{ steps.security-reparse.outcome }}'
+            }
+          )
+          $aggregate = if (@($commands | Where-Object { $_.result -ne 'success' }).Count -eq 0) { 0 } else { 1 }
+          New-Item -ItemType Directory -Force 'windows-security-receipt' | Out-Null
+          $receipt = [ordered]@{
+            schema = 'opentake-windows-security-receipt-v1'
+            repository = '${{ github.repository }}'
+            workflow = '${{ github.workflow }}'
+            workflow_file = '.github/workflows/ci.yml'
+            run_id = '${{ github.run_id }}'
+            run_attempt = '${{ github.run_attempt }}'
+            job = '${{ github.job }}'
+            event_name = '${{ github.event_name }}'
+            requested_sha = $env:TARGET_SHA.ToLowerInvariant()
+            checked_out_sha = $env:RECEIPT_SHA.ToLowerInvariant()
+            runner_os = '${{ runner.os }}'
+            runner_arch = '${{ runner.arch }}'
+            commands = @($commands)
+            aggregate_exit = $aggregate
+          }
+          $receipt | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8NoBOM 'windows-security-receipt/receipt.json'
+
+      - name: Upload exact-SHA Windows security receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-security-${{ steps.bind-security.outputs.sha }}
+          path: |
+            windows-security-receipt/receipt.json
+            ${{ runner.temp }}/windows-security-evidence/windows-tauri-test-imports.txt
+            ${{ runner.temp }}/windows-security-evidence/windows-tauri-test-manifest.txt
+            ${{ runner.temp }}/windows-security-evidence/windows-tauri-test.manifest
+            ${{ runner.temp }}/windows-security-evidence/windows-tauri-export-probe.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Enforce Windows security aggregate
+        if: always()
+        shell: pwsh
+        run: |
+          $path = 'windows-security-receipt/receipt.json'
+          if (-not (Test-Path $path -PathType Leaf)) { throw 'Windows security receipt is missing' }
+          $receipt = Get-Content $path -Raw | ConvertFrom-Json
+          if ($receipt.checked_out_sha -ne '${{ steps.bind-security.outputs.sha }}') {
+            throw 'Windows security receipt SHA is not checkout-bound'
+          }
+          if ([int]$receipt.aggregate_exit -ne 0) { throw 'Windows security aggregate failed' }
+          $failed = @($receipt.commands | Where-Object { $_.result -ne 'success' })
+          if ($failed.Count -ne 0) { throw "Windows security gates did not all succeed: $($failed.id -join ', ')" }
 
   web:
     name: Web (install / build)
     if: github.event_name != 'workflow_dispatch' || inputs.red_task == 'none'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
         with:
           version: 10
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 22
           cache: pnpm
           cache-dependency-path: web/pnpm-lock.yaml
 
       - name: pnpm install
-        run: pnpm -C web install
+        run: pnpm -C web install --frozen-lockfile
 
       - name: pnpm build
         run: pnpm -C web build
@@ -305,33 +1005,177 @@ jobs:
     name: Windows (library capability security)
     if: github.event_name != 'workflow_dispatch' || inputs.red_task == 'none'
     runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      TARGET_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Validate immutable Windows library SHA input
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TARGET_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.TARGET_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Assert exact Windows library checkout
+        id: bind-library
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          expected="$(printf '%s' "$TARGET_SHA" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected"
+          git cat-file -e "${expected}^{commit}"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$(git rev-parse "${expected}^{tree}")"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          printf 'sha=%s\n' "$actual" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust toolchain
         run: rustup component add rustfmt clippy
 
+      - name: Provision checksum-pinned packaged FFmpeg sidecars
+        run: python scripts/provision_ffmpeg_sidecars.py --target x86_64-pc-windows-msvc
+
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
-          key: ${{ runner.os }}-library-security-${{ hashFiles('**/Cargo.toml') }}
+          key: ${{ runner.os }}-library-security-${{ hashFiles('**/Cargo.toml', 'Cargo.lock') }}
           restore-keys: ${{ runner.os }}-library-security-
 
+      - name: Re-assert immutable Windows library source before gates
+        shell: bash
+        env:
+          BOUND_SHA: ${{ steps.bind-library.outputs.sha }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          expected="$(printf '%s' "$BOUND_SHA" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected"
+          git cat-file -e "${expected}^{commit}"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$(git rev-parse "${expected}^{tree}")"
+          git diff --cached --quiet --exit-code
+          git diff --quiet --exit-code
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
       - name: Test retained-handle and junction defenses
+        id: library-media
+        shell: pwsh
         run: cargo test -p opentake-media library::tests -- --test-threads=1
 
       - name: Test complete bundle publication and recovery
+        id: library-project
+        shell: pwsh
         run: cargo test -p opentake-project -- --test-threads=1
 
       - name: Test Tauri project-library commit guards
+        id: library-tauri
+        shell: pwsh
         run: cargo test -p opentake-tauri library::tests -- --test-threads=1
 
       - name: Clippy capability-backed library
+        id: library-clippy
+        shell: pwsh
         run: cargo clippy -p opentake-media --all-targets -- -D warnings
+
+      - name: Re-assert immutable Windows library source after gates
+        if: always()
+        shell: bash
+        env:
+          BOUND_SHA: ${{ steps.bind-library.outputs.sha }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          expected="$(printf '%s' "$BOUND_SHA" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected"
+          git cat-file -e "${expected}^{commit}"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$(git rev-parse "${expected}^{tree}")"
+          git diff --cached --quiet --exit-code
+          git diff --quiet --exit-code
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Build Windows library security JSON receipt
+        if: always()
+        shell: pwsh
+        env:
+          RECEIPT_SHA: ${{ steps.bind-library.outputs.sha }}
+        run: |
+          $requested = $env:TARGET_SHA.ToLowerInvariant()
+          $checkedOut = $env:RECEIPT_SHA.ToLowerInvariant()
+          if ($requested -notmatch '^[0-9a-f]{40}$') { throw 'requested SHA is not immutable 40-hex' }
+          if ($checkedOut -notmatch '^[0-9a-f]{40}$') { throw 'checked-out SHA receipt binding is missing' }
+          if ($checkedOut -ne $requested) { throw 'requested and checked-out SHA differ' }
+          $commands = @(
+            [ordered]@{
+              id = 'media-library'
+              command = 'cargo test -p opentake-media library::tests -- --test-threads=1'
+              result = '${{ steps.library-media.outcome }}'
+            },
+            [ordered]@{
+              id = 'project'
+              command = 'cargo test -p opentake-project -- --test-threads=1'
+              result = '${{ steps.library-project.outcome }}'
+            },
+            [ordered]@{
+              id = 'tauri-library'
+              command = 'cargo test -p opentake-tauri library::tests -- --test-threads=1'
+              result = '${{ steps.library-tauri.outcome }}'
+            },
+            [ordered]@{
+              id = 'media-clippy'
+              command = 'cargo clippy -p opentake-media --all-targets -- -D warnings'
+              result = '${{ steps.library-clippy.outcome }}'
+            }
+          )
+          $aggregate = if (@($commands | Where-Object { $_.result -ne 'success' }).Count -eq 0) { 0 } else { 1 }
+          New-Item -ItemType Directory -Force 'windows-library-security-receipt' | Out-Null
+          $receipt = [ordered]@{
+            schema = 'opentake-windows-library-security-receipt-v1'
+            repository = '${{ github.repository }}'
+            workflow = '${{ github.workflow }}'
+            workflow_file = '.github/workflows/ci.yml'
+            run_id = '${{ github.run_id }}'
+            run_attempt = '${{ github.run_attempt }}'
+            job = '${{ github.job }}'
+            event_name = '${{ github.event_name }}'
+            requested_sha = $env:TARGET_SHA.ToLowerInvariant()
+            checked_out_sha = $env:RECEIPT_SHA.ToLowerInvariant()
+            runner_os = '${{ runner.os }}'
+            runner_arch = '${{ runner.arch }}'
+            commands = @($commands)
+            aggregate_exit = $aggregate
+          }
+          $receipt | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8NoBOM 'windows-library-security-receipt/receipt.json'
+
+      - name: Upload exact-SHA Windows library security receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-library-security-${{ steps.bind-library.outputs.sha }}
+          path: |
+            windows-library-security-receipt/receipt.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Enforce Windows library security aggregate
+        if: always()
+        shell: pwsh
+        run: |
+          $path = 'windows-library-security-receipt/receipt.json'
+          if (-not (Test-Path $path -PathType Leaf)) { throw 'Windows library security receipt is missing' }
+          $receipt = Get-Content $path -Raw | ConvertFrom-Json
+          if ($receipt.checked_out_sha -ne '${{ steps.bind-library.outputs.sha }}') {
+            throw 'Windows library security receipt SHA is not checkout-bound'
+          }
+          if ([int]$receipt.aggregate_exit -ne 0) { throw 'Windows library security aggregate failed' }
+          $failed = @($receipt.commands | Where-Object { $_.result -ne 'success' })
+          if ($failed.Count -ne 0) { throw "Windows library security gates did not all succeed: $($failed.id -join ', ')" }
 
   safe-filesystem:
     name: Safe filesystem (${{ matrix.receipt_id }})
@@ -356,14 +1200,13 @@ jobs:
     timeout-minutes: 35
     env:
       TARGET_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.commit_sha || github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-      RECEIPT_DIR: c1b-native-receipt
     steps:
       - name: Validate immutable SHA input
         shell: bash
         run: |
           set -euo pipefail
           [[ "$TARGET_SHA" =~ ^[0-9a-fA-F]{40}$ ]]
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ env.TARGET_SHA }}
           fetch-depth: 0
@@ -382,7 +1225,7 @@ jobs:
         shell: bash
         run: rustup component add rustfmt clippy
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
             ~/.cargo/registry
@@ -401,15 +1244,22 @@ jobs:
           if ($errors.Count -ne 0) { throw ($errors | Out-String) }
       - name: Re-assert immutable target before native gates
         shell: bash
+        env:
+          BOUND_SHA: ${{ steps.bind.outputs.sha }}
         run: |
           set -euo pipefail
           actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
-          expected="$(printf '%s' "$TARGET_SHA" | tr '[:upper:]' '[:lower:]')"
+          expected="$(printf '%s' "$BOUND_SHA" | tr '[:upper:]' '[:lower:]')"
           test "$actual" = "$expected"
+          git cat-file -e "${expected}^{commit}"
           test "$(git rev-parse 'HEAD^{tree}')" = "$(git rev-parse "${expected}^{tree}")"
+          git diff --cached --quiet --exit-code
+          git diff --quiet --exit-code
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
       - name: Run all native gates and retain every exit
         shell: bash
+        env:
+          RECEIPT_DIR: ${{ runner.temp }}/c1b-native-receipt
         run: |
           set -u
           mkdir "$RECEIPT_DIR"
@@ -435,10 +1285,26 @@ jobs:
           run_gate safe-fs-unit cargo test -p opentake-project --lib safe_fs -- --test-threads=1
           run_gate archive-security cargo test -p opentake-project --test archive_security -- --test-threads=1
           printf '%s\n' "$aggregate" >"$RECEIPT_DIR/final-aggregate.raw-exit"
+      - name: Re-assert immutable target after native gates
+        if: always()
+        shell: bash
+        env:
+          BOUND_SHA: ${{ steps.bind.outputs.sha }}
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          expected="$(printf '%s' "$BOUND_SHA" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected"
+          git cat-file -e "${expected}^{commit}"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$(git rev-parse "${expected}^{tree}")"
+          git diff --cached --quiet --exit-code
+          git diff --quiet --exit-code
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
       - name: Build exclusive JSON receipt
         if: always()
         shell: pwsh
         env:
+          RECEIPT_DIR: ${{ runner.temp }}/c1b-native-receipt
           RECEIPT_SHA: ${{ steps.bind.outputs.sha }}
           RECEIPT_ID: ${{ matrix.receipt_id }}
           RUNNER_LABEL: ${{ matrix.runner }}
@@ -479,15 +1345,17 @@ jobs:
           $receipt | ConvertTo-Json -Depth 8 | Set-Content -Encoding utf8NoBOM (Join-Path $env:RECEIPT_DIR 'receipt.json')
       - name: Upload immutable native receipt
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: c1b-native-${{ matrix.receipt_id }}-${{ steps.bind.outputs.sha }}
-          path: c1b-native-receipt/
+          path: ${{ runner.temp }}/c1b-native-receipt/
           if-no-files-found: error
           retention-days: 30
       - name: Enforce native aggregate
         if: always()
         shell: bash
+        env:
+          RECEIPT_DIR: ${{ runner.temp }}/c1b-native-receipt
         run: |
           set -euo pipefail
           test -f "$RECEIPT_DIR/final-aggregate.raw-exit"
@@ -513,7 +1381,7 @@ jobs:
           if ($env:PARENT_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'red_parent_sha must be lower 40-hex' }
           if ($env:RED_NONCE -cnotmatch '^[0-9a-f]{16}$') { throw 'red_nonce must be unique lower 16-hex' }
       - name: Checkout trusted RED dispatcher
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ env.DISPATCHER_SHA }}
           fetch-depth: 1
@@ -529,7 +1397,7 @@ jobs:
           if ($actual -cne $env:DISPATCHER_SHA) { throw 'RED dispatcher SHA mismatch' }
           "sha=$actual" >> $env:GITHUB_OUTPUT
       - name: Checkout RED target
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ env.TARGET_SHA }}
           fetch-depth: 2
@@ -551,6 +1419,21 @@ jobs:
             throw 'RED commit changed paths outside windows.rs'
           }
           "sha=$actual" >> $env:GITHUB_OUTPUT
+      - name: Re-assert immutable RED sources before focused gate
+        shell: pwsh
+        run: |
+          $dispatcher = (git -C c1b-dispatcher rev-parse HEAD).Trim().ToLowerInvariant()
+          $target = (git -C c1b-target rev-parse HEAD).Trim().ToLowerInvariant()
+          if ($dispatcher -cne '${{ steps.bind-dispatcher.outputs.sha }}') { throw 'RED dispatcher moved after bind' }
+          if ($target -cne '${{ steps.bind-red.outputs.sha }}') { throw 'RED target moved after bind' }
+          if ((git -C c1b-dispatcher rev-parse 'HEAD^{tree}').Trim() -cne (git -C c1b-dispatcher rev-parse "${dispatcher}^{tree}").Trim()) { throw 'RED dispatcher tree mismatch' }
+          if ((git -C c1b-target rev-parse 'HEAD^{tree}').Trim() -cne (git -C c1b-target rev-parse "${target}^{tree}").Trim()) { throw 'RED target tree mismatch' }
+          git -C c1b-dispatcher diff --cached --quiet --exit-code
+          git -C c1b-dispatcher diff --quiet --exit-code
+          git -C c1b-target diff --cached --quiet --exit-code
+          git -C c1b-target diff --quiet --exit-code
+          if (@(git -C c1b-dispatcher status --porcelain=v1 --untracked-files=all).Count -ne 0) { throw 'RED dispatcher worktree is not clean' }
+          if (@(git -C c1b-target status --porcelain=v1 --untracked-files=all).Count -ne 0) { throw 'RED target worktree is not clean' }
       - name: Run focused expected-RED contract
         shell: pwsh
         run: |
@@ -558,9 +1441,25 @@ jobs:
           ../c1b-dispatcher/scripts/run-c1b-windows-red.ps1 `
             -Task $env:RED_TASK -TestSha $env:TARGET_SHA -ParentSha $env:PARENT_SHA `
             -Nonce $env:RED_NONCE -EvidenceRoot (Join-Path $env:RUNNER_TEMP 'c1b-red')
+      - name: Re-assert immutable RED sources after focused gate
+        if: always()
+        shell: pwsh
+        run: |
+          $dispatcher = (git -C c1b-dispatcher rev-parse HEAD).Trim().ToLowerInvariant()
+          $target = (git -C c1b-target rev-parse HEAD).Trim().ToLowerInvariant()
+          if ($dispatcher -cne '${{ steps.bind-dispatcher.outputs.sha }}') { throw 'RED dispatcher moved after gate' }
+          if ($target -cne '${{ steps.bind-red.outputs.sha }}') { throw 'RED target moved after gate' }
+          if ((git -C c1b-dispatcher rev-parse 'HEAD^{tree}').Trim() -cne (git -C c1b-dispatcher rev-parse "${dispatcher}^{tree}").Trim()) { throw 'RED dispatcher tree mismatch' }
+          if ((git -C c1b-target rev-parse 'HEAD^{tree}').Trim() -cne (git -C c1b-target rev-parse "${target}^{tree}").Trim()) { throw 'RED target tree mismatch' }
+          git -C c1b-dispatcher diff --cached --quiet --exit-code
+          git -C c1b-dispatcher diff --quiet --exit-code
+          git -C c1b-target diff --cached --quiet --exit-code
+          git -C c1b-target diff --quiet --exit-code
+          if (@(git -C c1b-dispatcher status --porcelain=v1 --untracked-files=all).Count -ne 0) { throw 'RED dispatcher worktree is not clean' }
+          if (@(git -C c1b-target status --porcelain=v1 --untracked-files=all).Count -ne 0) { throw 'RED target worktree is not clean' }
       - name: Upload immutable Windows RED receipt
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: c1b-red-${{ inputs.red_task }}-${{ steps.bind-red.outputs.sha }}-${{ inputs.red_nonce }}
           path: ${{ runner.temp }}/c1b-red/c1b-task-${{ inputs.red_task }}-${{ steps.bind-red.outputs.sha }}-${{ inputs.red_nonce }}/

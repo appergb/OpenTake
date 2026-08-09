@@ -5,7 +5,7 @@
  * UI-only displayHeight (not persisted).
  */
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Eye, EyeOff, Volume2, VolumeX, Link, Unlink } from "lucide-react";
 import { Icon } from "../ui/Icon";
@@ -73,6 +73,7 @@ export function TrackHeaderColumn({ timeline, scrollTop, totalHeight }: Props) {
           return (
             <TrackHeaderRow
               key={track.id || i}
+              trackId={track.id}
               index={i}
               label={trackDisplayLabel(timeline, i)}
               color={trackColor(track.type)}
@@ -111,6 +112,7 @@ function trackTop(
 }
 
 interface RowProps {
+  trackId: string;
   index: number;
   label: string;
   color: string;
@@ -126,42 +128,113 @@ interface RowProps {
   onResize: (delta: number) => void;
 }
 
+const TRACK_RESIZE_HIT_TARGET = 24;
+
 function TrackHeaderRow(p: RowProps) {
   const t = useT();
-  const dragRef = useRef<{ startY: number } | null>(null);
+  const pushToast = useEditorUiStore((s) => s.pushToast);
+  const rowRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{
+    startY: number;
+    pointerId: number;
+    target: HTMLElement;
+  } | null>(null);
+  const [isResizing, setIsResizing] = useState(false);
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+
+  const closeMenu = useCallback(() => {
+    setMenu(null);
+    rowRef.current?.focus();
+  }, []);
+
+  const finishResize = useCallback((releaseCapture: boolean) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    dragRef.current = null;
+    setIsResizing(false);
+    if (releaseCapture) {
+      try {
+        drag.target.releasePointerCapture(drag.pointerId);
+      } catch {
+        // Capture can already be gone when the browser ends the gesture.
+      }
+    }
+  }, []);
 
   const onPointerDown = useCallback(
     (e: React.PointerEvent) => {
       e.preventDefault();
       e.stopPropagation();
-      dragRef.current = { startY: e.clientY };
-      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+      const target = e.currentTarget as HTMLElement;
+      dragRef.current = { startY: e.clientY, pointerId: e.pointerId, target };
+      setIsResizing(true);
+      target.focus();
+      target.setPointerCapture(e.pointerId);
     },
     [],
   );
   const onPointerMove = useCallback(
     (e: React.PointerEvent) => {
-      if (!dragRef.current) return;
-      const delta = e.clientY - dragRef.current.startY;
-      dragRef.current.startY = e.clientY;
+      const drag = dragRef.current;
+      if (!drag || drag.pointerId !== e.pointerId) return;
+      const delta = e.clientY - drag.startY;
+      drag.startY = e.clientY;
       p.onResize(delta);
     },
     [p],
   );
-  const onPointerUp = useCallback((e: React.PointerEvent) => {
-    dragRef.current = null;
-    (e.target as HTMLElement).releasePointerCapture(e.pointerId);
-  }, []);
+  const onPointerUp = useCallback(
+    (e: React.PointerEvent) => {
+      if (dragRef.current?.pointerId !== e.pointerId) return;
+      finishResize(true);
+    },
+    [finishResize],
+  );
+  const onKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      let delta: number | null = null;
+      if (e.key === "ArrowUp") delta = -10;
+      else if (e.key === "ArrowDown") delta = 10;
+      else if (e.key === "Home") delta = TRACK_SIZE.minHeight - p.height;
+      else if (e.key === "End") delta = TRACK_SIZE.maxHeight - p.height;
+      else if (e.key === "Escape" && dragRef.current) {
+        e.preventDefault();
+        finishResize(true);
+        return;
+      }
+      if (delta === null) return;
+      e.preventDefault();
+      p.onResize(delta);
+    },
+    [finishResize, p],
+  );
 
   const iconColor = (active: boolean) =>
     active ? "var(--text-secondary)" : "rgba(255,255,255,0.186)"; // 0.62*0.3
 
+  const updateTrack = (properties: { muted?: boolean; hidden?: boolean; syncLocked?: boolean }) => {
+    void setTrackProps(p.index, properties).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      pushToast(t("timeline.trackUpdateFailed", { error: message }));
+    });
+  };
+
   return (
     <div
+      ref={rowRef}
+      data-track-row={p.trackId}
+      tabIndex={0}
+      aria-label={p.label}
       onContextMenu={(e) => {
         e.preventDefault();
         setMenu({ x: e.clientX, y: e.clientY });
+      }}
+      onKeyDown={(e) => {
+        if (e.currentTarget !== e.target) return;
+        if (e.key !== "ContextMenu" && !(e.shiftKey && e.key === "F10")) return;
+        e.preventDefault();
+        const rect = e.currentTarget.getBoundingClientRect();
+        setMenu({ x: rect.left + 8, y: rect.top + 8 });
       }}
       style={{
         position: "absolute",
@@ -194,35 +267,74 @@ function TrackHeaderRow(p: RowProps) {
       {/* Toggles. Clicking dispatches SetTrackProps (toggles the field). */}
       <div style={{ display: "flex", alignItems: "center", gap: 2, paddingRight: 4 }}>
         {p.isAudio ? (
-          <span
+          <button
+            type="button"
+            data-track-action="mute"
+            data-track-index={p.index}
+            aria-label={t("timeline.mute")}
+            aria-pressed={p.muted}
             title={t("timeline.mute")}
-            role="button"
             onPointerDown={(e) => e.stopPropagation()}
-            onClick={() => void setTrackProps(p.index, { muted: !p.muted })}
-            style={{ color: iconColor(!p.muted), display: "inline-flex", cursor: "pointer" }}
+            onClick={() => updateTrack({ muted: !p.muted })}
+            className="hover-area"
+            style={{
+              width: 24,
+              height: 24,
+              color: iconColor(!p.muted),
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: "pointer",
+            }}
           >
             <Icon icon={p.muted ? VolumeX : Volume2} size={11} />
-          </span>
+          </button>
         ) : (
-          <span
+          <button
+            type="button"
+            data-track-action="hide"
+            data-track-index={p.index}
+            aria-label={t("timeline.hide")}
+            aria-pressed={p.hidden}
             title={t("timeline.hide")}
-            role="button"
             onPointerDown={(e) => e.stopPropagation()}
-            onClick={() => void setTrackProps(p.index, { hidden: !p.hidden })}
-            style={{ color: iconColor(!p.hidden), display: "inline-flex", cursor: "pointer" }}
+            onClick={() => updateTrack({ hidden: !p.hidden })}
+            className="hover-area"
+            style={{
+              width: 24,
+              height: 24,
+              color: iconColor(!p.hidden),
+              display: "inline-flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: "pointer",
+            }}
           >
             <Icon icon={p.hidden ? EyeOff : Eye} size={11} />
-          </span>
+          </button>
         )}
-        <span
+        <button
+          type="button"
+          data-track-action="sync-lock"
+          data-track-index={p.index}
+          aria-label={t("timeline.syncLock")}
+          aria-pressed={p.syncLocked}
           title={t("timeline.syncLock")}
-          role="button"
           onPointerDown={(e) => e.stopPropagation()}
-          onClick={() => void setTrackProps(p.index, { syncLocked: !p.syncLocked })}
-          style={{ color: iconColor(p.syncLocked), display: "inline-flex", cursor: "pointer" }}
+          onClick={() => updateTrack({ syncLocked: !p.syncLocked })}
+          className="hover-area"
+          style={{
+            width: 24,
+            height: 24,
+            color: iconColor(p.syncLocked),
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            cursor: "pointer",
+          }}
         >
           <Icon icon={p.syncLocked ? Link : Unlink} size={11} />
-        </span>
+        </button>
       </div>
       {menu &&
         createPortal(
@@ -233,7 +345,8 @@ function TrackHeaderRow(p: RowProps) {
             canSwapDown={p.canSwapDown}
             onSwapUp={() => void swapTracks(p.index, p.index - 1)}
             onSwapDown={() => void swapTracks(p.index, p.index + 1)}
-            onClose={() => setMenu(null)}
+            onClose={closeMenu}
+            menuLabel={p.label}
             labels={{
               moveUp: t("timeline.moveTrackUp"),
               moveDown: t("timeline.moveTrackDown"),
@@ -243,15 +356,32 @@ function TrackHeaderRow(p: RowProps) {
         )}
       {/* Bottom resize grip. */}
       <div
+        data-track-resize={p.trackId}
+        data-interaction-state={isResizing ? "dragging" : "enabled"}
+        role="separator"
+        aria-label={p.label}
+        aria-orientation="horizontal"
+        aria-valuemin={TRACK_SIZE.minHeight}
+        aria-valuemax={TRACK_SIZE.maxHeight}
+        aria-valuenow={p.height}
+        tabIndex={0}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
+        onPointerCancel={() => finishResize(true)}
+        onLostPointerCapture={() => finishResize(false)}
+        onKeyDown={onKeyDown}
         style={{
           position: "absolute",
           left: 0,
-          right: 0,
-          bottom: -TRACK_SIZE.resizeHandleZone / 2,
-          height: TRACK_SIZE.resizeHandleZone,
+          // Keep the 24px drag target out from under the two 24px track
+          // buttons; the label-side segment remains a large resize affordance.
+          right: 56,
+          bottom: -TRACK_RESIZE_HIT_TARGET / 2,
+          height: TRACK_RESIZE_HIT_TARGET,
+          // Later track rows are rendered after this row and otherwise win the
+          // real browser hit test over the lower half of this 24px target.
+          zIndex: 3,
           cursor: "ns-resize",
         }}
       />
@@ -267,6 +397,7 @@ function TrackHeaderContextMenu({
   onSwapUp,
   onSwapDown,
   onClose,
+  menuLabel,
   labels,
 }: {
   x: number;
@@ -276,22 +407,49 @@ function TrackHeaderContextMenu({
   onSwapUp: () => void;
   onSwapDown: () => void;
   onClose: () => void;
+  menuLabel: string;
   labels: { moveUp: string; moveDown: string };
 }) {
+  const menuRef = useRef<HTMLDivElement>(null);
   const items = [
     { label: labels.moveUp, enabled: canSwapUp, action: onSwapUp },
     { label: labels.moveDown, enabled: canSwapDown, action: onSwapDown },
   ];
+
+  useEffect(() => {
+    const firstEnabled = menuRef.current?.querySelector<HTMLButtonElement>(
+      "button:not(:disabled)",
+    );
+    (firstEnabled ?? menuRef.current)?.focus();
+  }, []);
+
+  const moveFocus = (direction: 1 | -1) => {
+    const enabled = Array.from(
+      menuRef.current?.querySelectorAll<HTMLButtonElement>("button:not(:disabled)") ?? [],
+    );
+    if (enabled.length === 0) return;
+    const current = enabled.indexOf(document.activeElement as HTMLButtonElement);
+    const next = current < 0
+      ? direction === 1 ? 0 : enabled.length - 1
+      : (current + direction + enabled.length) % enabled.length;
+    enabled[next].focus();
+  };
+
   return (
     <div
+      data-track-menu-backdrop
       onMouseDown={onClose}
       onContextMenu={(e) => {
         e.preventDefault();
+        e.stopPropagation();
         onClose();
       }}
       style={{ position: "fixed", inset: 0, zIndex: 1000 }}
     >
       <div
+        ref={menuRef}
+        aria-label={menuLabel}
+        tabIndex={-1}
         style={{
           position: "fixed",
           left: x,
@@ -306,6 +464,27 @@ function TrackHeaderContextMenu({
         }}
         role="menu"
         onMouseDown={(e) => e.stopPropagation()}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            e.preventDefault();
+            onClose();
+          } else if (e.key === "ArrowDown") {
+            e.preventDefault();
+            moveFocus(1);
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            moveFocus(-1);
+          } else if (e.key === "Home") {
+            e.preventDefault();
+            menuRef.current?.querySelector<HTMLButtonElement>("button:not(:disabled)")?.focus();
+          } else if (e.key === "End") {
+            e.preventDefault();
+            const enabled = menuRef.current?.querySelectorAll<HTMLButtonElement>(
+              "button:not(:disabled)",
+            );
+            enabled?.[enabled.length - 1]?.focus();
+          }
+        }}
       >
         {items.map((item) => (
           <button

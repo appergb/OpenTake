@@ -73,8 +73,12 @@ pub fn split_single_clip(
     ids: &dyn IdGen,
 ) -> Option<String> {
     let (ti, ci) = find(timeline, clip_id)?;
+    // Validate all arithmetic before consuming the right-half id. The domain
+    // primitive is fallible for malformed persisted clips and extreme retimes.
+    opentake_domain::split_clip(&timeline.tracks[ti].clips[ci], at_frame, "preflight")?;
     let (left, right) =
-        opentake_domain::split_clip(&timeline.tracks[ti].clips[ci], at_frame, ids.next_id())?;
+        opentake_domain::split_clip(&timeline.tracks[ti].clips[ci], at_frame, ids.next_id())
+            .expect("split arithmetic was prevalidated");
     let right_id = right.id.clone();
     timeline.tracks[ti].clips[ci] = left;
     timeline.tracks[ti].clips.push(right);

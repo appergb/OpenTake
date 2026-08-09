@@ -1,7 +1,16 @@
-import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react";
 import {
   ChevronDown,
   ChevronRight,
+  Clapperboard,
+  MessageSquare,
   Plus,
   Send,
   Settings as SettingsIcon,
@@ -25,6 +34,7 @@ import { useSettingsStore } from "../../store/settingsStore";
 import { mintSessionId, useChatStore } from "../../store/chatStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useProjectStore } from "../../store/projectStore";
+import { MotionPanel } from "./MotionPanel";
 
 const NO_KEY_HINT = /Settings|设置|API key/i;
 
@@ -45,12 +55,21 @@ export function AgentPanel() {
   const finalize = useChatStore((state) => state.finalize);
   const setMessages = useChatStore((state) => state.setMessages);
   const reset = useChatStore((state) => state.reset);
+  const composerDraft = useChatStore((state) => state.composerDraft);
+  const setComposerDraft = useChatStore((state) => state.setComposerDraft);
 
   const [input, setInput] = useState("");
+  const [panelMode, setPanelMode] = useState<"chat" | "motion">("chat");
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const sessionsRef = useRef<ChatSession[]>([]);
   const tabMutationRef = useRef<Promise<void>>(Promise.resolve());
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (composerDraft === null) return;
+    setInput(composerDraft);
+    setComposerDraft(null);
+  }, [composerDraft, setComposerDraft]);
 
   function commitSessions(next: ChatSession[]) {
     sessionsRef.current = next;
@@ -342,9 +361,9 @@ export function AgentPanel() {
         }}
       >
         <span style={{ fontSize: "var(--fs-sm)", fontWeight: 600, color: "var(--text-primary)" }}>
-          {t("agent.title")}
+          {panelMode === "chat" ? t("agent.title") : t("motion.heading")}
         </span>
-        <button
+        {panelMode === "chat" && <button
           type="button"
           onClick={() => void newChat()}
           disabled={streaming || !projectPath}
@@ -363,9 +382,36 @@ export function AgentPanel() {
           }}
         >
           <Plus size={14} />
-        </button>
+        </button>}
       </div>
 
+      <div
+        role="group"
+        aria-label={t("agent.modes")}
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr",
+          gap: 3,
+          padding: "var(--space-xs) var(--space-sm)",
+          borderBottom: "var(--bw-hairline) solid var(--border-subtle)",
+          flexShrink: 0,
+        }}
+      >
+        <PanelModeButton
+          active={panelMode === "chat"}
+          label={t("agent.chatMode")}
+          icon={<MessageSquare size={13} />}
+          onClick={() => setPanelMode("chat")}
+        />
+        <PanelModeButton
+          active={panelMode === "motion"}
+          label={t("agent.motionMode")}
+          icon={<Clapperboard size={13} />}
+          onClick={() => setPanelMode("motion")}
+        />
+      </div>
+
+      {panelMode === "chat" ? <>
       <div
         role="tablist"
         aria-label={t("agent.tabs")}
@@ -417,12 +463,14 @@ export function AgentPanel() {
                 aria-label={`${t("agent.closeTab")} ${title}`}
                 disabled={streaming}
                 onClick={() => void closeChat(session)}
+                className="hover-area"
                 style={{
-                  width: 20,
+                  width: 24,
                   height: 24,
                   display: "inline-flex",
                   alignItems: "center",
                   justifyContent: "center",
+                  borderRadius: "var(--radius-xs)",
                   color: "var(--text-muted)",
                   opacity: streaming ? 0.4 : 1,
                 }}
@@ -526,7 +574,42 @@ export function AgentPanel() {
           </button>
         )}
       </div>
+      </> : <MotionPanel />}
     </div>
+  );
+}
+
+function PanelModeButton({
+  active,
+  label,
+  icon,
+  onClick,
+}: {
+  active: boolean;
+  label: string;
+  icon: ReactNode;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      style={{
+        height: 27,
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 6,
+        borderRadius: "var(--radius-sm)",
+        background: active ? "var(--bg-elevated)" : "transparent",
+        color: active ? "var(--text-primary)" : "var(--text-muted)",
+        fontSize: "var(--fs-xs)",
+      }}
+    >
+      {icon}
+      {label}
+    </button>
   );
 }
 

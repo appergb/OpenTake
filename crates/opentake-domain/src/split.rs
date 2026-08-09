@@ -27,34 +27,48 @@ use crate::keyframe::{split_keyframe_track, AnimPair};
 /// continuous across the seam.
 pub fn split_clip(clip: &Clip, at_frame: i32, right_id: impl Into<String>) -> Option<(Clip, Clip)> {
     // Half-open guard: endpoints do not split (matches upstream `splitSingleClip`).
-    if at_frame <= clip.start_frame || at_frame >= clip.end_frame() {
+    let end_frame = clip.start_frame.checked_add(clip.duration_frames)?;
+    if at_frame <= clip.start_frame || at_frame >= end_frame {
         return None;
     }
 
-    let split_offset = at_frame - clip.start_frame;
-    let left_source = (split_offset as f64 * clip.speed).round() as i32;
-    let right_source = ((clip.duration_frames - split_offset) as f64 * clip.speed).round() as i32;
+    if !clip.speed.is_finite() || clip.speed <= 0.0 {
+        return None;
+    }
+    let split_offset = at_frame.checked_sub(clip.start_frame)?;
+    let right_duration = clip.duration_frames.checked_sub(split_offset)?;
+    let left_source = (split_offset as f64 * clip.speed).round();
+    let right_source = (right_duration as f64 * clip.speed).round();
+    if !(0.0..=i32::MAX as f64).contains(&left_source)
+        || !(0.0..=i32::MAX as f64).contains(&right_source)
+    {
+        return None;
+    }
+    let left_source = left_source as i32;
+    let right_source = right_source as i32;
 
     let mut left = clip.clone();
     left.duration_frames = split_offset;
     if clip.reversed {
-        left.trim_start_frame = clip.trim_start_frame + right_source;
+        left.trim_start_frame = clip.trim_start_frame.checked_add(right_source)?;
     } else {
-        left.trim_end_frame = clip.trim_end_frame + right_source;
+        left.trim_end_frame = clip.trim_end_frame.checked_add(right_source)?;
     }
     left.fade_out_frames = 0;
+    left.loudness_normalization = None;
     left.clamp_fades_to_duration();
 
     let mut right = clip.clone();
     right.id = right_id.into();
     right.start_frame = at_frame;
-    right.duration_frames = clip.duration_frames - split_offset;
+    right.duration_frames = right_duration;
     if clip.reversed {
-        right.trim_end_frame = clip.trim_end_frame + left_source;
+        right.trim_end_frame = clip.trim_end_frame.checked_add(left_source)?;
     } else {
-        right.trim_start_frame = clip.trim_start_frame + left_source;
+        right.trim_start_frame = clip.trim_start_frame.checked_add(left_source)?;
     }
     right.fade_in_frames = 0;
+    right.loudness_normalization = None;
     right.clamp_fades_to_duration();
 
     // Split every animatable track at the cut, inserting a boundary keyframe so

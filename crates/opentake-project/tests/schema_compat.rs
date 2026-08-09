@@ -40,6 +40,20 @@ fn write_known_bundle(bundle: &Path) {
                             "interpolationOut": "smooth"
                         }]
                     },
+                    "loudnessNormalization": {
+                        "targetLufs": -16.0,
+                        "truePeakCeilingDbtp": -1.0,
+                        "inputIntegratedLufs": -24.0,
+                        "inputTruePeakDbtp": -12.0,
+                        "gainDb": 8.0,
+                        "outputIntegratedLufs": -16.0,
+                        "outputTruePeakDbtp": -2.0
+                    },
+                    "audioDenoise": {
+                        "mode": "voice",
+                        "strength": 0.8,
+                        "previewEnabled": true
+                    },
                     "effects": [{"name": "blur", "params": {}, "enabled": true}],
                     "masks": [{
                         "shape": {"kind": "circle", "center": {"x": 0.5, "y": 0.5}, "radius": {"x": 0.5, "y": 0.5}},
@@ -457,4 +471,17 @@ fn known_schema_remains_writable() {
     let saved_as = Project::open(&destination).expect("open saved-as bundle");
     assert_eq!(saved_as.timeline.fps, 60);
     assert!(!saved_as.compatibility().is_read_only());
+}
+
+/// Composite acceptance entry tracked by the data-safety implementation plan.
+/// It exercises strict required components, read-only recovery for optional
+/// corruption, unknown-field preservation, and the writable save/reopen path.
+#[test]
+fn cross_cutting_project_safety_acceptance() {
+    unknown_top_level_timeline_field_blocks_writes_without_changing_bytes();
+    unknown_nested_manifest_entry_and_source_fields_block_writes();
+    malformed_optional_generation_log_opens_but_blocks_writes();
+    malformed_manifest_contract_matches_authoritative_source();
+    trailing_required_json_remains_a_strict_open_error();
+    known_schema_remains_writable();
 }

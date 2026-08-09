@@ -32,15 +32,18 @@ pub struct SecretStatus {
 ```rust
 fn account_for(provider: &str) -> Result<&'static str, String> {
     match provider {
-        "anthropic" => Ok("anthropic-api-key"),
-        "openai"    => Ok("openai-api-key"),
-        "google"    => Ok("google-api-key"),
-        other       => Err(format!("unknown provider: {other}")),
+        "anthropic"  => Ok("anthropic-api-key"),
+        "fal"        => Ok("fal-api-key"),
+        "replicate"  => Ok("replicate-api-key"),
+        "openai"     => Ok("openai-api-key"),
+        "elevenlabs" => Ok("elevenlabs-api-key"),
+        "google"     => Ok("google-api-key"),
+        other        => Err(format!("unknown provider: {other}")),
     }
 }
 ```
 
-遵循 `opentake_gen::keys` 的 `<prefix>-api-key` 约定。**在此校验 provider 意味着未知值绝不能寻址任意钥匙串条目**——唯一可写的账户就是 UI 提供的这三个。这是一道安全边界（防止任意账户名注入钥匙串）。
+遵循 `opentake_gen::keys` 的 `<prefix>-api-key` 约定。**在此校验 provider 意味着未知值绝不能寻址任意钥匙串条目**——唯一可写的账户就是 UI 提供的这六个（3 聊天 `anthropic` / `openai` / `google` + 3 生成 `fal` / `replicate` / `elevenlabs`），生成 provider 的 key 同样可从前端 `secret_save` 写入。这是一道安全边界（防止任意账户名注入钥匙串）。
 
 ## 掩码规则（mask）
 

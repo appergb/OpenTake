@@ -51,6 +51,8 @@
 > 来源:`UI/AppTheme.swift` 全文。上游 `AGENTS.md` 强制「所有 UI 样式必须用 AppTheme 常量，不得硬编码」。OpenTake 前端同样:**全部令牌定义为 CSS 变量，组件只引用变量。**
 > 颜色:上游用 0–255 或 0–1 的 sRGB。下方给出等价 `rgb()/rgba()`。深色主题(上游唯一主题,不做浅色)。
 
+追踪证据：`web/src/lib/theme.contract.test.ts` 锁定完整数值表与 CSS 投影，`web/src/styles/tokenUsage.test.ts` 抽样 Shell/Toolbar/Media/Inspector/Preview/Timeline 并扫描所有生产组件，任何未定义变量都会使测试失败。字幕约束与关键帧局部几何直接消费 `LAYOUT` 类型化常量，不再在组件中重复数值。
+
 ### 1.1 背景 Background（`AppTheme.swift:8-23`）
 
 | Token | 上游值 | CSS 变量 | 值 |
@@ -971,6 +973,8 @@ TimelineContainer (relative)
 
 > **跨平台键位**:macOS ⌘ → Win/Linux Ctrl;⌥ → Alt。Tauri 下用 `accelerator` 字符串复刻。keyCode 是 macOS 物理键码,前端用 `event.code`(如 `Space`/`KeyC`/`BracketLeft`/`Backquote`/`ArrowLeft`)更可靠,**逐键对照上表语义**。
 
+**OpenTake 代码门禁（2026-08-01）**:`resolveDocumentedShortcut` 与 `APPLICATION_MENU_SPEC` 共同构成可审计的 WebView/原生菜单快捷键边界。表驱动测试覆盖 macOS/Windows 修饰键、保存/另存冲突、Space 修饰与 repeat、媒体/时间线焦点、输入控件、弹窗、只读工程及非编辑视图 no-op；实际 hook 只执行解析后的单一语义命令。代码测试与生产构建已通过，打包桌面端逐键证据仍是最终勾选前置。
+
 ### 9.7 Hover / 焦点 / 游标态
 
 | 元素 | hover 效果 | 来源 |
@@ -984,6 +988,8 @@ TimelineContainer (relative)
 | 轨道高度边 | `resizeUpDown` | `TimelineHeaderView.swift:203-209` |
 | scrub 条 | `pointingHand` + 变粗 | `PreviewContainerView.swift:655,677` |
 | 数字字段 | `resizeLeftRight`（ew-resize）| `ScrubbableNumberField.swift:185-187` |
+
+**OpenTake 代码门禁（2026-08-01）**:`timelineInteractionCursor` 是时间线刻度、trim、body、razor、drag 与只读态的唯一 cursor 投影；跨组件 owning matrix 同时覆盖 Transform/Crop、SplitPane、ScrubbableNumberField 与 HoverButton 的 enabled/disabled/active/dragging/focus 状态。数字字段已具备 spinbutton 键盘语义，禁用 hover 不再着色。代码测试与生产构建已通过，打包桌面实际交互/高对比度证据仍待顺序 GUI 阶段。
 
 ### 9.8 右键菜单（汇总，见 §5.10 详表）
 
@@ -1260,7 +1266,7 @@ interface Clip {                  // Timeline.swift:75-117
 ### 13.2 1:1 验收清单（逐项打勾）
 
 **A. 视觉（截图对拍，1600×1000）**
-- [ ] 五面板布局(default/media/vertical)的分栏比例、沟槽 5px、surface 圆角 6px、焦点环与上游一致。
+- [x] 五面板布局(default/media/vertical)的分栏比例、沟槽 5px、surface 圆角 6px、焦点环与上游一致。
 - [ ] 所有间距/字号/圆角/颜色取自令牌且与 §1 数值一致（抽查每面板 ≥5 处）。
 - [ ] Toolbar 按钮图标/分隔/缩放滑块(对数)外观一致。
 - [ ] 时间线:刻度间隔/次刻度/标签、轨道头(色条/标签/三图标/区分隔粗线)、clip(底色/左色条/标签/trim 手柄/波形/缩略图/音量橡皮筋/淡变/关键帧菱形)、playhead(红线+下三角)、磁吸黄虚线、marquee 白虚线、新轨黄线、razor 橙虚线 —— 逐项与上游同。
@@ -1275,7 +1281,11 @@ interface Clip {                  // Timeline.swift:75-117
 - [ ] §9.4 razor/split/关键帧/淡变/音量全 8 条。
 - [ ] §9.5 playhead/scrub/缩放全 9 条（含光标锚定缩放、灵敏度常量）。
 - [ ] §9.6 快捷键全表逐键。
+
+代码门禁已完成：完整表、平台修饰键、冲突/抑制规则与菜单动作均有 owning matrix；此项保持未勾选，直到打包应用逐键实际验证完成。
 - [ ] §9.7 hover/游标全表。
+
+代码门禁已完成：完整 hover/focus/cursor 表已由跨组件矩阵和纯 cursor 投影覆盖；此项保持未勾选，直到打包应用实际验证完成。
 - [ ] §9.8 右键菜单项与分组逐字（§5.10）。
 
 **C. 几何（单测）**
@@ -1285,8 +1295,21 @@ interface Clip {                  // Timeline.swift:75-117
 
 **D. 状态/契约**
 - [ ] 镜像只由 `timeline_changed`→`get_timeline` 更新；前端无任何直接改 timeline 的路径。
-- [ ] 每个编辑手势映射到正确 `edit_apply` 命令（§11.1）。
-- [ ] 持久化键（layoutPreset/三面板可见性/keyframes）跨会话保留。
+- [x] 每个编辑手势映射到正确 `edit_apply` 命令（§11.1）。
+
+该项由 `EDIT_GESTURE_COMMAND_MATRIX` 穷举 TypeScript `EditRequest` 的 41 个变体；编译期
+sentinel 在新增但未登记变体时失败。`commandRouting.test.ts` 逐 action 断言完整 camelCase
+DTO、空输入 no-op 和组件/Store 无直接 Timeline mutation；`api.editApply.test.ts` 验证生产
+Tauri envelope；Rust `every_frontend_edit_request_deserializes_to_intended_command` 逐个反序列化
+并核对对应 `EditCommand`（`freezeFrame` 由带媒体捕获的专用 `edit_apply` 分支接管）。
+- [x] 持久化键（layoutPreset/三面板可见性/keyframes）跨会话保留。
+
+持久化契约使用逐字段、带 schema 版本的键：`opentake.ui.v1.layoutPreset`、
+`opentake.ui.v1.agentPanelVisible`、`opentake.ui.v1.mediaPanelVisible`、
+`opentake.ui.v1.inspectorPanelVisible`、`opentake.ui.v1.keyframesPanelVisible`。首次读取时仅迁移
+通过严格校验的旧版无前缀键；非法/损坏值回落到 default / false / true / true / false，且不把
+损坏值写入新 schema。localStorage 不可用、读取抛错或写入失败时不得阻止当次 UI 更新。只持久化
+这五项全局 UI 偏好；工程 view、播放头、选择、最大化等工程/会话态在新 store 中必须恢复默认。
 
 ### 13.3 关键陷阱备忘（防止 1:1 偏差）
 

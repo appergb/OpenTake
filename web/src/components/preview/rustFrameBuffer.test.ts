@@ -78,15 +78,24 @@ describe("retained Rust frame buffer", () => {
     expect(staleLoad.state.slots[1].frame?.sequence).toBe(3);
   });
 
-  it("keeps the last good slot visible when the pending frame errors", () => {
+  it("keeps the last good slot visible and retries a live-frame error once", () => {
     const active = promote();
     const requested = requestRustFrame(active, frame(2), endpoint).state;
     const failed = failRustFrame(requested, 1, requested.slots[1].src!);
 
+    // A live frame that 204s because the engine already published a newer
+    // frame is retried once with the same URL (the backend resolves it to the
+    // newest published frame). The last good slot stays visible meanwhile.
     expect(failed.effect).toBe("none");
     expect(failed.state.activeSlot).toBe(0);
     expect(failed.state.slots[0].visible).toBe(true);
-    expect(failed.state.pendingSlot).toBeNull();
+    expect(failed.state.pendingSlot).toBe(1);
+    expect(failed.state.slots[1].src).toContain("retry=1");
+
+    const second = failRustFrame(failed.state, 1, failed.state.slots[1].src!);
+    expect(second.effect).toBe("none");
+    expect(second.state.pendingSlot).toBeNull();
+    expect(second.state.activeSlot).toBe(0);
   });
 
   it("does not end playback until the terminal frame is promoted", () => {

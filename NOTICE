@@ -28,3 +28,16 @@ Nature of the fork / summary of changes
   replacing AVFoundation's declarative composition.
 - Self-hosted / BYOK generative-AI backend. The upstream generative-AI processing
   is closed-source and is NOT part of this fork; OpenTake provides its own.
+
+-------------------------------------------------------------------------------
+Optional on-device model
+-------------------------------------------------------------------------------
+
+The AI portrait-matting feature can download the official Robust Video Matting
+(RVM) MobileNetV3 FP32 ONNX model, version 1.0.0, from
+https://github.com/PeterL1n/RobustVideoMatting. RVM was developed at ByteDance
+Inc. by Shanchuan Lin, Linjie Yang, Imran Saleemi, and Soumyadip Sengupta and is
+distributed under the GNU General Public License version 3. The model is not
+embedded in the OpenTake application; it is installed on demand after the user
+selects the model-install action and is verified against a pinned byte size and
+SHA-256 digest before use.

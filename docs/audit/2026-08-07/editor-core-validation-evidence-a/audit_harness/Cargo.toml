@@ -1,0 +1,13 @@
+[package]
+name = "opentake-editor-core-audit-harness"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+opentake-domain = { path = "../../../../../crates/opentake-domain" }
+opentake-render = { path = "../../../../../crates/opentake-render" }
+opentake-tauri = { path = "../../../../../src-tauri", features = ["playback-engine"] }
+tauri = { version = "2", features = ["protocol-asset", "test"] }
