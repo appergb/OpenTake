@@ -1779,6 +1779,26 @@ mod chromium_backend {
             width: u32,
             height: u32,
         ) -> MotionResult<()> {
+            // Screencast sizing is based on the compositor surface, so resize
+            // the browser contents before overriding the logical viewport.
+            let window = self.command("Browser.getWindowForTarget", json!({}), Some(session))?;
+            let window_id = window
+                .get("windowId")
+                .and_then(Value::as_u64)
+                .ok_or_else(|| {
+                    MotionError::render_failed(format!(
+                        "Chromium CDP response is missing integer field \"windowId\": {window}"
+                    ))
+                })?;
+            self.command(
+                "Browser.setContentsSize",
+                json!({
+                    "windowId": window_id,
+                    "width": width,
+                    "height": height
+                }),
+                None,
+            )?;
             self.command(
                 "Emulation.setDeviceMetricsOverride",
                 device_metrics_params(width, height),
@@ -3167,7 +3187,7 @@ mod chromium_backend {
         }
 
         #[test]
-        fn device_metrics_keep_layout_and_capture_viewport_exact() {
+        fn browser_contents_are_resized_before_device_metrics() {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
             let (server_stream, _) = listener.accept().unwrap();
@@ -3177,15 +3197,64 @@ mod chromium_backend {
                 None,
             );
             let mut server_socket = WebSocket::from_raw_socket(server_stream, Role::Server, None);
+            let (observed_sender, observed_receiver) = mpsc::channel();
             let server = thread::spawn(move || {
-                let request = match server_socket.read().unwrap() {
-                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
-                    other => panic!("expected device-metrics request, got {other:?}"),
-                };
-                assert_eq!(
-                    request,
+                let mut observed = Vec::new();
+                loop {
+                    let request = match server_socket.read().unwrap() {
+                        Message::Text(text) => {
+                            serde_json::from_str::<Value>(text.as_ref()).unwrap()
+                        }
+                        other => panic!("expected viewport-sizing request, got {other:?}"),
+                    };
+                    let id = request["id"].as_u64().unwrap();
+                    let method = request["method"].as_str().unwrap().to_owned();
+                    let result = if method == "Browser.getWindowForTarget" {
+                        json!({"windowId": 42, "bounds": {}})
+                    } else {
+                        json!({})
+                    };
+                    server_socket
+                        .send(Message::text(
+                            json!({"id": id, "result": result}).to_string(),
+                        ))
+                        .unwrap();
+                    observed.push(request);
+                    if method == "Emulation.setDeviceMetricsOverride" {
+                        break;
+                    }
+                }
+                observed_sender.send(observed).unwrap();
+            });
+
+            let mut cdp = Cdp::new(
+                client_socket,
+                SandboxPolicy::default(),
+                MotionCancellationToken::new(),
+                Instant::now() + Duration::from_secs(1),
+            );
+            cdp.set_device_metrics("render-session", 48, 32).unwrap();
+            server.join().unwrap();
+            assert_eq!(
+                observed_receiver.recv().unwrap(),
+                vec![
                     json!({
                         "id": 1,
+                        "method": "Browser.getWindowForTarget",
+                        "params": {},
+                        "sessionId": "render-session"
+                    }),
+                    json!({
+                        "id": 2,
+                        "method": "Browser.setContentsSize",
+                        "params": {
+                            "windowId": 42,
+                            "width": 48,
+                            "height": 32
+                        }
+                    }),
+                    json!({
+                        "id": 3,
                         "method": "Emulation.setDeviceMetricsOverride",
                         "params": {
                             "width": 48,
@@ -3197,20 +3266,8 @@ mod chromium_backend {
                         },
                         "sessionId": "render-session"
                     })
-                );
-                server_socket
-                    .send(Message::text(json!({"id": 1, "result": {}}).to_string()))
-                    .unwrap();
-            });
-
-            let mut cdp = Cdp::new(
-                client_socket,
-                SandboxPolicy::default(),
-                MotionCancellationToken::new(),
-                Instant::now() + Duration::from_secs(1),
+                ]
             );
-            cdp.set_device_metrics("render-session", 48, 32).unwrap();
-            server.join().unwrap();
         }
 
         #[test]
