@@ -334,6 +334,27 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assert_rejected(mutated, "publish outputs stay outside the worktree")
 
+    def test_publish_python_helpers_cannot_write_bytecode_into_checkout(self) -> None:
+        protected_env = "      PYTHONDONTWRITEBYTECODE: '1'\n"
+        if protected_env in WORKFLOW:
+            protected = WORKFLOW
+        else:
+            protected = self.mutate(
+                "      NOTES_PATH: ${{ needs.validate.outputs.notes_path }}\n",
+                "      NOTES_PATH: ${{ needs.validate.outputs.notes_path }}\n"
+                + protected_env,
+            )
+        unprotected = protected.replace(protected_env, "", 1)
+
+        self.assertNotIn(
+            "publish Python helpers cannot write bytecode into the checkout",
+            contract.validate_workflow(protected),
+        )
+        self.assert_rejected(
+            unprotected,
+            "publish Python helpers cannot write bytecode into the checkout",
+        )
+
     def test_macos_package_command_cannot_be_faked_by_an_echo_string(self) -> None:
         original = (
             "        run: >-\n"

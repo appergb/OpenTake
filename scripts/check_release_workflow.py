@@ -190,7 +190,7 @@ APPROVED_JOB_SHA256 = {
     "quality": "43599825f68088f3cc744220227267f77454e2c7ce389a52b8aee5a492491eec",
     "macos_arm64": "f913508e4f041614a967f680515cc0b8779800f0b2a7b4b6ff29f24f4bb1efd2",
     "windows_x64": "5f012278c20843ba1b38cffb27f3c614716bd92e3fec63a11885b41692be78b5",
-    "publish": "dd325630c78f236e972ca425ccc83018d12b4ec35a6b8a80d1af94990c8179a2",
+    "publish": "89192ac021d48cc8c8ef17b612a2da666d96c01d195c4e2b58eec24b2cc24d1b",
 }
 
 
@@ -969,6 +969,9 @@ def validate_workflow(workflow: str) -> list[str]:
         return list(dict.fromkeys(errors))
     if publish.get("permissions") != {"contents": "write"}:
         errors.append("publish-only contents write permission")
+    publish_env = _as_mapping(publish.get("env"))
+    if publish_env is None or publish_env.get("PYTHONDONTWRITEBYTECODE") != "1":
+        errors.append("publish Python helpers cannot write bytecode into the checkout")
     initialize_publish = _structured_step(publish, "Initialize isolated publish root")
     download_macos = _structured_step(publish, "Download macOS artifact")
     download_windows = _structured_step(publish, "Download Windows artifact")

@@ -636,6 +636,7 @@ jobs:
       RELEASE_SHA: ${{ needs.validate.outputs.source_sha }}
       RELEASE_VERSION: ${{ needs.validate.outputs.version }}
       NOTES_PATH: ${{ needs.validate.outputs.notes_path }}
+      PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
