@@ -79,30 +79,40 @@ pub mod prewarm;
 /// state.
 pub struct MediaState {
     engine: MediaEngine,
+    admission: crate::updater::InstallAdmissionGate,
 }
 
 /// Single-flight cooperative cancellation for an Inspector stabilization run.
 #[derive(Default)]
 pub struct StabilizationAnalysisState {
-    active: Mutex<Option<opentake_media::MediaCancelToken>>,
+    active: Mutex<Option<ActiveDeferredAnalysis>>,
+    admission: crate::updater::InstallAdmissionGate,
 }
 
 /// Single-flight cooperative cancellation for an Inspector loudness run.
 #[derive(Default)]
 pub struct LoudnessAnalysisState {
-    active: Mutex<Option<opentake_media::MediaCancelToken>>,
+    active: Mutex<Option<ActiveDeferredAnalysis>>,
+    admission: crate::updater::InstallAdmissionGate,
 }
 
 /// Single-flight cooperative cancellation for an Inspector denoise validation.
 #[derive(Default)]
 pub struct DenoiseAnalysisState {
-    active: Mutex<Option<opentake_media::MediaCancelToken>>,
+    active: Mutex<Option<ActiveDeferredAnalysis>>,
+    admission: crate::updater::InstallAdmissionGate,
+}
+
+struct ActiveDeferredAnalysis {
+    cancel: opentake_media::MediaCancelToken,
+    _admission: crate::updater::ActivityLease,
 }
 
 /// Single-flight cooperative cancellation for a two-stem separation job.
 #[derive(Default)]
 pub struct StemSeparationState {
-    active: Mutex<Option<opentake_media::MediaCancelToken>>,
+    active: Mutex<Option<ActiveProjectMutation>>,
+    admission: crate::updater::InstallAdmissionGate,
 }
 
 /// Single-flight proxy transcode plus the app-level playback preference. The
@@ -110,12 +120,27 @@ pub struct StemSeparationState {
 /// source selection only and never changes export resolution.
 #[derive(Default)]
 pub struct MediaProxyState {
-    active: Mutex<Option<opentake_media::MediaCancelToken>>,
+    active: Mutex<Option<ActiveProjectMutation>>,
+    admission: crate::updater::InstallAdmissionGate,
     enabled: AtomicBool,
 }
 
+struct ActiveProjectMutation {
+    cancel: opentake_media::MediaCancelToken,
+    _admission: crate::updater::ActivityLease,
+}
+
 impl MediaProxyState {
+    pub(crate) fn new(admission: crate::updater::InstallAdmissionGate) -> Self {
+        Self {
+            active: Mutex::new(None),
+            admission,
+            enabled: AtomicBool::new(false),
+        }
+    }
+
     fn begin(&self) -> Result<opentake_media::MediaCancelToken, String> {
+        let admission = self.admission.begin_activity()?;
         let mut active = self
             .active
             .lock()
@@ -124,7 +149,10 @@ impl MediaProxyState {
             return Err("media_proxy_busy".to_string());
         }
         let token = opentake_media::MediaCancelToken::new();
-        *active = Some(token.clone());
+        *active = Some(ActiveProjectMutation {
+            cancel: token.clone(),
+            _admission: admission,
+        });
         Ok(token)
     }
 
@@ -135,7 +163,7 @@ impl MediaProxyState {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if active
             .as_ref()
-            .is_some_and(|current| current.same_instance(token))
+            .is_some_and(|current| current.cancel.same_instance(token))
         {
             *active = None;
         }
@@ -146,8 +174,8 @@ impl MediaProxyState {
             .active
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        active.as_ref().is_some_and(|token| {
-            token.cancel();
+        active.as_ref().is_some_and(|operation| {
+            operation.cancel.cancel();
             true
         })
     }
@@ -162,7 +190,15 @@ impl MediaProxyState {
 }
 
 impl StemSeparationState {
+    pub(crate) fn new(admission: crate::updater::InstallAdmissionGate) -> Self {
+        Self {
+            active: Mutex::new(None),
+            admission,
+        }
+    }
+
     fn begin(&self) -> Result<opentake_media::MediaCancelToken, String> {
+        let admission = self.admission.begin_activity()?;
         let mut active = self
             .active
             .lock()
@@ -171,7 +207,10 @@ impl StemSeparationState {
             return Err("stem_separation_busy".to_string());
         }
         let token = opentake_media::MediaCancelToken::new();
-        *active = Some(token.clone());
+        *active = Some(ActiveProjectMutation {
+            cancel: token.clone(),
+            _admission: admission,
+        });
         Ok(token)
     }
 
@@ -182,7 +221,7 @@ impl StemSeparationState {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if active
             .as_ref()
-            .is_some_and(|current| current.same_instance(token))
+            .is_some_and(|current| current.cancel.same_instance(token))
         {
             *active = None;
         }
@@ -193,15 +232,29 @@ impl StemSeparationState {
             .active
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        active.as_ref().is_some_and(|token| {
-            token.cancel();
+        active.as_ref().is_some_and(|operation| {
+            operation.cancel.cancel();
             true
         })
     }
 }
 
+fn begin_direct_media_project_write(
+    admission: &crate::updater::InstallAdmissionGate,
+) -> Result<crate::updater::ActivityLease, String> {
+    crate::updater::begin_mutating_activity(admission)
+}
+
 impl DenoiseAnalysisState {
+    pub(crate) fn new(admission: crate::updater::InstallAdmissionGate) -> Self {
+        Self {
+            active: Mutex::new(None),
+            admission,
+        }
+    }
+
     fn begin(&self) -> Result<opentake_media::MediaCancelToken, String> {
+        let admission = self.admission.begin_activity()?;
         let mut active = self
             .active
             .lock()
@@ -210,7 +263,10 @@ impl DenoiseAnalysisState {
             return Err("denoise_analysis_busy".to_string());
         }
         let token = opentake_media::MediaCancelToken::new();
-        *active = Some(token.clone());
+        *active = Some(ActiveDeferredAnalysis {
+            cancel: token.clone(),
+            _admission: admission,
+        });
         Ok(token)
     }
 
@@ -221,7 +277,7 @@ impl DenoiseAnalysisState {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if active
             .as_ref()
-            .is_some_and(|current| current.same_instance(token))
+            .is_some_and(|current| current.cancel.same_instance(token))
         {
             *active = None;
         }
@@ -232,15 +288,23 @@ impl DenoiseAnalysisState {
             .active
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        active.as_ref().is_some_and(|token| {
-            token.cancel();
+        active.as_ref().is_some_and(|analysis| {
+            analysis.cancel.cancel();
             true
         })
     }
 }
 
 impl LoudnessAnalysisState {
+    pub(crate) fn new(admission: crate::updater::InstallAdmissionGate) -> Self {
+        Self {
+            active: Mutex::new(None),
+            admission,
+        }
+    }
+
     fn begin(&self) -> Result<opentake_media::MediaCancelToken, String> {
+        let admission = self.admission.begin_activity()?;
         let mut active = self
             .active
             .lock()
@@ -249,7 +313,10 @@ impl LoudnessAnalysisState {
             return Err("loudness_analysis_busy".to_string());
         }
         let token = opentake_media::MediaCancelToken::new();
-        *active = Some(token.clone());
+        *active = Some(ActiveDeferredAnalysis {
+            cancel: token.clone(),
+            _admission: admission,
+        });
         Ok(token)
     }
 
@@ -260,7 +327,7 @@ impl LoudnessAnalysisState {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if active
             .as_ref()
-            .is_some_and(|current| current.same_instance(token))
+            .is_some_and(|current| current.cancel.same_instance(token))
         {
             *active = None;
         }
@@ -271,15 +338,23 @@ impl LoudnessAnalysisState {
             .active
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        active.as_ref().is_some_and(|token| {
-            token.cancel();
+        active.as_ref().is_some_and(|analysis| {
+            analysis.cancel.cancel();
             true
         })
     }
 }
 
 impl StabilizationAnalysisState {
+    pub(crate) fn new(admission: crate::updater::InstallAdmissionGate) -> Self {
+        Self {
+            active: Mutex::new(None),
+            admission,
+        }
+    }
+
     fn begin(&self) -> Result<opentake_media::MediaCancelToken, String> {
+        let admission = self.admission.begin_activity()?;
         let mut active = self
             .active
             .lock()
@@ -288,7 +363,10 @@ impl StabilizationAnalysisState {
             return Err("a stabilization analysis is already running".to_string());
         }
         let token = opentake_media::MediaCancelToken::new();
-        *active = Some(token.clone());
+        *active = Some(ActiveDeferredAnalysis {
+            cancel: token.clone(),
+            _admission: admission,
+        });
         Ok(token)
     }
 
@@ -299,7 +377,7 @@ impl StabilizationAnalysisState {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if active
             .as_ref()
-            .is_some_and(|current| current.same_instance(token))
+            .is_some_and(|current| current.cancel.same_instance(token))
         {
             *active = None;
         }
@@ -310,8 +388,8 @@ impl StabilizationAnalysisState {
             .active
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(token) = active.as_ref() {
-            token.cancel();
+        if let Some(analysis) = active.as_ref() {
+            analysis.cancel.cancel();
             true
         } else {
             false
@@ -338,12 +416,23 @@ pub(crate) fn cancel_project_bound_analyses(
 impl MediaState {
     /// Wrap an engine for managed state.
     pub fn new(engine: MediaEngine) -> Self {
-        MediaState { engine }
+        Self::new_with_admission(engine, crate::updater::InstallAdmissionGate::default())
+    }
+
+    pub(crate) fn new_with_admission(
+        engine: MediaEngine,
+        admission: crate::updater::InstallAdmissionGate,
+    ) -> Self {
+        MediaState { engine, admission }
     }
 
     /// The wrapped engine.
     pub fn engine(&self) -> &MediaEngine {
         &self.engine
+    }
+
+    fn begin_cache_write(&self) -> Result<crate::updater::ActivityLease, String> {
+        crate::updater::begin_mutating_activity(&self.admission)
     }
 }
 
@@ -769,6 +858,20 @@ fn poster_target_time(time_secs: Option<f64>) -> f64 {
         .unwrap_or(0.0)
 }
 
+fn read_cached_poster(
+    poster_path: &Path,
+    target: f64,
+) -> Option<Result<(PathBuf, u32, u32, f64), String>> {
+    if !poster_path.exists() {
+        return None;
+    }
+    Some(
+        image::image_dimensions(poster_path)
+            .map(|(width, height)| (poster_path.to_path_buf(), width, height, target))
+            .map_err(|error| format!("thumbnail dimensions: {error}")),
+    )
+}
+
 /// Decode (or read from cache) a single poster frame for `path` at `target`,
 /// scaled to fit `max_size`, written to `poster_path`. Shared by the small grid
 /// poster ([`video_poster`]) and the hi-res preview poster
@@ -780,10 +883,8 @@ fn decode_poster_to(
     target: f64,
     max_size: (u32, u32),
 ) -> Result<(PathBuf, u32, u32, f64), String> {
-    if poster_path.exists() {
-        let (width, height) = image::image_dimensions(&poster_path)
-            .map_err(|e| format!("thumbnail dimensions: {e}"))?;
-        return Ok((poster_path, width, height, target));
+    if let Some(cached) = read_cached_poster(&poster_path, target) {
+        return cached;
     }
 
     let req = FrameRequest {
@@ -1007,6 +1108,97 @@ fn generate_thumbnail_for_entry(
             })
         }
         _ => Ok(empty_thumbnail_dto(entry)),
+    }
+}
+
+fn cached_thumbnail_for_entry(
+    engine: &MediaEngine,
+    entry: &MediaManifestEntry,
+    path: &Path,
+    time_secs: Option<f64>,
+    max_frames: Option<usize>,
+    include_sprite: bool,
+) -> Option<Result<ThumbnailDto, String>> {
+    if !path.is_file() {
+        return Some(Err(format!("source file not found: {}", path.display())));
+    }
+    let key = match cache_key_for(path) {
+        Ok(key) => key,
+        Err(error) => return Some(Err(error)),
+    };
+    match entry.kind {
+        ClipType::Video => {
+            let target = poster_target_time(time_secs);
+            let poster_path = timed_poster_path_for(engine.cache_root(), &key, target);
+            let (poster_path, poster_w, poster_h, poster_time) =
+                match read_cached_poster(&poster_path, target)? {
+                    Ok(cached) => cached,
+                    Err(error) => return Some(Err(error)),
+                };
+            let sprite_meta = if include_sprite {
+                let limit = sprite_frame_limit(max_frames);
+                match read_cached_sprite_meta(engine.cache_root(), &key) {
+                    Some(mut meta) => {
+                        meta.times.truncate(limit);
+                        Some(meta)
+                    }
+                    None if video_thumbnail_times(entry.duration)
+                        .into_iter()
+                        .take(limit)
+                        .next()
+                        .is_none() =>
+                    {
+                        None
+                    }
+                    None => return None,
+                }
+            } else {
+                None
+            };
+            let sprite_path = sprite_path_for(engine.cache_root(), &key);
+            Some(Ok(ThumbnailDto {
+                media_ref: entry.id.clone(),
+                kind: entry.kind,
+                thumbnail_path: Some(poster_path.to_string_lossy().into_owned()),
+                sprite_path: if include_sprite && sprite_path.is_file() {
+                    Some(sprite_path.to_string_lossy().into_owned())
+                } else {
+                    None
+                },
+                tile_width: sprite_meta
+                    .as_ref()
+                    .map(|meta| meta.tile_width)
+                    .or(Some(poster_w)),
+                tile_height: sprite_meta
+                    .as_ref()
+                    .map(|meta| meta.tile_height)
+                    .or(Some(poster_h)),
+                columns: sprite_meta.as_ref().map(|meta| meta.columns).or(Some(1)),
+                times: sprite_meta
+                    .map(|meta| meta.times)
+                    .unwrap_or_else(|| vec![poster_time]),
+            }))
+        }
+        ClipType::Image => {
+            let poster_path = poster_path_for(engine.cache_root(), &key);
+            if !poster_path.exists() {
+                return None;
+            }
+            let (tile_width, tile_height) = image::image_dimensions(&poster_path)
+                .map(|(width, height)| (Some(width), Some(height)))
+                .unwrap_or((None, None));
+            Some(Ok(ThumbnailDto {
+                media_ref: entry.id.clone(),
+                kind: entry.kind,
+                thumbnail_path: Some(poster_path.to_string_lossy().into_owned()),
+                sprite_path: None,
+                tile_width,
+                tile_height,
+                columns: Some(1),
+                times: vec![0.0],
+            }))
+        }
+        _ => Some(Ok(empty_thumbnail_dto(entry))),
     }
 }
 
@@ -1380,9 +1572,11 @@ pub fn import_folder(
     core: State<'_, AppCore>,
     media: State<'_, MediaState>,
     prewarm: State<'_, prewarm::PrewarmScheduler>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
     path: String,
     recursive: Option<bool>,
 ) -> Result<MediaListDto, String> {
+    let _activity = begin_direct_media_project_write(&admission)?;
     import_folder_impl(&core, media.engine(), &prewarm, path, recursive)
 }
 
@@ -2459,8 +2653,10 @@ pub fn import_media(
     core: State<'_, AppCore>,
     media: State<'_, MediaState>,
     prewarm: State<'_, prewarm::PrewarmScheduler>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
     paths: Vec<String>,
 ) -> Result<MediaListDto, String> {
+    let _activity = begin_direct_media_project_write(&admission)?;
     import_media_impl(&core, media.engine(), &prewarm, paths)
 }
 
@@ -2533,28 +2729,39 @@ fn import_media_impl_with_options(
 
 /// `get_media`: the current media catalog for the panel. Infallible.
 #[tauri::command]
-pub fn get_media(
-    app: AppHandle,
+pub fn get_media<R: Runtime>(
+    app: AppHandle<R>,
     core: State<'_, AppCore>,
     media: State<'_, MediaState>,
 ) -> MediaListDto {
     let mut catalog = MediaListDto::from_core(&core, Some(media.engine().cache_root()));
-    grant_catalog_proxy_asset_scope(&app, &mut catalog);
+    if catalog.items.iter().any(|item| item.proxy_path.is_some()) {
+        if let Ok(_activity) = media.begin_cache_write() {
+            grant_catalog_proxy_asset_scope(&app, &mut catalog);
+        } else {
+            for item in &mut catalog.items {
+                item.proxy_path = None;
+            }
+        }
+    }
     catalog
 }
 
 /// Persist one project asset in the content-addressed global library and mirror
 /// that identity in the current project manifest.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri injects project/media/library/update state
 pub fn toggle_favorite(
     core: State<'_, AppCore>,
     media: State<'_, MediaState>,
     library: State<'_, LibraryState>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
     asset_id: String,
     favorite: bool,
     expected_project_epoch: u64,
     expected_project_path: String,
 ) -> Result<MediaListDto, String> {
+    let _activity = begin_direct_media_project_write(&admission)?;
     let _workflow = library.lock_workflow();
     toggle_favorite_impl_for_project(
         &core,
@@ -2782,10 +2989,12 @@ pub fn sync_project_favorites(
     core: State<'_, AppCore>,
     media: State<'_, MediaState>,
     library: State<'_, LibraryState>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
     legacy_asset_ids: Vec<String>,
     expected_project_epoch: u64,
     expected_project_path: String,
 ) -> Result<FavoriteSyncDto, String> {
+    let _activity = begin_direct_media_project_write(&admission)?;
     let _workflow = library.lock_workflow();
     sync_project_favorites_impl_for_project(
         &core,
@@ -3352,9 +3561,13 @@ fn validate_extract_output(out_path: &str) -> Result<PathBuf, String> {
 pub fn extract_audio(
     core: State<'_, AppCore>,
     media: State<'_, MediaState>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
     media_id: String,
     out_path: String,
 ) -> Result<String, String> {
+    // The output is user-selected rather than project state, but it is a long
+    // durable write that must not be cut off by the updater's process exit.
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
     // Path boundary check first (review #4): fail fast on a bad output path
     // before touching the manifest or spawning ffmpeg.
     let output = validate_extract_output(&out_path)?;
@@ -3395,9 +3608,11 @@ pub fn relink_media(
     app: AppHandle,
     core: State<'_, AppCore>,
     media: State<'_, MediaState>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
     media_ref: String,
     new_path: String,
 ) -> Result<MediaListDto, String> {
+    let _activity = begin_direct_media_project_write(&admission)?;
     let new = PathBuf::from(&new_path);
     if !new.is_file() {
         return Err(format!("file not found: {new_path}"));
@@ -3472,13 +3687,25 @@ pub fn generate_thumbnail(
         .find(|e| e.id == media_ref)
         .ok_or_else(|| format!("media not found: {media_ref}"))?;
     let path = source_path_for_entry(entry, snapshot.project_dir.as_deref())?;
+    let include_sprite = include_sprite.unwrap_or(false);
+    if let Some(cached) = cached_thumbnail_for_entry(
+        media.engine(),
+        entry,
+        &path,
+        time_secs,
+        max_frames,
+        include_sprite,
+    ) {
+        return cached;
+    }
+    let _activity = media.begin_cache_write()?;
     generate_thumbnail_for_entry(
         media.engine(),
         entry,
         &path,
         time_secs,
         max_frames,
-        include_sprite.unwrap_or(false),
+        include_sprite,
     )
     .map_err(|e| {
         eprintln!(
@@ -3691,6 +3918,13 @@ pub fn preview_poster(
         return Err(format!("source file not found: {}", path.display()));
     }
     let key = cache_key_for(&path)?;
+    let target = poster_target_time(time_secs);
+    let cached_path = preview_poster_path_for(media.engine().cache_root(), &key, target);
+    if let Some(cached) = read_cached_poster(&cached_path, target) {
+        return cached
+            .map(|(poster_path, _, _, _)| Some(poster_path.to_string_lossy().into_owned()));
+    }
+    let _activity = media.begin_cache_write()?;
     let (poster_path, _, _, _) = video_preview_poster(media.engine(), &path, &key, time_secs)
         .map_err(|e| {
             eprintln!(
@@ -3727,7 +3961,18 @@ pub fn get_waveform(
             None => return Err("project not saved; cannot resolve media path".into()),
         },
     };
-    media.engine().waveform(&path, entry.duration).map_err(|e| {
+    let result = if let Some(key) = visual_file_identity_key(&path) {
+        if let Some(cached) =
+            opentake_media::waveform::store::load_waveform(media.engine().cache_root(), &key)
+        {
+            return Ok(cached);
+        }
+        let _activity = media.begin_cache_write()?;
+        media.engine().waveform(&path, entry.duration)
+    } else {
+        opentake_media::waveform::waveform(&path, entry.duration)
+    };
+    result.map_err(|e| {
         // Log server-side too (the frontend swallows the error into "no
         // waveform"); without this a decode failure is invisible.
         eprintln!(
@@ -4311,10 +4556,12 @@ pub struct ImportStemsToTracksDto {
 #[tauri::command]
 pub fn import_stems_to_tracks(
     core: State<'_, AppCore>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
     vocals_asset_id: String,
     accompaniment_asset_id: String,
     start_frame: i32,
 ) -> Result<ImportStemsToTracksDto, String> {
+    let _activity = begin_direct_media_project_write(&admission)?;
     import_stems_to_tracks_core(&core, vocals_asset_id, accompaniment_asset_id, start_frame)
 }
 
@@ -4760,8 +5007,10 @@ fn remove_media_proxy_impl(
 pub fn remove_media_proxy(
     app: AppHandle,
     core: State<'_, AppCore>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
     asset_id: String,
 ) -> Result<bool, String> {
+    let _activity = begin_direct_media_project_write(&admission)?;
     remove_media_proxy_impl(&core, &asset_id, |path| {
         let _ = std::fs::remove_file(path);
         revoke_proxy_asset_file(&app, path);
@@ -7700,6 +7949,164 @@ mod tests {
         assert!(!handle.asset_protocol_scope().is_allowed(&proxy));
     }
 
+    #[test]
+    fn update_install_rejects_synchronous_cache_writers() {
+        let temp = tempfile::tempdir().unwrap();
+        let (core, _bundle, _source, asset_id) = saved_core_with_media(temp.path());
+        let admission = crate::updater::InstallAdmissionGate::default();
+        let app = tauri::test::mock_app();
+        app.manage(core);
+        app.manage(MediaState::new_with_admission(
+            engine_for(temp.path()),
+            admission.clone(),
+        ));
+        let install = admission.begin_install().expect("install starts");
+        let expected = "app update installation is in progress";
+
+        assert_eq!(
+            generate_thumbnail(
+                app.state::<AppCore>(),
+                app.state::<MediaState>(),
+                asset_id.clone(),
+                None,
+                None,
+                None,
+            )
+            .expect_err("thumbnail cache writer must fail closed"),
+            expected
+        );
+        assert_eq!(
+            preview_poster(
+                app.state::<AppCore>(),
+                app.state::<MediaState>(),
+                asset_id.clone(),
+                None,
+            )
+            .expect_err("preview-poster cache writer must fail closed"),
+            expected
+        );
+        assert_eq!(
+            get_waveform(app.state::<AppCore>(), app.state::<MediaState>(), asset_id,)
+                .expect_err("waveform cache writer must fail closed"),
+            expected
+        );
+        drop(install);
+    }
+
+    #[test]
+    fn update_install_allows_cache_hits_and_nonwriting_thumbnail_requests() {
+        let temp = tempfile::tempdir().unwrap();
+        let (core, _bundle, source, video_id) = saved_core_with_media(temp.path());
+        let audio_source = temp.path().join("audio.wav");
+        fs::write(&audio_source, b"audio-placeholder").unwrap();
+        let audio_id = core
+            .import_media_file(&audio_source, "audio", &ProbedMedia::default())
+            .expect("import audio fixture")
+            .id;
+        core.save_project(None).expect("persist audio fixture");
+
+        let engine = engine_for(temp.path());
+        let key = cache_key_for(&source).expect("video cache key");
+        let thumbnail_path = timed_poster_path_for(engine.cache_root(), &key, 0.0);
+        let preview_path = preview_poster_path_for(engine.cache_root(), &key, 0.0);
+        write_png(&thumbnail_path, &RgbaFrame::black(2, 2)).expect("seed thumbnail cache");
+        write_png(&preview_path, &RgbaFrame::black(4, 4)).expect("seed preview cache");
+        let cached_waveform = vec![0.25, 0.75];
+        opentake_media::waveform::store::save_waveform(engine.cache_root(), &key, &cached_waveform)
+            .expect("seed waveform cache");
+
+        let admission = crate::updater::InstallAdmissionGate::default();
+        let app = tauri::test::mock_app();
+        app.manage(core);
+        app.manage(MediaState::new_with_admission(engine, admission.clone()));
+        let install = admission.begin_install().expect("install starts");
+
+        let thumbnail = generate_thumbnail(
+            app.state::<AppCore>(),
+            app.state::<MediaState>(),
+            video_id.clone(),
+            None,
+            None,
+            Some(false),
+        )
+        .expect("cached thumbnail is read-only");
+        assert_eq!(
+            thumbnail.thumbnail_path.as_deref(),
+            Some(thumbnail_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            preview_poster(
+                app.state::<AppCore>(),
+                app.state::<MediaState>(),
+                video_id.clone(),
+                None,
+            )
+            .expect("cached preview is read-only")
+            .as_deref(),
+            Some(preview_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            get_waveform(app.state::<AppCore>(), app.state::<MediaState>(), video_id,)
+                .expect("cached waveform is read-only"),
+            cached_waveform
+        );
+        let audio_thumbnail = generate_thumbnail(
+            app.state::<AppCore>(),
+            app.state::<MediaState>(),
+            audio_id,
+            None,
+            None,
+            Some(false),
+        )
+        .expect("audio has no thumbnail cache write");
+        assert_eq!(audio_thumbnail.kind, ClipType::Audio);
+        assert_eq!(audio_thumbnail.thumbnail_path, None);
+        drop(install);
+    }
+
+    #[test]
+    fn get_media_does_not_persist_proxy_scope_during_update_install() {
+        let temp = tempfile::tempdir().unwrap();
+        let (core, _bundle, _source, asset_id) = saved_core_with_media(temp.path());
+        let snapshot = core.runtime_snapshot();
+        let project_dir = snapshot.project_dir.clone().unwrap();
+        let proxy = project_dir.join("media/proxies/proxy.mp4");
+        fs::create_dir_all(proxy.parent().unwrap()).unwrap();
+        fs::write(&proxy, b"proxy").unwrap();
+        core.set_media_proxy_for_project(
+            snapshot.project_epoch,
+            &project_dir,
+            &asset_id,
+            Some(MediaProxy {
+                relative_path: "media/proxies/proxy.mp4".into(),
+                source_sha256: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+                    .into(),
+                width: 1280,
+                height: 720,
+            }),
+        )
+        .unwrap();
+        let admission = crate::updater::InstallAdmissionGate::default();
+        let app = tauri::test::mock_app();
+        app.manage(core);
+        app.manage(MediaState::new_with_admission(
+            engine_for(temp.path()),
+            admission.clone(),
+        ));
+        let install = admission.begin_install().expect("install starts");
+
+        let catalog = get_media(
+            app.handle().clone(),
+            app.state::<AppCore>(),
+            app.state::<MediaState>(),
+        );
+
+        assert_eq!(catalog.items.len(), 1);
+        assert_eq!(catalog.items[0].proxy_path, None);
+        assert!(!app.handle().asset_protocol_scope().is_allowed(&proxy));
+        drop(install);
+    }
+
     #[cfg(unix)]
     #[test]
     fn proxy_asset_scope_rejects_symlink() {
@@ -7968,6 +8375,28 @@ mod tests {
     }
 
     #[test]
+    fn deferred_inspector_analyses_share_update_install_admission() {
+        let admission = crate::updater::InstallAdmissionGate::default();
+        let stabilization = StabilizationAnalysisState::new(admission.clone());
+        let loudness = LoudnessAnalysisState::new(admission.clone());
+        let denoise = DenoiseAnalysisState::new(admission.clone());
+
+        let stabilization_token = stabilization.begin().unwrap();
+        let loudness_token = loudness.begin().unwrap();
+        let denoise_token = denoise.begin().unwrap();
+        assert!(admission.begin_install().is_err());
+
+        stabilization.finish(&stabilization_token);
+        loudness.finish(&loudness_token);
+        denoise.finish(&denoise_token);
+        let install = admission.begin_install().unwrap();
+        assert!(stabilization.begin().is_err());
+        assert!(loudness.begin().is_err());
+        assert!(denoise.begin().is_err());
+        drop(install);
+    }
+
+    #[test]
     fn project_identity_transition_cancels_every_inspector_analysis() {
         let stabilization = StabilizationAnalysisState::default();
         let loudness = LoudnessAnalysisState::default();
@@ -8001,5 +8430,68 @@ mod tests {
         assert!(!state.cancel());
         let second = state.begin().expect("slot is reusable");
         state.finish(&second);
+    }
+
+    #[test]
+    fn stem_separation_holds_update_admission_until_finish() {
+        let admission = crate::updater::InstallAdmissionGate::default();
+        let state = StemSeparationState::new(admission.clone());
+
+        let token = state.begin().expect("stem separation starts");
+        assert!(
+            admission.begin_install().is_err(),
+            "install must wait through the final persisted stem import"
+        );
+        state.finish(&token);
+
+        let install = admission
+            .begin_install()
+            .expect("finished job releases gate");
+        assert!(
+            state.begin().is_err(),
+            "an installer that wins admission rejects new stem work"
+        );
+        drop(install);
+    }
+
+    #[test]
+    fn media_proxy_holds_update_admission_until_finish() {
+        let admission = crate::updater::InstallAdmissionGate::default();
+        let state = MediaProxyState::new(admission.clone());
+
+        let token = state.begin().expect("proxy transcode starts");
+        assert!(
+            admission.begin_install().is_err(),
+            "install must wait through the final proxy manifest commit"
+        );
+        state.finish(&token);
+
+        let install = admission
+            .begin_install()
+            .expect("finished job releases gate");
+        assert!(
+            state.begin().is_err(),
+            "an installer that wins admission rejects new proxy work"
+        );
+        drop(install);
+    }
+
+    #[test]
+    fn direct_media_project_writer_is_mutually_exclusive_with_update_install() {
+        let admission = crate::updater::InstallAdmissionGate::default();
+
+        let write = begin_direct_media_project_write(&admission).expect("writer starts");
+        assert!(
+            admission.begin_install().is_err(),
+            "a direct writer that starts first must block install"
+        );
+        drop(write);
+
+        let install = admission.begin_install().expect("install starts");
+        assert!(
+            begin_direct_media_project_write(&admission).is_err(),
+            "install that starts first must reject a stale writer IPC"
+        );
+        drop(install);
     }
 }

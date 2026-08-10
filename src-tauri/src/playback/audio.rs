@@ -51,7 +51,9 @@ const STREAM_WINDOW_CAPACITY: usize = 4;
 const STREAM_SEND_POLL: Duration = Duration::from_millis(5);
 const CALLBACK_START_TIMEOUT: Duration = Duration::from_secs(1);
 const CALLBACK_POLL_INTERVAL: Duration = Duration::from_millis(5);
+const AUDIO_CLOCK_STALL_TIMEOUT: Duration = Duration::from_millis(150);
 const CALLBACKS_REQUIRED_FOR_LIVENESS: u64 = 2;
+pub(super) const AUDIO_PREPARE_BUSY: &str = "audio_prepare_busy";
 
 type AudioRateReply = SyncSender<Option<u32>>;
 
@@ -72,18 +74,37 @@ struct AudioPrepareJob<T> {
     result: tokio::sync::oneshot::Sender<Result<T, String>>,
 }
 
-struct AudioPrepareOccupancyGuard(Arc<AtomicBool>);
+struct AudioPrepareOccupancy {
+    occupied: AtomicBool,
+    idle: tokio::sync::Notify,
+}
+
+impl AudioPrepareOccupancy {
+    fn new() -> Self {
+        Self {
+            occupied: AtomicBool::new(false),
+            idle: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn release(&self) {
+        self.occupied.store(false, Ordering::Release);
+        self.idle.notify_waiters();
+    }
+}
+
+struct AudioPrepareOccupancyGuard(Arc<AudioPrepareOccupancy>);
 
 impl Drop for AudioPrepareOccupancyGuard {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        self.0.release();
     }
 }
 
 /// One persistent blocking worker with exactly one admitted audio-prepare job.
 pub struct AudioPrepareWorker<T: Send + 'static> {
     sender: SyncSender<AudioPrepareJob<T>>,
-    occupied: Arc<AtomicBool>,
+    occupancy: Arc<AudioPrepareOccupancy>,
 }
 
 /// Owning admission for the single audio-prepare worker slot. Dropping an
@@ -92,7 +113,7 @@ pub struct AudioPrepareWorker<T: Send + 'static> {
 #[must_use]
 pub struct AudioPreparePermit<T: Send + 'static> {
     sender: SyncSender<AudioPrepareJob<T>>,
-    occupied: Arc<AtomicBool>,
+    occupancy: Arc<AudioPrepareOccupancy>,
     reserved: bool,
 }
 
@@ -111,7 +132,7 @@ impl<T: Send + 'static> AudioPreparePermit<T> {
                 self.reserved = false;
                 Ok(receiver)
             }
-            Err(TrySendError::Full(_)) => Err("audio_prepare_busy".to_string()),
+            Err(TrySendError::Full(_)) => Err(AUDIO_PREPARE_BUSY.to_string()),
             Err(TrySendError::Disconnected(_)) => Err("audio_prepare_worker_stopped".to_string()),
         }
     }
@@ -120,7 +141,7 @@ impl<T: Send + 'static> AudioPreparePermit<T> {
 impl<T: Send + 'static> Drop for AudioPreparePermit<T> {
     fn drop(&mut self) {
         if self.reserved {
-            self.occupied.store(false, Ordering::Release);
+            self.occupancy.release();
         }
     }
 }
@@ -128,29 +149,30 @@ impl<T: Send + 'static> Drop for AudioPreparePermit<T> {
 impl<T: Send + 'static> AudioPrepareWorker<T> {
     pub fn new() -> Self {
         let (sender, receiver) = mpsc::sync_channel::<AudioPrepareJob<T>>(1);
-        let occupied = Arc::new(AtomicBool::new(false));
-        let worker_occupied = Arc::clone(&occupied);
+        let occupancy = Arc::new(AudioPrepareOccupancy::new());
+        let worker_occupancy = Arc::clone(&occupancy);
         let _ = thread::Builder::new()
             .name("opentake-audio-prepare".to_string())
             .spawn(move || {
                 while let Ok(job) = receiver.recv() {
-                    let occupancy = AudioPrepareOccupancyGuard(Arc::clone(&worker_occupied));
+                    let occupancy = AudioPrepareOccupancyGuard(Arc::clone(&worker_occupancy));
                     let value = catch_unwind(AssertUnwindSafe(job.build))
                         .map_err(|_| "audio_prepare_job_panicked".to_string());
                     drop(occupancy);
                     let _ = job.result.send(value);
                 }
             });
-        Self { sender, occupied }
+        Self { sender, occupancy }
     }
 
     pub fn try_reserve(&self) -> Result<AudioPreparePermit<T>, String> {
-        self.occupied
+        self.occupancy
+            .occupied
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| "audio_prepare_busy".to_string())?;
+            .map_err(|_| AUDIO_PREPARE_BUSY.to_string())?;
         Ok(AudioPreparePermit {
             sender: self.sender.clone(),
-            occupied: Arc::clone(&self.occupied),
+            occupancy: Arc::clone(&self.occupancy),
             reserved: true,
         })
     }
@@ -163,7 +185,21 @@ impl<T: Send + 'static> AudioPrepareWorker<T> {
     }
 
     pub fn is_occupied(&self) -> bool {
-        self.occupied.load(Ordering::Acquire)
+        self.occupancy.occupied.load(Ordering::Acquire)
+    }
+
+    /// Wait for the admitted closure to return without polling a worker thread.
+    pub async fn wait_until_idle(&self, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let idle = self.occupancy.idle.notified();
+            if !self.is_occupied() {
+                return true;
+            }
+            if tokio::time::timeout_at(deadline, idle).await.is_err() {
+                return !self.is_occupied();
+            }
+        }
     }
 }
 
@@ -304,14 +340,83 @@ pub struct AudioClock {
     /// Project fps (for `seek`, which has no fps argument).
     fps: i32,
     stream: Option<Arc<AudioStreamControl>>,
+    progress: Mutex<AudioClockProgress>,
+}
+
+struct AudioClockProgress {
+    observed_pos: u64,
+    observed_at: Instant,
+    fallback: Option<(Instant, i32)>,
+    last_frame: i32,
+}
+
+impl AudioClock {
+    fn new(
+        pos: Arc<AtomicU64>,
+        rate: u32,
+        fps: i32,
+        stream: Option<Arc<AudioStreamControl>>,
+    ) -> Self {
+        let observed_pos = pos.load(Ordering::Acquire);
+        let initial_frame = audio_position_frame(observed_pos, rate, fps);
+        Self {
+            pos,
+            rate,
+            fps,
+            stream,
+            progress: Mutex::new(AudioClockProgress {
+                observed_pos,
+                observed_at: Instant::now(),
+                fallback: None,
+                last_frame: initial_frame,
+            }),
+        }
+    }
+}
+
+fn audio_position_frame(pos: u64, rate: u32, fps: i32) -> i32 {
+    let fps = fps.max(1);
+    ((pos as f64 / rate.max(1) as f64) * fps as f64) as i32
 }
 
 impl PlaybackClock for AudioClock {
     fn frame(&self, fps: i32) -> i32 {
         let fps = if fps > 0 { fps } else { self.fps.max(1) };
-        let pos = self.pos.load(Ordering::Relaxed);
-        // Truncate (secondsToFrame = Int(secs*fps)).
-        ((pos as f64 / self.rate.max(1) as f64) * fps as f64) as i32
+        let pos = self.pos.load(Ordering::Acquire);
+        let audio_frame = audio_position_frame(pos, self.rate, fps);
+        let now = Instant::now();
+        let mut progress = self
+            .progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        if pos != progress.observed_pos {
+            progress.observed_pos = pos;
+            progress.observed_at = now;
+        } else if progress.fallback.is_none()
+            && now.saturating_duration_since(progress.observed_at) >= AUDIO_CLOCK_STALL_TIMEOUT
+        {
+            // The callback was proven live at startup/resume, but devices can be
+            // interrupted later. Continue from the last monotonic frame on wall
+            // time instead of rendering the same timeline frame forever.
+            progress.fallback = Some((progress.observed_at, progress.last_frame.max(audio_frame)));
+        }
+
+        let candidate = if let Some((origin, base_frame)) = progress.fallback {
+            let elapsed_frames =
+                (now.saturating_duration_since(origin).as_secs_f64() * fps as f64) as i32;
+            let wall_frame = base_frame.saturating_add(elapsed_frames.max(0));
+            if audio_frame >= wall_frame {
+                progress.fallback = None;
+                audio_frame
+            } else {
+                wall_frame
+            }
+        } else {
+            audio_frame
+        };
+        progress.last_frame = progress.last_frame.max(candidate);
+        progress.last_frame
     }
 
     fn seek(&self, frame: i32) {
@@ -323,6 +428,17 @@ impl PlaybackClock for AudioClock {
         let pos = ((frame.max(0) as f64 / fps as f64) * self.rate as f64).round() as u64;
         // Release pairs with the callback's AcqRel fetch_add so it observes the seek.
         self.pos.store(pos, Ordering::Release);
+        let mut progress = self
+            .progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *progress = AudioClockProgress {
+            observed_pos: pos,
+            observed_at: Instant::now(),
+            fallback: None,
+            last_frame: frame.max(0),
+        };
+        drop(progress);
         if let Some(stream) = &self.stream {
             stream.request_seek(pos);
         }
@@ -1448,12 +1564,12 @@ fn build_clock_with_state(
     };
     let pos = Arc::new(AtomicU64::new(start_audio_frame));
     let paused = Arc::new(AtomicBool::new(start_paused));
-    let clock = AudioClock {
-        pos: Arc::clone(&pos),
+    let clock = AudioClock::new(
+        Arc::clone(&pos),
         rate,
         fps,
-        stream: Some(Arc::clone(&prepared.control)),
-    };
+        Some(Arc::clone(&prepared.control)),
+    );
     match AudioPlayback::start_stream(
         prepared.consumer,
         prepared.control,
@@ -1483,12 +1599,7 @@ where
     let buffer = Arc::new(mixed);
     let pos = Arc::new(AtomicU64::new(0));
     let paused = Arc::new(AtomicBool::new(start_paused));
-    let clock = AudioClock {
-        pos: pos.clone(),
-        rate,
-        fps,
-        stream: None,
-    };
+    let clock = AudioClock::new(pos.clone(), rate, fps, None);
     clock.seek(start_frame); // begin playback at the current playhead
 
     match start(buffer, pos, paused) {
@@ -1932,20 +2043,49 @@ mod tests {
 
     #[test]
     fn audio_clock_frame_and_seek_round_trip() {
-        let clock = AudioClock {
-            pos: Arc::new(AtomicU64::new(0)),
-            rate: 48_000,
-            fps: 30,
-            stream: None,
-        };
+        let clock = AudioClock::new(Arc::new(AtomicU64::new(0)), 48_000, 30, None);
         // seek(30) → 30 frames = 1s = 48000 output frames → frame()==30.
         clock.seek(30);
         assert_eq!(clock.pos.load(Ordering::Relaxed), 48_000);
         assert_eq!(clock.frame(30), 30);
 
         // Half a second of frames → frame 15.
-        clock.pos.store(24_000, Ordering::Relaxed);
-        assert_eq!(clock.frame(30), 15);
+        let half_second = AudioClock::new(Arc::new(AtomicU64::new(24_000)), 48_000, 30, None);
+        assert_eq!(half_second.frame(30), 15);
+    }
+
+    #[test]
+    fn audio_clock_falls_back_to_wall_time_when_callbacks_stall_mid_playback() {
+        let clock = AudioClock::new(Arc::new(AtomicU64::new(0)), 48_000, 100, None);
+
+        assert_eq!(clock.frame(100), 0);
+        std::thread::sleep(AUDIO_CLOCK_STALL_TIMEOUT + Duration::from_millis(20));
+
+        assert!(
+            clock.frame(100) >= 1,
+            "a dead audio callback must not freeze the timeline forever"
+        );
+    }
+
+    #[test]
+    fn recovered_audio_callbacks_and_explicit_seeks_never_rewind_accidentally() {
+        let pos = Arc::new(AtomicU64::new(0));
+        let clock = AudioClock::new(Arc::clone(&pos), 48_000, 100, None);
+        let _ = clock.frame(100);
+        std::thread::sleep(AUDIO_CLOCK_STALL_TIMEOUT + Duration::from_millis(20));
+        let fallback_frame = clock.frame(100);
+        assert!(fallback_frame >= 1);
+
+        // A recovering device may initially report a position behind the wall
+        // fallback. It must catch up without pulling the timeline backwards.
+        pos.store(4_800, Ordering::Release);
+        assert!(clock.frame(100) >= fallback_frame);
+        pos.store(48_000, Ordering::Release);
+        assert!(clock.frame(100) >= 100);
+
+        // A user/transport seek is authoritative and intentionally may move back.
+        clock.seek(7);
+        assert_eq!(clock.frame(100), 7);
     }
 
     #[test]
@@ -2025,12 +2165,7 @@ mod tests {
 
     #[test]
     fn audio_clock_truncates_partial_frames() {
-        let clock = AudioClock {
-            pos: Arc::new(AtomicU64::new(0)),
-            rate: 48_000,
-            fps: 30,
-            stream: None,
-        };
+        let clock = AudioClock::new(Arc::new(AtomicU64::new(0)), 48_000, 30, None);
         // 1599 frames @ 48k, 30fps = 0.999 video frame → truncates to 0.
         clock.pos.store(1_599, Ordering::Relaxed);
         assert_eq!(clock.frame(30), 0);
@@ -2044,12 +2179,7 @@ mod tests {
         // 44100 Hz @ 24 fps: rate/fps = 1837.5 (not integer). seek (round) +
         // frame (truncate) must still land back on the same frame — a regression
         // guard for the truncate-only seek that reported frame-1 here.
-        let clock = AudioClock {
-            pos: Arc::new(AtomicU64::new(0)),
-            rate: 44_100,
-            fps: 24,
-            stream: None,
-        };
+        let clock = AudioClock::new(Arc::new(AtomicU64::new(0)), 44_100, 24, None);
         for f in [1, 7, 23, 100, 511] {
             clock.seek(f);
             assert_eq!(clock.frame(24), f, "seek({f}) must round-trip");

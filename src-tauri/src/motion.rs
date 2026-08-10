@@ -50,18 +50,29 @@ pub enum MotionProgress {
 #[derive(Clone)]
 pub struct MotionCommandState {
     bridge: Arc<TauriMotionBridge>,
-    active: Arc<Mutex<Option<opentake_media::MediaCancelToken>>>,
+    active: Arc<Mutex<Option<ActiveMotionCommand>>>,
+    admission: crate::updater::InstallAdmissionGate,
+}
+
+struct ActiveMotionCommand {
+    cancel: opentake_media::MediaCancelToken,
+    _admission: crate::updater::ActivityLease,
 }
 
 impl MotionCommandState {
-    pub fn new(bridge: Arc<TauriMotionBridge>) -> Self {
+    pub(crate) fn new(
+        bridge: Arc<TauriMotionBridge>,
+        admission: crate::updater::InstallAdmissionGate,
+    ) -> Self {
         Self {
             bridge,
             active: Arc::new(Mutex::new(None)),
+            admission,
         }
     }
 
     fn begin(&self) -> Result<opentake_media::MediaCancelToken, String> {
+        let admission = self.admission.begin_activity()?;
         let mut active = self
             .active
             .lock()
@@ -70,7 +81,10 @@ impl MotionCommandState {
             return Err("another motion render is already running".into());
         }
         let cancel = opentake_media::MediaCancelToken::new();
-        *active = Some(cancel.clone());
+        *active = Some(ActiveMotionCommand {
+            cancel: cancel.clone(),
+            _admission: admission,
+        });
         Ok(cancel)
     }
 
@@ -84,7 +98,7 @@ impl MotionCommandState {
         self.active
             .lock()
             .ok()
-            .and_then(|active| active.clone())
+            .and_then(|active| active.as_ref().map(|command| command.cancel.clone()))
             .map(|cancel| {
                 cancel.cancel();
                 true
@@ -92,8 +106,15 @@ impl MotionCommandState {
             .unwrap_or(false)
     }
 
-    pub fn cancel_active(&self) {
-        let _ = self.cancel();
+    pub fn has_active(&self) -> bool {
+        self.active
+            .lock()
+            .map(|active| active.is_some())
+            .unwrap_or(true)
+    }
+
+    pub fn cancel_active(&self) -> bool {
+        self.cancel()
     }
 }
 
@@ -934,5 +955,37 @@ mod tests {
             "motion-result.json did not match the validated output"
         );
         validate_motion_result(&serde_json::to_vec(&expected).unwrap(), &expected).unwrap();
+    }
+
+    #[test]
+    fn updater_gate_observes_and_cancels_an_active_motion_render() {
+        let temp = tempfile::tempdir().unwrap();
+        let bridge = Arc::new(TauriMotionBridge::new(AppCore::new(), temp.path()));
+        let admission = crate::updater::InstallAdmissionGate::default();
+        let state = MotionCommandState::new(bridge, admission.clone());
+        assert!(!state.has_active());
+
+        let token = state.begin().unwrap();
+        assert!(state.has_active());
+        assert!(state.cancel_active());
+        assert!(token.is_cancelled());
+
+        state.finish();
+        assert!(!state.has_active());
+        assert!(!state.cancel_active());
+    }
+
+    #[test]
+    fn motion_cannot_begin_after_update_install_claims_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let bridge = Arc::new(TauriMotionBridge::new(AppCore::new(), temp.path()));
+        let admission = crate::updater::InstallAdmissionGate::default();
+        let state = MotionCommandState::new(bridge, admission.clone());
+        let _install = admission.begin_install().unwrap();
+
+        assert_eq!(
+            state.begin().err().unwrap(),
+            "app update installation is in progress"
+        );
     }
 }

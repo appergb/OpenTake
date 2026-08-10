@@ -1,6 +1,10 @@
 // @vitest-environment happy-dom
 
-import { describe, expect, it } from "vitest";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
+import { describe, expect, it, vi } from "vitest";
+import { useEditorUiStore } from "../store/uiStore";
+import { useUpdateStore } from "../store/updateStore";
 import {
   DOCUMENTED_SHORTCUT_ROWS,
   handleAgentPanelKeyDown,
@@ -8,7 +12,11 @@ import {
   handleTransportSpaceKeyDown,
   resolveDocumentedShortcut,
   shouldHandleTransportSpaceKey,
+  useKeyboardShortcuts,
 } from "./useKeyboardShortcuts";
+
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
+  true;
 
 function event(overrides: Partial<KeyboardEvent> = {}): KeyboardEvent {
   return {
@@ -140,6 +148,47 @@ describe("keyboard transport Space shortcut", () => {
     expect(toggles).toBe(0);
   });
 
+  it("blocks at the global capture listener even when later blockers registered afterward", async () => {
+    const requestMediaPreviewToggle = vi.fn();
+    useEditorUiStore.setState({
+      view: "editor",
+      settingsOpen: false,
+      exportDialogOpen: false,
+      saveAsProgress: null,
+      projectSettingsPrompt: null,
+      pendingSwapClipId: null,
+      previewMediaId: "asset-1",
+      requestMediaPreviewToggle,
+    });
+    useUpdateStore.setState({ phase: "downloading", dialogOpen: true });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const Harness = () => {
+      useKeyboardShortcuts();
+      return null;
+    };
+    await act(async () => root.render(createElement(Harness)));
+
+    const laterCaptureListener = vi.fn();
+    window.addEventListener("keydown", laterCaptureListener, true);
+    const space = new KeyboardEvent("keydown", {
+      key: " ",
+      code: "Space",
+      bubbles: true,
+      cancelable: true,
+    });
+    await act(async () => window.dispatchEvent(space));
+
+    expect(space.defaultPrevented).toBe(true);
+    expect(requestMediaPreviewToggle).not.toHaveBeenCalled();
+    expect(laterCaptureListener).not.toHaveBeenCalled();
+    window.removeEventListener("keydown", laterCaptureListener, true);
+    await act(async () => root.unmount());
+    container.remove();
+    useUpdateStore.setState({ phase: "idle", dialogOpen: false });
+  });
+
   it("consumes native-control Space once without activating the local control", () => {
     let toggles = 0;
     let prevented = 0;
@@ -217,6 +266,34 @@ describe("keyboard transport Space shortcut", () => {
 
     expect("releaseTransportSpaceFocus" in shortcuts).toBe(false);
     expect("suppressTransportSpaceKeyUp" in shortcuts).toBe(false);
+  });
+});
+
+describe("native keyboard-control ownership", () => {
+  it("reserves arrow keys for separators and range inputs", () => {
+    const separator = document.createElement("div");
+    separator.setAttribute("role", "separator");
+    const range = document.createElement("input");
+    range.type = "range";
+    const context = {
+      view: "editor" as const,
+      blocked: false,
+      focusedPanel: "timeline" as const,
+      compatibilityReadOnly: false,
+      cropEditingActive: false,
+    };
+
+    for (const target of [separator, range]) {
+      expect(
+        resolveDocumentedShortcut(event({ code: "ArrowLeft", target }), context),
+      ).toBeNull();
+      expect(
+        resolveDocumentedShortcut(event({ code: "ArrowRight", target }), context),
+      ).toBeNull();
+      expect(resolveDocumentedShortcut(event({ target }), context)).toEqual({
+        type: "transport",
+      });
+    }
   });
 });
 

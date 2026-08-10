@@ -64,6 +64,20 @@ type ListenFn = (
   handler: (e: { payload: unknown }) => void,
 ) => Promise<() => void>;
 
+export interface AppUpdateMetadata {
+  rid: number;
+  currentVersion: string;
+  version: string;
+  notes: string | null;
+  publishedAt: string | null;
+}
+
+export type UpdateInstallEvent =
+  | { event: "started"; data: { contentLength: number | null } }
+  | { event: "progress"; data: { downloaded: number } }
+  | { event: "installing" }
+  | { event: "restarting" };
+
 /** Stable machine-readable error returned by typed core/edit Tauri commands. */
 export class TauriCommandError extends Error {
   readonly code: string;
@@ -102,6 +116,39 @@ async function ensureTauri(): Promise<void> {
 }
 
 // MARK: - Commands
+
+/** Check OpenTake's pinned GitHub release channel for a signed update. */
+export async function checkForAppUpdate(): Promise<AppUpdateMetadata | null> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<AppUpdateMetadata | null>("check_for_update");
+  return null;
+}
+
+/** Release a checked update resource that the user chose not to install. */
+export async function closeAppUpdate(rid: number): Promise<void> {
+  await ensureTauri();
+  if (invokeImpl) await invokeImpl<void>("close_update", { rid });
+}
+
+/** Download, verify, install, and restart through the native updater boundary. */
+export async function installAppUpdate(
+  rid: number,
+  onEvent: (event: UpdateInstallEvent) => void,
+): Promise<void> {
+  await ensureTauri();
+  if (!invokeImpl) throw new Error("App updates are only available in the desktop app");
+  const { Channel } = await import("@tauri-apps/api/core");
+  const channel = new Channel<UpdateInstallEvent>();
+  channel.onmessage = onEvent;
+  await invokeImpl<void>("install_update", { rid, onEvent: channel });
+}
+
+/** Open the fixed official Releases recovery page through the native shell. */
+export async function openUpdateReleases(): Promise<void> {
+  await ensureTauri();
+  if (!invokeImpl) throw new Error("The Releases page can only be opened by the desktop app");
+  await invokeImpl<void>("open_update_releases");
+}
 
 export async function getTimeline(): Promise<RuntimeTimelineSnapshot> {
   await ensureTauri();

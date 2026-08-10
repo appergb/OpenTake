@@ -656,18 +656,29 @@ impl CaptionTranslationProvider for NetworkCaptionTranslationProvider {
 
 pub struct AdvancedWorkflowCommandState {
     bridge: Arc<TauriAdvancedWorkflowBridge>,
-    active: Mutex<Option<MediaCancelToken>>,
+    active: Mutex<Option<ActiveAdvancedWorkflow>>,
+    admission: crate::updater::InstallAdmissionGate,
+}
+
+struct ActiveAdvancedWorkflow {
+    token: MediaCancelToken,
+    _admission: crate::updater::ActivityLease,
 }
 
 impl AdvancedWorkflowCommandState {
-    pub fn new(bridge: Arc<TauriAdvancedWorkflowBridge>) -> Self {
+    pub fn new(
+        bridge: Arc<TauriAdvancedWorkflowBridge>,
+        admission: crate::updater::InstallAdmissionGate,
+    ) -> Self {
         Self {
             bridge,
             active: Mutex::new(None),
+            admission,
         }
     }
 
     fn begin(&self) -> Result<MediaCancelToken, String> {
+        let admission = self.admission.begin_activity()?;
         let mut active = self
             .active
             .lock()
@@ -676,7 +687,10 @@ impl AdvancedWorkflowCommandState {
             return Err("advanced_workflow_busy".to_string());
         }
         let token = MediaCancelToken::new();
-        *active = Some(token.clone());
+        *active = Some(ActiveAdvancedWorkflow {
+            token: token.clone(),
+            _admission: admission,
+        });
         Ok(token)
     }
 
@@ -687,7 +701,7 @@ impl AdvancedWorkflowCommandState {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if active
             .as_ref()
-            .is_some_and(|current| current.same_instance(token))
+            .is_some_and(|current| current.token.same_instance(token))
         {
             *active = None;
         }
@@ -698,20 +712,33 @@ impl AdvancedWorkflowCommandState {
             .active
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        active.as_ref().is_some_and(|token| {
-            token.cancel();
+        active.as_ref().is_some_and(|current| {
+            current.token.cancel();
             true
         })
     }
 }
 
-#[derive(Default)]
 pub struct MattingModelInstallState {
-    active: Mutex<Option<MediaCancelToken>>,
+    active: Mutex<Option<ActiveMattingModelInstall>>,
+    admission: crate::updater::InstallAdmissionGate,
+}
+
+struct ActiveMattingModelInstall {
+    token: MediaCancelToken,
+    _admission: crate::updater::ActivityLease,
 }
 
 impl MattingModelInstallState {
+    pub fn new(admission: crate::updater::InstallAdmissionGate) -> Self {
+        Self {
+            active: Mutex::new(None),
+            admission,
+        }
+    }
+
     fn begin(&self) -> Result<MediaCancelToken, String> {
+        let admission = self.admission.begin_activity()?;
         let mut active = self
             .active
             .lock()
@@ -720,7 +747,10 @@ impl MattingModelInstallState {
             return Err("matting_model_download_busy".to_string());
         }
         let token = MediaCancelToken::new();
-        *active = Some(token.clone());
+        *active = Some(ActiveMattingModelInstall {
+            token: token.clone(),
+            _admission: admission,
+        });
         Ok(token)
     }
 
@@ -731,7 +761,7 @@ impl MattingModelInstallState {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if active
             .as_ref()
-            .is_some_and(|current| current.same_instance(token))
+            .is_some_and(|current| current.token.same_instance(token))
         {
             *active = None;
         }
@@ -742,10 +772,14 @@ impl MattingModelInstallState {
             .active
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        active.as_ref().is_some_and(|token| {
-            token.cancel();
+        active.as_ref().is_some_and(|current| {
+            current.token.cancel();
             true
         })
+    }
+
+    pub(crate) fn cancel_active(&self) -> bool {
+        self.cancel()
     }
 }
 
@@ -1037,6 +1071,7 @@ pub fn advanced_apply_caption_translation_review(
     state: State<'_, AdvancedWorkflowCommandState>,
     request: ApplyCaptionTranslationReviewRequest,
 ) -> Result<GenerateMatteResultDto, String> {
+    let _activity = crate::updater::begin_mutating_activity(&state.admission)?;
     if request.changes.is_empty() || request.changes.len() > 500 {
         return Err("select between 1 and 500 translated captions to apply".into());
     }
@@ -3849,6 +3884,29 @@ mod tests {
     use opentake_ops::ClipEntry;
     use std::collections::HashSet;
     use std::process::Command;
+
+    #[test]
+    fn advanced_work_cannot_begin_after_update_install_claims_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let admission = crate::updater::InstallAdmissionGate::default();
+        let bridge = Arc::new(TauriAdvancedWorkflowBridge::new(
+            AppCore::new(),
+            temp.path().join("cache"),
+            temp.path().join("models"),
+        ));
+        let state = AdvancedWorkflowCommandState::new(bridge, admission.clone());
+        let matting = MattingModelInstallState::new(admission.clone());
+        let _install = admission.begin_install().unwrap();
+
+        assert_eq!(
+            state.begin().err().unwrap(),
+            "app update installation is in progress"
+        );
+        assert_eq!(
+            matting.begin().err().unwrap(),
+            "app update installation is in progress"
+        );
+    }
 
     #[test]
     fn provider_resource_ids_are_safe_path_segments() {

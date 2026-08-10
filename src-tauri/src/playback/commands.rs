@@ -12,6 +12,7 @@
 //! existing `<video>` + `composite_frame` path (wired in PR3).
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tauri::{AppHandle, Manager, State};
 
@@ -20,6 +21,7 @@ use opentake_render::{even, RenderSize};
 
 use super::audio::{
     build_clock_paused_cancellable, AudioPlayback, AudioPreparePermit, AudioPrepareWorker,
+    AUDIO_PREPARE_BUSY,
 };
 use super::engine::{
     BoundedReaper, FrameSink, PlaybackClock, PlaybackEngine, PlayheadEmitter, ReapPermit,
@@ -34,6 +36,7 @@ use super::transport::{PreviewServer, PublicationGate, TauriPlayheadEmitter};
 /// Preview downscale cap (longest side, px) for streaming playback — matches the
 /// single-frame preview so PLAY and scrub/pause look identical.
 const PLAYBACK_PREVIEW_CAP: u32 = 1280;
+const PAUSED_PREPARE_HANDOFF_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A live playback session: the render engine plus the audio device handle.
 /// The audio handle is kept alive for the session (dropping it stops the cpal
@@ -88,6 +91,7 @@ struct PlaybackSlot {
     sessions: SessionRegistry,
     running: Option<RunningPlayback>,
     prepare: Option<PendingPrepare>,
+    paused_prepare_restart: Option<PlaybackIdentity>,
 }
 
 struct PendingPrepare {
@@ -124,6 +128,95 @@ impl PlaybackState {
             .ensure_project_transition_available()
     }
 
+    async fn coordinate_command_start(
+        &self,
+        identity: PlaybackIdentity,
+        authoritative: opentake_core::ProjectRevision,
+        frame: i32,
+        cancel: opentake_media::MediaCancelToken,
+    ) -> Result<
+        Option<(StartTicket, ReapPermit, AudioPreparePermit<PreparedAudio>)>,
+        PlaybackCommandError,
+    > {
+        let initial = self.coordinate_start(identity.clone(), authoritative, frame, cancel.clone());
+        let error = match initial {
+            Ok(start) => return Ok(start),
+            Err(error) => error,
+        };
+        if error.code != super::session::PlaybackErrorCode::Busy
+            || error.message != AUDIO_PREPARE_BUSY
+            || !self.claim_paused_prepare_handoff(&identity, cancel.clone())
+        {
+            return Err(error);
+        }
+
+        if !self
+            .audio_prepare
+            .wait_until_idle(PAUSED_PREPARE_HANDOFF_TIMEOUT)
+            .await
+        {
+            cancel.cancel();
+            self.abandon_paused_prepare_handoff(&identity, &cancel, true);
+            return Err(PlaybackCommandError::busy(
+                "audio prepare cancellation exceeded restart deadline",
+            ));
+        }
+        if cancel.is_cancelled() {
+            self.finish_prepare(&cancel);
+            return Err(PlaybackCommandError::cancelled(
+                "playback restart was cancelled",
+            ));
+        }
+
+        let restarted =
+            self.coordinate_start(identity.clone(), authoritative, frame, cancel.clone());
+        if let Err(error) = &restarted {
+            self.abandon_paused_prepare_handoff(
+                &identity,
+                &cancel,
+                error.code == super::session::PlaybackErrorCode::Busy,
+            );
+        }
+        restarted
+    }
+
+    fn claim_paused_prepare_handoff(
+        &self,
+        identity: &PlaybackIdentity,
+        cancel: opentake_media::MediaCancelToken,
+    ) -> bool {
+        let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
+        if slot.paused_prepare_restart.as_ref() != Some(identity) || slot.prepare.is_some() {
+            return false;
+        }
+        slot.paused_prepare_restart = None;
+        slot.prepare = Some(PendingPrepare {
+            identity: identity.clone(),
+            cancel,
+        });
+        true
+    }
+
+    fn abandon_paused_prepare_handoff(
+        &self,
+        identity: &PlaybackIdentity,
+        cancel: &opentake_media::MediaCancelToken,
+        retryable: bool,
+    ) {
+        let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
+        if !slot
+            .prepare
+            .as_ref()
+            .is_some_and(|pending| pending.cancel.same_instance(cancel))
+        {
+            return;
+        }
+        Self::cancel_prepare(&mut slot);
+        if retryable {
+            slot.paused_prepare_restart = Some(identity.clone());
+        }
+    }
+
     fn coordinate_start(
         &self,
         identity: PlaybackIdentity,
@@ -136,6 +229,11 @@ impl PlaybackState {
     > {
         let (decision, old, pending_reap, audio_admission) = {
             let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
+            if cancel.is_cancelled() {
+                return Err(PlaybackCommandError::cancelled(
+                    "playback start was cancelled",
+                ));
+            }
             if slot.sessions.start_would_resume(&identity, authoritative)? {
                 let decision = slot.sessions.begin_start(identity.clone(), authoritative)?;
                 debug_assert!(matches!(decision, StartDecision::Resume));
@@ -155,7 +253,9 @@ impl PlaybackState {
                         return Err(PlaybackCommandError::engine(error));
                     }
                 }
+                running.publication.reopen();
                 if let Err(error) = running.engine.resume(frame) {
+                    running.publication.close();
                     if let Some(audio) = running.audio.as_ref() {
                         let _ = audio.pause();
                     }
@@ -165,6 +265,7 @@ impl PlaybackState {
                 if let Some(audio) = running.audio.as_ref() {
                     audio.commit_resume();
                 }
+                slot.paused_prepare_restart = None;
                 return Ok(None);
             }
             let audio_admission = self
@@ -179,12 +280,16 @@ impl PlaybackState {
             let StartDecision::Build(_) = decision else {
                 unreachable!("resume handled before reaper admission")
             };
+            let adopted_cancel = cancel.clone();
             if let Some(incumbent) = slot.prepare.replace(PendingPrepare {
                 identity: identity.clone(),
                 cancel,
             }) {
-                incumbent.cancel.cancel();
+                if !incumbent.cancel.same_instance(&adopted_cancel) {
+                    incumbent.cancel.cancel();
+                }
             }
+            slot.paused_prepare_restart = None;
             let old = slot.running.take();
             (decision, old, pending_reap, audio_admission)
         };
@@ -329,18 +434,31 @@ impl PlaybackState {
         frame: i32,
     ) -> Result<(), PlaybackCommandError> {
         let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
-        if control == SessionControl::Stop
+        if matches!(control, SessionControl::Pause | SessionControl::Stop)
             && slot
                 .prepare
                 .as_ref()
                 .is_some_and(|pending| pending.identity == identity)
         {
+            slot.paused_prepare_restart = match control {
+                SessionControl::Pause => Some(identity.clone()),
+                SessionControl::Stop => None,
+                SessionControl::Seek => unreachable!(),
+            };
             slot.sessions.stop_all();
             Self::cancel_prepare(&mut slot);
             let running = slot.running.take();
             drop(slot);
             if let Some(running) = running {
                 running.shutdown()?;
+            }
+            return Ok(());
+        }
+        if slot.paused_prepare_restart.as_ref() == Some(&identity)
+            && matches!(control, SessionControl::Pause | SessionControl::Stop)
+        {
+            if control == SessionControl::Stop {
+                slot.paused_prepare_restart = None;
             }
             return Ok(());
         }
@@ -354,6 +472,10 @@ impl PlaybackState {
                 let running = slot.running.as_ref().ok_or_else(|| {
                     PlaybackCommandError::superseded("playback session is no longer installed")
                 })?;
+                // Freeze every observable output before touching audio or waiting
+                // on the render thread. A decode already in flight can finish,
+                // but its pixels and playhead tick cannot cross this gate.
+                running.close_publication();
                 if let Some(audio) = running.audio.as_ref() {
                     audio.pause().map_err(PlaybackCommandError::engine)?;
                 }
@@ -382,6 +504,7 @@ impl PlaybackState {
     pub fn begin_project_transition(&self) -> Result<ProjectTransition, PlaybackCommandError> {
         let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
         let transition = slot.sessions.begin_project_transition()?;
+        slot.paused_prepare_restart = None;
         Self::cancel_prepare(&mut slot);
         if let Some(running) = slot.running.as_ref() {
             running.close_publication();
@@ -405,6 +528,7 @@ impl PlaybackState {
         let running = {
             let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
             if slot.sessions.activate_project(transition, project_epoch) {
+                slot.paused_prepare_restart = None;
                 slot.running.take()
             } else {
                 None
@@ -419,6 +543,7 @@ impl PlaybackState {
         let running = {
             let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
             if slot.sessions.activate_project_event(project_epoch) {
+                slot.paused_prepare_restart = None;
                 Self::cancel_prepare(&mut slot);
                 slot.running.take()
             } else {
@@ -443,12 +568,22 @@ impl PlaybackState {
                 pending.identity.project_epoch == project_epoch
                     && pending.identity.timeline_version != version
             });
+            let paused_restart_invalid =
+                slot.paused_prepare_restart
+                    .as_ref()
+                    .is_some_and(|identity| {
+                        identity.project_epoch == project_epoch
+                            && identity.timeline_version != version
+                    });
             let running_invalid = slot
                 .sessions
                 .invalidate_for_timeline_change(project_epoch, version);
             if pending_invalid {
                 slot.sessions.stop_all();
                 Self::cancel_prepare(&mut slot);
+            }
+            if paused_restart_invalid {
+                slot.paused_prepare_restart = None;
             }
             if running_invalid {
                 slot.running.take()
@@ -553,15 +688,25 @@ pub async fn playback_start(
     };
     let start_at = from_frame.max(0);
     let cancel = opentake_media::MediaCancelToken::new();
-    let Some((ticket, cleanup, audio_admission)) = app.state::<PlaybackState>().coordinate_start(
-        identity.clone(),
-        authoritative,
-        start_at,
-        cancel.clone(),
-    )?
+    let Some((ticket, cleanup, audio_admission)) = app
+        .state::<PlaybackState>()
+        .coordinate_command_start(identity.clone(), authoritative, start_at, cancel.clone())
+        .await?
     else {
         return Ok(());
     };
+
+    let snapshot = app.state::<AppCore>().runtime_snapshot();
+    if snapshot.project_epoch != authoritative.project_epoch
+        || snapshot.version != authoritative.version
+    {
+        let _ =
+            app.state::<PlaybackState>()
+                .control(identity.clone(), SessionControl::Stop, start_at);
+        return Err(PlaybackCommandError::superseded(
+            "playback revision changed while waiting to restart",
+        ));
+    }
 
     // Snapshot the session synchronously — no managed-state guard is held across
     // the await below (Tauri async commands require a Send future).
@@ -930,6 +1075,287 @@ mod tests {
         assert_eq!(state.pending_prepare_identity(), None);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pause_cancels_pending_prepare_and_rejects_late_install_before_restart() {
+        let state = PlaybackState::new();
+        let pending_identity = identity(1, 6, "pending-pause");
+        let cancel = opentake_media::MediaCancelToken::new();
+        let (ticket, cleanup, admission) = state
+            .coordinate_start(
+                pending_identity.clone(),
+                pending_identity.revision(),
+                0,
+                cancel.clone(),
+            )
+            .expect("pending readiness is coordinated")
+            .expect("fresh session builds");
+        drop(admission);
+
+        state
+            .control(pending_identity.clone(), SessionControl::Pause, 0)
+            .expect("matching pause cancels pending readiness");
+
+        assert!(cancel.is_cancelled());
+        assert_eq!(state.pending_prepare_identity(), None);
+
+        let server = PreviewServer::start().await.expect("start preview server");
+        let publication = PublicationGate::open();
+        let (audio, muted, audio_stopped) = super::super::audio::AudioPlayback::test_stub();
+        let (engine, engine_stopped) = PlaybackEngine::test_stub();
+        let error = state
+            .install_if_current(
+                ticket,
+                cleanup,
+                pending_identity.revision(),
+                PlaybackResources {
+                    engine,
+                    audio: Some(audio),
+                    publication: publication.clone(),
+                    server,
+                },
+                0,
+                &cancel,
+            )
+            .expect_err("cancelled prepare must never install late resources");
+
+        assert_eq!(
+            error.code,
+            super::super::session::PlaybackErrorCode::Superseded
+        );
+        assert!(!publication.is_open());
+        assert!(muted.load(std::sync::atomic::Ordering::Acquire));
+        audio_stopped
+            .recv_timeout(Duration::from_secs(2))
+            .expect("late audio is stopped");
+        engine_stopped
+            .recv_timeout(Duration::from_secs(2))
+            .expect("late render engine is stopped");
+        state.reaper.wait_until_idle(Duration::from_secs(2));
+
+        let restart = state
+            .coordinate_start(
+                pending_identity.clone(),
+                pending_identity.revision(),
+                0,
+                opentake_media::MediaCancelToken::new(),
+            )
+            .expect("same identity may restart after pending pause")
+            .expect("pending pause requires a fresh build");
+        drop(restart);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restart_of_pause_cancelled_prepare_waits_instead_of_returning_busy() {
+        let state = PlaybackState::new();
+        let current = identity(1, 7, "pending-pause-restart");
+        let cancel = opentake_media::MediaCancelToken::new();
+        let (_ticket, _cleanup, admission) = state
+            .coordinate_start(current.clone(), current.revision(), 0, cancel.clone())
+            .expect("initial start is coordinated")
+            .expect("initial start builds");
+        let (cancel_seen_tx, cancel_seen_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker_cancel = cancel.clone();
+        let result = admission
+            .submit(move || {
+                while !worker_cancel.is_cancelled() {
+                    std::thread::yield_now();
+                }
+                cancel_seen_tx.send(()).expect("announce cancellation");
+                release_rx.recv().expect("release cancelled prepare");
+                Err(opentake_media::MediaError::Cancelled)
+            })
+            .expect("submit initial audio prepare");
+
+        state
+            .control(current.clone(), SessionControl::Pause, 0)
+            .expect("pause cancels initial prepare");
+        cancel_seen_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker observes cancellation while retaining capacity");
+
+        let unrelated = identity(1, 7, "unrelated-restart");
+        let unrelated_error = match state
+            .coordinate_command_start(
+                unrelated.clone(),
+                unrelated.revision(),
+                0,
+                opentake_media::MediaCancelToken::new(),
+            )
+            .await
+        {
+            Err(error) => error,
+            Ok(_) => panic!("an unrelated start must retain normal single-slot admission"),
+        };
+        assert_eq!(
+            unrelated_error.code,
+            super::super::session::PlaybackErrorCode::Busy
+        );
+
+        let restart_cancel = opentake_media::MediaCancelToken::new();
+        let restart =
+            state.coordinate_command_start(current.clone(), current.revision(), 0, restart_cancel);
+        tokio::pin!(restart);
+        tokio::select! {
+            biased;
+            _ = &mut restart => panic!("restart must wait for the cancelled owner to exit"),
+            _ = async {} => {}
+        }
+        assert_eq!(state.pending_prepare_identity(), Some(current.clone()));
+
+        release_tx.send(()).expect("release cancelled prepare");
+        assert!(matches!(
+            result
+                .await
+                .expect("initial prepare result channel")
+                .expect("initial prepare worker exits"),
+            Err(opentake_media::MediaError::Cancelled)
+        ));
+        let restart = restart
+            .await
+            .expect("same identity restart must not surface audio_prepare_busy")
+            .expect("paused pending restart requires a fresh build");
+        drop(restart);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restart_wait_for_cancelled_prepare_has_a_bounded_deadline() {
+        let state = PlaybackState::new();
+        let current = identity(1, 8, "pending-pause-deadline");
+        let cancel = opentake_media::MediaCancelToken::new();
+        let (_ticket, _cleanup, admission) = state
+            .coordinate_start(current.clone(), current.revision(), 0, cancel.clone())
+            .expect("initial start is coordinated")
+            .expect("initial start builds");
+        let (cancel_seen_tx, cancel_seen_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker_cancel = cancel.clone();
+        let result = admission
+            .submit(move || {
+                while !worker_cancel.is_cancelled() {
+                    std::thread::yield_now();
+                }
+                cancel_seen_tx.send(()).expect("announce cancellation");
+                release_rx.recv().expect("release cancelled prepare");
+                Err(opentake_media::MediaError::Cancelled)
+            })
+            .expect("submit initial audio prepare");
+        state
+            .control(current.clone(), SessionControl::Pause, 0)
+            .expect("pause cancels initial prepare");
+        cancel_seen_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker observes cancellation while retaining capacity");
+
+        let restart = state.coordinate_command_start(
+            current.clone(),
+            current.revision(),
+            0,
+            opentake_media::MediaCancelToken::new(),
+        );
+        tokio::pin!(restart);
+        tokio::select! {
+            biased;
+            _ = &mut restart => panic!("restart must wait before its deadline"),
+            _ = async {} => {}
+        }
+        tokio::time::advance(PAUSED_PREPARE_HANDOFF_TIMEOUT + Duration::from_millis(1)).await;
+        let error = match restart.await {
+            Err(error) => error,
+            Ok(_) => panic!("stuck cancelled prepare must hit the bounded deadline"),
+        };
+
+        assert_eq!(error.code, super::super::session::PlaybackErrorCode::Busy);
+        assert_eq!(state.pending_prepare_identity(), None);
+
+        release_tx.send(()).expect("release cancelled prepare");
+        assert!(matches!(
+            result
+                .await
+                .expect("initial prepare result channel")
+                .expect("initial prepare worker exits"),
+            Err(opentake_media::MediaError::Cancelled)
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_second_pause_cancels_the_waiting_restart_without_losing_retryability() {
+        let state = PlaybackState::new();
+        let current = identity(1, 9, "pending-double-pause");
+        let cancel = opentake_media::MediaCancelToken::new();
+        let (_ticket, _cleanup, admission) = state
+            .coordinate_start(current.clone(), current.revision(), 0, cancel.clone())
+            .expect("initial start is coordinated")
+            .expect("initial start builds");
+        let (cancel_seen_tx, cancel_seen_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker_cancel = cancel.clone();
+        let result = admission
+            .submit(move || {
+                while !worker_cancel.is_cancelled() {
+                    std::thread::yield_now();
+                }
+                cancel_seen_tx.send(()).expect("announce cancellation");
+                release_rx.recv().expect("release cancelled prepare");
+                Err(opentake_media::MediaError::Cancelled)
+            })
+            .expect("submit initial audio prepare");
+        state
+            .control(current.clone(), SessionControl::Pause, 0)
+            .expect("first pause cancels initial prepare");
+        cancel_seen_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("worker observes cancellation while retaining capacity");
+
+        let restart_cancel = opentake_media::MediaCancelToken::new();
+        let restart = state.coordinate_command_start(
+            current.clone(),
+            current.revision(),
+            0,
+            restart_cancel.clone(),
+        );
+        tokio::pin!(restart);
+        tokio::select! {
+            biased;
+            _ = &mut restart => panic!("restart must be waiting for the old worker"),
+            _ = async {} => {}
+        }
+        state
+            .control(current.clone(), SessionControl::Pause, 0)
+            .expect("second pause cancels waiting restart");
+        assert!(restart_cancel.is_cancelled());
+        assert_eq!(state.pending_prepare_identity(), None);
+
+        release_tx.send(()).expect("release cancelled prepare");
+        assert!(matches!(
+            result
+                .await
+                .expect("initial prepare result channel")
+                .expect("initial prepare worker exits"),
+            Err(opentake_media::MediaError::Cancelled)
+        ));
+        let error = match restart.await {
+            Err(error) => error,
+            Ok(_) => panic!("cancelled waiting restart must not build"),
+        };
+        assert_eq!(
+            error.code,
+            super::super::session::PlaybackErrorCode::Cancelled
+        );
+
+        let retry = state
+            .coordinate_command_start(
+                current.clone(),
+                current.revision(),
+                0,
+                opentake_media::MediaCancelToken::new(),
+            )
+            .await
+            .expect("same identity remains retryable after the second pause")
+            .expect("retry performs a fresh build");
+        drop(retry);
+    }
+
     #[test]
     fn stop_shuts_down_running_if_pending_and_installed_ownership_overlap() {
         let current = identity(1, 6, "readiness-handoff");
@@ -1168,6 +1594,36 @@ mod tests {
         );
         assert!(!paused.load(std::sync::atomic::Ordering::Acquire));
         drop(backlog);
+    }
+
+    #[test]
+    fn retained_resume_reopens_the_gate_only_for_the_exact_paused_session() {
+        let current = identity(4, 9, "retained-publication");
+        let (state, gate) = state_with_running(current.clone());
+        let (engine, _stopped) = PlaybackEngine::test_stub();
+        {
+            let mut slot = state
+                .slot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            slot.running.as_mut().expect("running playback").engine = engine;
+        }
+
+        state
+            .control(current.clone(), SessionControl::Pause, 17)
+            .expect("pause retained session");
+        assert!(!gate.is_open());
+
+        assert!(state
+            .coordinate_start(
+                current.clone(),
+                current.revision(),
+                17,
+                opentake_media::MediaCancelToken::new(),
+            )
+            .expect("resume retained session")
+            .is_none());
+        assert!(gate.is_open());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1431,6 +1887,41 @@ mod tests {
         engine_stop
             .recv_timeout(Duration::from_secs(2))
             .expect("render stop requested before command returns");
+    }
+
+    #[test]
+    fn pause_closes_publication_before_waiting_for_the_render_thread() {
+        let identity = identity(4, 2, "pause-order");
+        let (state, gate) = state_with_running(identity.clone());
+        let (engine, pause_seen, release_pause) = PlaybackEngine::test_blocking_pause();
+        {
+            let mut slot = state
+                .slot
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            slot.running.as_mut().expect("running playback").engine = engine;
+        }
+        let state = Arc::new(state);
+        let control_state = Arc::clone(&state);
+        let caller =
+            std::thread::spawn(move || control_state.control(identity, SessionControl::Pause, 19));
+
+        assert_eq!(
+            pause_seen
+                .recv_timeout(Duration::from_secs(1))
+                .expect("pause reaches render thread"),
+            19
+        );
+        let publication_closed_while_render_is_blocked = !gate.is_open();
+        release_pause
+            .send(())
+            .expect("release synthetic inflight render");
+        caller
+            .join()
+            .expect("join pause command")
+            .expect("pause succeeds");
+
+        assert!(publication_closed_while_render_is_blocked);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

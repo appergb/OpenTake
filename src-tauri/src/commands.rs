@@ -185,10 +185,12 @@ pub fn generation_log(core: State<'_, AppCore>) -> opentake_project::GenerationL
 #[tauri::command]
 pub fn undo(
     core: State<'_, AppCore>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
     expected_project_epoch: u64,
     expected_timeline_version: u64,
     expected_project_path: Option<String>,
 ) -> Result<EditResultDto, CmdError> {
+    let _admission = begin_edit_activity(&admission)?;
     handle_edit_apply_at_project_revision(
         &core,
         ProjectRevision {
@@ -203,10 +205,12 @@ pub fn undo(
 #[tauri::command]
 pub fn redo(
     core: State<'_, AppCore>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
     expected_project_epoch: u64,
     expected_timeline_version: u64,
     expected_project_path: Option<String>,
 ) -> Result<EditResultDto, CmdError> {
+    let _admission = begin_edit_activity(&admission)?;
     handle_edit_apply_at_project_revision(
         &core,
         ProjectRevision {
@@ -228,6 +232,10 @@ pub async fn project_new(
     app: AppHandle,
     path: Option<String>,
 ) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
+    let _update_activity = crate::updater::begin_mutating_activity(
+        &app.state::<crate::updater::InstallAdmissionGate>(),
+    )
+    .map_err(crate::playback::session::PlaybackCommandError::busy)?;
     let coordinator = app.state::<ProjectLifecycleCoordinator>();
     let lifecycle = coordinator
         .try_acquire()
@@ -247,9 +255,15 @@ pub async fn project_new(
         let admission = coordinator
             .try_admit_prepare(&path)
             .map_err(crate::playback::session::PlaybackCommandError::busy)?;
-        let prepared = prepare_saved_project_off_thread(path.clone(), admission)
-            .await
-            .map_err(crate::playback::session::PlaybackCommandError::engine)?;
+        let prepared = prepare_saved_project_off_thread(
+            path.clone(),
+            admission,
+            app.state::<crate::updater::InstallAdmissionGate>()
+                .inner()
+                .clone(),
+        )
+        .await
+        .map_err(crate::playback::session::PlaybackCommandError::engine)?;
         if !prepared.is_current_namespace().map_err(|error| {
             crate::playback::session::PlaybackCommandError::engine(error.to_string())
         })? {
@@ -308,6 +322,9 @@ pub async fn project_new(
     app: AppHandle,
     path: Option<String>,
 ) -> Result<TimelineSnapshotDto, String> {
+    let _update_activity = crate::updater::begin_mutating_activity(
+        &app.state::<crate::updater::InstallAdmissionGate>(),
+    )?;
     let coordinator = app.state::<ProjectLifecycleCoordinator>();
     let lifecycle = coordinator.try_acquire()?;
     if let Some(path) = path {
@@ -319,7 +336,14 @@ pub async fn project_new(
             return Err("project path has not been approved by a native file dialog".into());
         }
         let admission = coordinator.try_admit_prepare(&path)?;
-        let prepared = prepare_saved_project_off_thread(path.clone(), admission).await?;
+        let prepared = prepare_saved_project_off_thread(
+            path.clone(),
+            admission,
+            app.state::<crate::updater::InstallAdmissionGate>()
+                .inner()
+                .clone(),
+        )
+        .await?;
         if !prepared
             .is_current_namespace()
             .map_err(|error| error.to_string())?
@@ -395,12 +419,18 @@ async fn prepare_project_open_off_thread(
 async fn prepare_saved_project_off_thread(
     path: std::path::PathBuf,
     admission: ProjectPrepareAdmission,
+    update_admission: crate::updater::InstallAdmissionGate,
 ) -> Result<PreparedProjectOpen, String> {
+    let worker_activity = crate::updater::begin_mutating_activity(&update_admission)?;
     run_blocking_with_timeout(
         "project create",
         PROJECT_LIFECYCLE_PREPARE_TIMEOUT,
         admission,
         move || {
+            // spawn_blocking cannot be cancelled when the caller's timeout
+            // expires. Keep update admission until this worker really stops so
+            // its bundle writes cannot cross the install/save barrier.
+            let _worker_activity = worker_activity;
             AppCore::new()
                 .save_project(Some(path.clone()))
                 .map_err(|error| error.to_string())?;
@@ -416,6 +446,10 @@ pub async fn project_open(
     app: AppHandle,
     path: String,
 ) -> Result<TimelineSnapshotDto, crate::playback::session::PlaybackCommandError> {
+    let _update_activity = crate::updater::begin_mutating_activity(
+        &app.state::<crate::updater::InstallAdmissionGate>(),
+    )
+    .map_err(crate::playback::session::PlaybackCommandError::busy)?;
     let coordinator = app.state::<ProjectLifecycleCoordinator>();
     let lifecycle = coordinator
         .try_acquire()
@@ -500,6 +534,9 @@ fn commit_prepared_project_open_with_playback_and_prewarm(
 #[cfg(not(feature = "playback-engine"))]
 #[tauri::command]
 pub async fn project_open(app: AppHandle, path: String) -> Result<TimelineSnapshotDto, String> {
+    let _update_activity = crate::updater::begin_mutating_activity(
+        &app.state::<crate::updater::InstallAdmissionGate>(),
+    )?;
     let coordinator = app.state::<ProjectLifecycleCoordinator>();
     let lifecycle = coordinator.try_acquire()?;
     let path = std::path::PathBuf::from(path);
@@ -538,10 +575,13 @@ pub async fn project_open(app: AppHandle, path: String) -> Result<TimelineSnapsh
 #[tauri::command]
 pub fn project_save(
     core: State<'_, AppCore>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
     path: Option<String>,
     expected_project_epoch: u64,
     expected_project_path: Option<String>,
 ) -> Result<String, CmdError> {
+    let _activity =
+        crate::updater::begin_mutating_activity(&admission).map_err(validation_error)?;
     project_save_for_project(
         &core,
         path,
@@ -590,14 +630,58 @@ fn project_save_for_project(
 /// as the save dialog's `defaultPath` so the user picks a location + name like
 /// upstream `createNewProject` (`NSSavePanel`).
 #[tauri::command]
-pub fn get_default_project_dir(app: AppHandle) -> Result<String, String> {
+pub fn get_default_project_dir(
+    app: AppHandle,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
+) -> Result<String, String> {
     let dir = app
         .path()
         .document_dir()
         .map_err(|e| e.to_string())?
         .join("OpenTake");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    ensure_default_project_dir(&dir, &admission)?;
     Ok(dir.to_string_lossy().into_owned())
+}
+
+fn ensure_default_project_dir(
+    dir: &std::path::Path,
+    admission: &crate::updater::InstallAdmissionGate,
+) -> Result<(), String> {
+    if dir.is_dir() {
+        return Ok(());
+    }
+    let _activity = crate::updater::begin_mutating_activity(admission)?;
+    std::fs::create_dir_all(dir).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod default_project_dir_tests {
+    use super::ensure_default_project_dir;
+
+    #[test]
+    fn update_install_rejects_first_default_project_directory_write() {
+        let temp = tempfile::tempdir().expect("default directory fixture");
+        let directory = temp.path().join("OpenTake");
+        let admission = crate::updater::InstallAdmissionGate::default();
+        let install = admission.begin_install().expect("install starts");
+
+        assert_eq!(
+            ensure_default_project_dir(&directory, &admission)
+                .expect_err("directory creation must fail closed"),
+            "app update installation is in progress"
+        );
+        assert!(!directory.exists());
+
+        drop(install);
+        ensure_default_project_dir(&directory, &admission)
+            .expect("directory creation resumes after install");
+        assert!(directory.is_dir());
+
+        let install = admission.begin_install().expect("second install starts");
+        ensure_default_project_dir(&directory, &admission)
+            .expect("an existing default directory is a read-only cache hit");
+        drop(install);
+    }
 }
 
 /// `export_xmeml`: write the current timeline to `path` as XMEML 4 (Final Cut
@@ -607,7 +691,12 @@ pub fn get_default_project_dir(app: AppHandle) -> Result<String, String> {
 /// the timeline / media manifest / project dir from the core, builds the XML via
 /// the pure `export_xmeml`, and writes the file.
 #[tauri::command]
-pub fn export_xmeml(core: State<'_, AppCore>, path: String) -> Result<(), String> {
+pub fn export_xmeml(
+    core: State<'_, AppCore>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
+    path: String,
+) -> Result<(), String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
     let snapshot = core.runtime_snapshot();
     // Resolve each source file's start timecode via ffprobe (upstream reads the
     // QuickTime `tmcd` track; here `opentake_media::read_start_timecode_frame`
@@ -664,8 +753,12 @@ fn resolve_start_timecodes(
 /// New code (and the format picker) should call `export_xmeml`; native FCPXML is
 /// `export_fcpxml_modern`.
 #[tauri::command]
-pub fn export_fcpxml(core: State<'_, AppCore>, path: String) -> Result<(), String> {
-    export_xmeml(core, path)
+pub fn export_fcpxml(
+    core: State<'_, AppCore>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
+    path: String,
+) -> Result<(), String> {
+    export_xmeml(core, admission, path)
 }
 
 /// `export_edl`: write the current timeline to `path` as a CMX3600 EDL (`.edl`).
@@ -674,7 +767,12 @@ pub fn export_fcpxml(core: State<'_, AppCore>, path: String) -> Result<(), Strin
 /// Avid / 剪映 import. Effects, transforms, opacity, and multi-track layering are
 /// dropped — see `opentake_project::edl` for the documented limitations.
 #[tauri::command]
-pub fn export_edl(core: State<'_, AppCore>, path: String) -> Result<(), String> {
+pub fn export_edl(
+    core: State<'_, AppCore>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
+    path: String,
+) -> Result<(), String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
     let snapshot = core.runtime_snapshot();
     let edl = opentake_project::export_edl(&snapshot.timeline, &snapshot.media);
     std::fs::write(&path, edl).map_err(|e| e.to_string())
@@ -686,7 +784,12 @@ pub fn export_edl(core: State<'_, AppCore>, path: String) -> Result<(), String> 
 /// per-clip media references; see `opentake_project::otio` for what is dropped
 /// (effects, transforms, keyframes).
 #[tauri::command]
-pub fn export_otio(core: State<'_, AppCore>, path: String) -> Result<(), String> {
+pub fn export_otio(
+    core: State<'_, AppCore>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
+    path: String,
+) -> Result<(), String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
     let snapshot = core.runtime_snapshot();
     let json = opentake_project::export_otio(
         &snapshot.timeline,
@@ -702,7 +805,12 @@ pub fn export_otio(core: State<'_, AppCore>, path: String) -> Result<(), String>
 /// FCPXML — use `export_xmeml` for Premiere / DaVinci / 剪映. See
 /// `opentake_project::fcpxml_modern`.
 #[tauri::command]
-pub fn export_fcpxml_modern(core: State<'_, AppCore>, path: String) -> Result<(), String> {
+pub fn export_fcpxml_modern(
+    core: State<'_, AppCore>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
+    path: String,
+) -> Result<(), String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
     let snapshot = core.runtime_snapshot();
     let xml = opentake_project::export_fcpxml(
         &snapshot.timeline,
@@ -745,9 +853,11 @@ pub struct SubtitleExportSummary {
 #[tauri::command]
 pub fn export_subtitles(
     core: State<'_, AppCore>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
     path: String,
     format: SubtitleFormat,
 ) -> Result<SubtitleExportSummary, String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
     let timeline = core.get_timeline().timeline;
     write_subtitles(&timeline, path, format)
 }
@@ -785,21 +895,30 @@ pub fn can_redo(core: State<'_, AppCore>) -> bool {
 
 // MARK: - The single editing entry point
 
+fn begin_edit_activity(
+    admission: &crate::updater::InstallAdmissionGate,
+) -> Result<crate::updater::ActivityLease, CmdError> {
+    crate::updater::begin_mutating_activity(admission).map_err(validation_error)
+}
+
 /// `edit_apply`: the unified editing command. The front end constructs an
 /// [`EditRequest`] from a UI gesture; this maps it to an [`EditCommand`] and
 /// routes it through [`AppCore::apply_at_project_revision`] (which performs the
 /// project identity check and snapshot/commit/version transaction under one
 /// authoritative lock, then emits `TimelineChanged`).
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri IPC injects states and request identity separately
 pub fn edit_apply(
     core: State<'_, AppCore>,
     render: State<'_, crate::render::RenderState>,
     media: State<'_, crate::media::MediaState>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
     command: EditRequest,
     expected_project_epoch: u64,
     expected_timeline_version: u64,
     expected_project_path: Option<String>,
 ) -> Result<EditResultDto, CmdError> {
+    let _admission = begin_edit_activity(&admission)?;
     let mut prepared_freeze_path = None;
     let cmd = match command {
         EditRequest::FreezeFrame {
@@ -2090,6 +2209,52 @@ mod project_open_async_tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn timed_out_mutating_worker_keeps_update_admission_until_it_really_finishes() {
+        let coordinator = ProjectLifecycleCoordinator::default();
+        let admission = coordinator
+            .try_admit_prepare(std::path::Path::new("slow-create.opentake"))
+            .expect("prepare admitted");
+        let update_admission = crate::updater::InstallAdmissionGate::default();
+        let worker_activity = crate::updater::begin_mutating_activity(&update_admission).unwrap();
+        let (release_worker, wait_for_release) = std::sync::mpsc::channel();
+
+        let result: Result<(), String> = run_blocking_with_timeout(
+            "project create",
+            Duration::from_millis(10),
+            admission,
+            move || {
+                let _worker_activity = worker_activity;
+                wait_for_release
+                    .recv()
+                    .map_err(|error| format!("release channel closed: {error}"))
+            },
+        )
+        .await;
+
+        assert_eq!(
+            result.expect_err("blocked writer must time out at the caller"),
+            "project create timed out after 10ms"
+        );
+        assert!(
+            update_admission.begin_install().is_err(),
+            "spawn_blocking keeps writing after the caller timeout, so install must still wait"
+        );
+
+        release_worker.send(()).expect("release worker");
+        let install = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Ok(install) = update_admission.begin_install() {
+                    break install;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("worker eventually releases update admission");
+        drop(install);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn timed_out_prepare_cannot_commit_a_late_project() {
         let fixture = tempfile::tempdir().expect("fixture tempdir");
         let bundle = fixture.path().join("slow.opentake");
@@ -2135,10 +2300,12 @@ mod project_open_async_tests {
         let admission = coordinator
             .try_admit_prepare(&bundle)
             .expect("prepare admitted");
+        let update_admission = crate::updater::InstallAdmissionGate::default();
 
-        let prepared = prepare_saved_project_off_thread(bundle.clone(), admission)
-            .await
-            .expect("new project bundle prepares");
+        let prepared =
+            prepare_saved_project_off_thread(bundle.clone(), admission, update_admission)
+                .await
+                .expect("new project bundle prepares");
 
         assert_eq!(core.project_revision(), before);
         assert!(bundle.join("project.json").is_file());
@@ -2161,11 +2328,13 @@ mod project_open_async_tests {
         let admission = coordinator
             .try_admit_prepare(&bundle)
             .expect("prepare admitted");
+        let update_admission = crate::updater::InstallAdmissionGate::default();
 
-        let error = match prepare_saved_project_off_thread(bundle, admission).await {
-            Err(error) => error,
-            Ok(_) => panic!("invalid destination must fail"),
-        };
+        let error =
+            match prepare_saved_project_off_thread(bundle, admission, update_admission).await {
+                Err(error) => error,
+                Ok(_) => panic!("invalid destination must fail"),
+            };
 
         assert!(!error.is_empty());
         assert_eq!(core.project_revision(), before);
@@ -2402,11 +2571,24 @@ mod project_prewarm_lifecycle_tests {
 
 #[cfg(test)]
 mod edit_request_serde_tests {
-    use super::{validate_freeze_frame_request, EditRequest};
+    use super::{begin_edit_activity, validate_freeze_frame_request, EditRequest};
     use opentake_core::{AppCore, EditCommand};
     use opentake_domain::{ClipType, TransitionKind};
     use opentake_ops::command::{NewTrackClipMode, PlaceMediaTarget};
     use opentake_ops::ClipEntry;
+
+    #[test]
+    fn deferred_analysis_continuation_cannot_commit_after_install_wins_the_await_boundary() {
+        let admission = crate::updater::InstallAdmissionGate::default();
+        let analysis = admission.begin_activity().unwrap();
+        assert!(admission.begin_install().is_err());
+        drop(analysis);
+
+        let install = admission.begin_install().unwrap();
+        assert!(begin_edit_activity(&admission).is_err());
+        drop(install);
+        assert!(begin_edit_activity(&admission).is_ok());
+    }
 
     fn request_route(request: &EditRequest) -> &'static str {
         match request {

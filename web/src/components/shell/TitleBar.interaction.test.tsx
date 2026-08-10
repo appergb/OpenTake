@@ -20,6 +20,9 @@ vi.mock("../../i18n", () => ({
 }));
 
 vi.mock("../../lib/api", () => ({
+  checkForAppUpdate: vi.fn().mockResolvedValue(null),
+  closeAppUpdate: vi.fn().mockResolvedValue(undefined),
+  installAppUpdate: vi.fn().mockResolvedValue(undefined),
   exportEdl: mocks.exportEdl,
   exportFcpxmlModern: mocks.exportFcpxmlModern,
   exportOtio: mocks.exportOtio,

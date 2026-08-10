@@ -499,6 +499,33 @@ describe("pausedPlayheadFrameFromFrozenVideo", () => {
     expect(typeof fn).toBe("function");
     expect(fn?.(media, 2, 30)).toBe(115);
   });
+
+  it("never rewinds the authoritative playhead to a lagging decoded frame", () => {
+    const fn = (
+      previewEngine as {
+        settlePausedPlayheadFrame?: (activeFrame: number, frozenFrame: number | null) => number;
+      }
+    ).settlePausedPlayheadFrame;
+
+    expect(typeof fn).toBe("function");
+    expect(fn?.(120, 114)).toBe(120);
+    expect(fn?.(120, 123)).toBe(123);
+    expect(fn?.(120, null)).toBe(120);
+  });
+});
+
+describe("transportAcceptsNativePlayhead", () => {
+  it("rejects native ticks immediately after pause and while scrubbing", () => {
+    const fn = (
+      previewEngine as {
+        transportAcceptsNativePlayhead?: (isPlaying: boolean, isScrubbing: boolean) => boolean;
+      }
+    ).transportAcceptsNativePlayhead;
+
+    expect(fn?.(true, false)).toBe(true);
+    expect(fn?.(false, false)).toBe(false);
+    expect(fn?.(true, true)).toBe(false);
+  });
 });
 
 describe("activeVideoForPausedSnap", () => {

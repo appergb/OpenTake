@@ -110,12 +110,20 @@ pub struct GenerateCaptionsResult {
 /// to `download_transcribe_model`). Returns `caption_count == 0` (not an error)
 /// when nothing was captionable / no speech was found, matching upstream's empty
 /// return.
+fn begin_caption_generation(
+    admission: &crate::updater::InstallAdmissionGate,
+) -> Result<crate::updater::ActivityLease, String> {
+    admission.begin_activity()
+}
+
 #[tauri::command]
 pub fn generate_captions(
     core: State<'_, AppCore>,
     media: State<'_, MediaState>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
     request: CaptionRequestDto,
 ) -> Result<GenerateCaptionsResult, String> {
+    let _admission = begin_caption_generation(&admission)?;
     let snapshot = core.runtime_snapshot();
     let revision = ProjectRevision {
         project_epoch: snapshot.project_epoch,
@@ -470,6 +478,15 @@ mod tests {
         assert_eq!(req.source, CaptionSource::Auto);
         assert_eq!(req.text_case, CaptionCaseDto::Auto);
         assert!(!req.censor_profanity);
+    }
+
+    #[test]
+    fn caption_generation_is_rejected_while_update_install_owns_admission() {
+        let admission = crate::updater::InstallAdmissionGate::default();
+        let install = admission.begin_install().unwrap();
+        assert!(begin_caption_generation(&admission).is_err());
+        drop(install);
+        assert!(begin_caption_generation(&admission).is_ok());
     }
 
     #[test]

@@ -527,6 +527,7 @@ async fn start_login_until(
     state: &CodexAuthState,
     codex: VerifiedCodex,
     deadline: tokio::time::Instant,
+    activity: crate::updater::ActivityLease,
 ) -> Result<(), String> {
     let id = state.next_login_id.fetch_add(1, Ordering::AcqRel) + 1;
     let cancel = Arc::new(AtomicBool::new(false));
@@ -552,6 +553,10 @@ async fn start_login_until(
     let spawn = std::thread::Builder::new()
         .name("codex-login".to_string())
         .spawn(move || {
+            // The command returns after startup while the browser login child
+            // keeps running. Let the worker own update admission until the
+            // contained child has actually exited and been reaped.
+            let _activity = activity;
             let _guard = LoginCompletionGuard(thread_completion);
             let runtime = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -603,7 +608,9 @@ pub async fn codex_auth_status(
 #[tauri::command]
 pub async fn codex_login_start(
     state: State<'_, CodexAuthState>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
 ) -> Result<CodexAuthStatus, String> {
+    let activity = crate::updater::begin_mutating_activity(&admission)?;
     let deadline = tokio::time::Instant::now() + CODEX_AUTH_TIMEOUT;
     let (current, codex) = auth_status_until(&state, deadline).await?;
     if current.authenticated || current.login_in_progress {
@@ -612,7 +619,7 @@ pub async fn codex_login_start(
     let Some(codex) = codex else {
         return Ok(CodexAuthStatus::unavailable());
     };
-    start_login_until(&state, codex.clone(), deadline).await?;
+    start_login_until(&state, codex.clone(), deadline, activity).await?;
     Ok(CodexAuthStatus {
         available: true,
         authenticated: false,
@@ -635,7 +642,11 @@ pub async fn codex_login_cancel(
 }
 
 #[tauri::command]
-pub async fn codex_logout(state: State<'_, CodexAuthState>) -> Result<CodexAuthStatus, String> {
+pub async fn codex_logout(
+    state: State<'_, CodexAuthState>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
+) -> Result<CodexAuthStatus, String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
     let deadline = tokio::time::Instant::now() + CODEX_LOGOUT_TIMEOUT;
     cancel_login_until(&state, deadline).await?;
     let cancel = AtomicBool::new(false);

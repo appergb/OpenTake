@@ -243,8 +243,10 @@ impl FeedbackState {
 #[tauri::command]
 pub async fn submit_feedback(
     state: State<'_, FeedbackState>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
     draft: FeedbackDraft,
 ) -> Result<(), String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
     let submission = FeedbackSubmission::from_runtime(draft)?;
     state.send(&submission).await
 }

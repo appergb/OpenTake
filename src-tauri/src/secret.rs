@@ -10,6 +10,7 @@
 //! store, or `localStorage`.
 
 use serde::Serialize;
+use tauri::State;
 
 use opentake_gen::{KeyStore, KeyringStore};
 
@@ -71,7 +72,12 @@ fn status_for(account: &str) -> Result<SecretStatus, String> {
 /// trimmed; an empty key is rejected rather than stored. Returns the new masked
 /// status so the front end never has to round-trip the plaintext back.
 #[tauri::command]
-pub fn secret_save(provider: String, key: String) -> Result<SecretStatus, String> {
+pub fn secret_save(
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
+    provider: String,
+    key: String,
+) -> Result<SecretStatus, String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
     let account = account_for(&provider)?;
     let trimmed = key.trim();
     if trimmed.is_empty() {
@@ -92,7 +98,11 @@ pub fn secret_load(provider: String) -> Result<SecretStatus, String> {
 /// `secret_delete`: remove a provider's key from the keychain. Deleting an
 /// absent key is a no-op (treated as success). Returns the now-empty status.
 #[tauri::command]
-pub fn secret_delete(provider: String) -> Result<SecretStatus, String> {
+pub fn secret_delete(
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
+    provider: String,
+) -> Result<SecretStatus, String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
     let account = account_for(&provider)?;
     KeyringStore::new()
         .delete(account)

@@ -102,7 +102,7 @@ const zh: Dict = {
 
   // Export mode (#29): video vs self-contained .opentake bundle
   "export.mode": "导出类型",
-  "export.mode.video": "视频 (.mp4)",
+  "export.mode.video": "视频 (.{ext})",
   "export.mode.bundle": "项目包 (.opentake)",
   "export.bundle.description": "打包本项目及其全部素材，便于在任意电脑上打开。",
   "export.bundle.run": "导出项目包",
@@ -135,7 +135,7 @@ const zh: Dict = {
   "layout.resizePanels": "调整面板大小",
   "layout.positionPixels": "{value} 像素",
   "menu.about": "关于 OpenTake",
-  "menu.checkUpdates": "检查更新…（Beta 暂不可用）",
+  "menu.checkUpdates": "检查更新…",
   "menu.quit": "退出 OpenTake",
   "menu.file": "文件",
   "menu.new": "新建",
@@ -160,6 +160,25 @@ const zh: Dict = {
   "menu.shortcuts": "键盘快捷键",
   "menu.feedback": "发送反馈…（Beta 暂不可用）",
   "menu.installFailed": "无法安装应用菜单，请重启 OpenTake",
+
+  // Signed application updates
+  "update.title": "OpenTake 更新",
+  "update.check": "检查更新",
+  "update.checking": "正在检查更新…",
+  "update.available": "发现新版本",
+  "update.availableBody": "安装前将下载并验证 OpenTake 官方签名包。",
+  "update.upToDate": "OpenTake 已是最新版本",
+  "update.error": "无法完成更新",
+  "update.version": "版本",
+  "update.install": "安装并重启",
+  "update.downloading": "正在下载更新…",
+  "update.installing": "正在安装更新…",
+  "update.restarting": "安装完成，正在重启…",
+  "update.close": "关闭",
+  "update.releases": "前往 GitHub Releases 手动下载",
+  "update.releasesOpenFailed": "无法打开浏览器，请手动访问 OpenTake 的 GitHub Releases 页面。",
+  "update.progress": "更新下载进度",
+  "update.aboutStatus": "自动检查 GitHub 上的 OpenTake 新版本",
 
   // Save As 进度 toast（SaveAsProgress）
   "saveAs.cancelling": "正在取消…",
@@ -1176,7 +1195,7 @@ const en: Dict = {
 
   // Export mode (#29): video vs self-contained .opentake bundle
   "export.mode": "Export type",
-  "export.mode.video": "Video (.mp4)",
+  "export.mode.video": "Video (.{ext})",
   "export.mode.bundle": "Project bundle (.opentake)",
   "export.bundle.description":
     "Bundles this project with all its media so it opens on any machine.",
@@ -1209,7 +1228,7 @@ const en: Dict = {
   "layout.resizePanels": "Resize panels",
   "layout.positionPixels": "{value} pixels",
   "menu.about": "About OpenTake",
-  "menu.checkUpdates": "Check for Updates… (Unavailable in Beta)",
+  "menu.checkUpdates": "Check for Updates…",
   "menu.quit": "Quit OpenTake",
   "menu.file": "File",
   "menu.new": "New",
@@ -1234,6 +1253,25 @@ const en: Dict = {
   "menu.shortcuts": "Keyboard Shortcuts",
   "menu.feedback": "Send Feedback… (Unavailable in Beta)",
   "menu.installFailed": "Could not install the application menu. Restart OpenTake.",
+
+  // Signed application updates
+  "update.title": "OpenTake Update",
+  "update.check": "Check for Updates",
+  "update.checking": "Checking for updates…",
+  "update.available": "A New Version Is Available",
+  "update.availableBody": "OpenTake will download and verify the officially signed package before installation.",
+  "update.upToDate": "OpenTake is up to date",
+  "update.error": "Update Could Not Be Completed",
+  "update.version": "Version",
+  "update.install": "Install and Restart",
+  "update.downloading": "Downloading update…",
+  "update.installing": "Installing update…",
+  "update.restarting": "Installed. Restarting…",
+  "update.close": "Close",
+  "update.releases": "Download manually from GitHub Releases",
+  "update.releasesOpenFailed": "Could not open your browser. Visit OpenTake's GitHub Releases page manually.",
+  "update.progress": "Update download progress",
+  "update.aboutStatus": "Automatically checks GitHub for new OpenTake versions",
 
   // Save As progress toast (SaveAsProgress)
   "saveAs.cancelling": "Cancelling…",

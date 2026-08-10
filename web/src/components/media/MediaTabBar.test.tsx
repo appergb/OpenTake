@@ -4,6 +4,8 @@ import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MediaSubTabId, MediaTabId } from "../../store/uiStore";
+import { useEditorUiStore } from "../../store/uiStore";
+import { PanelShell } from "../ui/PanelShell";
 import {
   MATERIAL_SUB_TABS,
   MediaSubTabBar,
@@ -25,6 +27,7 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
+  useEditorUiStore.setState({ selectedClipIds: new Set(), focusedPanel: null });
 });
 
 function MainHarness({ onSelect }: { onSelect: (tab: MediaTabId) => void }) {
@@ -56,6 +59,134 @@ function SubHarness({ onSelect }: { onSelect: (tab: MediaSubTabId) => void }) {
 }
 
 describe("MediaTabBar keyboard semantics", () => {
+  it("keeps_the_timeline_cut_selected_when_opening_the_transition_tab", async () => {
+    const onSelect = vi.fn();
+    useEditorUiStore.setState({
+      selectedClipIds: new Set(["outgoing-clip"]),
+      focusedPanel: "timeline",
+    });
+    await act(async () =>
+      root.render(
+        <PanelShell panel="media">
+          <MainHarness onSelect={onSelect} />
+        </PanelShell>,
+      ),
+    );
+    const transitionTab = container.querySelector<HTMLButtonElement>(
+      "#media-main-tab-transition",
+    )!;
+
+    await act(async () => {
+      transitionTab.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      transitionTab.focus();
+      transitionTab.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+      transitionTab.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(onSelect).toHaveBeenCalledWith("transition");
+    expect(useEditorUiStore.getState().focusedPanel).toBe("media");
+    expect(useEditorUiStore.getState().selectedClipIds).toEqual(new Set(["outgoing-clip"]));
+  });
+
+  it("keeps_the_cut_selected_when_keyboard_focus_roves_to_the_transition_tab", async () => {
+    const onSelect = vi.fn();
+    useEditorUiStore.setState({
+      selectedClipIds: new Set(["outgoing-clip"]),
+      focusedPanel: "timeline",
+    });
+    await act(async () =>
+      root.render(
+        <PanelShell panel="media">
+          <MainHarness onSelect={onSelect} />
+        </PanelShell>,
+      ),
+    );
+    const panel = container.querySelector<HTMLElement>('[data-editor-panel="media"]')!;
+    const materialTab = container.querySelector<HTMLButtonElement>(
+      "#media-main-tab-material",
+    )!;
+
+    expect(materialTab.tabIndex).toBe(0);
+    await act(async () => materialTab.focus());
+    for (let step = 0; step < 3; step += 1) {
+      await act(async () =>
+        document.activeElement!.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }),
+        ),
+      );
+    }
+
+    expect(document.activeElement?.id).toBe("media-main-tab-transition");
+    expect(onSelect).toHaveBeenLastCalledWith("transition");
+    expect(useEditorUiStore.getState().focusedPanel).toBe("media");
+    expect(useEditorUiStore.getState().selectedClipIds).toEqual(new Set(["outgoing-clip"]));
+    expect(panel.tabIndex).toBe(-1);
+  });
+
+  it("still_clears_timeline_selection_when_clicking_an_asset_tab", async () => {
+    useEditorUiStore.setState({
+      selectedClipIds: new Set(["timeline-clip"]),
+      focusedPanel: "timeline",
+    });
+    await act(async () =>
+      root.render(
+        <PanelShell panel="media">
+          <MainHarness onSelect={vi.fn()} />
+        </PanelShell>,
+      ),
+    );
+    const audioTab = container.querySelector<HTMLButtonElement>("#media-main-tab-audio")!;
+
+    await act(async () => {
+      audioTab.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      audioTab.focus();
+      audioTab.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+      audioTab.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+
+    expect(useEditorUiStore.getState().selectedClipIds).toEqual(new Set());
+  });
+
+  it("still_clears_timeline_selection_when_non_tab_media_content_receives_focus", async () => {
+    useEditorUiStore.setState({
+      selectedClipIds: new Set(["timeline-clip"]),
+      focusedPanel: "timeline",
+    });
+    await act(async () =>
+      root.render(
+        <PanelShell panel="media">
+          <input aria-label="media search" />
+        </PanelShell>,
+      ),
+    );
+
+    await act(async () =>
+      container.querySelector<HTMLInputElement>('input[aria-label="media search"]')!.focus(),
+    );
+
+    expect(useEditorUiStore.getState().selectedClipIds).toEqual(new Set());
+  });
+
+  it("clears_timeline_selection_when_accessibility_focus_lands_on_a_non_transition_media_panel", async () => {
+    useEditorUiStore.setState({
+      selectedClipIds: new Set(["timeline-clip"]),
+      focusedPanel: "timeline",
+    });
+    await act(async () =>
+      root.render(
+        <PanelShell panel="media">
+          <MainHarness onSelect={vi.fn()} />
+        </PanelShell>,
+      ),
+    );
+
+    await act(async () =>
+      container.querySelector<HTMLElement>('[data-editor-panel="media"]')!.focus(),
+    );
+
+    expect(useEditorUiStore.getState().selectedClipIds).toEqual(new Set());
+  });
+
   it("roves across enabled main tabs and skips disabled tabs", async () => {
     const onSelect = vi.fn();
     await act(async () => root.render(<MainHarness onSelect={onSelect} />));

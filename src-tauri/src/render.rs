@@ -1108,15 +1108,18 @@ pub fn cancel_composite_frame(
 /// path uses `videoComposition = nil`, i.e. the raw asset frame, not a
 /// composite). Both then import identically.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri injects shared render/media/update state
 pub fn capture_frame_to_media(
     core: State<'_, AppCore>,
     render: State<'_, RenderState>,
     media: State<'_, crate::media::MediaState>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
     frame: i32,
     name_base: String,
     folder_id: Option<String>,
     source_media_id: Option<String>,
 ) -> Result<crate::media::MediaListDto, String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
     capture_frame_to_media_impl(&core, || {
         capture_frame_to_media_workflow(
             &core,
@@ -1223,15 +1226,23 @@ fn decode_source_frame(
     if !path.is_file() {
         return Err(format!("source file not found: {}", path.display()));
     }
-    let fps = if timeline.fps > 0 { timeline.fps } else { 30 };
-    let req = FrameRequest {
-        time_secs: (frame.max(0) as f64) / fps as f64,
-        max_size: (max_size, max_size),
-        ..FrameRequest::default()
-    };
+    let req = source_frame_request(frame, timeline.fps, max_size);
     let (_, rgba) = decode_frame_at_cancellable(&path, &req, cancel)
         .map_err(|e| format!("decode source frame: {e}"))?;
     Ok(DecodedFrame::new(rgba.width, rgba.height, rgba.rgba, false))
+}
+
+fn source_frame_request(frame: i32, timeline_fps: i32, max_size: u32) -> FrameRequest {
+    let fps = if timeline_fps > 0 { timeline_fps } else { 30 };
+    FrameRequest {
+        time_secs: (frame.max(0) as f64) / fps as f64,
+        max_size: (max_size, max_size),
+        // Source-tab stills and captures promise the frame selected by the app
+        // transport. The generic one-second thumbnail tolerance can seek back
+        // to frame zero for short generated clips whose opening frame is blank.
+        tolerance_secs: 0.0,
+        apply_rotation: true,
+    }
 }
 
 /// A short unique-ish suffix (nanos since epoch) to keep capture filenames from
@@ -1394,6 +1405,16 @@ mod tests {
         .expect("source still request decodes");
 
         assert_eq!(request.source_media_id.as_deref(), Some("main10"));
+    }
+
+    #[test]
+    fn source_still_request_seeks_the_exact_requested_frame() {
+        let request = source_frame_request(22, 30, 0);
+
+        assert!((request.time_secs - (22.0 / 30.0)).abs() < f64::EPSILON);
+        assert_eq!(request.max_size, (0, 0));
+        assert_eq!(request.tolerance_secs, 0.0);
+        assert!(request.apply_rotation);
     }
 
     #[test]

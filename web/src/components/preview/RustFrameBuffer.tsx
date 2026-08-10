@@ -8,6 +8,7 @@ import type { PlaybackFrameEvent, PlaybackIdentity } from "../../lib/types";
 import { useEditorUiStore } from "../../store/uiStore";
 import { nativePlaybackController, samePlaybackIdentity } from "./nativePlaybackSession";
 import {
+  cancelPendingRustFrame,
   createRustFrameBufferState,
   failRustFrame,
   loadRustFrame,
@@ -141,6 +142,8 @@ export function RustFrameBuffer({
 }: RustFrameBufferProps) {
   const [state, setState] = useState<RustFrameBufferState>(createRustFrameBufferState);
   const stateRef = useRef(state);
+  const engineDrivingRef = useRef(engineDriving);
+  engineDrivingRef.current = engineDriving;
   const liveCanvasRef = useRef<HTMLCanvasElement>(null);
   const [composite, setComposite] = useState<{
     image: CompositeFrame;
@@ -329,7 +332,13 @@ export function RustFrameBuffer({
   }, [cancelCompositeStill, engineDriving, projectEpoch, requestCompositeStill, stillFrame, timelineVersion]);
 
   useEffect(() => {
-    if (!event) return;
+    if (engineDriving) return;
+    const next = cancelPendingRustFrame(stateRef.current);
+    if (next !== stateRef.current) commit(next);
+  }, [engineDriving]);
+
+  useEffect(() => {
+    if (!engineDriving || !event) return;
     const previousIdentity = stateRef.current.identity;
     const result = requestRustFrame(stateRef.current, event, endpoint);
     if (
@@ -341,7 +350,7 @@ export function RustFrameBuffer({
       setComposite(null);
     }
     if (result.state !== stateRef.current) commit(result.state);
-  }, [endpoint, event]);
+  }, [endpoint, engineDriving, event]);
 
   const activeFrame = state.activeSlot === null ? null : state.slots[state.activeSlot].frame;
   useEffect(() => {
@@ -379,6 +388,9 @@ export function RustFrameBuffer({
 
   const onLoad = (slot: 0 | 1, target: HTMLImageElement) => {
     const src = rustFrameEventSource(target);
+    // An image request can finish after Space/Pause already froze transport.
+    // Retain the last painted canvas until the exact paused still arrives.
+    if (!engineDrivingRef.current) return;
     const current = stateRef.current;
     if (current.pendingSlot !== slot || current.slots[slot].src !== src) return;
     const pendingFrame = current.slots[slot].frame;

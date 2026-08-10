@@ -18,6 +18,22 @@ export function PanelShell({ panel, children }: PanelShellProps) {
   const focusedPanel = useEditorUiStore((s) => s.focusedPanel);
   const focusPanel = useEditorUiStore((s) => s.focusPanel);
   const focused = focusedPanel === panel;
+  const focusFrom = (
+    target: EventTarget | null,
+    keyboardFocus: boolean,
+    panelRoot: HTMLElement,
+  ) => {
+    const element = target instanceof Element ? target : null;
+    const preserveTimelineSelection =
+      panel === "media" &&
+      element !== null &&
+      (element.closest("[data-preserve-timeline-selection]") !== null ||
+        (keyboardFocus && element.closest("[data-media-main-tab]") !== null) ||
+        (keyboardFocus &&
+          element === panelRoot &&
+          panelRoot.querySelector("[data-transition-selection-context]") !== null));
+    focusPanel(panel, preserveTimelineSelection);
+  };
 
   return (
     // Outer = base groove color; the inner card is the surface (SPEC §2.5).
@@ -26,11 +42,11 @@ export function PanelShell({ panel, children }: PanelShellProps) {
       data-focused={focused ? "true" : "false"}
       role="region"
       aria-label={t(`layout.panel.${panel}`)}
-      tabIndex={0}
+      tabIndex={-1}
       className="editor-panel-shell"
       style={{ background: "var(--bg-base)" }}
-      onMouseDown={() => focusPanel(panel)}
-      onFocus={() => focusPanel(panel)}
+      onMouseDown={(event) => focusFrom(event.target, false, event.currentTarget)}
+      onFocus={(event) => focusFrom(event.target, true, event.currentTarget)}
     >
       <div
         className="editor-panel-card"

@@ -411,6 +411,9 @@ fn validate_response(response: &Response, max: u64, label: &str) -> Result<(), S
 
 #[tauri::command]
 pub async fn sample_project_materialize(app: AppHandle, slug: String) -> Result<String, String> {
+    let activity = crate::updater::begin_mutating_activity(
+        &app.state::<crate::updater::InstallAdmissionGate>(),
+    )?;
     let backend = crate::account::configured_backend_url().ok().flatten();
     let cache = app
         .path()
@@ -420,6 +423,7 @@ pub async fn sample_project_materialize(app: AppHandle, slug: String) -> Result<
     let progress_app = app.clone();
     let progress_slug = slug.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _activity = activity;
         let service = SampleProjectService::new(cache)?;
         let progress = |fraction: f64| {
             let total = 10_000;

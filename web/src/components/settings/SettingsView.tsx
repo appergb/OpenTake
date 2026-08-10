@@ -49,6 +49,7 @@ import {
 import type { SecretStatus } from "../../lib/types";
 import { AccountPane } from "./AccountPane";
 import { StoragePane } from "./StoragePane";
+import { UpdateSettingsControl } from "./UpdateDialog";
 
 const settingsPanelStyle: CSSProperties = {
   width: "100%",
@@ -930,6 +931,7 @@ function AboutPane() {
     <Section title={t("settings.section.about")}>
       <Field label={t("settings.aboutVersion")} control={<Value>{__APP_VERSION__}</Value>} />
       <Field label={t("settings.aboutLicense")} control={<Value>GPL-3.0</Value>} />
+      <UpdateSettingsControl />
       <div style={{ fontSize: "var(--fs-xs)", color: "var(--text-tertiary)" }}>
         {t("settings.aboutDesc")}
       </div>

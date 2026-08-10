@@ -16,7 +16,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -395,6 +395,7 @@ impl RenderLoop {
 pub struct PlaybackEngine {
     control_tx: mpsc::Sender<PlaybackCmd>,
     seek_mailbox: Arc<SeekMailbox>,
+    pause_requested: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
     cancel: MediaCancelToken,
 }
@@ -553,6 +554,8 @@ impl PlaybackEngine {
         let (tx, rx) = mpsc::channel();
         let seek_mailbox = Arc::new(SeekMailbox::default());
         let render_seek_mailbox = Arc::clone(&seek_mailbox);
+        let pause_requested = Arc::new(AtomicBool::new(false));
+        let render_pause_requested = Arc::clone(&pause_requested);
         let render_cancel = cancel.clone();
         let handle = thread::Builder::new()
             .name("opentake-playback-render".to_string())
@@ -569,6 +572,7 @@ impl PlaybackEngine {
                     project_dir,
                     rx,
                     render_seek_mailbox,
+                    render_pause_requested,
                     initial_frame,
                     startup,
                     render_cancel,
@@ -578,6 +582,7 @@ impl PlaybackEngine {
         Ok(PlaybackEngine {
             control_tx: tx,
             seek_mailbox,
+            pause_requested,
             handle: Some(handle),
             cancel,
         })
@@ -591,7 +596,17 @@ impl PlaybackEngine {
     }
 
     pub fn pause(&self, frame: i32) -> Result<(), String> {
-        self.barrier(|reply| PlaybackCmd::Pause(frame, reply))
+        self.pause_requested.store(true, Ordering::Release);
+        let (reply, _acknowledgement) = mpsc::channel();
+        if self
+            .control_tx
+            .send(PlaybackCmd::Pause(frame, reply))
+            .is_err()
+        {
+            self.pause_requested.store(false, Ordering::Release);
+            return Err("playback render thread exited before control".to_string());
+        }
+        Ok(())
     }
 
     pub fn resume(&self, frame: i32) -> Result<(), String> {
@@ -645,6 +660,7 @@ impl PlaybackEngine {
             Self {
                 control_tx,
                 seek_mailbox: Arc::new(SeekMailbox::default()),
+                pause_requested: Arc::new(AtomicBool::new(false)),
                 handle: Some(handle),
                 cancel: MediaCancelToken::new(),
             },
@@ -682,11 +698,46 @@ impl PlaybackEngine {
             Self {
                 control_tx,
                 seek_mailbox: Arc::new(SeekMailbox::default()),
+                pause_requested: Arc::new(AtomicBool::new(false)),
                 handle: Some(handle),
                 cancel: MediaCancelToken::new(),
             },
             resume_rx,
             stopped_rx,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_blocking_pause() -> (Self, mpsc::Receiver<i32>, mpsc::Sender<()>) {
+        let (control_tx, control_rx) = mpsc::channel();
+        let (pause_tx, pause_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            while let Ok(command) = control_rx.recv() {
+                match command {
+                    PlaybackCmd::Pause(frame, reply) => {
+                        let _ = pause_tx.send(frame);
+                        let _ = release_rx.recv();
+                        let _ = reply.send(());
+                    }
+                    PlaybackCmd::Resume(_, reply) => {
+                        let _ = reply.send(());
+                    }
+                    PlaybackCmd::Seek => {}
+                    PlaybackCmd::Stop => break,
+                }
+            }
+        });
+        (
+            Self {
+                control_tx,
+                seek_mailbox: Arc::new(SeekMailbox::default()),
+                pause_requested: Arc::new(AtomicBool::new(false)),
+                handle: Some(handle),
+                cancel: MediaCancelToken::new(),
+            },
+            pause_rx,
+            release_tx,
         )
     }
 }
@@ -717,6 +768,7 @@ fn run_render_thread(
     project_dir: Option<PathBuf>,
     rx: mpsc::Receiver<PlaybackCmd>,
     seek_mailbox: Arc<SeekMailbox>,
+    pause_requested: Arc<AtomicBool>,
     initial_frame: Option<i32>,
     mut startup: Option<mpsc::Sender<Result<(), String>>>,
     cancel: MediaCancelToken,
@@ -769,6 +821,7 @@ fn run_render_thread(
                         emitter.emit(buffered_frame);
                     }
                     paused = false;
+                    pause_requested.store(false, Ordering::Release);
                     let _ = reply.send(());
                 }
                 Ok(PlaybackCmd::Seek) => {
@@ -796,6 +849,7 @@ fn run_render_thread(
                 Ok(PlaybackCmd::Resume(frame, reply)) => {
                     clock.seek(frame);
                     render_loop.seek();
+                    pause_requested.store(false, Ordering::Release);
                     let _ = reply.send(());
                 }
                 Ok(PlaybackCmd::Seek) => {
@@ -817,7 +871,7 @@ fn run_render_thread(
         let (clamped, done) = loop_step(clock.frame(fps), total);
         let render_generation = seek_mailbox.generation();
         let rendered = render_loop.render_frame(clamped);
-        if !seek_mailbox.is_current(render_generation) {
+        if pause_requested.load(Ordering::Acquire) || !seek_mailbox.is_current(render_generation) {
             continue;
         }
         match rendered {
@@ -864,6 +918,33 @@ fn run_render_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pause_request_does_not_wait_for_an_inflight_render_to_finish() {
+        let (engine, pause_seen, release_pause) = PlaybackEngine::test_blocking_pause();
+        let (result_tx, result_rx) = mpsc::channel();
+        let caller = thread::spawn(move || {
+            let result = engine.pause(73);
+            let _ = result_tx.send(result);
+        });
+
+        assert_eq!(
+            pause_seen
+                .recv_timeout(Duration::from_secs(1))
+                .expect("pause reaches render thread"),
+            73
+        );
+        let returned_before_render_release = result_rx.try_recv().is_ok();
+        release_pause
+            .send(())
+            .expect("release synthetic inflight render");
+        caller.join().expect("join pause caller");
+
+        assert!(
+            returned_before_render_release,
+            "pause must acknowledge after enqueueing, not after the slow render finishes"
+        );
+    }
 
     #[test]
     fn bounded_reaper_rejects_new_start_when_teardown_backlog_is_full() {

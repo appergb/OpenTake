@@ -245,7 +245,7 @@ PRIMARY-CN/
 
 ### 前置依赖
 
-- **Rust** ≥ 1.82 (via [rustup](https://rustup.rs))
+- **Rust** ≥ 1.96 (via [rustup](https://rustup.rs))
 - **Node.js** ≥ 20 + **pnpm**
 - **FFmpeg** ≥ 6.0
 

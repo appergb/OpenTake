@@ -40,7 +40,7 @@ it("control-bbc125bbbf2275f2 focus an editor panel", async () => {
   const ring = panel.querySelector<HTMLElement>("[data-panel-focus-ring]")!;
   expect(panel.getAttribute("role")).toBe("region");
   expect(panel.getAttribute("aria-label")).not.toBe("");
-  expect(panel.tabIndex).toBe(0);
+  expect(panel.tabIndex).toBe(-1);
   expect(panel.dataset.focused).toBe("false");
   expect(ring.style.opacity).toBe("0");
 
@@ -54,6 +54,8 @@ it("control-bbc125bbbf2275f2 focus an editor panel", async () => {
   expect(ring.style.opacity).toBe("0.6");
 
   await act(async () => useEditorUiStore.setState({ focusedPanel: "timeline" }));
+  // The named region remains programmatically focusable without adding a
+  // redundant stop before its native buttons in the keyboard Tab order.
   await act(async () => panel.focus());
   expect(document.activeElement).toBe(panel);
   expect(useEditorUiStore.getState().focusedPanel).toBe("media");

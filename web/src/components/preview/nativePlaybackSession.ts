@@ -197,13 +197,23 @@ export function createNativePlaybackController(
     },
     async pause(identity, frame) {
       if (!samePlaybackIdentity(current, identity)) return;
+      const pauseGeneration = ++lifecycleGeneration;
+      // Pause is a local publication barrier first and an IPC command second.
+      // The backend can be finishing a slow decode while the command crosses the
+      // WebView bridge; those late events must never move the frozen UI frame.
+      paused = true;
       try {
         await playbackApi.playbackPause(identity, Math.max(0, Math.floor(frame)));
       } catch (error) {
         const decoded = api.decodePlaybackCommandError(error);
         if (!decoded || decoded.code === "engine") throw error;
       }
-      if (samePlaybackIdentity(current, identity)) paused = true;
+      if (
+        pauseGeneration === lifecycleGeneration &&
+        samePlaybackIdentity(current, identity)
+      ) {
+        paused = true;
+      }
     },
     async seek(identity, frame) {
       if (!samePlaybackIdentity(current, identity)) return;
@@ -218,13 +228,20 @@ export function createNativePlaybackController(
     async cleanup(identity, action, frame) {
       if (!samePlaybackIdentity(current, identity)) return;
       if (action === "pause") {
+        const pauseGeneration = ++lifecycleGeneration;
+        paused = true;
         try {
           await playbackApi.playbackPause(identity, Math.max(0, Math.floor(frame)));
         } catch (error) {
           const decoded = api.decodePlaybackCommandError(error);
           if (!decoded || decoded.code === "engine") throw error;
         }
-        if (samePlaybackIdentity(current, identity)) paused = true;
+        if (
+          pauseGeneration === lifecycleGeneration &&
+          samePlaybackIdentity(current, identity)
+        ) {
+          paused = true;
+        }
       } else {
         await stopIdentity(identity);
       }
@@ -236,7 +253,7 @@ export function createNativePlaybackController(
       return current ? { ...current } : null;
     },
     acceptFrame(event) {
-      if (!validFrameEvent(event) || !samePlaybackIdentity(current, event)) return;
+      if (paused || !validFrameEvent(event) || !samePlaybackIdentity(current, event)) return;
       if (event.sequence <= lastSequence) return;
       lastSequence = event.sequence;
       publishNativePlaybackFrame(event);

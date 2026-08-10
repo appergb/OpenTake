@@ -9,6 +9,7 @@ import {
   RustFrameBuffer,
 } from "./RustFrameBuffer.tsx";
 import {
+  cancelPendingRustFrame,
   createRustFrameBufferState,
   failRustFrame,
   loadRustFrame,
@@ -44,6 +45,18 @@ function promote(
 }
 
 describe("retained Rust frame buffer", () => {
+  it("cancels a pre-pause pending request without discarding the promoted frame", () => {
+    const active = promote();
+    const withPending = requestRustFrame(active, frame(2), endpoint).state;
+
+    const paused = cancelPendingRustFrame(withPending);
+
+    expect(paused.pendingSlot).toBeNull();
+    expect(paused.activeSlot).toBe(active.activeSlot);
+    expect(paused.activeSlot === null ? null : paused.slots[paused.activeSlot].frame?.sequence)
+      .toBe(1);
+  });
+
   it("loads the next frame into the inactive slot while keeping the active slot visible", () => {
     const active = promote();
     const next = requestRustFrame(active, frame(2), endpoint).state;

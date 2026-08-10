@@ -708,6 +708,31 @@ fn add_clips_auto_track_mixed_audio_video_is_one_undoable_transaction() {
     assert!(st.timeline.tracks.is_empty());
 }
 
+#[test]
+fn add_clips_auto_track_places_visual_media_on_a_fresh_top_track() {
+    let mut st = state(vec![
+        video_track("existing-video", true, vec![clip("base", 0, 60)]),
+        audio_track("existing-audio", true, vec![clip("sound", 0, 60)]),
+    ]);
+    let g = SeqIdGen::new("n-");
+
+    apply(
+        &mut st,
+        EditCommand::AddClipsAutoTrack {
+            entries: vec![entry(0, ClipType::Video, 0, 30)],
+        },
+        &g,
+    )
+    .unwrap();
+
+    assert_eq!(st.timeline.tracks.len(), 3);
+    assert_eq!(st.timeline.tracks[0].kind, ClipType::Video);
+    assert_eq!(st.timeline.tracks[0].clips[0].media_ref, "m");
+    assert_eq!(st.timeline.tracks[1].id, "existing-video");
+    assert_eq!(st.timeline.tracks[1].clips[0].id, "base");
+    assert_eq!(st.timeline.tracks[2].id, "existing-audio");
+}
+
 // ---- split + keyframes ----------------------------------------------------
 
 #[test]

@@ -1,6 +1,6 @@
 # Playback engine architecture
 
-> Current reviewed state: 2026-08-01. The original 2026-07-04 default-off
+> Current reviewed state: 2026-08-10. The original 2026-07-04 default-off
 > MJPEG design is historical; this document records the Wave 1A implementation.
 
 ## Capability route is the sole authority
@@ -77,6 +77,21 @@ revision during installation. Pause, seek, stop, events, and frame requests are
 accepted only for the exact identity; an exact paused revision may retain and
 resume its session.
 
+Pause is an immediate publication boundary, not a render-thread barrier. The
+frontend freezes the authoritative playhead before awaiting IPC and rejects
+late native events/image loads. The backend closes `PublicationGate` before
+audio control, enqueues the pause without waiting for an in-flight decode, and
+discards that render before publication. Resume repositions the retained engine
+before reopening audible output; only the exact retained session can reopen its
+gate. WebKit's decoded frame may advance a pause by a fractional frame, but it
+can never rewrite the playhead backwards when decoding lags.
+
+The cpal sample position remains the preferred master clock. Startup and resume
+still require sustained callback liveness; additionally, a callback that stops
+advancing during playback switches after 150 ms to a monotonic wall-clock
+continuation. Recovery never rewinds the timeline, while an explicit transport
+seek remains authoritative and may move backward.
+
 Audio preparation has one persistent admitted worker and checked memory bounds;
 teardown uses one persistent reaper with at most two outstanding jobs. Queue,
 panic, cancellation, timeout, and project-boundary paths release capacity and
@@ -106,7 +121,10 @@ composite releases the terminal Rust frame only after the replacement is loaded.
 Paused/scrub composite requests are latest-only: one request may be in flight
 and only the newest pending frame is retained. That paused composite stays
 painted during native startup and is removed only after the first live slot
-loads. Stale identity, sequence, load, cleanup, and paint callbacks are ignored.
+loads. Pausing cancels the pending decoder slot while preserving the promoted
+canvas, so even a pre-pause image that finishes during a fast pause/resume cycle
+cannot paint afterward. Stale identity, sequence, load, cleanup, and paint
+callbacks are ignored.
 
 ## Project/source identity and prewarm/cache
 

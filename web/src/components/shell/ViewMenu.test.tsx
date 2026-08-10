@@ -18,6 +18,8 @@ import { useEditorUiStore } from "../../store/uiStore";
 import { useProjectStore } from "../../store/projectStore";
 import { useClipboardStore } from "../../store/clipboardStore";
 import { useMediaStore } from "../../store/mediaStore";
+import { useUpdateStore } from "../../store/updateStore";
+import type { Clip } from "../../lib/types";
 import * as editActions from "../../store/editActions";
 import { handleViewShortcutKeyDown } from "../../hooks/useKeyboardShortcuts";
 import {
@@ -43,6 +45,36 @@ function deferred<T>() {
 
 function menuItems(): HTMLButtonElement[] {
   return [...(container?.querySelectorAll<HTMLButtonElement>('[role="menu"] button') ?? [])];
+}
+
+function videoClip(): Clip {
+  return {
+    id: "clip-1",
+    mediaRef: "media-1",
+    mediaType: "video",
+    sourceClipType: "video",
+    startFrame: 0,
+    durationFrames: 30,
+    trimStartFrame: 0,
+    trimEndFrame: 0,
+    speed: 1,
+    volume: 1,
+    fadeInFrames: 0,
+    fadeOutFrames: 0,
+    fadeInInterpolation: "linear",
+    fadeOutInterpolation: "linear",
+    opacity: 1,
+    transform: {
+      centerX: 0.5,
+      centerY: 0.5,
+      width: 1,
+      height: 1,
+      rotation: 0,
+      flipHorizontal: false,
+      flipVertical: false,
+    },
+    crop: { left: 0, top: 0, right: 0, bottom: 0 },
+  };
 }
 
 function menuItem(label: string): HTMLButtonElement {
@@ -75,6 +107,14 @@ beforeEach(async () => {
     previewMediaId: null,
   });
   useProjectStore.setState({ projectEpoch: 0, projectPath: null, timelineVersion: 0 });
+  useUpdateStore.setState({
+    phase: "idle",
+    dialogOpen: false,
+    source: null,
+    update: null,
+    progress: null,
+    error: null,
+  });
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -91,6 +131,109 @@ afterEach(async () => {
 });
 
 describe("ViewMenu aggregate command contract", () => {
+  it("blocks native menu mutations and stale accelerators throughout installation", async () => {
+    await act(async () => {
+      useProjectStore.setState({
+        projectPath: "/tmp/update-lock.opentake",
+        compatibilityReadOnly: false,
+        canUndo: true,
+        timeline: {
+          ...useProjectStore.getState().timeline,
+          tracks: [
+            {
+              id: "v1",
+              type: "video",
+              muted: false,
+              hidden: false,
+              syncLocked: true,
+              clips: [videoClip()],
+            },
+          ],
+        },
+      });
+      useEditorUiStore.setState({ exportDialogOpen: false, layoutPreset: "default" });
+      useUpdateStore.setState({ phase: "installing", dialogOpen: true });
+    });
+
+    expect(applicationMenuStateSnapshot().enabled).toMatchObject({
+      quit: false,
+      checkUpdates: false,
+      new: false,
+      open: false,
+      save: false,
+      importMedia: false,
+      export: false,
+      undo: false,
+      split: false,
+      layoutDefault: false,
+      layoutMedia: false,
+      fullscreen: false,
+    });
+
+    await act(async () => {
+      runApplicationMenuCommand("export");
+      runApplicationMenuCommand("layoutMedia");
+    });
+    expect(useEditorUiStore.getState()).toMatchObject({
+      exportDialogOpen: false,
+      layoutPreset: "default",
+    });
+  });
+
+  it("keeps native Export closed when the timeline has no renderable clips", async () => {
+    await act(async () => {
+      useEditorUiStore.setState({ exportDialogOpen: false, view: "editor" });
+      useProjectStore.setState({
+        timeline: {
+          ...useProjectStore.getState().timeline,
+          tracks: [],
+        },
+      });
+      runApplicationMenuCommand("export");
+    });
+    expect(useEditorUiStore.getState().exportDialogOpen).toBe(false);
+
+    await act(async () => {
+      useProjectStore.setState({
+        timeline: {
+          ...useProjectStore.getState().timeline,
+          tracks: [
+            {
+              id: "empty-v1",
+              type: "video",
+              muted: false,
+              hidden: false,
+              syncLocked: true,
+              clips: [],
+            },
+          ],
+        },
+      });
+      runApplicationMenuCommand("export");
+    });
+    expect(useEditorUiStore.getState().exportDialogOpen).toBe(false);
+
+    await act(async () => {
+      useProjectStore.setState({
+        timeline: {
+          ...useProjectStore.getState().timeline,
+          tracks: [
+            {
+              id: "v1",
+              type: "video",
+              muted: false,
+              hidden: false,
+              syncLocked: true,
+              clips: [videoClip()],
+            },
+          ],
+        },
+      });
+      runApplicationMenuCommand("export");
+    });
+    expect(useEditorUiStore.getState().exportDialogOpen).toBe(true);
+  });
+
   it("routes application-menu media Delete through the shared pending transaction", async () => {
     const pending = deferred<void>();
     vi.mocked(editActions.deleteMedia).mockReturnValue(pending.promise);
@@ -237,7 +380,7 @@ describe("ViewMenu aggregate command contract", () => {
       ]),
     ).toEqual([
       ["app", "about", null, "predefined"],
-      ["app", "checkUpdates", null, "disabled"],
+      ["app", "checkUpdates", null, "action"],
       ["app", "settings", "CmdOrCtrl+,", "action"],
       ["app", "quit", "CmdOrCtrl+Q", "predefined"],
       ["file", "new", "CmdOrCtrl+N", "action"],
@@ -308,7 +451,7 @@ describe("ViewMenu aggregate command contract", () => {
     });
     const nativeState = applicationMenuStateSnapshot();
     expect(nativeState.enabled).toMatchObject({
-      checkUpdates: false,
+      checkUpdates: true,
       save: true,
       saveAs: true,
       importMedia: true,
@@ -333,6 +476,9 @@ describe("ViewMenu aggregate command contract", () => {
       agentPanel: false,
       fullscreen: true,
     });
+    const checkUpdates = vi.spyOn(useUpdateStore.getState(), "check").mockResolvedValue();
+    await act(async () => runApplicationMenuCommand("checkUpdates"));
+    expect(checkUpdates).toHaveBeenCalledWith("manual");
     await act(async () => runApplicationMenuCommand("shortcuts"));
     expect(useEditorUiStore.getState()).toMatchObject({
       settingsOpen: true,

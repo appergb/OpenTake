@@ -85,6 +85,58 @@ describe("native playback identity", () => {
     expect(resumed.sessionId).toBe(first.sessionId);
   });
 
+  it("freezes publication as soon as pause is requested, before IPC settles", async () => {
+    let finishPause!: () => void;
+    const api = {
+      playbackStart: vi.fn(async () => {}),
+      playbackPause: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            finishPause = resolve;
+          }),
+      ),
+      playbackSeek: vi.fn(async () => {}),
+      playbackStop: vi.fn(async () => {}),
+    };
+    const controller = createNativePlaybackController(api, () => "pause-freeze");
+    const identity = await controller.start(revision(1, 7), 0);
+    controller.acceptFrame({ ...identity, frame: 40, sequence: 1, terminal: false });
+
+    const pausing = controller.pause(identity, 40);
+    await Promise.resolve();
+    controller.acceptFrame({ ...identity, frame: 41, sequence: 2, terminal: false });
+
+    expect(getNativePlaybackPublication()).toMatchObject({ frame: 40, sequence: 1 });
+    finishPause();
+    await pausing;
+  });
+
+  it("does not let a late pause completion re-freeze a resumed session", async () => {
+    let finishPause!: () => void;
+    const api = {
+      playbackStart: vi.fn(async () => {}),
+      playbackPause: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            finishPause = resolve;
+          }),
+      ),
+      playbackSeek: vi.fn(async () => {}),
+      playbackStop: vi.fn(async () => {}),
+    };
+    const controller = createNativePlaybackController(api, () => "pause-resume-race");
+    const identity = await controller.start(revision(1, 7), 0);
+    const pausing = controller.pause(identity, 40);
+    await Promise.resolve();
+
+    const resumed = await controller.start(revision(1, 7), 40);
+    finishPause();
+    await pausing;
+    controller.acceptFrame({ ...resumed, frame: 41, sequence: 1, terminal: false });
+
+    expect(getNativePlaybackPublication()).toMatchObject({ frame: 41, sequence: 1 });
+  });
+
   it("mints a new session id after project or timeline revision changes", async () => {
     const h = harness();
     const first = await h.controller.start(revision(1, 7), 0);

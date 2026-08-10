@@ -100,6 +100,16 @@ export function syncRustFrameBufferIdentity(
     : createRustFrameBufferState({ ...identity });
 }
 
+/** Retain the last promoted frame while invalidating an image request that was
+ * started by the running transport. A pause/resume cycle must not allow that
+ * pre-pause decoder completion to paint after the new run begins. */
+export function cancelPendingRustFrame(state: RustFrameBufferState): RustFrameBufferState {
+  if (state.pendingSlot === null) return state;
+  const slots = cloneSlots(state);
+  slots[state.pendingSlot] = emptySlot();
+  return { ...state, slots, pendingSlot: null };
+}
+
 export function requestRustFrame(
   current: RustFrameBufferState,
   frame: PlaybackFrameEvent,
