@@ -343,10 +343,11 @@ impl Crc32 {
 /// 4. `Emulation.setVirtualTimePolicy { policy: "pause" }` in the author session
 ///    to stop real time.
 /// 5. For each frame `i`, call `OpenTake.seek(i / fps)` in the author context.
-///    Every black/white candidate uses a fresh paused main-target PageHandler:
-///    an opaque seed precedes screencast start, then unique transition and
-///    desired guard colors prove compositor generations before the guard is
-///    cropped and independent candidates are compared exactly.
+///    Every black/white readback uses three fresh paused main-target
+///    PageHandlers. An engine-owned marker in the author OOPIF moves across
+///    three pixels; each root readback must contain both that author generation
+///    and a unique host guard. Every output pixel is reconstructed from at
+///    least two unmarked, byte-identical samples.
 /// 6. Return the [`RenderedClip`].
 ///
 /// Compatibility boundary: author code is intentionally not top-level
@@ -536,6 +537,8 @@ impl MotionRenderer for HeadlessChromiumRenderer {
 
 #[cfg(feature = "chromium")]
 mod chromium_backend {
+    use std::collections::hash_map::RandomState;
+    use std::hash::BuildHasher;
     use std::io::{BufRead, BufReader, Cursor};
     use std::net::TcpStream;
     use std::process::{Child, Command, Stdio};
@@ -547,12 +550,14 @@ mod chromium_backend {
     use base64::Engine as _;
     use opentake_process_tree::{configure_command, ProcessTree};
     use serde_json::{json, Value};
+    use sha2::{Digest, Sha256};
     use tungstenite::stream::MaybeTlsStream;
     use tungstenite::{Message, WebSocket};
 
     use super::*;
 
     static PROFILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+    static AUTHOR_FENCE_COUNTER: AtomicU64 = AtomicU64::new(0);
     const GPU_TRACE_FIELD_LIMIT: usize = 96;
     const GPU_TRACE_STATUS_LIMIT: usize = 48;
 
@@ -905,8 +910,11 @@ mod chromium_backend {
         let installed = install_host_document(&mut cdp, &session, &document)?;
         trace("inline motion document loaded");
         cdp.ensure_no_blocked_url()?;
-        let author_session = installed.author_session_id;
-        let author_context_id = installed.author_context_id;
+        let InstalledHost {
+            author_session_id: author_session,
+            author_context_id,
+            author_fence,
+        } = installed;
         let contract = cdp.command(
             "Runtime.evaluate",
             json!({
@@ -1013,10 +1021,13 @@ mod chromium_backend {
             let png = cdp.capture_frame_png(
                 &target_id,
                 &session,
+                &author_fence,
                 req.transparent,
-                req.width,
-                req.height,
-                index,
+                CaptureFrame {
+                    width: req.width,
+                    height: req.height,
+                    index,
+                },
             )?;
             check_abort(cancellation, deadline, renderer.policy.timeout)?;
             cdp.ensure_no_blocked_url()?;
@@ -1109,6 +1120,34 @@ mod chromium_backend {
     struct InstalledHost {
         author_session_id: String,
         author_context_id: u64,
+        author_fence: AuthorPaintFence,
+    }
+
+    #[derive(Clone, Debug)]
+    struct AuthorPaintFence {
+        session_id: String,
+        context_id: u64,
+        nonce: String,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    struct AuthorMarker {
+        x: u32,
+        y: u32,
+        rgb: [u8; 3],
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct CaptureFrame {
+        width: u32,
+        height: u32,
+        index: usize,
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct CapturePass<'a> {
+        frame: CaptureFrame,
+        background: &'a str,
     }
 
     fn install_host_document(
@@ -1254,7 +1293,45 @@ mod chromium_backend {
         cdp.wait_for_event("Page.loadEventFired", Some(&author_session_id))?;
         cdp.ensure_no_blocked_url()?;
 
+        let fence_nonce = author_fence_nonce();
+        let isolated = cdp.command(
+            "Page.createIsolatedWorld",
+            json!({
+                "frameId": author_frame_id,
+                "worldName": format!("opentake-paint-fence-{fence_nonce}"),
+                "grantUniveralAccess": false
+            }),
+            Some(&author_session_id),
+        )?;
+        let fence_context_id = isolated
+            .get("executionContextId")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                MotionError::render_failed(
+                    "Chromium author paint-fence world has no execution context",
+                )
+            })?;
+        let installed = cdp.command(
+            "Runtime.evaluate",
+            json!({
+                "expression": author_fence_install_expression(&fence_nonce),
+                "contextId": fence_context_id,
+                "returnByValue": true
+            }),
+            Some(&author_session_id),
+        )?;
+        if !runtime_boolean(&installed) {
+            return Err(MotionError::render_failed(
+                "Chromium author paint-fence controller installation failed",
+            ));
+        }
+
         Ok(InstalledHost {
+            author_fence: AuthorPaintFence {
+                session_id: author_session_id.clone(),
+                context_id: fence_context_id,
+                nonce: fence_nonce,
+            },
             author_session_id,
             author_context_id,
         })
@@ -1340,6 +1417,172 @@ mod chromium_backend {
                     "Chromium CDP response is missing string field {key:?}: {value}"
                 ))
             })
+    }
+
+    fn runtime_boolean(evaluated: &Value) -> bool {
+        evaluated
+            .get("result")
+            .and_then(|result| result.get("value"))
+            .and_then(Value::as_bool)
+            == Some(true)
+            && evaluated.get("exceptionDetails").is_none()
+    }
+
+    fn author_fence_nonce() -> String {
+        let counter = AUTHOR_FENCE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let process = std::process::id();
+        let first = RandomState::new().hash_one((process, nanos, counter, 0_u8));
+        let second = RandomState::new().hash_one((process, nanos, counter, 1_u8));
+        format!("{first:016x}{second:016x}")
+    }
+
+    fn author_fence_key(nonce: &str) -> String {
+        format!("__opentakeAuthorPaintFence_{nonce}")
+    }
+
+    fn author_fence_install_expression(nonce: &str) -> String {
+        const TEMPLATE: &str = r#"(() => {
+  const key = __KEY__;
+  const nonce = __NONCE__;
+  if (Object.prototype.hasOwnProperty.call(globalThis, key)) return false;
+  let host = null;
+  let canvas = null;
+  const retiredHosts = [];
+  const setImportant = (name, value) => host.style.setProperty(name, value, 'important');
+  const controller = (request) => {
+    if (!request || request.nonce !== nonce) return false;
+    if (retiredHosts.some((retired) => retired.isConnected)) return false;
+    if (request.action === 'clear') {
+      if (!host || !host.isConnected || !canvas || !canvas.isConnected) return false;
+      canvas.width = 0;
+      canvas.height = 0;
+      canvas.remove();
+      host.remove();
+      if (host.isConnected || canvas.isConnected) return false;
+      retiredHosts.push(host);
+      host = null;
+      canvas = null;
+      return true;
+    }
+    if (request.action !== 'paint'
+        || !Number.isInteger(request.x) || !Number.isInteger(request.y)
+        || request.x < 0 || request.y < 0
+        || !Array.isArray(request.rgb) || request.rgb.length !== 3
+        || request.rgb.some((channel) => !Number.isInteger(channel) || channel < 0 || channel > 255)) {
+      return false;
+    }
+    if (host) {
+      if (!host.isConnected || !canvas || !canvas.isConnected) return false;
+      const current = getComputedStyle(host);
+      if (current.position !== 'fixed' || current.width !== '1px'
+          || current.height !== '1px' || current.opacity !== '1'
+          || current.display === 'none' || current.visibility !== 'visible') return false;
+    } else {
+      host = document.createElement('opentake-paint-fence');
+      const shadow = host.attachShadow({mode: 'closed'});
+      canvas = document.createElement('canvas');
+      canvas.width = 1;
+      canvas.height = 1;
+      canvas.style.cssText = 'all:initial!important;display:block!important;width:1px!important;height:1px!important';
+      shadow.appendChild(canvas);
+      setImportant('all', 'initial');
+      setImportant('position', 'fixed');
+      setImportant('display', 'block');
+      setImportant('visibility', 'visible');
+      setImportant('width', '1px');
+      setImportant('height', '1px');
+      setImportant('margin', '0');
+      setImportant('padding', '0');
+      setImportant('border', '0');
+      setImportant('opacity', '1');
+      setImportant('filter', 'none');
+      setImportant('transform', 'none');
+      setImportant('mix-blend-mode', 'normal');
+      setImportant('pointer-events', 'none');
+      setImportant('overflow', 'hidden');
+      setImportant('z-index', '2147483647');
+      document.documentElement.appendChild(host);
+    }
+    setImportant('left', `${request.x}px`);
+    setImportant('top', `${request.y}px`);
+    const context = canvas.getContext('2d', {alpha: false});
+    if (!context) return false;
+    context.globalCompositeOperation = 'copy';
+    context.fillStyle = `rgb(${request.rgb[0]} ${request.rgb[1]} ${request.rgb[2]})`;
+    context.fillRect(0, 0, 1, 1);
+    const pixel = context.getImageData(0, 0, 1, 1).data;
+    const rect = host.getBoundingClientRect();
+    return host.isConnected && canvas.isConnected
+      && rect.x === request.x && rect.y === request.y
+      && rect.width === 1 && rect.height === 1
+      && pixel[0] === request.rgb[0] && pixel[1] === request.rgb[1]
+      && pixel[2] === request.rgb[2] && pixel[3] === 255;
+  };
+  Object.defineProperty(globalThis, key, {
+    configurable: false,
+    enumerable: false,
+    writable: false,
+    value: controller
+  });
+  return true;
+})()"#;
+        TEMPLATE
+            .replace(
+                "__KEY__",
+                &serde_json::to_string(&author_fence_key(nonce))
+                    .expect("author fence key is serializable"),
+            )
+            .replace(
+                "__NONCE__",
+                &serde_json::to_string(nonce).expect("author fence nonce is serializable"),
+            )
+    }
+
+    fn author_marker_expression(fence: &AuthorPaintFence, marker: AuthorMarker) -> String {
+        let key = serde_json::to_string(&author_fence_key(&fence.nonce))
+            .expect("author fence key is serializable");
+        let nonce =
+            serde_json::to_string(&fence.nonce).expect("author fence nonce is serializable");
+        format!(
+            "(() => {{ const controller = globalThis[{key}]; return typeof controller === 'function' && controller({{nonce:{nonce},action:'paint',x:{},y:{},rgb:[{},{},{}]}}); }})()",
+            marker.x, marker.y, marker.rgb[0], marker.rgb[1], marker.rgb[2]
+        )
+    }
+
+    fn clear_author_marker_expression(fence: &AuthorPaintFence) -> String {
+        let key = serde_json::to_string(&author_fence_key(&fence.nonce))
+            .expect("author fence key is serializable");
+        let nonce =
+            serde_json::to_string(&fence.nonce).expect("author fence nonce is serializable");
+        format!(
+            "(() => {{ const controller = globalThis[{key}]; return typeof controller === 'function' && controller({{nonce:{nonce},action:'clear'}}); }})()"
+        )
+    }
+
+    fn author_marker_plan(nonce: &str, generation: u64) -> [AuthorMarker; 3] {
+        let positions = [(0, 0), (1, 0), (0, 1)];
+        let mut colors = [[0_u8; 3]; 3];
+        for index in 0..colors.len() {
+            let mut hasher = Sha256::new();
+            hasher.update(nonce.as_bytes());
+            hasher.update(generation.to_le_bytes());
+            hasher.update([index as u8]);
+            let digest = hasher.finalize();
+            let mut color = [digest[0], digest[1], digest[2]];
+            while colors[..index].contains(&color) {
+                color[2] = color[2].wrapping_add(1);
+            }
+            colors[index] = color;
+        }
+        std::array::from_fn(|index| AuthorMarker {
+            x: positions[index].0,
+            y: positions[index].1,
+            rgb: colors[index],
+        })
     }
 
     fn remove_partial_frames(dir: &Path) -> MotionResult<()> {
@@ -1578,6 +1821,7 @@ mod chromium_backend {
         blocked_url: Option<String>,
         pending_events: Vec<Value>,
         next_capture_generation: u32,
+        next_author_marker_generation: u64,
     }
 
     impl Cdp {
@@ -1596,6 +1840,7 @@ mod chromium_backend {
                 blocked_url: None,
                 pending_events: Vec::new(),
                 next_capture_generation: 0,
+                next_author_marker_generation: 0,
             }
         }
 
@@ -1839,11 +2084,15 @@ mod chromium_backend {
             &mut self,
             target_id: &str,
             rgb: [u8; 3],
-            width: u32,
-            height: u32,
-            frame_index: usize,
-            background: &str,
+            pass: CapturePass<'_>,
+            author_marker: Option<(&AuthorPaintFence, AuthorMarker)>,
         ) -> MotionResult<image::RgbaImage> {
+            let CapturePass { frame, background } = pass;
+            let CaptureFrame {
+                width,
+                height,
+                index: frame_index,
+            } = frame;
             let generation = self.next_capture_generation;
             self.next_capture_generation =
                 self.next_capture_generation.checked_add(1).ok_or_else(|| {
@@ -1883,6 +2132,9 @@ mod chromium_backend {
                 )?;
                 started = true;
                 self.ensure_no_blocked_url()?;
+                if let Some((fence, marker)) = author_marker {
+                    self.set_author_marker(fence, marker)?;
+                }
                 trace(format!(
                     "frame {frame_index}: {background} transition guard start"
                 ));
@@ -1892,14 +2144,8 @@ mod chromium_backend {
                 // bounded lifecycle/compositor turn without advancing author
                 // timers between the black and white alpha samples.
                 self.settle_compositor(&capture_session)?;
-                let transition_image = self.receive_guarded_generation(
-                    &capture_session,
-                    transition,
-                    width,
-                    height,
-                    frame_index,
-                    background,
-                )?;
+                let transition_image =
+                    self.receive_guarded_generation(&capture_session, transition, pass, None)?;
                 drop(transition_image);
                 trace(format!(
                     "frame {frame_index}: {background} transition guard complete; desired guard start"
@@ -1909,10 +2155,8 @@ mod chromium_backend {
                 let desired_image = self.receive_guarded_generation(
                     &capture_session,
                     rgb,
-                    width,
-                    height,
-                    frame_index,
-                    background,
+                    pass,
+                    author_marker.map(|(_, marker)| marker),
                 )?;
                 trace(format!(
                     "frame {frame_index}: {background} desired guard complete"
@@ -1951,11 +2195,15 @@ mod chromium_backend {
             &mut self,
             session: &str,
             expected_guard: [u8; 3],
-            width: u32,
-            height: u32,
-            frame_index: usize,
-            background: &str,
+            pass: CapturePass<'_>,
+            author_marker: Option<AuthorMarker>,
         ) -> MotionResult<image::RgbaImage> {
+            let CapturePass { frame, background } = pass;
+            let CaptureFrame {
+                width,
+                height,
+                index: frame_index,
+            } = frame;
             loop {
                 self.check_abort()?;
                 let png = self.receive_and_ack_screencast_png(session, frame_index)?;
@@ -1974,7 +2222,9 @@ mod chromium_backend {
                         image.dimensions()
                     )));
                 }
-                if external_guard_matches(&image, width, height, expected_guard) {
+                if external_guard_matches(&image, width, height, expected_guard)
+                    && author_marker.is_none_or(|marker| author_marker_matches(&image, marker))
+                {
                     return Ok(image);
                 }
             }
@@ -2065,49 +2315,57 @@ mod chromium_backend {
             &mut self,
             target_id: &str,
             session: &str,
+            author_fence: &AuthorPaintFence,
             transparent: bool,
-            width: u32,
-            height: u32,
-            frame_index: usize,
+            frame: CaptureFrame,
         ) -> MotionResult<Vec<u8>> {
             self.check_abort()?;
             if !transparent {
                 let white = self.capture_stable_background(
                     target_id,
                     session,
+                    author_fence,
                     [255, 255, 255],
-                    "opaque-white",
-                    (width, height),
-                    frame_index,
+                    CapturePass {
+                        frame,
+                        background: "opaque-white",
+                    },
                 )?;
                 self.check_abort()?;
-                let normalized = encode_viewport_png(white, frame_index)?;
+                let normalized = encode_viewport_png(white, frame.index)?;
                 self.check_abort()?;
+                self.clear_author_marker(author_fence)?;
                 return Ok(normalized);
             }
 
-            // Each background uses two independent PageHandlers whose guard-
-            // committed images must agree exactly. This is four compositor
-            // candidates for transparency and two for opaque output.
+            // Three independently guard-committed author marker generations
+            // provide two exact, unobscured samples for every output pixel.
+            // Transparency therefore uses six root compositor readbacks;
+            // opaque output uses three.
             let black = self.capture_stable_background(
                 target_id,
                 session,
+                author_fence,
                 [0, 0, 0],
-                "black",
-                (width, height),
-                frame_index,
+                CapturePass {
+                    frame,
+                    background: "black",
+                },
             )?;
             let white = self.capture_stable_background(
                 target_id,
                 session,
+                author_fence,
                 [255, 255, 255],
-                "white",
-                (width, height),
-                frame_index,
+                CapturePass {
+                    frame,
+                    background: "white",
+                },
             )?;
             self.check_abort()?;
-            let recovered = recover_transparent_images(black, white, frame_index)?;
+            let recovered = recover_transparent_images(black, white, frame.index)?;
             self.check_abort()?;
+            self.clear_author_marker(author_fence)?;
             Ok(recovered)
         }
 
@@ -2153,13 +2411,7 @@ mod chromium_backend {
                 }),
                 Some(session),
             )?;
-            let updated = evaluated
-                .get("result")
-                .and_then(|result| result.get("value"))
-                .and_then(Value::as_bool)
-                == Some(true)
-                && evaluated.get("exceptionDetails").is_none();
-            if !updated {
+            if !runtime_boolean(&evaluated) {
                 return Err(MotionError::render_failed(
                     "Chromium host background layer update failed",
                 ));
@@ -2167,44 +2419,118 @@ mod chromium_backend {
             self.ensure_no_blocked_url()
         }
 
+        fn set_author_marker(
+            &mut self,
+            fence: &AuthorPaintFence,
+            marker: AuthorMarker,
+        ) -> MotionResult<()> {
+            let evaluated = self.command(
+                "Runtime.evaluate",
+                json!({
+                    "expression": author_marker_expression(fence, marker),
+                    "contextId": fence.context_id,
+                    "returnByValue": true
+                }),
+                Some(&fence.session_id),
+            )?;
+            if !runtime_boolean(&evaluated) {
+                return Err(MotionError::render_failed(
+                    "Chromium author paint-fence marker update failed",
+                ));
+            }
+            self.ensure_no_blocked_url()
+        }
+
+        fn clear_author_marker(&mut self, fence: &AuthorPaintFence) -> MotionResult<()> {
+            let evaluated = self.command(
+                "Runtime.evaluate",
+                json!({
+                    "expression": clear_author_marker_expression(fence),
+                    "contextId": fence.context_id,
+                    "returnByValue": true
+                }),
+                Some(&fence.session_id),
+            )?;
+            if !runtime_boolean(&evaluated) {
+                return Err(MotionError::render_failed(
+                    "Chromium author paint-fence marker cleanup failed",
+                ));
+            }
+            self.ensure_no_blocked_url()
+        }
+
+        fn next_author_marker_plan(
+            &mut self,
+            fence: &AuthorPaintFence,
+        ) -> MotionResult<[AuthorMarker; 3]> {
+            let generation = self.next_author_marker_generation;
+            self.next_author_marker_generation = self
+                .next_author_marker_generation
+                .checked_add(1)
+                .ok_or_else(|| {
+                    MotionError::render_failed("Chromium author marker generation overflowed")
+                })?;
+            Ok(author_marker_plan(&fence.nonce, generation))
+        }
+
         fn capture_stable_background(
             &mut self,
             target_id: &str,
             session: &str,
+            author_fence: &AuthorPaintFence,
             rgb: [u8; 3],
-            background: &str,
-            size: (u32, u32),
-            frame_index: usize,
+            pass: CapturePass<'_>,
         ) -> MotionResult<image::RgbaImage> {
-            let (width, height) = size;
+            let CapturePass { frame, background } = pass;
             self.set_host_background(session, rgb)?;
+            let markers = self.next_author_marker_plan(author_fence)?;
             let first = self.capture_isolated_viewport(
                 target_id,
                 rgb,
-                width,
-                height,
-                frame_index,
-                background,
+                pass,
+                Some((author_fence, markers[0])),
             )?;
             let second = self.capture_isolated_viewport(
                 target_id,
                 rgb,
-                width,
-                height,
-                frame_index,
-                background,
+                pass,
+                Some((author_fence, markers[1])),
             )?;
-            if let Err(error) =
-                ensure_stable_viewport_images(&first, &second, background, frame_index)
-            {
+            let second_p0 =
+                validate_author_marker_pair(&first, &second, markers, background, frame.index);
+            if let Err(error) = second_p0.as_ref() {
                 return Err(MotionError::render_failed(format!(
                     "{error}; sandbox_blocked_url_seen={}",
                     self.blocked_url.is_some()
                 )));
             }
-            drop(first);
+            let second_p0 = second_p0?;
+            // I0/I1 have already established every pixel except p0/p1.
+            // Release I1 before capturing I2 so transparent 4K recovery keeps
+            // at most two readbacks for the active background in memory.
+            drop(second);
+            let third = self.capture_isolated_viewport(
+                target_id,
+                rgb,
+                pass,
+                Some((author_fence, markers[2])),
+            )?;
+            let stable = reconcile_author_marker_third(
+                first,
+                third,
+                markers,
+                second_p0,
+                background,
+                frame.index,
+            );
+            if let Err(error) = stable.as_ref() {
+                return Err(MotionError::render_failed(format!(
+                    "{error}; sandbox_blocked_url_seen={}",
+                    self.blocked_url.is_some()
+                )));
+            }
             self.check_abort()?;
-            Ok(second)
+            stable
         }
 
         fn send(&mut self, value: Value) -> MotionResult<()> {
@@ -2422,6 +2748,7 @@ mod chromium_backend {
         encode_viewport_png(image, frame_index)
     }
 
+    #[cfg(test)]
     fn ensure_stable_viewport_images(
         fence: &image::RgbaImage,
         captured: &image::RgbaImage,
@@ -2456,6 +2783,130 @@ mod chromium_backend {
             )));
         }
         Ok(())
+    }
+
+    fn validate_author_marker_pair(
+        first: &image::RgbaImage,
+        second: &image::RgbaImage,
+        markers: [AuthorMarker; 3],
+        background: &str,
+        frame_index: usize,
+    ) -> MotionResult<[u8; 4]> {
+        let dimensions = first.dimensions();
+        if second.dimensions() != dimensions {
+            return Err(MotionError::render_failed(format!(
+                "Chromium {background}-background author-fenced pair returned inconsistent sizes for frame {frame_index}: first={dimensions:?}, second={:?}",
+                second.dimensions()
+            )));
+        }
+        if dimensions.0 < 2 || dimensions.1 < 2 {
+            return Err(MotionError::render_failed(format!(
+                "Chromium author paint fence requires a viewport of at least 2x2 for frame {frame_index}"
+            )));
+        }
+        for (image, marker) in [(first, markers[0]), (second, markers[1])] {
+            if !author_marker_matches(image, marker) {
+                return Err(MotionError::render_failed(format!(
+                    "Chromium {background}-background author marker was missing from frame {frame_index} at ({}, {})",
+                    marker.x, marker.y
+                )));
+            }
+        }
+
+        let mut differing_pixels = 0_usize;
+        let mut sample_coordinates = Vec::with_capacity(8);
+        for y in 0..dimensions.1 {
+            for x in 0..dimensions.0 {
+                let coordinate = (x, y);
+                if coordinate == (markers[0].x, markers[0].y)
+                    || coordinate == (markers[1].x, markers[1].y)
+                {
+                    continue;
+                }
+                if first.get_pixel(x, y) != second.get_pixel(x, y) {
+                    differing_pixels += 1;
+                    if sample_coordinates.len() < 8 {
+                        sample_coordinates.push(coordinate);
+                    }
+                }
+            }
+        }
+        if differing_pixels != 0 {
+            return Err(MotionError::render_failed(format!(
+                "Chromium {background}-background author-fenced pair diverged for frame {frame_index}: dimensions={dimensions:?}, differing_pixels={differing_pixels}, sample_coordinates={sample_coordinates:?}"
+            )));
+        }
+        Ok(second.get_pixel(markers[0].x, markers[0].y).0)
+    }
+
+    fn reconcile_author_marker_third(
+        mut first: image::RgbaImage,
+        third: image::RgbaImage,
+        markers: [AuthorMarker; 3],
+        second_p0: [u8; 4],
+        background: &str,
+        frame_index: usize,
+    ) -> MotionResult<image::RgbaImage> {
+        let dimensions = first.dimensions();
+        if third.dimensions() != dimensions {
+            return Err(MotionError::render_failed(format!(
+                "Chromium {background}-background author-fenced third readback returned an inconsistent size for frame {frame_index}: first={dimensions:?}, third={:?}",
+                third.dimensions()
+            )));
+        }
+        if !author_marker_matches(&third, markers[2]) {
+            return Err(MotionError::render_failed(format!(
+                "Chromium {background}-background author marker was missing from frame {frame_index} at ({}, {})",
+                markers[2].x, markers[2].y
+            )));
+        }
+
+        let p0 = (markers[0].x, markers[0].y);
+        let p2 = (markers[2].x, markers[2].y);
+        let mut differing_pixels = 0_usize;
+        let mut sample_coordinates = Vec::with_capacity(8);
+        for y in 0..dimensions.1 {
+            for x in 0..dimensions.0 {
+                let coordinate = (x, y);
+                if coordinate == p2 {
+                    // I0 and I1 already provided the two unmarked exact
+                    // samples for p2 before I1 was released.
+                    continue;
+                }
+                let first_pixel = if coordinate == p0 {
+                    second_p0
+                } else {
+                    first.get_pixel(x, y).0
+                };
+                if first_pixel != third.get_pixel(x, y).0 {
+                    differing_pixels += 1;
+                    if sample_coordinates.len() < 8 {
+                        sample_coordinates.push(coordinate);
+                    }
+                }
+            }
+        }
+        if differing_pixels != 0 {
+            return Err(MotionError::render_failed(format!(
+                "Chromium {background}-background author-fenced third readback diverged for frame {frame_index}: dimensions={dimensions:?}, differing_pixels={differing_pixels}, sample_coordinates={sample_coordinates:?}"
+            )));
+        }
+        first.put_pixel(markers[0].x, markers[0].y, image::Rgba(second_p0));
+        Ok(first)
+    }
+
+    #[cfg(test)]
+    fn reconcile_author_marker_images(
+        images: [image::RgbaImage; 3],
+        markers: [AuthorMarker; 3],
+        background: &str,
+        frame_index: usize,
+    ) -> MotionResult<image::RgbaImage> {
+        let [first, second, third] = images;
+        let second_p0 =
+            validate_author_marker_pair(&first, &second, markers, background, frame_index)?;
+        drop(second);
+        reconcile_author_marker_third(first, third, markers, second_p0, background, frame_index)
     }
 
     fn decode_viewport_png(
@@ -2524,6 +2975,12 @@ mod chromium_backend {
         let expected = [expected[0], expected[1], expected[2], 255];
         (0..guarded_height).all(|y| image.get_pixel(width, y).0 == expected)
             && (0..guarded_width).all(|x| image.get_pixel(x, height).0 == expected)
+    }
+
+    fn author_marker_matches(image: &image::RgbaImage, marker: AuthorMarker) -> bool {
+        image
+            .get_pixel_checked(marker.x, marker.y)
+            .is_some_and(|pixel| pixel.0 == [marker.rgb[0], marker.rgb[1], marker.rgb[2], 255])
     }
 
     fn crop_guarded_image(
@@ -2618,6 +3075,14 @@ mod chromium_backend {
                 ),
                 server_socket,
             )
+        }
+
+        fn test_author_fence() -> AuthorPaintFence {
+            AuthorPaintFence {
+                session_id: "author-session".to_owned(),
+                context_id: 77,
+                nonce: "0123456789abcdef0123456789abcdef".to_owned(),
+            }
         }
 
         fn validate_browser_launch_args_contract(args: &[&str]) -> Result<(), String> {
@@ -3005,6 +3470,55 @@ mod chromium_backend {
                         .send(Message::text(event.to_string()))
                         .unwrap();
                 }
+
+                let isolated_world = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected isolated-world request, got {other:?}"),
+                };
+                assert_eq!(isolated_world["id"], 11);
+                assert_eq!(isolated_world["method"], "Page.createIsolatedWorld");
+                assert_eq!(isolated_world["params"]["frameId"], "author-frame");
+                assert_eq!(isolated_world["params"]["grantUniveralAccess"], false);
+                assert_eq!(isolated_world["sessionId"], "author-session");
+                let nonce = isolated_world["params"]["worldName"]
+                    .as_str()
+                    .and_then(|name| name.strip_prefix("opentake-paint-fence-"))
+                    .expect("paint-fence world carries its nonce")
+                    .to_owned();
+                assert_eq!(nonce.len(), 32);
+                assert!(nonce.bytes().all(|byte| byte.is_ascii_hexdigit()));
+                server_socket
+                    .send(Message::text(
+                        json!({"id": 11, "result": {"executionContextId": 23}}).to_string(),
+                    ))
+                    .unwrap();
+
+                let install_fence = match server_socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
+                    other => panic!("expected paint-fence install request, got {other:?}"),
+                };
+                assert_eq!(
+                    install_fence,
+                    json!({
+                        "id": 12,
+                        "method": "Runtime.evaluate",
+                        "params": {
+                            "expression": author_fence_install_expression(&nonce),
+                            "contextId": 23,
+                            "returnByValue": true
+                        },
+                        "sessionId": "author-session"
+                    })
+                );
+                server_socket
+                    .send(Message::text(
+                        json!({
+                            "id": 12,
+                            "result": {"result": {"type": "boolean", "value": true}}
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap();
             });
 
             let mut cdp = Cdp::new(
@@ -3016,6 +3530,9 @@ mod chromium_backend {
             let installed = install_host_document(&mut cdp, "render-session", &wrapper).unwrap();
             assert_eq!(installed.author_session_id, "author-session");
             assert_eq!(installed.author_context_id, 17);
+            assert_eq!(installed.author_fence.session_id, "author-session");
+            assert_eq!(installed.author_fence.context_id, 23);
+            assert_eq!(installed.author_fence.nonce.len(), 32);
             server.join().unwrap();
         }
 
@@ -3483,7 +4000,19 @@ mod chromium_backend {
                 Instant::now() + Duration::from_secs(1),
             );
             let image = cdp
-                .capture_isolated_viewport("target-id", desired, 1, 1, 0, "black")
+                .capture_isolated_viewport(
+                    "target-id",
+                    desired,
+                    CapturePass {
+                        frame: CaptureFrame {
+                            width: 1,
+                            height: 1,
+                            index: 0,
+                        },
+                        background: "black",
+                    },
+                    None,
+                )
                 .unwrap();
             assert_eq!(image.dimensions(), (1, 1));
             assert_eq!(image.get_pixel(0, 0).0, [128, 0, 0, 255]);
@@ -3539,7 +4068,19 @@ mod chromium_backend {
                 Instant::now() + Duration::from_secs(1),
             );
             let error = cdp
-                .capture_isolated_viewport("target-id", [0, 0, 0], 1, 1, 0, "black")
+                .capture_isolated_viewport(
+                    "target-id",
+                    [0, 0, 0],
+                    CapturePass {
+                        frame: CaptureFrame {
+                            width: 1,
+                            height: 1,
+                            index: 0,
+                        },
+                        background: "black",
+                    },
+                    None,
+                )
                 .unwrap_err();
             assert!(error.to_string().contains("setup-primary"));
             assert!(!error.to_string().contains("cleanup-secondary"));
@@ -3641,7 +4182,19 @@ mod chromium_backend {
                 Instant::now() + Duration::from_secs(1),
             );
             let error = cdp
-                .capture_isolated_viewport("target-id", [0, 0, 0], 1, 1, 0, "black")
+                .capture_isolated_viewport(
+                    "target-id",
+                    [0, 0, 0],
+                    CapturePass {
+                        frame: CaptureFrame {
+                            width: 1,
+                            height: 1,
+                            index: 0,
+                        },
+                        background: "black",
+                    },
+                    None,
+                )
                 .unwrap_err();
             assert!(error.to_string().contains("malformed screencast data"));
             assert!(!error.to_string().contains("stop-secondary"));
@@ -4093,7 +4646,39 @@ mod chromium_backend {
         }
 
         #[test]
-        fn transparent_capture_uses_four_guard_committed_page_handlers() {
+        fn author_fenced_reconstruction_rejects_a_stale_oopif_surface() {
+            let markers = author_marker_plan("0123456789abcdef0123456789abcdef", 9);
+            let marked = |pixel: [u8; 4], marker: AuthorMarker| {
+                let mut image = image::RgbaImage::from_pixel(2, 2, image::Rgba(pixel));
+                image.put_pixel(
+                    marker.x,
+                    marker.y,
+                    image::Rgba([marker.rgb[0], marker.rgb[1], marker.rgb[2], 255]),
+                );
+                image
+            };
+            let stale = marked([9, 8, 7, 255], markers[0]);
+            let current_a = marked([1, 2, 3, 255], markers[1]);
+            let current_b = marked([1, 2, 3, 255], markers[2]);
+
+            let error = reconcile_author_marker_images(
+                [stale, current_a, current_b],
+                markers,
+                "opaque-white",
+                0,
+            )
+            .expect_err("one stale OOPIF generation must fail closed");
+            let MotionError::RenderFailed(message) = error else {
+                panic!("expected render failure, got {error:?}");
+            };
+            assert!(message.contains("author-fenced pair diverged"));
+            assert!(message.contains("differing_pixels=2"));
+            assert!(!message.contains("0123456789abcdef"));
+            assert!(!message.contains("[9, 8, 7"));
+        }
+
+        #[test]
+        fn transparent_capture_uses_three_author_fenced_generations_per_background() {
             fn read_json(socket: &mut WebSocket<TcpStream>) -> Value {
                 match socket.read().unwrap() {
                     Message::Text(text) => serde_json::from_str(text.as_ref()).unwrap(),
@@ -4114,22 +4699,35 @@ mod chromium_backend {
                 None,
             );
             let mut server_socket = WebSocket::from_raw_socket(server_stream, Role::Server, None);
-            let encoded = |pixel: [u8; 4], guard: [u8; 3]| {
+            let encoded = |pixel: [u8; 4], guard: [u8; 3], marker: AuthorMarker| {
                 let mut image = image::RgbaImage::from_pixel(
-                    2,
-                    2,
+                    3,
+                    3,
                     image::Rgba([guard[0], guard[1], guard[2], 255]),
                 );
-                image.put_pixel(0, 0, image::Rgba(pixel));
+                for y in 0..2 {
+                    for x in 0..2 {
+                        image.put_pixel(x, y, image::Rgba(pixel));
+                    }
+                }
+                image.put_pixel(
+                    marker.x,
+                    marker.y,
+                    image::Rgba([marker.rgb[0], marker.rgb[1], marker.rgb[2], 255]),
+                );
                 base64::engine::general_purpose::STANDARD
                     .encode(encode_viewport_png(image, 0).unwrap())
             };
-            let black = encoded([128, 0, 0, 255], [0, 0, 0]);
-            let white = encoded([255, 127, 127, 255], [255, 255, 255]);
+            let author_fence = test_author_fence();
+            let server_fence = author_fence.clone();
             let server = thread::spawn(move || {
                 let mut next_id = 1u64;
                 let mut capture_index = 0usize;
-                for (rgb, current) in [([0, 0, 0], black), ([255, 255, 255], white)] {
+                for (marker_generation, rgb, current) in [
+                    (0_u64, [0, 0, 0], [128, 0, 0, 255]),
+                    (1_u64, [255, 255, 255], [255, 127, 127, 255]),
+                ] {
+                    let markers = author_marker_plan(&server_fence.nonce, marker_generation);
                     let background = read_json(&mut server_socket);
                     assert_eq!(
                         background,
@@ -4150,11 +4748,21 @@ mod chromium_backend {
                     next_id += 1;
 
                     let mut previous_capture_session = None::<String>;
-                    for _ in 0..2 {
+                    for marker in markers {
                         let capture_session = format!("capture-{capture_index}");
                         let seed = [capture_index as u8, 0, 90];
                         let transition = [capture_index as u8, 0, 165];
-                        let transition_frame = encoded([4, 5, 6, 255], transition);
+                        let transition_frame = encoded(current, transition, marker);
+                        let wrong_guard_frame = transition_frame.clone();
+                        let wrong_marker_frame = encoded(
+                            current,
+                            rgb,
+                            AuthorMarker {
+                                rgb: [marker.rgb[0] ^ 0xff, marker.rgb[1], marker.rgb[2]],
+                                ..marker
+                            },
+                        );
+                        let desired_frame = encoded(current, rgb, marker);
                         capture_index += 1;
                         let attach = read_json(&mut server_socket);
                         assert_eq!(
@@ -4185,16 +4793,9 @@ mod chromium_backend {
                                 "Page.startScreencast",
                                 json!({
                                     "format": "png",
-                                    "maxWidth": 2,
-                                    "maxHeight": 2,
+                                    "maxWidth": 3,
+                                    "maxHeight": 3,
                                     "everyNthFrame": 1
-                                }),
-                            ),
-                            (
-                                "Runtime.evaluate",
-                                json!({
-                                    "expression": host_background_expression(transition),
-                                    "returnByValue": true
                                 }),
                             ),
                         ] {
@@ -4216,6 +4817,45 @@ mod chromium_backend {
                             send_json(&mut server_socket, json!({"id": next_id, "result": result}));
                             next_id += 1;
                         }
+
+                        let author_generation = read_json(&mut server_socket);
+                        assert_eq!(
+                            author_generation,
+                            json!({
+                                "id": next_id,
+                                "method": "Runtime.evaluate",
+                                "params": {
+                                    "expression": author_marker_expression(&server_fence, marker),
+                                    "contextId": server_fence.context_id,
+                                    "returnByValue": true
+                                },
+                                "sessionId": server_fence.session_id
+                            })
+                        );
+                        send_json(
+                            &mut server_socket,
+                            json!({"id": next_id, "result": {"result": {"type": "boolean", "value": true}}}),
+                        );
+                        next_id += 1;
+
+                        let transition_command = read_json(&mut server_socket);
+                        assert_eq!(
+                            transition_command,
+                            json!({
+                                "id": next_id,
+                                "method": "Runtime.evaluate",
+                                "params": {
+                                    "expression": host_background_expression(transition),
+                                    "returnByValue": true
+                                },
+                                "sessionId": capture_session
+                            })
+                        );
+                        send_json(
+                            &mut server_socket,
+                            json!({"id": next_id, "result": {"result": {"type": "boolean", "value": true}}}),
+                        );
+                        next_id += 1;
 
                         let transition_fence = read_json(&mut server_socket);
                         assert_eq!(
@@ -4247,7 +4887,7 @@ mod chromium_backend {
                                 &mut server_socket,
                                 json!({
                                     "method": "Page.screencastFrame",
-                                    "params": {"data": current.clone(), "metadata": {}, "sessionId": 6},
+                                    "params": {"data": desired_frame.clone(), "metadata": {}, "sessionId": 6},
                                     "sessionId": prior
                                 }),
                             );
@@ -4322,7 +4962,61 @@ mod chromium_backend {
                             &mut server_socket,
                             json!({
                                 "method": "Page.screencastFrame",
-                                "params": {"data": current.clone(), "metadata": {}, "sessionId": 8},
+                                "params": {
+                                    "data": wrong_guard_frame,
+                                    "metadata": {},
+                                    "sessionId": 8
+                                },
+                                "sessionId": capture_session
+                            }),
+                        );
+                        let wrong_guard_ack = read_json(&mut server_socket);
+                        assert_eq!(
+                            wrong_guard_ack,
+                            json!({
+                                "id": next_id,
+                                "method": "Page.screencastFrameAck",
+                                "params": {"sessionId": 8},
+                                "sessionId": capture_session
+                            })
+                        );
+                        send_json(&mut server_socket, json!({"id": next_id, "result": {}}));
+                        next_id += 1;
+
+                        send_json(
+                            &mut server_socket,
+                            json!({
+                                "method": "Page.screencastFrame",
+                                "params": {
+                                    "data": wrong_marker_frame,
+                                    "metadata": {},
+                                    "sessionId": 9
+                                },
+                                "sessionId": capture_session
+                            }),
+                        );
+                        let wrong_marker_ack = read_json(&mut server_socket);
+                        assert_eq!(
+                            wrong_marker_ack,
+                            json!({
+                                "id": next_id,
+                                "method": "Page.screencastFrameAck",
+                                "params": {"sessionId": 9},
+                                "sessionId": capture_session
+                            })
+                        );
+                        send_json(&mut server_socket, json!({"id": next_id, "result": {}}));
+                        next_id += 1;
+
+                        send_json(
+                            &mut server_socket,
+                            json!({
+                                "method": "Page.screencastFrame",
+                                "params": {
+                                    "data": desired_frame,
+                                    "metadata": {},
+                                    "sessionId": 10
+                                },
                                 "sessionId": capture_session
                             }),
                         );
@@ -4332,7 +5026,7 @@ mod chromium_backend {
                             json!({
                                 "id": next_id,
                                 "method": "Page.screencastFrameAck",
-                                "params": {"sessionId": 8},
+                                "params": {"sessionId": 10},
                                 "sessionId": capture_session
                             })
                         );
@@ -4366,7 +5060,25 @@ mod chromium_backend {
                         previous_capture_session = Some(capture_session);
                     }
                 }
-                assert_eq!(capture_index, 4);
+                let clear = read_json(&mut server_socket);
+                assert_eq!(
+                    clear,
+                    json!({
+                        "id": next_id,
+                        "method": "Runtime.evaluate",
+                        "params": {
+                            "expression": clear_author_marker_expression(&server_fence),
+                            "contextId": server_fence.context_id,
+                            "returnByValue": true
+                        },
+                        "sessionId": server_fence.session_id
+                    })
+                );
+                send_json(
+                    &mut server_socket,
+                    json!({"id": next_id, "result": {"result": {"type": "boolean", "value": true}}}),
+                );
+                assert_eq!(capture_index, 6);
             });
 
             let mut cdp = Cdp::new(
@@ -4376,15 +5088,23 @@ mod chromium_backend {
                 Instant::now() + Duration::from_secs(1),
             );
             let png = cdp
-                .capture_frame_png("target-id", "main-session", true, 1, 1, 0)
+                .capture_frame_png(
+                    "target-id",
+                    "main-session",
+                    &author_fence,
+                    true,
+                    CaptureFrame {
+                        width: 2,
+                        height: 2,
+                        index: 0,
+                    },
+                )
                 .unwrap();
-            assert_eq!(
-                image::load_from_memory(&png)
-                    .unwrap()
-                    .to_rgba8()
-                    .get_pixel(0, 0)
-                    .0,
-                [255, 0, 0, 128]
+            let recovered = image::load_from_memory(&png).unwrap().to_rgba8();
+            assert_eq!(recovered.dimensions(), (2, 2));
+            assert!(
+                recovered.pixels().all(|pixel| pixel.0 == [255, 0, 0, 128]),
+                "all marker positions must be reconstructed from two exact unobscured samples"
             );
             assert!(
                 cdp.pending_events
