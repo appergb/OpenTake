@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import importlib.util
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,10 +11,90 @@ from unittest import mock
 import check_release_workflow as contract
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW_PATH = REPOSITORY_ROOT / ".github" / "workflows" / "release.yml"
+REPOSITORY_ROOT = Path(
+    os.environ.get("OPENTAKE_REPOSITORY_ROOT", Path(__file__).resolve().parents[1])
+).resolve()
+WORKFLOW_PATH = Path(
+    os.environ.get(
+        "OPENTAKE_RELEASE_WORKFLOW_PATH",
+        REPOSITORY_ROOT / ".github" / "workflows" / "release.yml",
+    )
+).resolve()
+RELEASE_NOTES_PATH = Path(
+    os.environ.get(
+        "OPENTAKE_RELEASE_NOTES_PATH",
+        REPOSITORY_ROOT / "docs" / "releases" / "1.0.0-beta.4.md",
+    )
+).resolve()
 WORKFLOW = WORKFLOW_PATH.read_text(encoding="utf-8") if WORKFLOW_PATH.is_file() else ""
 CHECKOUT_SHA = "11d5960a326750d5838078e36cf38b85af677262"
+BETA4_FAILED_RUN_ID = 31412976593
+BETA4_SOURCE_SHA = "2c4efdff9d2587c90cbcac0919f9d1d333d67d6a"
+RECOVERY_WINDOWS_STEP_OUTCOMES = (
+    ("Set up job", "success"),
+    (f"Run actions/checkout@{CHECKOUT_SHA}", "success"),
+    ("Assert exact checked-out SHA", "success"),
+    ("Require updater signing secrets", "success"),
+    ("Install Rust toolchain", "success"),
+    (
+        "Run pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1",
+        "success",
+    ),
+    (
+        "Run actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+        "success",
+    ),
+    (
+        "Run ruby/setup-ruby@95ef2b042f9d7a56d8268cba8559e2842e2ad01b",
+        "success",
+    ),
+    ("Provision checksum-pinned Windows FFmpeg sidecars", "failure"),
+    ("Verify pinned sidecar supply", "skipped"),
+    ("Cache Cargo dependencies", "skipped"),
+    ("Install locked Web dependencies", "skipped"),
+    ("Rust workspace clippy", "skipped"),
+    ("Rust workspace tests", "skipped"),
+    ("Web editor behavior suite", "skipped"),
+    ("Minimal-feature Tauri clippy", "skipped"),
+    ("Web production build", "skipped"),
+    ("Reassert exact source before Windows build", "skipped"),
+    ("Build native MSI, NSIS, and signed updater artifacts", "skipped"),
+    (
+        "Install NSIS and smoke installed app, sidecars, and updater artifacts",
+        "skipped",
+    ),
+    ("Reassert exact source after Windows packaging", "skipped"),
+    ("Create and sign Windows updater attestations", "skipped"),
+    ("Create Windows exact-SHA receipt", "skipped"),
+    ("Upload exact-SHA Windows packages and updater signatures", "skipped"),
+    (
+        "Post Run actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+        "skipped",
+    ),
+    (
+        "Post Run pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1",
+        "success",
+    ),
+    (f"Post Run actions/checkout@{CHECKOUT_SHA}", "success"),
+    ("Complete job", "success"),
+)
+RECOVERY_WINDOWS_STEP_NUMBERS = (*range(1, 25), 46, 47, 48, 49)
+
+
+def recovery_windows_steps() -> list[dict[str, object]]:
+    return [
+        {
+            "number": number,
+            "name": name,
+            "status": "completed",
+            "conclusion": conclusion,
+        }
+        for number, (name, conclusion) in zip(
+            RECOVERY_WINDOWS_STEP_NUMBERS,
+            RECOVERY_WINDOWS_STEP_OUTCOMES,
+            strict=True,
+        )
+    ]
 
 
 class ReleaseWorkflowContractTests(unittest.TestCase):
@@ -36,6 +118,467 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
     def test_trigger_must_remain_tag_only_with_existing_tag_dispatch(self) -> None:
         mutated = self.mutate("    tags: ['v*']\n", "    branches: [main]\n")
         self.assert_rejected(mutated, "tag-only release trigger")
+
+    def test_failed_run_recovery_binds_the_original_tag_push_and_source(self) -> None:
+        source_sha = BETA4_SOURCE_SHA
+        run_id = BETA4_FAILED_RUN_ID
+        run = {
+            "id": run_id,
+            "name": "Release",
+            "path": ".github/workflows/release.yml",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "failure",
+            "head_branch": "v1.0.0-beta.4",
+            "head_sha": source_sha,
+            "run_attempt": 1,
+        }
+        jobs = {
+            "total_count": 5,
+            "jobs": [
+                {
+                    "name": "Validate immutable release source",
+                    "run_id": run_id,
+                    "run_attempt": 1,
+                    "head_sha": source_sha,
+                    "status": "completed",
+                    "conclusion": "success",
+                },
+                {
+                    "name": "Release quality gates",
+                    "run_id": run_id,
+                    "run_attempt": 1,
+                    "head_sha": source_sha,
+                    "status": "completed",
+                    "conclusion": "success",
+                },
+                {
+                    "name": "macOS ARM64 app and DMG",
+                    "run_id": run_id,
+                    "run_attempt": 1,
+                    "head_sha": source_sha,
+                    "status": "completed",
+                    "conclusion": "success",
+                },
+                {
+                    "name": "Windows x64 MSI and NSIS",
+                    "run_id": run_id,
+                    "run_attempt": 1,
+                    "head_sha": source_sha,
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "steps": recovery_windows_steps(),
+                },
+                {
+                    "name": "Publish verified GitHub prerelease",
+                    "run_id": run_id,
+                    "run_attempt": 1,
+                    "head_sha": source_sha,
+                    "status": "completed",
+                    "conclusion": "skipped",
+                },
+            ],
+        }
+        compare = {
+            "status": "ahead",
+            "base_commit": {"sha": source_sha},
+            "merge_base_commit": {"sha": source_sha},
+        }
+
+        contract.validate_recovery_run(
+            run,
+            jobs,
+            compare,
+            expected_run_id=run_id,
+            expected_tag="v1.0.0-beta.4",
+            expected_sha=source_sha,
+        )
+
+        mutations = (
+            ("run event", {**run, "event": "workflow_dispatch"}, jobs, compare),
+            ("run source", {**run, "head_sha": "2" * 40}, jobs, compare),
+            ("published result", {**run, "conclusion": "success"}, jobs, compare),
+            (
+                "validation gate",
+                run,
+                {
+                    **jobs,
+                    "jobs": [
+                        {
+                            "name": "Validate immutable release source",
+                            "run_id": run_id,
+                            "run_attempt": 1,
+                            "head_sha": source_sha,
+                            "status": "completed",
+                            "conclusion": "failure",
+                        },
+                        *jobs["jobs"][1:],
+                    ],
+                },
+                compare,
+            ),
+            (
+                "main ancestry",
+                run,
+                jobs,
+                {**compare, "merge_base_commit": {"sha": "3" * 40}},
+            ),
+        )
+        for name, mutated_run, mutated_jobs, mutated_compare in mutations:
+            with self.subTest(name=name):
+                with self.assertRaises(contract.RecoveryRunError):
+                    contract.validate_recovery_run(
+                        mutated_run,
+                        mutated_jobs,
+                        mutated_compare,
+                        expected_run_id=run_id,
+                        expected_tag="v1.0.0-beta.4",
+                        expected_sha=source_sha,
+                    )
+
+    def test_failed_run_recovery_requires_the_exact_windows_failure_job_set(
+        self,
+    ) -> None:
+        source_sha = BETA4_SOURCE_SHA
+        run_id = BETA4_FAILED_RUN_ID
+        run = {
+            "id": run_id,
+            "name": "Release",
+            "path": ".github/workflows/release.yml",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "failure",
+            "head_branch": "v1.0.0-beta.4",
+            "head_sha": source_sha,
+            "run_attempt": 1,
+        }
+        outcomes = {
+            "Validate immutable release source": "success",
+            "Release quality gates": "success",
+            "macOS ARM64 app and DMG": "success",
+            "Windows x64 MSI and NSIS": "failure",
+            "Publish verified GitHub prerelease": "skipped",
+        }
+
+        def entry(name: str, conclusion: str) -> dict[str, object]:
+            result: dict[str, object] = {
+                "name": name,
+                "run_id": run_id,
+                "run_attempt": 1,
+                "head_sha": source_sha,
+                "status": "completed",
+                "conclusion": conclusion,
+            }
+            if name == "Windows x64 MSI and NSIS":
+                result["steps"] = recovery_windows_steps()
+            return result
+
+        exact = [entry(name, conclusion) for name, conclusion in outcomes.items()]
+        compare = {
+            "status": "ahead",
+            "base_commit": {"sha": source_sha},
+            "merge_base_commit": {"sha": source_sha},
+        }
+        invalid_job_sets = {
+            "missing": exact[:-1],
+            "extra": [*exact, entry("unexpected arbitrary job", "failure")],
+            "duplicate": [*exact, exact[-1]],
+            "quality failure": [
+                entry(
+                    name,
+                    "failure" if name == "Release quality gates" else conclusion,
+                )
+                for name, conclusion in outcomes.items()
+            ],
+            "publish failure": [
+                entry(
+                    name,
+                    "failure"
+                    if name == "Publish verified GitHub prerelease"
+                    else conclusion,
+                )
+                for name, conclusion in outcomes.items()
+            ],
+            "wrong run": [
+                {**exact[0], "run_id": run_id + 1},
+                *exact[1:],
+            ],
+            "wrong attempt": [
+                {**exact[0], "run_attempt": 2},
+                *exact[1:],
+            ],
+            "wrong source": [
+                {**exact[0], "head_sha": "2" * 40},
+                *exact[1:],
+            ],
+        }
+
+        for name, entries in invalid_job_sets.items():
+            with self.subTest(name=name):
+                with self.assertRaises(contract.RecoveryRunError):
+                    contract.validate_recovery_run(
+                        run,
+                        {"total_count": len(entries), "jobs": entries},
+                        compare,
+                        expected_run_id=run_id,
+                        expected_tag="v1.0.0-beta.4",
+                        expected_sha=source_sha,
+                    )
+
+    def test_failed_run_recovery_requires_the_exact_sidecar_failure_step(
+        self,
+    ) -> None:
+        source_sha = BETA4_SOURCE_SHA
+        run_id = BETA4_FAILED_RUN_ID
+        run = {
+            "id": run_id,
+            "name": "Release",
+            "path": ".github/workflows/release.yml",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "failure",
+            "head_branch": "v1.0.0-beta.4",
+            "head_sha": source_sha,
+            "run_attempt": 1,
+        }
+        outcomes = (
+            ("Validate immutable release source", "success"),
+            ("Release quality gates", "success"),
+            ("macOS ARM64 app and DMG", "success"),
+            ("Windows x64 MSI and NSIS", "failure"),
+            ("Publish verified GitHub prerelease", "skipped"),
+        )
+
+        def jobs_with_steps(steps: list[dict[str, object]]) -> dict[str, object]:
+            entries = []
+            for name, conclusion in outcomes:
+                entry: dict[str, object] = {
+                    "name": name,
+                    "run_id": run_id,
+                    "run_attempt": 1,
+                    "head_sha": source_sha,
+                    "status": "completed",
+                    "conclusion": conclusion,
+                }
+                if name == "Windows x64 MSI and NSIS":
+                    entry["steps"] = steps
+                entries.append(entry)
+            return {"total_count": len(entries), "jobs": entries}
+
+        compare = {
+            "status": "ahead",
+            "base_commit": {"sha": source_sha},
+            "merge_base_commit": {"sha": source_sha},
+        }
+        exact_steps = recovery_windows_steps()
+        mutations: dict[str, list[dict[str, object]]] = {
+            "missing failure step": [
+                step
+                for step in exact_steps
+                if step["name"]
+                != "Provision checksum-pinned Windows FFmpeg sidecars"
+            ],
+            "extra step": [
+                *recovery_windows_steps(),
+                {
+                    "name": "unexpected arbitrary step",
+                    "status": "completed",
+                    "conclusion": "failure",
+                },
+            ],
+            "wrong failure step number": [
+                {
+                    **step,
+                    "number": 10
+                    if step["name"]
+                    == "Provision checksum-pinned Windows FFmpeg sidecars"
+                    else step["number"],
+                }
+                for step in recovery_windows_steps()
+            ],
+            "workspace test failure": [
+                {
+                    **step,
+                    "status": "completed",
+                    "conclusion": (
+                        "success"
+                        if step["name"]
+                        == "Provision checksum-pinned Windows FFmpeg sidecars"
+                        else "failure"
+                        if step["name"] == "Rust workspace tests"
+                        else step["conclusion"]
+                    ),
+                }
+                for step in recovery_windows_steps()
+            ],
+            "installer failure": [
+                {
+                    **step,
+                    "status": "completed",
+                    "conclusion": (
+                        "success"
+                        if step["name"]
+                        == "Provision checksum-pinned Windows FFmpeg sidecars"
+                        else "failure"
+                        if step["name"]
+                        == "Build native MSI, NSIS, and signed updater artifacts"
+                        else step["conclusion"]
+                    ),
+                }
+                for step in recovery_windows_steps()
+            ],
+        }
+
+        for name, steps in mutations.items():
+            with self.subTest(name=name):
+                with self.assertRaises(contract.RecoveryRunError):
+                    contract.validate_recovery_run(
+                        run,
+                        jobs_with_steps(steps),
+                        compare,
+                        expected_run_id=run_id,
+                        expected_tag="v1.0.0-beta.4",
+                        expected_sha=source_sha,
+                    )
+
+    def test_dispatch_contract_requires_an_explicit_failed_run_id(self) -> None:
+        tag_input = (
+            "      tag:\n"
+            "        description: Existing v<semver> tag from a failed run; this workflow never creates or moves tags\n"
+            "        required: true\n"
+            "        type: string\n"
+        )
+        recovered = tag_input + (
+            "      failed_run_id:\n"
+            "        description: Failed tag-push Release run ID whose exact source is being recovered\n"
+            "        required: true\n"
+            "        type: string\n"
+        )
+        candidate = self.mutate(tag_input, recovered)
+
+        self.assertNotIn("tag-only release trigger", contract.validate_workflow(candidate))
+
+    def test_contract_paths_can_be_bound_to_an_external_workflow_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            workflow = root / "release.yml"
+            notes = root / "release-notes.md"
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "OPENTAKE_REPOSITORY_ROOT": str(root),
+                    "OPENTAKE_RELEASE_WORKFLOW_PATH": str(workflow),
+                    "OPENTAKE_RELEASE_NOTES_PATH": str(notes),
+                },
+            ):
+                isolated_spec = importlib.util.spec_from_file_location(
+                    "isolated_check_release_workflow",
+                    Path(contract.__file__).resolve(),
+                )
+                assert isolated_spec is not None and isolated_spec.loader is not None
+                isolated = importlib.util.module_from_spec(isolated_spec)
+                isolated_spec.loader.exec_module(isolated)
+
+            self.assertEqual(isolated.REPOSITORY_ROOT, root)
+            self.assertEqual(isolated.WORKFLOW_PATH, workflow)
+            self.assertEqual(
+                isolated.RELEASE_NOTES_PATH,
+                notes,
+            )
+
+    def test_dispatch_recovery_cannot_bypass_failed_run_provenance(self) -> None:
+        mutations = (
+            (
+                '      RELEASE_TOOLING_SHA: ${{ github.workflow_sha }}\n',
+                '      RELEASE_TOOLING_SHA: ${{ github.sha }}\n',
+            ),
+            (
+                '            test "$tooling_sha" = "$remote_main"\n',
+                '            test -n "$tooling_sha"\n',
+            ),
+            (
+                '              --run-id "$FAILED_RUN_ID" \\\n',
+                '              --run-id 31412976593 \\\n',
+            ),
+            (
+                '            gh api "repos/$GITHUB_REPOSITORY/compare/$source_sha...$remote_main" \\\n',
+                '            gh api "repos/$GITHUB_REPOSITORY/compare/$remote_main...$remote_main" \\\n',
+            ),
+        )
+        for old, new in mutations:
+            with self.subTest(mutation=old.strip()):
+                self.assert_rejected(
+                    self.mutate(old, new), "failed-run recovery provenance"
+                )
+
+    def test_windows_recovery_tooling_is_bound_to_the_workflow_commit(self) -> None:
+        mutations = (
+            (
+                'git cat-file blob "$($env:RELEASE_TOOLING_SHA):scripts/provision_ffmpeg_sidecars.py" > $provisioner',
+                'Get-Content scripts/provision_ffmpeg_sidecars.py | Set-Content $provisioner',
+            ),
+            (
+                'git cat-file -e "$($env:RELEASE_TOOLING_SHA)^{commit}" 2>$null',
+                '$true',
+            ),
+            (
+                'git fetch --no-tags --depth=1 origin $env:RELEASE_TOOLING_SHA',
+                'git fetch --no-tags --depth=1 origin main',
+            ),
+        )
+        for old, new in mutations:
+            with self.subTest(mutation=old):
+                self.assert_rejected(
+                    self.mutate(old, new), "exact release tooling provenance"
+                )
+
+    def test_recovery_tooling_never_trusts_raw_github_downloads(self) -> None:
+        mutations = (
+            (
+                'git cat-file blob "$tooling_sha:scripts/check_release_workflow.py" \\\n',
+                'curl --fail "https://raw.githubusercontent.com/appergb/OpenTake/$tooling_sha/scripts/check_release_workflow.py" \\\n',
+            ),
+            (
+                'git cat-file blob "$RELEASE_TOOLING_SHA:scripts/test_check_release_workflow.py" \\\n',
+                'curl --fail "https://raw.githubusercontent.com/appergb/OpenTake/$RELEASE_TOOLING_SHA/scripts/test_check_release_workflow.py" \\\n',
+            ),
+            (
+                'git cat-file blob "$($env:RELEASE_TOOLING_SHA):scripts/provision_ffmpeg_sidecars.py" > $provisioner',
+                'Invoke-WebRequest "https://raw.githubusercontent.com/appergb/OpenTake/$env:RELEASE_TOOLING_SHA/scripts/provision_ffmpeg_sidecars.py" -OutFile $provisioner',
+            ),
+        )
+        for old, new in mutations:
+            with self.subTest(mutation=old):
+                self.assert_rejected(
+                    self.mutate(old, new),
+                    "release tooling never trusts raw HTTP downloads",
+                )
+
+    def test_recovery_runs_the_exact_tooling_provisioner_tests(self) -> None:
+        mutated = self.mutate(
+            '            -s "$tooling_root" -p \'test_provision_ffmpeg_sidecars.py\'\n',
+            '            -s scripts/tests -p \'test_*.py\'\n',
+        )
+        self.assert_rejected(mutated, "recovery provisioner tests")
+
+    def test_recovery_release_notes_are_loaded_from_exact_tooling_commit(
+        self,
+    ) -> None:
+        mutations = (
+            (
+                'git cat-file blob "$RELEASE_TOOLING_SHA:docs/releases/1.0.0-beta.4.md" \\\n',
+                'cp docs/releases/1.0.0-beta.4.md \\\n',
+                "exact release tooling provenance",
+            ),
+            (
+                'git cat-file blob "$RELEASE_TOOLING_SHA:$NOTES_PATH" \\\n',
+                'cp "$NOTES_PATH" \\\n',
+                "recovery release notes use exact tooling commit",
+            ),
+        )
+        for old, new, expected in mutations:
+            with self.subTest(mutation=old):
+                self.assert_rejected(self.mutate(old, new), expected)
 
     def test_trigger_rejects_any_additional_event(self) -> None:
         mutated = self.mutate(
@@ -658,6 +1201,21 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
 
     def test_repository_metadata_is_beta4_and_release_notes_exist(self) -> None:
         self.assertEqual([], contract.validate_repository_metadata(REPOSITORY_ROOT))
+
+    def test_release_notes_document_normal_push_and_dual_sha_recovery(self) -> None:
+        self.assertTrue(RELEASE_NOTES_PATH.is_file())
+        self.assertEqual(
+            [], contract.validate_release_notes_contract(RELEASE_NOTES_PATH)
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            notes = Path(directory) / "notes.md"
+            notes.write_text(
+                "tag must always equal current main\n", encoding="utf-8"
+            )
+            self.assertEqual(
+                ["Beta 4 release notes document dual-SHA recovery provenance"],
+                contract.validate_release_notes_contract(notes),
+            )
 
 
 class ReleaseRepositoryMetadataTests(unittest.TestCase):

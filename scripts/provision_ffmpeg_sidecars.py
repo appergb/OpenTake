@@ -18,7 +18,9 @@ import urllib.request
 import zipfile
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(
+    os.environ.get("OPENTAKE_REPOSITORY_ROOT", Path(__file__).resolve().parents[1])
+).resolve()
 LOCK_PATH = ROOT / "scripts" / "ffmpeg-sidecars.lock.json"
 BIN_DIR = ROOT / "src-tauri" / "binaries"
 
@@ -42,7 +44,7 @@ def destination(tool: str, target: str) -> Path:
     return BIN_DIR / f"{tool}-{target}{extension}"
 
 
-def verify(path: Path, expected_sha: str, version: str) -> None:
+def verify_regular_file(path: Path, expected_sha: str) -> None:
     if path.is_symlink() or not path.is_file():
         raise RuntimeError(f"sidecar is not a regular non-symlink file: {path}")
     actual_sha = sha256(path)
@@ -50,6 +52,10 @@ def verify(path: Path, expected_sha: str, version: str) -> None:
         raise RuntimeError(
             f"sidecar checksum mismatch for {path}: {actual_sha} != {expected_sha}"
         )
+
+
+def verify(path: Path, expected_sha: str, version: str) -> None:
+    verify_regular_file(path, expected_sha)
     output = subprocess.check_output(
         [str(path), "-version"], text=True, stderr=subprocess.STDOUT
     )
@@ -65,6 +71,17 @@ def verify(path: Path, expected_sha: str, version: str) -> None:
     )
     if "not legally redistributable" in license_output.lower():
         raise RuntimeError(f"unredistributable sidecar license rejected: {path}")
+
+
+def verify_detached(path: Path, expected_sha: str, version: str) -> None:
+    verify_regular_file(path, expected_sha)
+    with tempfile.TemporaryDirectory(
+        prefix="opentake-sidecar-probe-", ignore_cleanup_errors=True
+    ) as temporary_directory:
+        probe_path = Path(temporary_directory) / f"sidecar{path.suffix}"
+        shutil.copy2(path, probe_path)
+        verify(probe_path, expected_sha, version)
+    verify_regular_file(path, expected_sha)
 
 
 def download(url: str, destination_path: Path) -> None:
@@ -133,24 +150,19 @@ def provision(tool: str, record: dict[str, object], target: str) -> None:
     assert isinstance(version, str)
     assert isinstance(url, str)
     if final_path.is_file() and sha256(final_path) == expected_sha:
-        verify(final_path, expected_sha, version)
+        verify_detached(final_path, expected_sha, version)
         print(f"verified {final_path.relative_to(ROOT)}")
         return
 
-    with tempfile.NamedTemporaryFile(
-        prefix=f".{tool}-{target}-", dir=BIN_DIR, delete=False
-    ) as stream:
-        temporary_path = Path(stream.name)
-    archive_path: Path | None = None
-
-    try:
+    with tempfile.TemporaryDirectory(
+        prefix=f"opentake-{tool}-{target}-", ignore_cleanup_errors=True
+    ) as temporary_directory:
+        temporary_root = Path(temporary_directory)
+        temporary_path = temporary_root / f"{tool}-verified"
+        archive_path = temporary_root / f"{tool}-download"
         if record.get("archive") is None:
             download(url, temporary_path)
         else:
-            with tempfile.NamedTemporaryFile(
-                prefix=f".{tool}-{target}-archive-", dir=BIN_DIR, delete=False
-            ) as stream:
-                archive_path = Path(stream.name)
             download(url, archive_path)
             materialize_download(record, archive_path, temporary_path)
         actual_sha = sha256(temporary_path)
@@ -165,15 +177,25 @@ def provision(tool: str, record: dict[str, object], target: str) -> None:
                 | stat.S_IXGRP
                 | stat.S_IXOTH
             )
-        verify(temporary_path, expected_sha, version)
-        os.replace(temporary_path, final_path)
-        verify(final_path, expected_sha, version)
-        print(f"provisioned {final_path.relative_to(ROOT)}")
-    finally:
-        if temporary_path.exists():
-            temporary_path.unlink()
-        if archive_path is not None and archive_path.exists():
-            archive_path.unlink()
+        with tempfile.NamedTemporaryFile(
+            prefix=f".{tool}-{target}-publish-", dir=BIN_DIR, delete=False
+        ) as stream:
+            publication_path = Path(stream.name)
+        try:
+            shutil.copy2(temporary_path, publication_path)
+            publication_sha = sha256(publication_path)
+            if publication_sha != expected_sha:
+                raise RuntimeError(
+                    "sidecar publication copy checksum mismatch for "
+                    f"{tool}: {publication_sha} != {expected_sha}"
+                )
+            verify(temporary_path, expected_sha, version)
+            os.replace(publication_path, final_path)
+            verify_regular_file(final_path, expected_sha)
+            print(f"provisioned {final_path.relative_to(ROOT)}")
+        finally:
+            if publication_path.exists():
+                publication_path.unlink()
 
 
 def main() -> int:
@@ -196,7 +218,7 @@ def main() -> int:
     for tool in ("ffmpeg", "ffprobe"):
         path = destination(tool, args.target)
         if args.verify_only:
-            verify(path, target[tool]["sha256"], target[tool]["version"])
+            verify_detached(path, target[tool]["sha256"], target[tool]["version"])
             print(f"verified {path.relative_to(ROOT)}")
         else:
             provision(tool, target[tool], args.target)
