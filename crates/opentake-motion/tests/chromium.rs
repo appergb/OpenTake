@@ -449,6 +449,9 @@ mod live {
           <div id="box" style="width:24px;height:16px"></div>
           <script>
             OpenTake.onSeek((t) => {
+              if (document.querySelector('opentake-paint-fence')) {
+                throw new Error('paint fence leaked across frame seeks');
+              }
               const value = Math.round(t * 1000);
               box.style.background = `rgb(${value}, 20, 30)`;
               box.dataset.clock = `${Date.now()}:${performance.now()}`;
@@ -579,6 +582,19 @@ mod live {
                 );
             }
         }
+        for (index, path) in first.frames.iter().enumerate() {
+            let pixels = image::open(path).unwrap().to_rgba8();
+            assert_eq!(
+                pixels.get_pixel(0, 0).0,
+                [(index as u8) * 100, 20, 30, 255],
+                "frame {index} must contain the post-seek author surface, including at the reconstructed marker coordinate"
+            );
+            assert_eq!(
+                pixels.get_pixel(47, 31).0,
+                [0, 0, 0, 0],
+                "transparent frame {index} must preserve the uncovered canvas"
+            );
+        }
         assert_ne!(
             fs::read(&first.frames[0]).unwrap(),
             fs::read(&first.frames[2]).unwrap(),
@@ -598,6 +614,36 @@ mod live {
         assert_eq!((composited.width, composited.height), (48, 32));
         assert_eq!(composited.rgba.len(), 48 * 32 * 4);
 
+        let marker_tamper_root = tempfile::tempdir().unwrap();
+        let marker_tamper_renderer = renderer(marker_tamper_root.path());
+        let marker_tamper_request = request(
+            r#"<!doctype html><script>
+                  new MutationObserver((records) => {
+                    for (const record of records) {
+                      for (const node of record.removedNodes) {
+                        if (node.localName === 'opentake-paint-fence') {
+                          document.documentElement.appendChild(node);
+                        }
+                      }
+                    }
+                  }).observe(document.documentElement, { childList: true });
+                  OpenTake.onSeek(() => {});
+                </script>"#,
+        );
+        let marker_tamper = marker_tamper_renderer
+            .render(&marker_tamper_request)
+            .expect_err("reinserting a retired author marker must fail closed");
+        assert!(
+            matches!(&marker_tamper, MotionError::RenderFailed(message) if message.contains("paint-fence marker update failed")),
+            "unexpected retired-marker tamper result: {marker_tamper:?}"
+        );
+        assert!(
+            !marker_tamper_renderer
+                .cache()
+                .is_cached(&marker_tamper_request),
+            "a retired-marker tamper must not publish a completed render"
+        );
+
         // Opaque clips use isolated stable PageHandlers without alpha recovery.
         // Render twice to prove determinism across independent browser processes.
         let opaque_root = tempfile::tempdir().unwrap();
@@ -616,6 +662,15 @@ mod live {
                 fs::read(second).unwrap(),
                 "opaque compositor captures must be byte-identical across browsers"
             );
+        }
+        for (index, path) in opaque.frames.iter().enumerate() {
+            let pixels = image::open(path).unwrap().to_rgba8();
+            assert_eq!(
+                pixels.get_pixel(0, 0).0,
+                [(index as u8) * 100, 20, 30, 255],
+                "opaque frame {index} must contain the post-seek author surface"
+            );
+            assert_eq!(pixels.get_pixel(47, 31).0, [255, 255, 255, 255]);
         }
         let opaque_first = image::open(&opaque.frames[0]).unwrap().to_rgba8();
         assert_eq!(opaque_first.dimensions(), (48, 32));
