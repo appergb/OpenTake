@@ -36,6 +36,10 @@ MOTION_4K_UPLOAD_STEP_NAME = "Upload Windows Chromium 4K resource receipt"
 MOTION_4K_UPLOAD_STEP_SHA256 = (
     "129dd5a34d6c6582e4c6eda4b92a3e51deb24e9c136cc6bd9741ff6b16565863"
 )
+PRODUCT_BUNDLE_STEP_NAME = "Build native MSI and NSIS installers"
+PRODUCT_BUNDLE_STEP_SHA256 = (
+    "c3655079ed250a95a3c91e9bf66a6c545d067af80ac6ea05edb870c039ab1fce"
+)
 ACTION_PINS = MappingProxyType(
     {
         "actions/checkout": "11d5960a326750d5838078e36cf38b85af677262",
@@ -294,7 +298,7 @@ SHA_BOUND_JOB_CONTRACTS = (
         before_reassert_name="Re-assert immutable Windows product source before gates",
         after_reassert_name="Re-assert immutable Windows product source after gates",
         first_gate_name="Rust formatting",
-        job_sha256="e5664d484775190143ea33abcfbf2a458950d3f11fd7a9f065b08b2ce5139b7a",
+        job_sha256="e660a84d438c1828b7aa534cde2047427c179bcd20ae197fba3c8faa767aa968",
         step_identities=(
             "name:Validate immutable SHA input",
             f"uses:{_pinned_action('actions/checkout')}",
@@ -1172,7 +1176,7 @@ def _validate_structured_product(document: dict[str, object]) -> list[str]:
     ):
         errors.append("Windows Chromium 4K resource gate order")
 
-    bundle = _structured_step(job, "Build native MSI and NSIS installers")
+    bundle = _structured_step(job, PRODUCT_BUNDLE_STEP_NAME)
     if not _has_code_lines(
         bundle,
         (
@@ -1180,10 +1184,56 @@ def _validate_structured_product(document: dict[str, object]) -> list[str]:
             "-ErrorAction SilentlyContinue",
             "Remove-Item 'target/release/bundle/nsis' -Recurse -Force "
             "-ErrorAction SilentlyContinue",
-            "& .\\web\\node_modules\\.bin\\tauri.cmd build --ci --bundles msi,nsis",
         ),
     ):
         errors.append("clean native Tauri bundle")
+    bundle_config_lines = (
+        "$ErrorActionPreference = 'Stop'",
+        "if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { throw 'RUNNER_TEMP is required' }",
+        "$runnerTemp = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP)",
+        '$configPath = Join-Path $env:RUNNER_TEMP "opentake-windows-ci-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json"',
+        "$configPath = [System.IO.Path]::GetFullPath($configPath)",
+        "if (-not [System.IO.Path]::IsPathFullyQualified($configPath)) { throw 'Tauri config path is not absolute' }",
+        "if (-not [string]::Equals([System.IO.Path]::GetDirectoryName($configPath), $runnerTemp, [System.StringComparison]::OrdinalIgnoreCase)) {",
+        "if (Test-Path -LiteralPath $configPath) { throw 'Tauri config path already exists' }",
+        "$configJson = '{\"bundle\":{\"createUpdaterArtifacts\":false}}'",
+        "$utf8NoBom = [System.Text.UTF8Encoding]::new($false)",
+        "[System.IO.File]::WriteAllText($configPath, $configJson, $utf8NoBom)",
+        "$configItem = Get-Item -LiteralPath $configPath -Force",
+        "if ($configItem.PSIsContainer -or (($configItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {",
+        "$configBytes = [System.IO.File]::ReadAllBytes($configPath)",
+        "if ($configBytes.Length -ne $utf8NoBom.GetByteCount($configJson)) { throw 'Tauri config is not exact UTF-8 without BOM' }",
+        "$configText = [System.IO.File]::ReadAllText($configPath, [System.Text.Encoding]::UTF8)",
+        "if ($configText -cne $configJson) { throw 'Tauri config content changed' }",
+        "$parsedConfig = [System.IO.File]::ReadAllText($configPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json -AsHashtable",
+        "if (@($parsedConfig.Keys).Count -ne 1 -or -not ($parsedConfig.Keys -ccontains 'bundle')) { throw 'Tauri config root is not exact' }",
+        "$bundleConfig = $parsedConfig['bundle']",
+        "if (-not ($bundleConfig -is [System.Collections.IDictionary]) -or @($bundleConfig.Keys).Count -ne 1 -or -not ($bundleConfig.Keys -ccontains 'createUpdaterArtifacts')) {",
+        "if (-not ($bundleConfig['createUpdaterArtifacts'] -is [bool]) -or $bundleConfig['createUpdaterArtifacts'] -ne $false) {",
+        "$tauriArguments = @(",
+        "'build'",
+        "'--ci'",
+        "'--bundles'",
+        "'msi,nsis'",
+        "'--config'",
+        "$configPath",
+        "& .\\web\\node_modules\\.bin\\tauri.cmd @tauriArguments",
+        "$tauriExitCode = $LASTEXITCODE",
+        "Remove-Item -LiteralPath $configPath -Force",
+        "if ($tauriExitCode -ne 0) { exit $tauriExitCode }",
+    )
+    bundle_script = _run_script(bundle)
+    if (
+        not _has_code_lines(bundle, bundle_config_lines)
+        or bundle_script.count(
+            "& .\\web\\node_modules\\.bin\\tauri.cmd @tauriArguments"
+        )
+        != 1
+        or "--config '{" in bundle_script
+    ):
+        errors.append("exact runner-temp Tauri config argument")
+    if bundle is None or _structured_digest(bundle) != PRODUCT_BUNDLE_STEP_SHA256:
+        errors.append("exact Windows product Tauri bundle step")
 
     installed_script = _run_script(
         _structured_step(

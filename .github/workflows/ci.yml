@@ -491,9 +491,56 @@ jobs:
       - name: Build native MSI and NSIS installers
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           Remove-Item 'target/release/bundle/msi' -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item 'target/release/bundle/nsis' -Recurse -Force -ErrorAction SilentlyContinue
-          & .\web\node_modules\.bin\tauri.cmd build --ci --bundles msi,nsis
+          if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { throw 'RUNNER_TEMP is required' }
+          $runnerTemp = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP)
+          $configPath = Join-Path $env:RUNNER_TEMP "opentake-windows-ci-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json"
+          $configPath = [System.IO.Path]::GetFullPath($configPath)
+          if (-not [System.IO.Path]::IsPathFullyQualified($configPath)) { throw 'Tauri config path is not absolute' }
+          if (-not [string]::Equals([System.IO.Path]::GetDirectoryName($configPath), $runnerTemp, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Tauri config path escaped RUNNER_TEMP'
+          }
+          if (Test-Path -LiteralPath $configPath) { throw 'Tauri config path already exists' }
+          $configJson = '{"bundle":{"createUpdaterArtifacts":false}}'
+          $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+          [System.IO.File]::WriteAllText($configPath, $configJson, $utf8NoBom)
+          $configItem = Get-Item -LiteralPath $configPath -Force
+          if ($configItem.PSIsContainer -or (($configItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+            throw 'Tauri config must be a regular non-link file'
+          }
+          $configBytes = [System.IO.File]::ReadAllBytes($configPath)
+          if ($configBytes.Length -ne $utf8NoBom.GetByteCount($configJson)) { throw 'Tauri config is not exact UTF-8 without BOM' }
+          $configText = [System.IO.File]::ReadAllText($configPath, [System.Text.Encoding]::UTF8)
+          if ($configText -cne $configJson) { throw 'Tauri config content changed' }
+          $parsedConfig = [System.IO.File]::ReadAllText($configPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json -AsHashtable
+          if (@($parsedConfig.Keys).Count -ne 1 -or -not ($parsedConfig.Keys -ccontains 'bundle')) { throw 'Tauri config root is not exact' }
+          $bundleConfig = $parsedConfig['bundle']
+          if (-not ($bundleConfig -is [System.Collections.IDictionary]) -or @($bundleConfig.Keys).Count -ne 1 -or -not ($bundleConfig.Keys -ccontains 'createUpdaterArtifacts')) {
+            throw 'Tauri bundle config is not exact'
+          }
+          if (-not ($bundleConfig['createUpdaterArtifacts'] -is [bool]) -or $bundleConfig['createUpdaterArtifacts'] -ne $false) {
+            throw 'Tauri updater artifact config must be false in product CI'
+          }
+          $tauriArguments = @(
+            'build'
+            '--ci'
+            '--bundles'
+            'msi,nsis'
+            '--config'
+            $configPath
+          )
+          $tauriExitCode = $null
+          try {
+            & .\web\node_modules\.bin\tauri.cmd @tauriArguments
+            $tauriExitCode = $LASTEXITCODE
+          } finally {
+            if (Test-Path -LiteralPath $configPath) {
+              Remove-Item -LiteralPath $configPath -Force
+            }
+          }
+          if ($tauriExitCode -ne 0) { exit $tauriExitCode }
 
       - name: Install NSIS package and execute installed product without PATH
         shell: pwsh
