@@ -30,6 +30,9 @@ WORKFLOW = WORKFLOW_PATH.read_text(encoding="utf-8") if WORKFLOW_PATH.is_file() 
 CHECKOUT_SHA = "11d5960a326750d5838078e36cf38b85af677262"
 BETA4_FAILED_RUN_ID = 31412976593
 BETA4_SOURCE_SHA = "2c4efdff9d2587c90cbcac0919f9d1d333d67d6a"
+BETA4_RECOVERY2_RUN_ID = 31427093503
+BETA4_RECOVERY1_TOOLING_SHA = "6162466834bbabb8a16a2c08808e03a53c2b22b6"
+BETA4_NEXT_TOOLING_SHA = "d90c87df0c0b4194635cd20de5e5816b6797d0c0"
 RECOVERY_WINDOWS_STEP_OUTCOMES = (
     ("Set up job", "success"),
     (f"Run actions/checkout@{CHECKOUT_SHA}", "success"),
@@ -79,6 +82,37 @@ RECOVERY_WINDOWS_STEP_OUTCOMES = (
     ("Complete job", "success"),
 )
 RECOVERY_WINDOWS_STEP_NUMBERS = (*range(1, 25), 46, 47, 48, 49)
+RECOVERY2_WINDOWS_STEP_OUTCOMES = (
+    *RECOVERY_WINDOWS_STEP_OUTCOMES[:8],
+    ("Provision checksum-pinned Windows FFmpeg sidecars", "success"),
+    ("Verify pinned sidecar supply", "success"),
+    ("Cache Cargo dependencies", "success"),
+    ("Install locked Web dependencies", "success"),
+    ("Rust workspace clippy", "success"),
+    ("Rust workspace tests", "success"),
+    ("Web editor behavior suite", "success"),
+    ("Minimal-feature Tauri clippy", "success"),
+    ("Web production build", "success"),
+    ("Reassert exact source before Windows build", "success"),
+    ("Build native MSI, NSIS, and signed updater artifacts", "failure"),
+    ("Install NSIS and smoke installed app, sidecars, and updater artifacts", "skipped"),
+    ("Reassert exact source after Windows packaging", "skipped"),
+    ("Create and sign Windows updater attestations", "skipped"),
+    ("Create Windows exact-SHA receipt", "skipped"),
+    ("Upload exact-SHA Windows packages and updater signatures", "skipped"),
+    ("Post Cache Cargo dependencies", "skipped"),
+    (
+        "Post Run actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
+        "skipped",
+    ),
+    (
+        "Post Run pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1",
+        "success",
+    ),
+    (f"Post Run actions/checkout@{CHECKOUT_SHA}", "success"),
+    ("Complete job", "success"),
+)
+RECOVERY2_WINDOWS_STEP_NUMBERS = (*range(1, 25), 45, 46, 47, 48, 49)
 
 
 def recovery_windows_steps() -> list[dict[str, object]]:
@@ -95,6 +129,61 @@ def recovery_windows_steps() -> list[dict[str, object]]:
             strict=True,
         )
     ]
+
+
+def recovery2_windows_steps() -> list[dict[str, object]]:
+    return [
+        {
+            "number": number,
+            "name": name,
+            "status": "completed",
+            "conclusion": conclusion,
+        }
+        for number, (name, conclusion) in zip(
+            RECOVERY2_WINDOWS_STEP_NUMBERS,
+            RECOVERY2_WINDOWS_STEP_OUTCOMES,
+            strict=True,
+        )
+    ]
+
+
+def recovery_artifacts(
+    run_id: int, head_branch: str, head_sha: str
+) -> dict[str, object]:
+    return {
+        "total_count": 1,
+        "artifacts": [
+            {
+                "id": 9077851536,
+                "name": f"opentake-macos-arm64-{BETA4_SOURCE_SHA}",
+                "size_in_bytes": 142001290,
+                "expired": False,
+                "digest": "sha256:b62a8270268087d91bc4f8d2c8aac5d2ae2fe2cf32ec21d95bd2fd46787df612",
+                "workflow_run": {
+                    "id": run_id,
+                    "repository_id": 1275692189,
+                    "head_repository_id": 1275692189,
+                    "head_branch": head_branch,
+                    "head_sha": head_sha,
+                },
+            }
+        ],
+    }
+
+
+def recovery_comparison(
+    base_sha: str,
+    head_sha: str = BETA4_RECOVERY1_TOOLING_SHA,
+) -> dict[str, object]:
+    return {
+        "status": "ahead",
+        "ahead_by": 1,
+        "behind_by": 0,
+        "total_commits": 1,
+        "base_commit": {"sha": base_sha},
+        "merge_base_commit": {"sha": base_sha},
+        "commits": [{"sha": head_sha}],
+    }
 
 
 class ReleaseWorkflowContractTests(unittest.TestCase):
@@ -181,8 +270,12 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         }
         compare = {
             "status": "ahead",
+            "ahead_by": 1,
+            "behind_by": 0,
+            "total_commits": 1,
             "base_commit": {"sha": source_sha},
             "merge_base_commit": {"sha": source_sha},
+            "commits": [{"sha": BETA4_RECOVERY1_TOOLING_SHA}],
         }
 
         contract.validate_recovery_run(
@@ -192,6 +285,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             expected_run_id=run_id,
             expected_tag="v1.0.0-beta.4",
             expected_sha=source_sha,
+            expected_comparison_head_sha=BETA4_RECOVERY1_TOOLING_SHA,
         )
 
         mutations = (
@@ -223,6 +317,24 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                 jobs,
                 {**compare, "merge_base_commit": {"sha": "3" * 40}},
             ),
+            (
+                "comparison head",
+                run,
+                jobs,
+                {**compare, "commits": [{"sha": "4" * 40}]},
+            ),
+            (
+                "missing comparison head",
+                run,
+                jobs,
+                {key: value for key, value in compare.items() if key != "commits"},
+            ),
+            (
+                "truncated comparison commits",
+                run,
+                jobs,
+                {**compare, "ahead_by": 2, "total_commits": 2},
+            ),
         )
         for name, mutated_run, mutated_jobs, mutated_compare in mutations:
             with self.subTest(name=name):
@@ -234,6 +346,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                         expected_run_id=run_id,
                         expected_tag="v1.0.0-beta.4",
                         expected_sha=source_sha,
+                        expected_comparison_head_sha=BETA4_RECOVERY1_TOOLING_SHA,
                     )
 
     def test_failed_run_recovery_requires_the_exact_windows_failure_job_set(
@@ -276,8 +389,12 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         exact = [entry(name, conclusion) for name, conclusion in outcomes.items()]
         compare = {
             "status": "ahead",
+            "ahead_by": 1,
+            "behind_by": 0,
+            "total_commits": 1,
             "base_commit": {"sha": source_sha},
             "merge_base_commit": {"sha": source_sha},
+            "commits": [{"sha": BETA4_RECOVERY1_TOOLING_SHA}],
         }
         invalid_job_sets = {
             "missing": exact[:-1],
@@ -323,6 +440,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                         expected_run_id=run_id,
                         expected_tag="v1.0.0-beta.4",
                         expected_sha=source_sha,
+                        expected_comparison_head_sha=BETA4_RECOVERY1_TOOLING_SHA,
                     )
 
     def test_failed_run_recovery_requires_the_exact_sidecar_failure_step(
@@ -367,8 +485,12 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
 
         compare = {
             "status": "ahead",
+            "ahead_by": 1,
+            "behind_by": 0,
+            "total_commits": 1,
             "base_commit": {"sha": source_sha},
             "merge_base_commit": {"sha": source_sha},
+            "commits": [{"sha": BETA4_RECOVERY1_TOOLING_SHA}],
         }
         exact_steps = recovery_windows_steps()
         mutations: dict[str, list[dict[str, object]]] = {
@@ -439,24 +561,472 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                         expected_run_id=run_id,
                         expected_tag="v1.0.0-beta.4",
                         expected_sha=source_sha,
+                        expected_comparison_head_sha=BETA4_RECOVERY1_TOOLING_SHA,
                     )
 
-    def test_dispatch_contract_requires_an_explicit_failed_run_id(self) -> None:
-        tag_input = (
-            "      tag:\n"
-            "        description: Existing v<semver> tag from a failed run; this workflow never creates or moves tags\n"
-            "        required: true\n"
-            "        type: string\n"
+    def test_second_recovery_run_is_an_exact_fail_closed_chain_link(self) -> None:
+        run = {
+            "id": BETA4_RECOVERY2_RUN_ID,
+            "workflow_id": 330325373,
+            "name": "Release",
+            "path": ".github/workflows/release.yml",
+            "event": "workflow_dispatch",
+            "status": "completed",
+            "conclusion": "failure",
+            "head_branch": "main",
+            "head_sha": BETA4_RECOVERY1_TOOLING_SHA,
+            "run_attempt": 1,
+            "repository": {
+                "id": 1275692189,
+                "full_name": "appergb/OpenTake",
+                "private": False,
+            },
+            "head_repository": {
+                "id": 1275692189,
+                "full_name": "appergb/OpenTake",
+                "private": False,
+            },
+        }
+        outcomes = (
+            ("Validate immutable release source", "success"),
+            ("Release quality gates", "success"),
+            ("macOS ARM64 app and DMG", "success"),
+            ("Windows x64 MSI and NSIS", "failure"),
+            ("Publish verified GitHub prerelease", "skipped"),
         )
-        recovered = tag_input + (
-            "      failed_run_id:\n"
-            "        description: Failed tag-push Release run ID whose exact source is being recovered\n"
-            "        required: true\n"
-            "        type: string\n"
-        )
-        candidate = self.mutate(tag_input, recovered)
 
-        self.assertNotIn("tag-only release trigger", contract.validate_workflow(candidate))
+        def jobs_with_steps(steps: list[dict[str, object]]) -> dict[str, object]:
+            entries = []
+            for name, conclusion in outcomes:
+                entry: dict[str, object] = {
+                    "name": name,
+                    "run_id": BETA4_RECOVERY2_RUN_ID,
+                    "run_attempt": 1,
+                    "head_sha": BETA4_RECOVERY1_TOOLING_SHA,
+                    "status": "completed",
+                    "conclusion": conclusion,
+                }
+                if name == "Windows x64 MSI and NSIS":
+                    entry["steps"] = steps
+                entries.append(entry)
+            return {"total_count": len(entries), "jobs": entries}
+
+        exact_jobs = jobs_with_steps(recovery2_windows_steps())
+        exact_artifacts = recovery_artifacts(
+            BETA4_RECOVERY2_RUN_ID, "main", BETA4_RECOVERY1_TOOLING_SHA
+        )
+        run_comparison = recovery_comparison(
+            BETA4_RECOVERY1_TOOLING_SHA,
+            BETA4_NEXT_TOOLING_SHA,
+        )
+
+        contract.validate_failed_recovery_run(
+            run,
+            exact_jobs,
+            exact_artifacts,
+            run_comparison,
+            expected_run_id=BETA4_RECOVERY2_RUN_ID,
+            expected_tag="v1.0.0-beta.4",
+            expected_source_sha=BETA4_SOURCE_SHA,
+            expected_tooling_sha=BETA4_RECOVERY1_TOOLING_SHA,
+            expected_current_tooling_sha=BETA4_NEXT_TOOLING_SHA,
+        )
+
+        moved_failure_steps = [
+            {
+                **step,
+                "conclusion": (
+                    "success"
+                    if step["name"]
+                    == "Build native MSI, NSIS, and signed updater artifacts"
+                    else "failure"
+                    if step["name"] == "Rust workspace tests"
+                    else step["conclusion"]
+                ),
+            }
+            for step in recovery2_windows_steps()
+        ]
+        artifact = exact_artifacts["artifacts"][0]
+        assert isinstance(artifact, dict)
+        artifact_run = artifact["workflow_run"]
+        assert isinstance(artifact_run, dict)
+        job_entries = exact_jobs["jobs"]
+        assert isinstance(job_entries, list)
+        run_repository = run["repository"]
+        run_head_repository = run["head_repository"]
+        assert isinstance(run_repository, dict)
+        assert isinstance(run_head_repository, dict)
+        mutations = (
+            (
+                "wrong dispatcher head",
+                {**run, "head_sha": "3" * 40},
+                exact_jobs,
+                exact_artifacts,
+                run_comparison,
+            ),
+            (
+                "wrong workflow ID",
+                {**run, "workflow_id": 1},
+                exact_jobs,
+                exact_artifacts,
+                run_comparison,
+            ),
+            (
+                "wrong repository",
+                {**run, "repository": {**run_repository, "id": 1}},
+                exact_jobs,
+                exact_artifacts,
+                run_comparison,
+            ),
+            (
+                "non-boolean repository visibility",
+                {**run, "repository": {**run_repository, "private": 0}},
+                exact_jobs,
+                exact_artifacts,
+                run_comparison,
+            ),
+            (
+                "wrong head repository",
+                {**run, "head_repository": {**run_head_repository, "id": 1}},
+                exact_jobs,
+                exact_artifacts,
+                run_comparison,
+            ),
+            (
+                "wrong run attempt",
+                {**run, "run_attempt": 2},
+                exact_jobs,
+                exact_artifacts,
+                run_comparison,
+            ),
+            (
+                "boolean run attempt",
+                {**run, "run_attempt": True},
+                exact_jobs,
+                exact_artifacts,
+                run_comparison,
+            ),
+            (
+                "missing job",
+                run,
+                {"total_count": 4, "jobs": job_entries[:-1]},
+                exact_artifacts,
+                run_comparison,
+            ),
+            (
+                "extra job",
+                run,
+                {
+                    "total_count": 6,
+                    "jobs": [
+                        *job_entries,
+                        {
+                            "name": "unexpected job",
+                            "run_id": BETA4_RECOVERY2_RUN_ID,
+                            "run_attempt": 1,
+                            "head_sha": BETA4_RECOVERY1_TOOLING_SHA,
+                            "status": "completed",
+                            "conclusion": "failure",
+                        },
+                    ],
+                },
+                exact_artifacts,
+                run_comparison,
+            ),
+            (
+                "boolean job attempt",
+                run,
+                {
+                    **exact_jobs,
+                    "jobs": [
+                        {**job_entries[0], "run_attempt": True},
+                        *job_entries[1:],
+                    ],
+                },
+                exact_artifacts,
+                run_comparison,
+            ),
+            (
+                "failure moved to workspace tests",
+                run,
+                jobs_with_steps(moved_failure_steps),
+                exact_artifacts,
+                run_comparison,
+            ),
+            (
+                "boolean Windows step number",
+                run,
+                jobs_with_steps(
+                    [
+                        {**recovery2_windows_steps()[0], "number": True},
+                        *recovery2_windows_steps()[1:],
+                    ]
+                ),
+                exact_artifacts,
+                run_comparison,
+            ),
+            (
+                "artifact ID",
+                run,
+                exact_jobs,
+                {
+                    **exact_artifacts,
+                    "artifacts": [{**artifact, "id": 9077851537}],
+                },
+                run_comparison,
+            ),
+            (
+                "artifact name",
+                run,
+                exact_jobs,
+                {
+                    **exact_artifacts,
+                    "artifacts": [{**artifact, "name": "unbound-artifact"}],
+                },
+                run_comparison,
+            ),
+            (
+                "artifact size drift",
+                run,
+                exact_jobs,
+                {
+                    **exact_artifacts,
+                    "artifacts": [{**artifact, "size_in_bytes": 142001291}],
+                },
+                run_comparison,
+            ),
+            (
+                "artifact digest",
+                run,
+                exact_jobs,
+                {
+                    **exact_artifacts,
+                    "artifacts": [{**artifact, "digest": "sha256:" + "0" * 64}],
+                },
+                run_comparison,
+            ),
+            (
+                "artifact repository",
+                run,
+                exact_jobs,
+                {
+                    **exact_artifacts,
+                    "artifacts": [
+                        {
+                            **artifact,
+                            "workflow_run": {
+                                **artifact_run,
+                                "repository_id": 1,
+                            },
+                        }
+                    ],
+                },
+                run_comparison,
+            ),
+            (
+                "artifact head",
+                run,
+                exact_jobs,
+                {
+                    **exact_artifacts,
+                    "artifacts": [
+                        {
+                            **artifact,
+                            "workflow_run": {
+                                **artifact_run,
+                                "head_sha": BETA4_SOURCE_SHA,
+                            },
+                        }
+                    ],
+                },
+                run_comparison,
+            ),
+            (
+                "missing artifact payload",
+                run,
+                exact_jobs,
+                {"total_count": 0, "artifacts": []},
+                run_comparison,
+            ),
+            (
+                "boolean artifact count",
+                run,
+                exact_jobs,
+                {**exact_artifacts, "total_count": True},
+                run_comparison,
+            ),
+            (
+                "malformed artifact payload",
+                run,
+                exact_jobs,
+                {"total_count": 1, "artifacts": ["not-an-object"]},
+                run_comparison,
+            ),
+            (
+                "expired artifact",
+                run,
+                exact_jobs,
+                {
+                    **exact_artifacts,
+                    "artifacts": [{**artifact, "expired": True}],
+                },
+                run_comparison,
+            ),
+            (
+                "non-boolean artifact expiry",
+                run,
+                exact_jobs,
+                {
+                    **exact_artifacts,
+                    "artifacts": [{**artifact, "expired": 0}],
+                },
+                run_comparison,
+            ),
+            (
+                "empty artifact",
+                run,
+                exact_jobs,
+                {
+                    **exact_artifacts,
+                    "artifacts": [{**artifact, "size_in_bytes": 0}],
+                },
+                run_comparison,
+            ),
+            (
+                "artifact run",
+                run,
+                exact_jobs,
+                {
+                    **exact_artifacts,
+                    "artifacts": [
+                        {
+                            **artifact,
+                            "workflow_run": {
+                                **artifact_run,
+                                "id": BETA4_FAILED_RUN_ID,
+                            },
+                        }
+                    ],
+                },
+                run_comparison,
+            ),
+            (
+                "prior tooling ancestry",
+                run,
+                exact_jobs,
+                exact_artifacts,
+                {
+                    **run_comparison,
+                    "merge_base_commit": {"sha": BETA4_SOURCE_SHA},
+                },
+            ),
+            (
+                "current tooling comparison head",
+                run,
+                exact_jobs,
+                exact_artifacts,
+                {
+                    **run_comparison,
+                    "commits": [{"sha": "4" * 40}],
+                },
+            ),
+            (
+                "truncated tooling comparison commits",
+                run,
+                exact_jobs,
+                exact_artifacts,
+                {
+                    **run_comparison,
+                    "ahead_by": 2,
+                    "total_commits": 2,
+                },
+            ),
+            (
+                "boolean comparison counts",
+                run,
+                exact_jobs,
+                exact_artifacts,
+                {
+                    **run_comparison,
+                    "ahead_by": True,
+                    "behind_by": False,
+                },
+            ),
+        )
+        for name, mutated_run, mutated_jobs, mutated_artifacts, mutated_compare in mutations:
+            with self.subTest(name=name):
+                with self.assertRaises(contract.RecoveryRunError):
+                    contract.validate_failed_recovery_run(
+                        mutated_run,
+                        mutated_jobs,
+                        mutated_artifacts,
+                        mutated_compare,
+                        expected_run_id=BETA4_RECOVERY2_RUN_ID,
+                        expected_tag="v1.0.0-beta.4",
+                        expected_source_sha=BETA4_SOURCE_SHA,
+                        expected_tooling_sha=BETA4_RECOVERY1_TOOLING_SHA,
+                        expected_current_tooling_sha=BETA4_NEXT_TOOLING_SHA,
+                    )
+
+    def test_recovery_rejects_an_unlisted_failed_run(self) -> None:
+        with self.assertRaises(contract.RecoveryRunError):
+            contract.validate_failed_recovery_run(
+                {
+                    "id": 99999999999,
+                    "name": "Release",
+                    "path": ".github/workflows/release.yml",
+                    "event": "workflow_dispatch",
+                    "status": "completed",
+                    "conclusion": "failure",
+                    "head_branch": "main",
+                    "head_sha": BETA4_RECOVERY1_TOOLING_SHA,
+                    "run_attempt": 1,
+                },
+                {"total_count": 0, "jobs": []},
+                {"total_count": 0, "artifacts": []},
+                recovery_comparison(
+                    BETA4_RECOVERY1_TOOLING_SHA,
+                    BETA4_NEXT_TOOLING_SHA,
+                ),
+                expected_run_id=99999999999,
+                expected_tag="v1.0.0-beta.4",
+                expected_source_sha=BETA4_SOURCE_SHA,
+                expected_tooling_sha=BETA4_RECOVERY1_TOOLING_SHA,
+                expected_current_tooling_sha=BETA4_NEXT_TOOLING_SHA,
+            )
+
+    def test_dispatch_contract_requires_root_and_predecessor_run_ids(self) -> None:
+        document = contract._parse_workflow_yaml(WORKFLOW)
+        inputs = document["on"]["workflow_dispatch"]["inputs"]
+        self.assertEqual(
+            {"tag", "failed_run_id", "failed_recovery_run_id"},
+            set(inputs),
+        )
+        self.assertTrue(inputs["failed_run_id"]["required"])
+        self.assertEqual(
+            "Root failed tag-push Release run ID (31412976593) for the immutable source",
+            inputs["failed_run_id"]["description"],
+        )
+        self.assertEqual(
+            {
+                "description": "Previous failed workflow_dispatch recovery Release run ID (31427093503) chained to the same immutable source",
+                "required": True,
+                "type": "string",
+            },
+            inputs["failed_recovery_run_id"],
+        )
+
+        mutated = self.mutate(
+            "      failed_recovery_run_id:\n"
+            "        description: Previous failed workflow_dispatch recovery Release run ID (31427093503) chained to the same immutable source\n"
+            "        required: true\n"
+            "        type: string\n",
+            "      failed_recovery_run_id:\n"
+            "        description: Optional arbitrary run\n"
+            "        required: false\n"
+            "        type: string\n",
+        )
+        self.assert_rejected(mutated, "tag-only release trigger")
 
     def test_contract_paths_can_be_bound_to_an_external_workflow_copy(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -497,12 +1067,32 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                 '            test -n "$tooling_sha"\n',
             ),
             (
+                '            test "$FAILED_RUN_ID" = "31412976593"\n',
+                '            test -n "$FAILED_RUN_ID"\n',
+            ),
+            (
+                '            test "$FAILED_RECOVERY_RUN_ID" = "31427093503"\n',
+                '            test -n "$FAILED_RECOVERY_RUN_ID"\n',
+            ),
+            (
                 '              --run-id "$FAILED_RUN_ID" \\\n',
                 '              --run-id 31412976593 \\\n',
             ),
             (
+                '            gh api "repos/$GITHUB_REPOSITORY/compare/$source_sha...$predecessor_tooling_sha" \\\n',
                 '            gh api "repos/$GITHUB_REPOSITORY/compare/$source_sha...$remote_main" \\\n',
+            ),
+            (
+                '            gh api "repos/$GITHUB_REPOSITORY/compare/$predecessor_tooling_sha...$remote_main" \\\n',
                 '            gh api "repos/$GITHUB_REPOSITORY/compare/$remote_main...$remote_main" \\\n',
+            ),
+            (
+                '            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FAILED_RECOVERY_RUN_ID/artifacts?per_page=100" \\\n',
+                '            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FAILED_RECOVERY_RUN_ID/artifacts?per_page=1" \\\n',
+            ),
+            (
+                '      FAILED_RECOVERY_RUN_ID: ${{ github.event_name == \'workflow_dispatch\' && inputs.failed_recovery_run_id || \'\' }}\n',
+                '      FAILED_RECOVERY_RUN_ID: 31427093503\n',
             ),
         )
         for old, new in mutations:
@@ -998,6 +1588,19 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         self.assert_rejected(second, "remote tag rebound before publication")
 
     def test_permissions_are_read_by_default_and_write_only_for_publish(self) -> None:
+        document = contract._parse_workflow_yaml(WORKFLOW)
+        self.assertEqual(
+            {"actions": "read", "contents": "read"},
+            document["jobs"]["validate"]["permissions"],
+        )
+        validate_without_actions = self.mutate(
+            "    permissions:\n      actions: read\n      contents: read\n",
+            "    permissions:\n      contents: read\n",
+        )
+        self.assert_rejected(
+            validate_without_actions,
+            "validate-only Actions read permission",
+        )
         top_level_write = self.mutate(
             "permissions:\n  contents: read\n",
             "permissions:\n  contents: write\n",
@@ -1187,10 +1790,70 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
 
     def test_windows_package_command_cannot_be_faked_by_a_string(self) -> None:
         mutated = self.mutate(
-            "          & .\\web\\node_modules\\.bin\\tauri.cmd build --ci --bundles msi,nsis --config '{\"bundle\":{\"createUpdaterArtifacts\":true}}'\n",
-            "          $decoy = '& .\\web\\node_modules\\.bin\\tauri.cmd build --ci --bundles msi,nsis --config {\"bundle\":{\"createUpdaterArtifacts\":true}}'\n",
+            "            & .\\web\\node_modules\\.bin\\tauri.cmd @tauriArguments\n",
+            "            $decoy = '& .\\web\\node_modules\\.bin\\tauri.cmd @tauriArguments'\n",
         )
         self.assert_rejected(mutated, "complete Windows x64 installer gate")
+
+    def test_windows_build_config_is_one_runner_temp_file_argument(self) -> None:
+        document = contract._parse_workflow_yaml(WORKFLOW)
+        windows = document["jobs"]["windows_x64"]
+        build = next(
+            step
+            for step in windows["steps"]
+            if step.get("name")
+            == "Build native MSI, NSIS, and signed updater artifacts"
+        )
+        script = build["run"]
+        required = (
+            '$configPath = Join-Path $env:RUNNER_TEMP "opentake-windows-updater-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json"',
+            "$configJson = '{\"bundle\":{\"createUpdaterArtifacts\":true}}'",
+            "$utf8NoBom = [System.Text.UTF8Encoding]::new($false)",
+            "[System.IO.File]::WriteAllText($configPath, $configJson, $utf8NoBom)",
+            "$parsedConfig = [System.IO.File]::ReadAllText($configPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json -AsHashtable",
+            "$tauriArguments = @(",
+            "'--config'",
+            "$configPath",
+            "& .\\web\\node_modules\\.bin\\tauri.cmd @tauriArguments",
+        )
+        for marker in required:
+            with self.subTest(marker=marker):
+                self.assertIn(marker, script)
+        self.assertNotIn("--config '{", script)
+
+    def test_windows_build_config_file_contract_is_fail_closed(self) -> None:
+        mutations = (
+            (
+                '$configPath = Join-Path $env:RUNNER_TEMP "opentake-windows-updater-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json"',
+                '$configPath = Join-Path $env:GITHUB_WORKSPACE "tauri-release.json"',
+            ),
+            (
+                "$utf8NoBom = [System.Text.UTF8Encoding]::new($false)",
+                "$utf8NoBom = [System.Text.UTF8Encoding]::new($true)",
+            ),
+            (
+                "$configJson = '{\"bundle\":{\"createUpdaterArtifacts\":true}}'",
+                "$configJson = '{\"bundle\":{\"createUpdaterArtifacts\":false}}'",
+            ),
+            (
+                "if ($configItem.PSIsContainer -or (($configItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {",
+                "if ($configItem.PSIsContainer) {",
+            ),
+            (
+                "            '--config'\n            $configPath\n",
+                "            '--config'\n            $configJson\n",
+            ),
+            (
+                "& .\\web\\node_modules\\.bin\\tauri.cmd @tauriArguments",
+                "Write-Host '& .\\web\\node_modules\\.bin\\tauri.cmd @tauriArguments'",
+            ),
+        )
+        for before, after in mutations:
+            with self.subTest(before=before):
+                self.assert_rejected(
+                    self.mutate(before, after),
+                    "complete Windows x64 installer gate",
+                )
 
     def test_publish_command_cannot_be_faked_by_echo(self) -> None:
         mutated = self.mutate(
@@ -1216,6 +1879,26 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                 ["Beta 4 release notes document dual-SHA recovery provenance"],
                 contract.validate_release_notes_contract(notes),
             )
+        canonical = RELEASE_NOTES_PATH.read_text(encoding="utf-8")
+        for marker in (
+            "`failed_run_id=31412976593`",
+            "`failed_recovery_run_id=31427093503`",
+            "`2c4efdff9d2587c90cbcac0919f9d1d333d67d6a`",
+            "`6162466834bbabb8a16a2c08808e03a53c2b22b6`",
+        ):
+            with self.subTest(marker=marker):
+                with tempfile.TemporaryDirectory() as directory:
+                    notes = Path(directory) / "notes.md"
+                    notes.write_text(
+                        canonical.replace(marker, "`redacted`"),
+                        encoding="utf-8",
+                    )
+                    self.assertEqual(
+                        [
+                            "Beta 4 release notes document dual-SHA recovery provenance"
+                        ],
+                        contract.validate_release_notes_contract(notes),
+                    )
 
 
 class ReleaseRepositoryMetadataTests(unittest.TestCase):

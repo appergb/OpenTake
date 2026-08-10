@@ -169,7 +169,7 @@ APPROVED_SIMPLE_RUNS = {
 }
 
 APPROVED_COMPLEX_RUN_SHA256 = {
-    ("validate", "Validate tag, source SHA, versions, and notes"): "5a1c640ad928939cde6666cdfd6374b477862f99b0e3c12d8d3632c27eb4c80c",
+    ("validate", "Validate tag, source SHA, versions, and notes"): "57f984fba1ddd7171444f54b3f086b86b563e55ac7b298b6e9271446bbfdb54f",
     ("validate", "Reassert exact source after validation"): "953657d26d2eda8490c18e7030c66ddb19aba64a5c8b19808da9a853fd1bfdd2",
     ("quality", "Assert exact checked-out SHA"): "ff0b148eecdf8603712586a6c4a05e752df0b36b5c97a366760f6cba10e58ddd",
     ("quality", "Free disk space"): "5848415c4d0e696f46965d62a2e17c8b7a0dd45ae600d28102af0b04108d9bf6",
@@ -191,7 +191,7 @@ APPROVED_COMPLEX_RUN_SHA256 = {
     ("windows_x64", "Require updater signing secrets"): "d03a04c4866ac7ecb9eba9d53aabbf92de24f452e6b5448d438d863988e797c4",
     ("windows_x64", "Provision checksum-pinned Windows FFmpeg sidecars"): "0518296c77e12a05d7bd99327daf00782e05aa1697f853d654a0eec0fd449238",
     ("windows_x64", "Reassert exact source before Windows build"): "953657d26d2eda8490c18e7030c66ddb19aba64a5c8b19808da9a853fd1bfdd2",
-    ("windows_x64", "Build native MSI, NSIS, and signed updater artifacts"): "efa3fa9c3659a91dcbeb3b16e95bbb17482e50f5e71ef9ff4f037b69d7ee335f",
+    ("windows_x64", "Build native MSI, NSIS, and signed updater artifacts"): "cc2f68b639e4d188892836a0b4e0a3819eb216dc83b06f5acf2a3d0640405142",
     ("windows_x64", "Install NSIS and smoke installed app, sidecars, and updater artifacts"): "556af3fe7ee52b0dfde26824abf39b589c897782f1a311a8c64a044dc3cf7010",
     ("windows_x64", "Reassert exact source after Windows packaging"): "953657d26d2eda8490c18e7030c66ddb19aba64a5c8b19808da9a853fd1bfdd2",
     ("windows_x64", "Create and sign Windows updater attestations"): "40c7f2ea8696db15adf49a688a446637df5b1625fe0b39de32502e66af71f2c6",
@@ -214,10 +214,10 @@ APPROVED_COMPLEX_RUN_SHA256 = {
 }
 
 APPROVED_JOB_SHA256 = {
-    "validate": "e493b3756464fe932b402b2aab9e36575bbeb58be1ae80fea28dfa0cb335cbb4",
+    "validate": "e0749abbec85f8a9dade905f4e98e903350168a79b2c972dcc5b839070f4e9c5",
     "quality": "a2947370289ebd299042159fbe8fd046f7fedf72b47037d58b4398ed8e85baee",
     "macos_arm64": "1785d765c96278190c25e312c9e610070619e17b7b2b0d922f0bd234501df525",
-    "windows_x64": "b7cff85dc4201f30fce5ade71687993ce185b913b1ba62f29d6b031faa5311f2",
+    "windows_x64": "63bd70d85e40a3f1177e9059d4674d7f93d4502181fc378f7706e839af953378",
     "publish": "c7d84471185df270f1d30129b936dccc8cb6c1069020e34924037be2976425ec",
 }
 
@@ -303,6 +303,79 @@ EXPECTED_RECOVERY_WINDOWS_STEPS = (
     ("Complete job", "completed", "success"),
 )
 EXPECTED_RECOVERY_WINDOWS_STEP_NUMBERS = (*range(1, 25), 46, 47, 48, 49)
+EXPECTED_FAILED_RECOVERY_RUN_ID = 31427093503
+EXPECTED_FAILED_RECOVERY_TAG = "v1.0.0-beta.4"
+EXPECTED_FAILED_RECOVERY_SOURCE_SHA = (
+    "2c4efdff9d2587c90cbcac0919f9d1d333d67d6a"
+)
+EXPECTED_FAILED_RECOVERY_TOOLING_SHA = (
+    "6162466834bbabb8a16a2c08808e03a53c2b22b6"
+)
+EXPECTED_FAILED_RECOVERY_ARTIFACT_ID = 9077851536
+EXPECTED_FAILED_RECOVERY_ARTIFACT_SIZE = 142001290
+EXPECTED_FAILED_RECOVERY_ARTIFACT_DIGEST = (
+    "sha256:b62a8270268087d91bc4f8d2c8aac5d2ae2fe2cf32ec21d95bd2fd46787df612"
+)
+EXPECTED_FAILED_RECOVERY_WINDOWS_STEPS = (
+    *EXPECTED_RECOVERY_WINDOWS_STEPS[:8],
+    (
+        "Provision checksum-pinned Windows FFmpeg sidecars",
+        "completed",
+        "success",
+    ),
+    ("Verify pinned sidecar supply", "completed", "success"),
+    ("Cache Cargo dependencies", "completed", "success"),
+    ("Install locked Web dependencies", "completed", "success"),
+    ("Rust workspace clippy", "completed", "success"),
+    ("Rust workspace tests", "completed", "success"),
+    ("Web editor behavior suite", "completed", "success"),
+    ("Minimal-feature Tauri clippy", "completed", "success"),
+    ("Web production build", "completed", "success"),
+    ("Reassert exact source before Windows build", "completed", "success"),
+    (
+        "Build native MSI, NSIS, and signed updater artifacts",
+        "completed",
+        "failure",
+    ),
+    (
+        "Install NSIS and smoke installed app, sidecars, and updater artifacts",
+        "completed",
+        "skipped",
+    ),
+    ("Reassert exact source after Windows packaging", "completed", "skipped"),
+    ("Create and sign Windows updater attestations", "completed", "skipped"),
+    ("Create Windows exact-SHA receipt", "completed", "skipped"),
+    (
+        "Upload exact-SHA Windows packages and updater signatures",
+        "completed",
+        "skipped",
+    ),
+    ("Post Cache Cargo dependencies", "completed", "skipped"),
+    (
+        f"Post Run actions/setup-node@{PINNED_ACTIONS['actions/setup-node']}",
+        "completed",
+        "skipped",
+    ),
+    (
+        f"Post Run pnpm/action-setup@{PINNED_ACTIONS['pnpm/action-setup']}",
+        "completed",
+        "success",
+    ),
+    (
+        f"Post Run actions/checkout@{PINNED_ACTIONS['actions/checkout']}",
+        "completed",
+        "success",
+    ),
+    ("Complete job", "completed", "success"),
+)
+EXPECTED_FAILED_RECOVERY_WINDOWS_STEP_NUMBERS = (
+    *range(1, 25),
+    45,
+    46,
+    47,
+    48,
+    49,
+)
 
 
 class ReleaseStateError(ValueError):
@@ -325,12 +398,15 @@ def validate_recovery_run(
     expected_run_id: int,
     expected_tag: str,
     expected_sha: str,
+    expected_comparison_head_sha: str,
 ) -> None:
     """Validate one failed tag run before rebuilding its immutable source."""
     if expected_run_id <= 0:
         raise RecoveryRunError("recovery run ID must be positive")
     if re.fullmatch(r"[0-9a-f]{40}", expected_sha) is None:
         raise RecoveryRunError("recovery source SHA must be lowercase 40-hex")
+    if re.fullmatch(r"[0-9a-f]{40}", expected_comparison_head_sha) is None:
+        raise RecoveryRunError("recovery comparison head must be lowercase 40-hex")
     required_run_fields = {
         "id": expected_run_id,
         "name": "Release",
@@ -391,7 +467,11 @@ def validate_recovery_run(
         for step in windows_steps
     )
     if (
-        step_numbers != EXPECTED_RECOVERY_WINDOWS_STEP_NUMBERS
+        any(
+            not isinstance(number, int) or isinstance(number, bool)
+            for number in step_numbers
+        )
+        or step_numbers != EXPECTED_RECOVERY_WINDOWS_STEP_NUMBERS
         or step_outcomes != EXPECTED_RECOVERY_WINDOWS_STEPS
     ):
         raise RecoveryRunError(
@@ -400,14 +480,217 @@ def validate_recovery_run(
 
     base = comparison.get("base_commit")
     merge_base = comparison.get("merge_base_commit")
+    commits = comparison.get("commits")
+    total_commits = comparison.get("total_commits")
+    ahead_by = comparison.get("ahead_by")
+    behind_by = comparison.get("behind_by")
     if (
-        comparison.get("status") not in {"ahead", "identical"}
+        comparison.get("status") != "ahead"
+        or not isinstance(total_commits, int)
+        or isinstance(total_commits, bool)
+        or total_commits <= 0
+        or not isinstance(ahead_by, int)
+        or isinstance(ahead_by, bool)
+        or ahead_by != total_commits
+        or not isinstance(behind_by, int)
+        or isinstance(behind_by, bool)
+        or behind_by != 0
         or not isinstance(base, dict)
         or base.get("sha") != expected_sha
         or not isinstance(merge_base, dict)
         or merge_base.get("sha") != expected_sha
+        or not isinstance(commits, list)
+        or len(commits) != total_commits
+        or not all(isinstance(commit, dict) for commit in commits)
+        or commits[-1].get("sha") != expected_comparison_head_sha
     ):
-        raise RecoveryRunError("release source is not an ancestor of current main")
+        raise RecoveryRunError(
+            "release source is not an ancestor of the approved predecessor tooling"
+        )
+
+
+def validate_failed_recovery_run(
+    run: dict[str, object],
+    jobs: dict[str, object],
+    artifacts: dict[str, object],
+    tooling_comparison: dict[str, object],
+    *,
+    expected_run_id: int,
+    expected_tag: str,
+    expected_source_sha: str,
+    expected_tooling_sha: str,
+    expected_current_tooling_sha: str,
+) -> None:
+    """Validate the one approved failed recovery before chaining another run."""
+    if (
+        expected_run_id != EXPECTED_FAILED_RECOVERY_RUN_ID
+        or expected_tag != EXPECTED_FAILED_RECOVERY_TAG
+        or expected_source_sha != EXPECTED_FAILED_RECOVERY_SOURCE_SHA
+        or expected_tooling_sha != EXPECTED_FAILED_RECOVERY_TOOLING_SHA
+    ):
+        raise RecoveryRunError("failed recovery is not on the approved Beta 4 chain")
+    if (
+        re.fullmatch(r"[0-9a-f]{40}", expected_current_tooling_sha) is None
+        or expected_current_tooling_sha == expected_tooling_sha
+    ):
+        raise RecoveryRunError("current recovery tooling SHA is invalid")
+
+    required_run_fields = {
+        "id": EXPECTED_FAILED_RECOVERY_RUN_ID,
+        "workflow_id": 330325373,
+        "name": "Release",
+        "path": ".github/workflows/release.yml",
+        "event": "workflow_dispatch",
+        "status": "completed",
+        "conclusion": "failure",
+        "head_branch": "main",
+        "head_sha": EXPECTED_FAILED_RECOVERY_TOOLING_SHA,
+        "run_attempt": 1,
+    }
+    if any(run.get(field) != value for field, value in required_run_fields.items()):
+        raise RecoveryRunError("failed recovery run is not the approved exact run")
+    if isinstance(run.get("run_attempt"), bool):
+        raise RecoveryRunError("failed recovery run attempt must be an integer")
+    expected_repository = {
+        "id": 1275692189,
+        "full_name": "appergb/OpenTake",
+        "private": False,
+    }
+    for field in ("repository", "head_repository"):
+        repository = run.get(field)
+        if (
+            not isinstance(repository, dict)
+            or repository.get("id") != expected_repository["id"]
+            or repository.get("full_name") != expected_repository["full_name"]
+            or repository.get("private") is not False
+        ):
+            raise RecoveryRunError(
+                f"failed recovery {field} provenance is not exact"
+            )
+
+    total_count = jobs.get("total_count")
+    entries = jobs.get("jobs")
+    expected_job_count = len(EXPECTED_RECOVERY_JOB_CONCLUSIONS)
+    if (
+        total_count != expected_job_count
+        or not isinstance(entries, list)
+        or len(entries) != expected_job_count
+        or not all(isinstance(entry, dict) for entry in entries)
+    ):
+        raise RecoveryRunError("failed recovery job list is incomplete or malformed")
+    names = [entry.get("name") for entry in entries]
+    if (
+        not all(isinstance(name, str) for name in names)
+        or len(set(names)) != expected_job_count
+        or set(names) != set(EXPECTED_RECOVERY_JOB_CONCLUSIONS)
+    ):
+        raise RecoveryRunError("failed recovery job set is not exact")
+    by_name = {str(entry["name"]): entry for entry in entries}
+    for name, conclusion in EXPECTED_RECOVERY_JOB_CONCLUSIONS.items():
+        entry = by_name[name]
+        expected_fields = {
+            "run_id": EXPECTED_FAILED_RECOVERY_RUN_ID,
+            "run_attempt": 1,
+            "head_sha": EXPECTED_FAILED_RECOVERY_TOOLING_SHA,
+            "status": "completed",
+            "conclusion": conclusion,
+        }
+        if isinstance(entry.get("run_attempt"), bool) or any(
+            entry.get(field) != value for field, value in expected_fields.items()
+        ):
+            raise RecoveryRunError(
+                f"failed recovery job outcome is not whitelisted: {name}"
+            )
+
+    windows_steps = by_name["Windows x64 MSI and NSIS"].get("steps")
+    if not isinstance(windows_steps, list) or not all(
+        isinstance(step, dict) for step in windows_steps
+    ):
+        raise RecoveryRunError(
+            "failed recovery Windows steps are missing or malformed"
+        )
+    step_numbers = tuple(step.get("number") for step in windows_steps)
+    step_outcomes = tuple(
+        (step.get("name"), step.get("status"), step.get("conclusion"))
+        for step in windows_steps
+    )
+    if (
+        any(
+            not isinstance(number, int) or isinstance(number, bool)
+            for number in step_numbers
+        )
+        or step_numbers != EXPECTED_FAILED_RECOVERY_WINDOWS_STEP_NUMBERS
+        or step_outcomes != EXPECTED_FAILED_RECOVERY_WINDOWS_STEPS
+    ):
+        raise RecoveryRunError(
+            "failed recovery is not the exact Windows config argv failure"
+        )
+
+    artifact_total_count = artifacts.get("total_count")
+    artifact_entries = artifacts.get("artifacts")
+    if (
+        not isinstance(artifact_total_count, int)
+        or isinstance(artifact_total_count, bool)
+        or artifact_total_count != 1
+        or not isinstance(artifact_entries, list)
+        or len(artifact_entries) != 1
+        or not isinstance(artifact_entries[0], dict)
+    ):
+        raise RecoveryRunError("failed recovery artifact list is not exact")
+    artifact = artifact_entries[0]
+    artifact_fields = {
+        "id": EXPECTED_FAILED_RECOVERY_ARTIFACT_ID,
+        "name": f"opentake-macos-arm64-{EXPECTED_FAILED_RECOVERY_SOURCE_SHA}",
+        "size_in_bytes": EXPECTED_FAILED_RECOVERY_ARTIFACT_SIZE,
+        "digest": EXPECTED_FAILED_RECOVERY_ARTIFACT_DIGEST,
+    }
+    if artifact.get("expired") is not False or any(
+        artifact.get(field) != value for field, value in artifact_fields.items()
+    ):
+        raise RecoveryRunError("failed recovery macOS artifact is not exact")
+    artifact_run = artifact.get("workflow_run")
+    expected_artifact_run = {
+        "id": EXPECTED_FAILED_RECOVERY_RUN_ID,
+        "repository_id": 1275692189,
+        "head_repository_id": 1275692189,
+        "head_branch": "main",
+        "head_sha": EXPECTED_FAILED_RECOVERY_TOOLING_SHA,
+    }
+    if not isinstance(artifact_run, dict) or any(
+        artifact_run.get(field) != value
+        for field, value in expected_artifact_run.items()
+    ):
+        raise RecoveryRunError("failed recovery artifact provenance is not exact")
+
+    base = tooling_comparison.get("base_commit")
+    merge_base = tooling_comparison.get("merge_base_commit")
+    commits = tooling_comparison.get("commits")
+    total_commits = tooling_comparison.get("total_commits")
+    ahead_by = tooling_comparison.get("ahead_by")
+    behind_by = tooling_comparison.get("behind_by")
+    if (
+        tooling_comparison.get("status") != "ahead"
+        or not isinstance(total_commits, int)
+        or isinstance(total_commits, bool)
+        or total_commits <= 0
+        or not isinstance(ahead_by, int)
+        or isinstance(ahead_by, bool)
+        or ahead_by != total_commits
+        or not isinstance(behind_by, int)
+        or isinstance(behind_by, bool)
+        or behind_by != 0
+        or not isinstance(base, dict)
+        or base.get("sha") != EXPECTED_FAILED_RECOVERY_TOOLING_SHA
+        or not isinstance(merge_base, dict)
+        or merge_base.get("sha") != EXPECTED_FAILED_RECOVERY_TOOLING_SHA
+        or not isinstance(commits, list)
+        or len(commits) != total_commits
+        or not all(isinstance(commit, dict) for commit in commits)
+        or commits[-1].get("sha") != expected_current_tooling_sha
+    ):
+        raise RecoveryRunError(
+            "approved failed-recovery tooling is not an ancestor of current main"
+        )
 
 
 def resolve_remote_tag_refs(refs_text: str, expected_tag: str) -> str:
@@ -749,20 +1032,33 @@ def validate_workflow(workflow: str) -> list[str]:
     failed_run_input = (
         _as_mapping(inputs.get("failed_run_id")) if inputs is not None else None
     )
+    failed_recovery_run_input = (
+        _as_mapping(inputs.get("failed_recovery_run_id"))
+        if inputs is not None
+        else None
+    )
     if (
         push != {"tags": ["v*"]}
         or dispatch is None
         or set(dispatch) != {"inputs"}
         or inputs is None
-        or set(inputs) != {"tag", "failed_run_id"}
+        or set(inputs) != {"tag", "failed_run_id", "failed_recovery_run_id"}
         or tag_input is None
         or set(tag_input) != {"description", "required", "type"}
         or tag_input.get("required") is not True
         or tag_input.get("type") != "string"
         or failed_run_input is None
         or set(failed_run_input) != {"description", "required", "type"}
+        or failed_run_input.get("description")
+        != "Root failed tag-push Release run ID (31412976593) for the immutable source"
         or failed_run_input.get("required") is not True
         or failed_run_input.get("type") != "string"
+        or failed_recovery_run_input is None
+        or set(failed_recovery_run_input) != {"description", "required", "type"}
+        or failed_recovery_run_input.get("description")
+        != "Previous failed workflow_dispatch recovery Release run ID (31427093503) chained to the same immutable source"
+        or failed_recovery_run_input.get("required") is not True
+        or failed_recovery_run_input.get("type") != "string"
     ):
         errors.append("tag-only release trigger")
 
@@ -1042,10 +1338,15 @@ def validate_workflow(workflow: str) -> list[str]:
         '[[ "$tooling_sha" =~ ^[0-9a-f]{40}$ ]]',
         'if [[ "$GITHUB_EVENT_NAME" = "push" ]]; then',
         'test -z "$FAILED_RUN_ID"',
+        'test -z "$FAILED_RECOVERY_RUN_ID"',
         'test "$tooling_sha" = "$source_sha"',
         'elif [[ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]]; then',
         '[[ "$FAILED_RUN_ID" =~ ^[1-9][0-9]*$ ]]',
+        '[[ "$FAILED_RECOVERY_RUN_ID" =~ ^[1-9][0-9]*$ ]]',
+        'test "$FAILED_RUN_ID" = "31412976593"',
+        'test "$FAILED_RECOVERY_RUN_ID" = "31427093503"',
         'test "$tooling_sha" = "$remote_main"',
+        'predecessor_tooling_sha="6162466834bbabb8a16a2c08808e03a53c2b22b6"',
         'if ! git cat-file -e "${tooling_sha}^{commit}" 2>/dev/null; then',
         'git fetch --no-tags --depth=1 origin "$tooling_sha"',
         'test "$(git rev-parse "${tooling_sha}^{commit}")" = "$tooling_sha"',
@@ -1053,11 +1354,21 @@ def validate_workflow(workflow: str) -> list[str]:
         'git cat-file blob "$tooling_sha:scripts/workflow_yaml.py" \\',
         'gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FAILED_RUN_ID" \\',
         'gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FAILED_RUN_ID/jobs?per_page=100" \\',
-        'gh api "repos/$GITHUB_REPOSITORY/compare/$source_sha...$remote_main" \\',
+        'gh api "repos/$GITHUB_REPOSITORY/compare/$source_sha...$predecessor_tooling_sha" \\',
         'validate-recovery-run \\',
         '--run-id "$FAILED_RUN_ID" \\',
         '--tag "$RELEASE_TAG" \\',
-        '--sha "$source_sha"',
+        '--sha "$source_sha" \\',
+        '--comparison-head-sha "$predecessor_tooling_sha"',
+        'gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FAILED_RECOVERY_RUN_ID" \\',
+        'gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FAILED_RECOVERY_RUN_ID/jobs?per_page=100" \\',
+        'gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FAILED_RECOVERY_RUN_ID/artifacts?per_page=100" \\',
+        'gh api "repos/$GITHUB_REPOSITORY/compare/$predecessor_tooling_sha...$remote_main" \\',
+        'validate-failed-recovery-run \\',
+        '--run-id "$FAILED_RECOVERY_RUN_ID" \\',
+        '--source-sha "$source_sha" \\',
+        '--tooling-sha "$predecessor_tooling_sha" \\',
+        '--current-tooling-sha "$tooling_sha"',
         'printf \'tooling_sha=%s\\n\' "$tooling_sha" >> "$GITHUB_OUTPUT"',
     )
     recovery_provenance = (
@@ -1065,6 +1376,7 @@ def validate_workflow(workflow: str) -> list[str]:
         == {
             "RELEASE_TAG": "${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}",
             "FAILED_RUN_ID": "${{ github.event_name == 'workflow_dispatch' && inputs.failed_run_id || '' }}",
+            "FAILED_RECOVERY_RUN_ID": "${{ github.event_name == 'workflow_dispatch' && inputs.failed_recovery_run_id || '' }}",
             "RELEASE_TOOLING_SHA": "${{ github.workflow_sha }}",
         }
         and validate_outputs is not None
@@ -1104,7 +1416,12 @@ def validate_workflow(workflow: str) -> list[str]:
         errors.append("validate binds exact clean checkout")
 
     required_jobs = ("quality", "macos_arm64", "windows_x64")
-    for name in ("validate", *required_jobs):
+    validate_permissions = (
+        _as_mapping(validate.get("permissions")) if validate is not None else None
+    )
+    if validate_permissions != {"actions": "read", "contents": "read"}:
+        errors.append("validate-only Actions read permission")
+    for name in required_jobs:
         job = structured_jobs[name]
         if job is not None and "permissions" in job and job.get("permissions") != {
             "contents": "read"
@@ -1346,10 +1663,50 @@ def validate_workflow(workflow: str) -> list[str]:
         _has_command(_structured_step(windows, step_name), command)
         for step_name, command in windows_commands
     )
-    windows_ok = windows_ok and _has_command(
-        windows_build,
-        ("&", ".\\web\\node_modules\\.bin\\tauri.cmd", "build", "--ci", "--bundles", "msi,nsis", "--config", "'{\"bundle\":{\"createUpdaterArtifacts\":true}}'"),
-        powershell=True,
+    windows_config_lines = (
+        "$ErrorActionPreference = 'Stop'",
+        "if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { throw 'RUNNER_TEMP is required' }",
+        "$runnerTemp = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP)",
+        '$configPath = Join-Path $env:RUNNER_TEMP "opentake-windows-updater-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json"',
+        "$configPath = [System.IO.Path]::GetFullPath($configPath)",
+        "if (-not [System.IO.Path]::IsPathFullyQualified($configPath)) { throw 'Tauri config path is not absolute' }",
+        "if (-not [string]::Equals([System.IO.Path]::GetDirectoryName($configPath), $runnerTemp, [System.StringComparison]::OrdinalIgnoreCase)) {",
+        "if (Test-Path -LiteralPath $configPath) { throw 'Tauri config path already exists' }",
+        "$configJson = '{\"bundle\":{\"createUpdaterArtifacts\":true}}'",
+        "$utf8NoBom = [System.Text.UTF8Encoding]::new($false)",
+        "[System.IO.File]::WriteAllText($configPath, $configJson, $utf8NoBom)",
+        "$configItem = Get-Item -LiteralPath $configPath -Force",
+        "if ($configItem.PSIsContainer -or (($configItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {",
+        "$configBytes = [System.IO.File]::ReadAllBytes($configPath)",
+        "if ($configBytes.Length -ne $utf8NoBom.GetByteCount($configJson)) { throw 'Tauri config is not exact UTF-8 without BOM' }",
+        "$configText = [System.IO.File]::ReadAllText($configPath, [System.Text.Encoding]::UTF8)",
+        "if ($configText -cne $configJson) { throw 'Tauri config content changed' }",
+        "$parsedConfig = [System.IO.File]::ReadAllText($configPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json -AsHashtable",
+        "if (@($parsedConfig.Keys).Count -ne 1 -or -not ($parsedConfig.Keys -ccontains 'bundle')) { throw 'Tauri config root is not exact' }",
+        "$bundleConfig = $parsedConfig['bundle']",
+        "if (-not ($bundleConfig -is [System.Collections.IDictionary]) -or @($bundleConfig.Keys).Count -ne 1 -or -not ($bundleConfig.Keys -ccontains 'createUpdaterArtifacts')) {",
+        "if (-not ($bundleConfig['createUpdaterArtifacts'] -is [bool]) -or $bundleConfig['createUpdaterArtifacts'] -ne $true) {",
+        "$tauriArguments = @(",
+        "'build'",
+        "'--ci'",
+        "'--bundles'",
+        "'msi,nsis'",
+        "'--config'",
+        "$configPath",
+        "& .\\web\\node_modules\\.bin\\tauri.cmd @tauriArguments",
+        "$tauriExitCode = $LASTEXITCODE",
+        "Remove-Item -LiteralPath $configPath -Force",
+        "if ($tauriExitCode -ne 0) { exit $tauriExitCode }",
+    )
+    windows_build_script = _run_script(windows_build)
+    windows_ok = (
+        windows_ok
+        and _has_code_lines(windows_build, windows_config_lines)
+        and windows_build_script.count(
+            "& .\\web\\node_modules\\.bin\\tauri.cmd @tauriArguments"
+        )
+        == 1
+        and "--config '{" not in windows_build_script
     )
     windows_ok = windows_ok and windows_build is not None and _as_mapping(
         windows_build.get("env")
@@ -1527,20 +1884,11 @@ def validate_workflow(workflow: str) -> list[str]:
         )
         and windows_build is not None
         and _as_mapping(windows_build.get("env")) == signing_env
-        and _has_command(
-            windows_build,
-            (
-                "&",
-                ".\\web\\node_modules\\.bin\\tauri.cmd",
-                "build",
-                "--ci",
-                "--bundles",
-                "msi,nsis",
-                "--config",
-                "'{\"bundle\":{\"createUpdaterArtifacts\":true}}'",
-            ),
-            powershell=True,
+        and _has_code_lines(windows_build, windows_config_lines)
+        and _run_script(windows_build).count(
+            "& .\\web\\node_modules\\.bin\\tauri.cmd @tauriArguments"
         )
+        == 1
     )
     if not signed_bundles_ok:
         errors.append("signed Tauri v2 updater bundles")
@@ -2040,9 +2388,15 @@ def validate_release_notes_contract(notes_path: Path) -> list[str]:
         "product source SHA 与 release tooling SHA",
         "当前远端 `main` HEAD",
         "`failed_run_id`",
+        "`failed_run_id=31412976593`",
+        "`failed_recovery_run_id=31427093503`",
+        "`2c4efdff9d2587c90cbcac0919f9d1d333d67d6a`",
+        "`6162466834bbabb8a16a2c08808e03a53c2b22b6`",
         "`workflow_dispatch` 恢复",
         "原不可变 tag SHA",
         "`github.workflow_sha`",
+        "source → `61624668…`",
+        "`61624668…` → 当前远端 `main`",
         "不创建、移动或删除 tag",
         "公开 release notes",
         "notes commit",
@@ -2138,6 +2492,7 @@ def _validate_recovery_run_command(arguments: list[str]) -> None:
     parser.add_argument("--run-id", required=True, type=int)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--sha", required=True)
+    parser.add_argument("--comparison-head-sha", required=True)
     options = parser.parse_args(arguments)
     try:
         payloads = [
@@ -2153,10 +2508,58 @@ def _validate_recovery_run_command(arguments: list[str]) -> None:
             expected_run_id=options.run_id,
             expected_tag=options.tag,
             expected_sha=options.sha,
+            expected_comparison_head_sha=options.comparison_head_sha,
         )
     except (OSError, json.JSONDecodeError, RecoveryRunError) as error:
         raise SystemExit(f"unsafe failed-run recovery: {error}") from error
     print(f"validated failed release run {options.run_id} for {options.tag}")
+
+
+def _validate_failed_recovery_run_command(arguments: list[str]) -> None:
+    parser = argparse.ArgumentParser(
+        prog="check_release_workflow.py validate-failed-recovery-run"
+    )
+    parser.add_argument("--run", required=True, type=Path)
+    parser.add_argument("--jobs", required=True, type=Path)
+    parser.add_argument("--artifacts", required=True, type=Path)
+    parser.add_argument("--tooling-comparison", required=True, type=Path)
+    parser.add_argument("--run-id", required=True, type=int)
+    parser.add_argument("--tag", required=True)
+    parser.add_argument("--source-sha", required=True)
+    parser.add_argument("--tooling-sha", required=True)
+    parser.add_argument("--current-tooling-sha", required=True)
+    options = parser.parse_args(arguments)
+    try:
+        payloads = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in (
+                options.run,
+                options.jobs,
+                options.artifacts,
+                options.tooling_comparison,
+            )
+        ]
+        if not all(isinstance(payload, dict) for payload in payloads):
+            raise RecoveryRunError(
+                "failed-recovery API payloads must be JSON objects"
+            )
+        validate_failed_recovery_run(
+            payloads[0],
+            payloads[1],
+            payloads[2],
+            payloads[3],
+            expected_run_id=options.run_id,
+            expected_tag=options.tag,
+            expected_source_sha=options.source_sha,
+            expected_tooling_sha=options.tooling_sha,
+            expected_current_tooling_sha=options.current_tooling_sha,
+        )
+    except (OSError, json.JSONDecodeError, RecoveryRunError) as error:
+        raise SystemExit(f"unsafe failed-recovery chain: {error}") from error
+    print(
+        f"validated failed recovery run {options.run_id} "
+        f"for {options.tag} at {options.tooling_sha}"
+    )
 
 
 def main(arguments: list[str] | None = None) -> None:
@@ -2168,6 +2571,8 @@ def main(arguments: list[str] | None = None) -> None:
             _resolve_remote_tag_command(arguments[1:])
         elif arguments[0] == "validate-recovery-run":
             _validate_recovery_run_command(arguments[1:])
+        elif arguments[0] == "validate-failed-recovery-run":
+            _validate_failed_recovery_run_command(arguments[1:])
         else:
             raise SystemExit(f"unknown command: {arguments[0]}")
         return

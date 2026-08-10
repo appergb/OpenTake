@@ -10,7 +10,11 @@ on:
         required: true
         type: string
       failed_run_id:
-        description: Failed tag-push Release run ID whose exact source is being recovered
+        description: Root failed tag-push Release run ID (31412976593) for the immutable source
+        required: true
+        type: string
+      failed_recovery_run_id:
+        description: Previous failed workflow_dispatch recovery Release run ID (31427093503) chained to the same immutable source
         required: true
         type: string
 
@@ -25,9 +29,13 @@ jobs:
   validate:
     name: Validate immutable release source
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
       FAILED_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.failed_run_id || '' }}
+      FAILED_RECOVERY_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.failed_recovery_run_id || '' }}
       RELEASE_TOOLING_SHA: ${{ github.workflow_sha }}
     outputs:
       source_sha: ${{ steps.bind.outputs.source_sha }}
@@ -63,8 +71,10 @@ jobs:
           read -r remote_main remote_ref < <(git ls-remote --exit-code origin refs/heads/main)
           remote_main="$(printf '%s' "$remote_main" | tr '[:upper:]' '[:lower:]')"
           test "$remote_ref" = "refs/heads/main"
+          predecessor_tooling_sha="6162466834bbabb8a16a2c08808e03a53c2b22b6"
           if [[ "$GITHUB_EVENT_NAME" = "push" ]]; then
             test -z "$FAILED_RUN_ID"
+            test -z "$FAILED_RECOVERY_RUN_ID"
             test "$tooling_sha" = "$source_sha"
             if [[ "$source_sha" != "$remote_main" ]]; then
               echo "tag commit does not equal current remote main HEAD" >&2
@@ -72,6 +82,9 @@ jobs:
             fi
           elif [[ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]]; then
             [[ "$FAILED_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+            [[ "$FAILED_RECOVERY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+            test "$FAILED_RUN_ID" = "31412976593"
+            test "$FAILED_RECOVERY_RUN_ID" = "31427093503"
             test "$tooling_sha" = "$remote_main"
             recovery_root="$RUNNER_TEMP/opentake-release-recovery-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
             mkdir -p "$recovery_root/tooling"
@@ -86,20 +99,41 @@ jobs:
             test -s "$recovery_root/tooling/check_release_workflow.py"
             test -s "$recovery_root/tooling/workflow_yaml.py"
             gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FAILED_RUN_ID" \
-              > "$recovery_root/run.json"
+              > "$recovery_root/root-run.json"
             gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FAILED_RUN_ID/jobs?per_page=100" \
-              > "$recovery_root/jobs.json"
-            gh api "repos/$GITHUB_REPOSITORY/compare/$source_sha...$remote_main" \
-              > "$recovery_root/comparison.json"
+              > "$recovery_root/root-jobs.json"
+            gh api "repos/$GITHUB_REPOSITORY/compare/$source_sha...$predecessor_tooling_sha" \
+              > "$recovery_root/source-to-predecessor.json"
             PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$recovery_root/tooling" \
               python3 "$recovery_root/tooling/check_release_workflow.py" \
               validate-recovery-run \
-              --run "$recovery_root/run.json" \
-              --jobs "$recovery_root/jobs.json" \
-              --comparison "$recovery_root/comparison.json" \
+              --run "$recovery_root/root-run.json" \
+              --jobs "$recovery_root/root-jobs.json" \
+              --comparison "$recovery_root/source-to-predecessor.json" \
               --run-id "$FAILED_RUN_ID" \
               --tag "$RELEASE_TAG" \
-              --sha "$source_sha"
+              --sha "$source_sha" \
+              --comparison-head-sha "$predecessor_tooling_sha"
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FAILED_RECOVERY_RUN_ID" \
+              > "$recovery_root/predecessor-run.json"
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FAILED_RECOVERY_RUN_ID/jobs?per_page=100" \
+              > "$recovery_root/predecessor-jobs.json"
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FAILED_RECOVERY_RUN_ID/artifacts?per_page=100" \
+              > "$recovery_root/predecessor-artifacts.json"
+            gh api "repos/$GITHUB_REPOSITORY/compare/$predecessor_tooling_sha...$remote_main" \
+              > "$recovery_root/predecessor-to-current.json"
+            PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$recovery_root/tooling" \
+              python3 "$recovery_root/tooling/check_release_workflow.py" \
+              validate-failed-recovery-run \
+              --run "$recovery_root/predecessor-run.json" \
+              --jobs "$recovery_root/predecessor-jobs.json" \
+              --artifacts "$recovery_root/predecessor-artifacts.json" \
+              --tooling-comparison "$recovery_root/predecessor-to-current.json" \
+              --run-id "$FAILED_RECOVERY_RUN_ID" \
+              --tag "$RELEASE_TAG" \
+              --source-sha "$source_sha" \
+              --tooling-sha "$predecessor_tooling_sha" \
+              --current-tooling-sha "$tooling_sha"
           else
             echo "unsupported release event: $GITHUB_EVENT_NAME" >&2
             exit 1
@@ -750,9 +784,56 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
+          $ErrorActionPreference = 'Stop'
           Remove-Item 'target/release/bundle/msi' -Recurse -Force -ErrorAction SilentlyContinue
           Remove-Item 'target/release/bundle/nsis' -Recurse -Force -ErrorAction SilentlyContinue
-          & .\web\node_modules\.bin\tauri.cmd build --ci --bundles msi,nsis --config '{"bundle":{"createUpdaterArtifacts":true}}'
+          if ([string]::IsNullOrWhiteSpace($env:RUNNER_TEMP)) { throw 'RUNNER_TEMP is required' }
+          $runnerTemp = [System.IO.Path]::GetFullPath($env:RUNNER_TEMP)
+          $configPath = Join-Path $env:RUNNER_TEMP "opentake-windows-updater-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json"
+          $configPath = [System.IO.Path]::GetFullPath($configPath)
+          if (-not [System.IO.Path]::IsPathFullyQualified($configPath)) { throw 'Tauri config path is not absolute' }
+          if (-not [string]::Equals([System.IO.Path]::GetDirectoryName($configPath), $runnerTemp, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Tauri config path escaped RUNNER_TEMP'
+          }
+          if (Test-Path -LiteralPath $configPath) { throw 'Tauri config path already exists' }
+          $configJson = '{"bundle":{"createUpdaterArtifacts":true}}'
+          $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+          [System.IO.File]::WriteAllText($configPath, $configJson, $utf8NoBom)
+          $configItem = Get-Item -LiteralPath $configPath -Force
+          if ($configItem.PSIsContainer -or (($configItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {
+            throw 'Tauri config must be a regular non-link file'
+          }
+          $configBytes = [System.IO.File]::ReadAllBytes($configPath)
+          if ($configBytes.Length -ne $utf8NoBom.GetByteCount($configJson)) { throw 'Tauri config is not exact UTF-8 without BOM' }
+          $configText = [System.IO.File]::ReadAllText($configPath, [System.Text.Encoding]::UTF8)
+          if ($configText -cne $configJson) { throw 'Tauri config content changed' }
+          $parsedConfig = [System.IO.File]::ReadAllText($configPath, [System.Text.Encoding]::UTF8) | ConvertFrom-Json -AsHashtable
+          if (@($parsedConfig.Keys).Count -ne 1 -or -not ($parsedConfig.Keys -ccontains 'bundle')) { throw 'Tauri config root is not exact' }
+          $bundleConfig = $parsedConfig['bundle']
+          if (-not ($bundleConfig -is [System.Collections.IDictionary]) -or @($bundleConfig.Keys).Count -ne 1 -or -not ($bundleConfig.Keys -ccontains 'createUpdaterArtifacts')) {
+            throw 'Tauri bundle config is not exact'
+          }
+          if (-not ($bundleConfig['createUpdaterArtifacts'] -is [bool]) -or $bundleConfig['createUpdaterArtifacts'] -ne $true) {
+            throw 'Tauri updater artifact config must be true'
+          }
+          $tauriArguments = @(
+            'build'
+            '--ci'
+            '--bundles'
+            'msi,nsis'
+            '--config'
+            $configPath
+          )
+          $tauriExitCode = $null
+          try {
+            & .\web\node_modules\.bin\tauri.cmd @tauriArguments
+            $tauriExitCode = $LASTEXITCODE
+          } finally {
+            if (Test-Path -LiteralPath $configPath) {
+              Remove-Item -LiteralPath $configPath -Force
+            }
+          }
+          if ($tauriExitCode -ne 0) { exit $tauriExitCode }
 
       - name: Install NSIS and smoke installed app, sidecars, and updater artifacts
         shell: pwsh

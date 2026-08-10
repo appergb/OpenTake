@@ -384,6 +384,80 @@ class WindowsProductCiContractTests(unittest.TestCase):
         )
         self.assert_rejected(mutated, "product cache excludes target")
 
+    def test_product_build_uses_exact_runner_temp_tauri_config_argument(
+        self,
+    ) -> None:
+        document = contract.parse_workflow_yaml(WORKFLOW)
+        job = document["jobs"]["windows-product"]
+        bundle = next(
+            step
+            for step in job["steps"]
+            if step.get("name") == "Build native MSI and NSIS installers"
+        )
+        script = bundle["run"]
+        required = (
+            '$configPath = Join-Path $env:RUNNER_TEMP "opentake-windows-ci-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json"',
+            "$configJson = '{\"bundle\":{\"createUpdaterArtifacts\":false}}'",
+            "$utf8NoBom = [System.Text.UTF8Encoding]::new($false)",
+            "[System.IO.File]::WriteAllText($configPath, $configJson, $utf8NoBom)",
+            "[System.IO.FileAttributes]::ReparsePoint",
+            "ConvertFrom-Json -AsHashtable",
+            "$bundleConfig['createUpdaterArtifacts'] -ne $false",
+            "$tauriArguments = @(",
+            "'--config'",
+            "$configPath",
+            "& .\\web\\node_modules\\.bin\\tauri.cmd @tauriArguments",
+        )
+        for marker in required:
+            with self.subTest(marker=marker):
+                self.assertIn(marker, script)
+        self.assertNotIn("--config '{", script)
+        self.assertRegex(contract.PRODUCT_BUNDLE_STEP_SHA256, r"^[0-9a-f]{64}$")
+
+    def test_product_tauri_config_step_drift_breaks_frozen_digest(self) -> None:
+        self.assert_job_mutation_rejected(
+            "windows-product",
+            "throw 'Tauri config path escaped RUNNER_TEMP'",
+            "throw 'Tauri config left its temporary directory'",
+            "exact Windows product Tauri bundle step",
+        )
+
+    def test_product_tauri_config_file_contract_is_fail_closed(self) -> None:
+        mutations = (
+            (
+                '$configPath = Join-Path $env:RUNNER_TEMP "opentake-windows-ci-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT.json"',
+                '$configPath = Join-Path $env:GITHUB_WORKSPACE "tauri-ci.json"',
+            ),
+            (
+                "$utf8NoBom = [System.Text.UTF8Encoding]::new($false)",
+                "$utf8NoBom = [System.Text.UTF8Encoding]::new($true)",
+            ),
+            (
+                "$configJson = '{\"bundle\":{\"createUpdaterArtifacts\":false}}'",
+                "$configJson = '{\"bundle\":{\"createUpdaterArtifacts\":true}}'",
+            ),
+            (
+                "if ($configItem.PSIsContainer -or (($configItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)) {",
+                "if ($configItem.PSIsContainer) {",
+            ),
+            (
+                "            '--config'\n            $configPath\n",
+                "            '--config'\n            $configJson\n",
+            ),
+            (
+                "& .\\web\\node_modules\\.bin\\tauri.cmd @tauriArguments",
+                "Write-Host '& .\\web\\node_modules\\.bin\\tauri.cmd @tauriArguments'",
+            ),
+        )
+        for before, after in mutations:
+            with self.subTest(before=before):
+                self.assert_job_mutation_rejected(
+                    "windows-product",
+                    before,
+                    after,
+                    "exact runner-temp Tauri config argument",
+                )
+
     def test_installed_product_must_launch(self) -> None:
         without_launch = WORKFLOW.replace(
             "          $app = Start-Process -FilePath $application -PassThru\n",
