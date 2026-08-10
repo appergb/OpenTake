@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shlex
@@ -16,8 +17,21 @@ import tomllib
 from workflow_yaml import WorkflowYamlError, parse_workflow_yaml as _parse_workflow_yaml
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW_PATH = REPOSITORY_ROOT / ".github" / "workflows" / "release.yml"
+REPOSITORY_ROOT = Path(
+    os.environ.get("OPENTAKE_REPOSITORY_ROOT", Path(__file__).resolve().parents[1])
+).resolve()
+WORKFLOW_PATH = Path(
+    os.environ.get(
+        "OPENTAKE_RELEASE_WORKFLOW_PATH",
+        REPOSITORY_ROOT / ".github" / "workflows" / "release.yml",
+    )
+).resolve()
+RELEASE_NOTES_PATH = Path(
+    os.environ.get(
+        "OPENTAKE_RELEASE_NOTES_PATH",
+        REPOSITORY_ROOT / "docs" / "releases" / "1.0.0-beta.4.md",
+    )
+).resolve()
 PINNED_ACTIONS = {
     "actions/checkout": "11d5960a326750d5838078e36cf38b85af677262",
     "actions/setup-node": "49933ea5288caeca8642d1e84afbd3f7d6820020",
@@ -130,7 +144,6 @@ APPROVED_STEP_IDENTITIES = {
 APPROVED_SIMPLE_RUNS = {
     ("quality", "Install Rust toolchain"): "rustup component add rustfmt clippy",
     ("quality", "Install locked Motion Canvas dependencies"): "npm --prefix plugins/motion-canvas-studio ci --ignore-scripts",
-    ("quality", "Provisioner unit tests"): "python3 -B -m unittest discover -s scripts/tests -p 'test_*.py'",
     ("quality", "Install locked Web dependencies"): "pnpm -C web install --frozen-lockfile",
     ("quality", "Rust formatting"): "cargo fmt --all --check",
     ("quality", "Rust workspace clippy"): "cargo clippy --workspace --all-targets -- -D warnings",
@@ -144,7 +157,6 @@ APPROVED_SIMPLE_RUNS = {
     ("macos_arm64", "Install locked Web dependencies"): "pnpm -C web install --frozen-lockfile",
     ("macos_arm64", "Build ad-hoc Tauri app, DMG, and signed updater"): "./web/node_modules/.bin/tauri build --ci --target aarch64-apple-darwin --bundles app,dmg --config '{\"bundle\":{\"createUpdaterArtifacts\":true,\"macOS\":{\"signingIdentity\":\"-\"}}}'",
     ("windows_x64", "Install Rust toolchain"): "rustup component add rustfmt clippy",
-    ("windows_x64", "Provision checksum-pinned Windows FFmpeg sidecars"): "python scripts/provision_ffmpeg_sidecars.py --target x86_64-pc-windows-msvc",
     ("windows_x64", "Verify pinned sidecar supply"): "ruby scripts/tests/packaged-sidecars-test.rb --name packaged_macos_windows_sidecars_resolve_and_execute",
     ("windows_x64", "Install locked Web dependencies"): "pnpm -C web install --frozen-lockfile",
     ("windows_x64", "Rust workspace clippy"): "cargo clippy --workspace --all-targets -- -D warnings",
@@ -157,14 +169,15 @@ APPROVED_SIMPLE_RUNS = {
 }
 
 APPROVED_COMPLEX_RUN_SHA256 = {
-    ("validate", "Validate tag, source SHA, versions, and notes"): "a8098fcb30554344d8821c32540b2116efef5877c4fc992cd2a98b955e73a346",
+    ("validate", "Validate tag, source SHA, versions, and notes"): "5a1c640ad928939cde6666cdfd6374b477862f99b0e3c12d8d3632c27eb4c80c",
     ("validate", "Reassert exact source after validation"): "953657d26d2eda8490c18e7030c66ddb19aba64a5c8b19808da9a853fd1bfdd2",
     ("quality", "Assert exact checked-out SHA"): "ff0b148eecdf8603712586a6c4a05e752df0b36b5c97a366760f6cba10e58ddd",
     ("quality", "Free disk space"): "5848415c4d0e696f46965d62a2e17c8b7a0dd45ae600d28102af0b04108d9bf6",
     ("quality", "Install system deps (ffmpeg + Tauri/GTK)"): "ee466d2d3fff1c3703d50f9dabe4d21e1cee4b399924d064c6d2714dae34d16b",
     ("quality", "Audit Motion Canvas dependencies and licenses"): "a3517fae1a8663e519138196c9f3721d8f4df19ac8f115c49a079c4aaa60c8b3",
     ("quality", "Test and reproduce Motion Canvas runner"): "8bcd55de9b045f9d7be6343163a5422cba0ab545f7844da50ca1a7c8623fe640",
-    ("quality", "Validate Windows and release workflow contracts"): "a3eee0e4912440340c2be717b3b635f9eb121f68e8f3dd1e3c58f19b4c2ace36",
+    ("quality", "Validate Windows and release workflow contracts"): "f70c00caca2a1ea66ce7843bd5e4b6e9702422d2ad0cc7d77d714decdb93b351",
+    ("quality", "Provisioner unit tests"): "f57d4d7d6df403d573d31bbda02589804109596040c2cefcca60f3e9352e891a",
     ("quality", "Live playback transport integration"): "461f79546009551e5e7adbf50f869abb9449c2ae7666a66a425c7cd3c24acea9",
     ("quality", "Reassert exact source after quality gates"): "953657d26d2eda8490c18e7030c66ddb19aba64a5c8b19808da9a853fd1bfdd2",
     ("macos_arm64", "Assert exact checked-out SHA"): "ff0b148eecdf8603712586a6c4a05e752df0b36b5c97a366760f6cba10e58ddd",
@@ -176,6 +189,7 @@ APPROVED_COMPLEX_RUN_SHA256 = {
     ("macos_arm64", "Create macOS exact-SHA receipt"): "06f89a7122f8257ad14b8ae5fa59426e87ecbae4936f0db69a37ee6cc748bd2a",
     ("windows_x64", "Assert exact checked-out SHA"): "ff0b148eecdf8603712586a6c4a05e752df0b36b5c97a366760f6cba10e58ddd",
     ("windows_x64", "Require updater signing secrets"): "d03a04c4866ac7ecb9eba9d53aabbf92de24f452e6b5448d438d863988e797c4",
+    ("windows_x64", "Provision checksum-pinned Windows FFmpeg sidecars"): "0518296c77e12a05d7bd99327daf00782e05aa1697f853d654a0eec0fd449238",
     ("windows_x64", "Reassert exact source before Windows build"): "953657d26d2eda8490c18e7030c66ddb19aba64a5c8b19808da9a853fd1bfdd2",
     ("windows_x64", "Build native MSI, NSIS, and signed updater artifacts"): "efa3fa9c3659a91dcbeb3b16e95bbb17482e50f5e71ef9ff4f037b69d7ee335f",
     ("windows_x64", "Install NSIS and smoke installed app, sidecars, and updater artifacts"): "556af3fe7ee52b0dfde26824abf39b589c897782f1a311a8c64a044dc3cf7010",
@@ -189,7 +203,7 @@ APPROVED_COMPLEX_RUN_SHA256 = {
     ("publish", "Verify updater signatures against embedded public key"): "d0da4c84101149e7853b764db8f770d25f61b4fa654f9f927fd813bd22604fe5",
     ("publish", "Write and verify tag-specific updater manifest"): "faef05e038dd082d81e1ec12a8c6f933575e8766e73df1b4ecb28cb794156579",
     ("publish", "Create and verify SHA256SUMS"): "67975ac408cc96209261e8c397402acaac47e1a689d7572d5634d3b8dabd66d8",
-    ("publish", "Prepare release notes with provenance"): "efa2e3d9cd3b576a5e6ef3f25788a9d2156e0c0a5c8f53d3f8f9a1dbc1bbb5ea",
+    ("publish", "Prepare release notes with provenance"): "3f8dc1f9ab2680cb4d0c7989830cac37e536844bdbbee05f8955dfb40673a271",
     ("publish", "Reassert exact source before draft mutation"): "953657d26d2eda8490c18e7030c66ddb19aba64a5c8b19808da9a853fd1bfdd2",
     ("publish", "Revalidate remote tag before draft mutation"): "2eac9a1203d96969b545c9447b9637c8ad16689d2704b32c7e710e9ae4bff47c",
     ("publish", "Create or refresh draft prerelease"): "e3cee76806b604359715ec91cf1a7c6d7c8919e05dd5b5c99f77b98686debc6b",
@@ -200,12 +214,95 @@ APPROVED_COMPLEX_RUN_SHA256 = {
 }
 
 APPROVED_JOB_SHA256 = {
-    "validate": "36c12ee29b323f04d1ac48b046de6786d130e85bae8e89d831bb64c96f2b5c26",
-    "quality": "54f73cef43a8a808cf481f807cf08fccfa281112cd4c365edd06a1d7d6f68187",
+    "validate": "e493b3756464fe932b402b2aab9e36575bbeb58be1ae80fea28dfa0cb335cbb4",
+    "quality": "a2947370289ebd299042159fbe8fd046f7fedf72b47037d58b4398ed8e85baee",
     "macos_arm64": "1785d765c96278190c25e312c9e610070619e17b7b2b0d922f0bd234501df525",
-    "windows_x64": "7a95b56230b09f34c3abf31a9d1c226e290115934285eab008568ade516145c3",
-    "publish": "945d07ecb63de230c8ba38f27a082a019370ee9e233adf9ae733f32669c231cb",
+    "windows_x64": "b7cff85dc4201f30fce5ade71687993ce185b913b1ba62f29d6b031faa5311f2",
+    "publish": "c7d84471185df270f1d30129b936dccc8cb6c1069020e34924037be2976425ec",
 }
+
+EXPECTED_RECOVERY_JOB_CONCLUSIONS = {
+    "Validate immutable release source": "success",
+    "Release quality gates": "success",
+    "macOS ARM64 app and DMG": "success",
+    "Windows x64 MSI and NSIS": "failure",
+    "Publish verified GitHub prerelease": "skipped",
+}
+EXPECTED_RECOVERY_WINDOWS_STEPS = (
+    ("Set up job", "completed", "success"),
+    (
+        f"Run actions/checkout@{PINNED_ACTIONS['actions/checkout']}",
+        "completed",
+        "success",
+    ),
+    ("Assert exact checked-out SHA", "completed", "success"),
+    ("Require updater signing secrets", "completed", "success"),
+    ("Install Rust toolchain", "completed", "success"),
+    (
+        f"Run pnpm/action-setup@{PINNED_ACTIONS['pnpm/action-setup']}",
+        "completed",
+        "success",
+    ),
+    (
+        f"Run actions/setup-node@{PINNED_ACTIONS['actions/setup-node']}",
+        "completed",
+        "success",
+    ),
+    (
+        f"Run ruby/setup-ruby@{PINNED_ACTIONS['ruby/setup-ruby']}",
+        "completed",
+        "success",
+    ),
+    (
+        "Provision checksum-pinned Windows FFmpeg sidecars",
+        "completed",
+        "failure",
+    ),
+    ("Verify pinned sidecar supply", "completed", "skipped"),
+    ("Cache Cargo dependencies", "completed", "skipped"),
+    ("Install locked Web dependencies", "completed", "skipped"),
+    ("Rust workspace clippy", "completed", "skipped"),
+    ("Rust workspace tests", "completed", "skipped"),
+    ("Web editor behavior suite", "completed", "skipped"),
+    ("Minimal-feature Tauri clippy", "completed", "skipped"),
+    ("Web production build", "completed", "skipped"),
+    ("Reassert exact source before Windows build", "completed", "skipped"),
+    (
+        "Build native MSI, NSIS, and signed updater artifacts",
+        "completed",
+        "skipped",
+    ),
+    (
+        "Install NSIS and smoke installed app, sidecars, and updater artifacts",
+        "completed",
+        "skipped",
+    ),
+    ("Reassert exact source after Windows packaging", "completed", "skipped"),
+    ("Create and sign Windows updater attestations", "completed", "skipped"),
+    ("Create Windows exact-SHA receipt", "completed", "skipped"),
+    (
+        "Upload exact-SHA Windows packages and updater signatures",
+        "completed",
+        "skipped",
+    ),
+    (
+        f"Post Run actions/setup-node@{PINNED_ACTIONS['actions/setup-node']}",
+        "completed",
+        "skipped",
+    ),
+    (
+        f"Post Run pnpm/action-setup@{PINNED_ACTIONS['pnpm/action-setup']}",
+        "completed",
+        "success",
+    ),
+    (
+        f"Post Run actions/checkout@{PINNED_ACTIONS['actions/checkout']}",
+        "completed",
+        "success",
+    ),
+    ("Complete job", "completed", "success"),
+)
+EXPECTED_RECOVERY_WINDOWS_STEP_NUMBERS = (*range(1, 25), 46, 47, 48, 49)
 
 
 class ReleaseStateError(ValueError):
@@ -214,6 +311,103 @@ class ReleaseStateError(ValueError):
 
 class RemoteTagError(ValueError):
     """The remote tag advertisement is missing, ambiguous, or malformed."""
+
+
+class RecoveryRunError(ValueError):
+    """The requested failed-run recovery is not bound to a trusted tag push."""
+
+
+def validate_recovery_run(
+    run: dict[str, object],
+    jobs: dict[str, object],
+    comparison: dict[str, object],
+    *,
+    expected_run_id: int,
+    expected_tag: str,
+    expected_sha: str,
+) -> None:
+    """Validate one failed tag run before rebuilding its immutable source."""
+    if expected_run_id <= 0:
+        raise RecoveryRunError("recovery run ID must be positive")
+    if re.fullmatch(r"[0-9a-f]{40}", expected_sha) is None:
+        raise RecoveryRunError("recovery source SHA must be lowercase 40-hex")
+    required_run_fields = {
+        "id": expected_run_id,
+        "name": "Release",
+        "path": ".github/workflows/release.yml",
+        "event": "push",
+        "status": "completed",
+        "conclusion": "failure",
+        "head_branch": expected_tag,
+        "head_sha": expected_sha,
+    }
+    if any(run.get(field) != value for field, value in required_run_fields.items()):
+        raise RecoveryRunError("recovery run is not the failed exact-tag push")
+
+    run_attempt = run.get("run_attempt")
+    total_count = jobs.get("total_count")
+    entries = jobs.get("jobs")
+    expected_job_count = len(EXPECTED_RECOVERY_JOB_CONCLUSIONS)
+    if (
+        not isinstance(run_attempt, int)
+        or isinstance(run_attempt, bool)
+        or run_attempt <= 0
+        or total_count != expected_job_count
+        or not isinstance(entries, list)
+        or len(entries) != expected_job_count
+        or not all(isinstance(entry, dict) for entry in entries)
+    ):
+        raise RecoveryRunError("recovery job list is incomplete or malformed")
+    names = [entry.get("name") for entry in entries]
+    if (
+        not all(isinstance(name, str) for name in names)
+        or len(set(names)) != expected_job_count
+        or set(names) != set(EXPECTED_RECOVERY_JOB_CONCLUSIONS)
+    ):
+        raise RecoveryRunError("recovery job set is not the exact failed release")
+    by_name = {str(entry["name"]): entry for entry in entries}
+    for name, conclusion in EXPECTED_RECOVERY_JOB_CONCLUSIONS.items():
+        entry = by_name[name]
+        expected_fields = {
+            "run_id": expected_run_id,
+            "run_attempt": run_attempt,
+            "head_sha": expected_sha,
+            "status": "completed",
+            "conclusion": conclusion,
+        }
+        if any(entry.get(field) != value for field, value in expected_fields.items()):
+            raise RecoveryRunError(
+                f"recovery job outcome is not whitelisted: {name}"
+            )
+
+    windows_steps = by_name["Windows x64 MSI and NSIS"].get("steps")
+    if not isinstance(windows_steps, list) or not all(
+        isinstance(step, dict) for step in windows_steps
+    ):
+        raise RecoveryRunError("failed Windows job steps are missing or malformed")
+    step_numbers = tuple(step.get("number") for step in windows_steps)
+    step_outcomes = tuple(
+        (step.get("name"), step.get("status"), step.get("conclusion"))
+        for step in windows_steps
+    )
+    if (
+        step_numbers != EXPECTED_RECOVERY_WINDOWS_STEP_NUMBERS
+        or step_outcomes != EXPECTED_RECOVERY_WINDOWS_STEPS
+    ):
+        raise RecoveryRunError(
+            "Windows failure is not the exact checksum-pinned sidecar step"
+        )
+
+    base = comparison.get("base_commit")
+    merge_base = comparison.get("merge_base_commit")
+    if (
+        comparison.get("status") not in {"ahead", "identical"}
+        or not isinstance(base, dict)
+        or base.get("sha") != expected_sha
+        or not isinstance(merge_base, dict)
+        or merge_base.get("sha") != expected_sha
+    ):
+        raise RecoveryRunError("release source is not an ancestor of current main")
 
 
 def resolve_remote_tag_refs(refs_text: str, expected_tag: str) -> str:
@@ -552,16 +746,23 @@ def validate_workflow(workflow: str) -> list[str]:
     )
     inputs = _as_mapping(dispatch.get("inputs")) if dispatch is not None else None
     tag_input = _as_mapping(inputs.get("tag")) if inputs is not None else None
+    failed_run_input = (
+        _as_mapping(inputs.get("failed_run_id")) if inputs is not None else None
+    )
     if (
         push != {"tags": ["v*"]}
         or dispatch is None
         or set(dispatch) != {"inputs"}
         or inputs is None
-        or set(inputs) != {"tag"}
+        or set(inputs) != {"tag", "failed_run_id"}
         or tag_input is None
         or set(tag_input) != {"description", "required", "type"}
         or tag_input.get("required") is not True
         or tag_input.get("type") != "string"
+        or failed_run_input is None
+        or set(failed_run_input) != {"description", "required", "type"}
+        or failed_run_input.get("required") is not True
+        or failed_run_input.get("type") != "string"
     ):
         errors.append("tag-only release trigger")
 
@@ -652,6 +853,8 @@ def validate_workflow(workflow: str) -> list[str]:
     if skipped:
         errors.append("required steps are unconditional")
     scalar_strings = _all_scalar_strings(document)
+    if any("raw.githubusercontent.com" in value for value in scalar_strings):
+        errors.append("release tooling never trusts raw HTTP downloads")
     signing_env = {
         "TAURI_SIGNING_PRIVATE_KEY": "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}",
         "TAURI_SIGNING_PRIVATE_KEY_PASSWORD": "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}",
@@ -830,6 +1033,49 @@ def validate_workflow(workflow: str) -> list[str]:
         ("read", "-r", "remote_main", "remote_ref", "<", "<(git", "ls-remote", "--exit-code", "origin", "refs/heads/main)"),
     ):
         errors.append("tag commit equals current remote main HEAD")
+    validate_env = _as_mapping(validate.get("env")) if validate is not None else None
+    validate_outputs = (
+        _as_mapping(validate.get("outputs")) if validate is not None else None
+    )
+    recovery_lines = (
+        'tooling_sha="$(printf \'%s\' "$RELEASE_TOOLING_SHA" | tr \'[:upper:]\' \'[:lower:]\')"',
+        '[[ "$tooling_sha" =~ ^[0-9a-f]{40}$ ]]',
+        'if [[ "$GITHUB_EVENT_NAME" = "push" ]]; then',
+        'test -z "$FAILED_RUN_ID"',
+        'test "$tooling_sha" = "$source_sha"',
+        'elif [[ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]]; then',
+        '[[ "$FAILED_RUN_ID" =~ ^[1-9][0-9]*$ ]]',
+        'test "$tooling_sha" = "$remote_main"',
+        'if ! git cat-file -e "${tooling_sha}^{commit}" 2>/dev/null; then',
+        'git fetch --no-tags --depth=1 origin "$tooling_sha"',
+        'test "$(git rev-parse "${tooling_sha}^{commit}")" = "$tooling_sha"',
+        'git cat-file blob "$tooling_sha:scripts/check_release_workflow.py" \\',
+        'git cat-file blob "$tooling_sha:scripts/workflow_yaml.py" \\',
+        'gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FAILED_RUN_ID" \\',
+        'gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FAILED_RUN_ID/jobs?per_page=100" \\',
+        'gh api "repos/$GITHUB_REPOSITORY/compare/$source_sha...$remote_main" \\',
+        'validate-recovery-run \\',
+        '--run-id "$FAILED_RUN_ID" \\',
+        '--tag "$RELEASE_TAG" \\',
+        '--sha "$source_sha"',
+        'printf \'tooling_sha=%s\\n\' "$tooling_sha" >> "$GITHUB_OUTPUT"',
+    )
+    recovery_provenance = (
+        validate_env
+        == {
+            "RELEASE_TAG": "${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}",
+            "FAILED_RUN_ID": "${{ github.event_name == 'workflow_dispatch' && inputs.failed_run_id || '' }}",
+            "RELEASE_TOOLING_SHA": "${{ github.workflow_sha }}",
+        }
+        and validate_outputs is not None
+        and validate_outputs.get("tooling_sha")
+        == "${{ steps.bind.outputs.tooling_sha }}"
+        and bind is not None
+        and _as_mapping(bind.get("env")) == {"GH_TOKEN": "${{ github.token }}"}
+        and _has_code_lines(bind, recovery_lines)
+    )
+    if not recovery_provenance:
+        errors.append("failed-run recovery provenance")
     if not _has_code_lines(
         bind,
         (
@@ -921,8 +1167,6 @@ def validate_workflow(workflow: str) -> list[str]:
         ("Test and reproduce Motion Canvas runner", ("git", "diff", "--exit-code", "--", "plugins/motion-canvas-studio/bundle/runner.html", "plugins/motion-canvas-studio/package-lock.json")),
         ("Validate Windows and release workflow contracts", ("python3", "-B", "scripts/check_windows_product_ci.py")),
         ("Validate Windows and release workflow contracts", ("python3", "-B", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_check_windows_product_ci.py")),
-        ("Validate Windows and release workflow contracts", ("python3", "-B", "scripts/check_release_workflow.py")),
-        ("Validate Windows and release workflow contracts", ("python3", "-B", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_check_release_workflow.py")),
         ("Validate Windows and release workflow contracts", ("python3", "-B", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_write_updater_attestation.py")),
         ("Validate Windows and release workflow contracts", ("python3", "-B", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_write_updater_manifest.py")),
         ("Provisioner unit tests", ("python3", "-B", "-m", "unittest", "discover", "-s", "scripts/tests", "-p", "test_*.py")),
@@ -952,6 +1196,54 @@ def validate_workflow(workflow: str) -> list[str]:
     )
     if not quality_ok:
         errors.append("complete Ubuntu release quality gates")
+
+    quality_env = _as_mapping(quality.get("env")) if quality is not None else None
+    quality_release_contract = _structured_step(
+        quality, "Validate Windows and release workflow contracts"
+    )
+    running_contract_provenance = (
+        quality_env is not None
+        and quality_env.get("RELEASE_TOOLING_SHA")
+        == "${{ needs.validate.outputs.tooling_sha }}"
+        and _has_code_lines(
+            quality_release_contract,
+            (
+                'if ! git cat-file -e "${RELEASE_TOOLING_SHA}^{commit}" 2>/dev/null; then',
+                'git fetch --no-tags --depth=1 origin "$RELEASE_TOOLING_SHA"',
+                'test "$(git rev-parse "${RELEASE_TOOLING_SHA}^{commit}")" = "$RELEASE_TOOLING_SHA"',
+                'git cat-file blob "$RELEASE_TOOLING_SHA:scripts/check_release_workflow.py" \\',
+                'git cat-file blob "$RELEASE_TOOLING_SHA:scripts/test_check_release_workflow.py" \\',
+                'git cat-file blob "$RELEASE_TOOLING_SHA:scripts/workflow_yaml.py" \\',
+                'git cat-file blob "$RELEASE_TOOLING_SHA:scripts/provision_ffmpeg_sidecars.py" \\',
+                'git cat-file blob "$RELEASE_TOOLING_SHA:scripts/tests/test_provision_ffmpeg_sidecars.py" \\',
+                'git cat-file blob "$RELEASE_TOOLING_SHA:.github/workflows/release.yml" \\',
+                'git cat-file blob "$RELEASE_TOOLING_SHA:docs/releases/1.0.0-beta.4.md" \\',
+                'OPENTAKE_REPOSITORY_ROOT="$GITHUB_WORKSPACE" \\',
+                'OPENTAKE_RELEASE_WORKFLOW_PATH="$tooling_root/release.yml" \\',
+                'OPENTAKE_RELEASE_NOTES_PATH="$tooling_root/release-notes.md" \\',
+                'PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$tooling_root" \\',
+                'python3 -B "$tooling_root/check_release_workflow.py"',
+                'python3 -B -m unittest discover -s "$tooling_root" \\',
+                "-p 'test_check_release_workflow.py'",
+            ),
+        )
+    )
+    if not running_contract_provenance:
+        errors.append("exact release tooling provenance")
+    provisioner_tests = _structured_step(quality, "Provisioner unit tests")
+    recovery_provisioner_tests = _has_code_lines(
+        provisioner_tests,
+        (
+            "python3 -B -m unittest discover -s scripts/tests -p 'test_*.py'",
+            'OPENTAKE_REPOSITORY_ROOT="$GITHUB_WORKSPACE" \\',
+            'OPENTAKE_PROVISIONER_PATH="$tooling_root/provision_ffmpeg_sidecars.py" \\',
+            'PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$tooling_root" \\',
+            'python3 -B -m unittest discover \\',
+            '-s "$tooling_root" -p \'test_provision_ffmpeg_sidecars.py\'',
+        ),
+    )
+    if not recovery_provisioner_tests:
+        errors.append("recovery provisioner tests")
 
     ruby_steps = _action_step(quality, "ruby/setup-ruby")
     validator_position = _step_position(quality, "Validate Windows and release workflow contracts")
@@ -1042,7 +1334,7 @@ def validate_workflow(workflow: str) -> list[str]:
     windows_receipt = _structured_step(windows, "Create Windows exact-SHA receipt")
     windows_uploads = _action_step(windows, "actions/upload-artifact")
     windows_commands = (
-        ("Provision checksum-pinned Windows FFmpeg sidecars", ("python", "scripts/provision_ffmpeg_sidecars.py", "--target", "x86_64-pc-windows-msvc")),
+        ("Provision checksum-pinned Windows FFmpeg sidecars", ("python", "$provisioner", "--target", "x86_64-pc-windows-msvc")),
         ("Rust workspace clippy", ("cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings")),
         ("Rust workspace tests", ("cargo", "test", "--workspace", "--", "--test-threads=1")),
         ("Web editor behavior suite", ("pnpm", "-C", "web", "test")),
@@ -1136,6 +1428,35 @@ def validate_workflow(workflow: str) -> list[str]:
     ) == f"actions/upload-artifact@{PINNED_ACTIONS['actions/upload-artifact']}"
     if not windows_ok:
         errors.append("complete Windows x64 installer gate")
+    windows_env = _as_mapping(windows.get("env")) if windows is not None else None
+    windows_provision = _structured_step(
+        windows, "Provision checksum-pinned Windows FFmpeg sidecars"
+    )
+    windows_tooling_provenance = (
+        windows_env is not None
+        and windows_env.get("RELEASE_TOOLING_SHA")
+        == "${{ needs.validate.outputs.tooling_sha }}"
+        and windows_provision is not None
+        and windows_provision.get("shell") == "pwsh"
+        and _has_code_lines(
+            windows_provision,
+            (
+                "if ($env:RELEASE_TOOLING_SHA -notmatch '^[0-9a-f]{40}$') {",
+                'git cat-file -e "$($env:RELEASE_TOOLING_SHA)^{commit}" 2>$null',
+                'git fetch --no-tags --depth=1 origin $env:RELEASE_TOOLING_SHA',
+                '$resolvedTooling = (git rev-parse "$($env:RELEASE_TOOLING_SHA)^{commit}").Trim().ToLowerInvariant()',
+                'git cat-file blob "$($env:RELEASE_TOOLING_SHA):scripts/provision_ffmpeg_sidecars.py" > $provisioner',
+                '$env:OPENTAKE_REPOSITORY_ROOT = $env:GITHUB_WORKSPACE',
+                'python $provisioner --target x86_64-pc-windows-msvc',
+            ),
+        )
+        and not any(
+            "raw.githubusercontent.com" in value
+            for value in _all_scalar_strings(windows_provision)
+        )
+    )
+    if not windows_tooling_provenance:
+        errors.append("exact release tooling provenance")
 
     mac_upload_with = (
         _with_mapping(mac_uploads[0][1]) if len(mac_uploads) == 1 else None
@@ -1677,7 +1998,26 @@ def validate_workflow(workflow: str) -> list[str]:
     if not _has_code_lines(
         notes,
         (
+            'notes_sha="$RELEASE_SHA"',
+            'if [[ "$RELEASE_TOOLING_SHA" = "$RELEASE_SHA" ]]; then',
+            'cp "$NOTES_PATH" "$PUBLISH_ROOT/release-body.md"',
+            '[[ "$RELEASE_TOOLING_SHA" =~ ^[0-9a-f]{40}$ ]]',
+            'if ! git cat-file -e "${RELEASE_TOOLING_SHA}^{commit}" 2>/dev/null; then',
+            'git fetch --no-tags --depth=1 origin "$RELEASE_TOOLING_SHA"',
+            'test "$(git rev-parse "${RELEASE_TOOLING_SHA}^{commit}")" = "$RELEASE_TOOLING_SHA"',
+            'git cat-file blob "$RELEASE_TOOLING_SHA:$NOTES_PATH" \\',
+            'notes_sha="$RELEASE_TOOLING_SHA"',
+            'test -s "$PUBLISH_ROOT/release-body.md"',
+            "- Release notes commit: \\`$notes_sha\\`",
+        ),
+    ):
+        errors.append("recovery release notes use exact tooling commit")
+    if not _has_code_lines(
+        notes,
+        (
             "- Source commit: \\`$RELEASE_SHA\\`",
+            "- Release tooling commit: \\`$RELEASE_TOOLING_SHA\\`",
+            "- Release notes commit: \\`$notes_sha\\`",
             "- GitHub Actions run: [$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)",
             "- Updater trust: updater packages are signed with the dedicated Tauri updater key; the private key is supplied only from GitHub Actions secrets and is never published.",
             "- Platform signing limits: the macOS app uses ad-hoc signing only; it is not Developer ID signed or notarized. Windows installers are not Authenticode-signed.",
@@ -1686,6 +2026,30 @@ def validate_workflow(workflow: str) -> list[str]:
         errors.append("release notes record source, run, and signing limits")
 
     return list(dict.fromkeys(errors))
+
+
+def validate_release_notes_contract(notes_path: Path) -> list[str]:
+    """Require the public notes to describe normal and recovery provenance."""
+    try:
+        notes = notes_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return ["Beta 4 release notes document dual-SHA recovery provenance"]
+    normalized = " ".join(notes.split())
+    required = (
+        "正常 tag push",
+        "product source SHA 与 release tooling SHA",
+        "当前远端 `main` HEAD",
+        "`failed_run_id`",
+        "`workflow_dispatch` 恢复",
+        "原不可变 tag SHA",
+        "`github.workflow_sha`",
+        "不创建、移动或删除 tag",
+        "公开 release notes",
+        "notes commit",
+    )
+    if not notes.strip() or any(marker not in normalized for marker in required):
+        return ["Beta 4 release notes document dual-SHA recovery provenance"]
+    return []
 
 
 def validate_repository_metadata(repository_root: Path) -> list[str]:
@@ -1764,6 +2128,37 @@ def _resolve_remote_tag_command(arguments: list[str]) -> None:
     print(resolved)
 
 
+def _validate_recovery_run_command(arguments: list[str]) -> None:
+    parser = argparse.ArgumentParser(
+        prog="check_release_workflow.py validate-recovery-run"
+    )
+    parser.add_argument("--run", required=True, type=Path)
+    parser.add_argument("--jobs", required=True, type=Path)
+    parser.add_argument("--comparison", required=True, type=Path)
+    parser.add_argument("--run-id", required=True, type=int)
+    parser.add_argument("--tag", required=True)
+    parser.add_argument("--sha", required=True)
+    options = parser.parse_args(arguments)
+    try:
+        payloads = [
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in (options.run, options.jobs, options.comparison)
+        ]
+        if not all(isinstance(payload, dict) for payload in payloads):
+            raise RecoveryRunError("recovery API payloads must be JSON objects")
+        validate_recovery_run(
+            payloads[0],
+            payloads[1],
+            payloads[2],
+            expected_run_id=options.run_id,
+            expected_tag=options.tag,
+            expected_sha=options.sha,
+        )
+    except (OSError, json.JSONDecodeError, RecoveryRunError) as error:
+        raise SystemExit(f"unsafe failed-run recovery: {error}") from error
+    print(f"validated failed release run {options.run_id} for {options.tag}")
+
+
 def main(arguments: list[str] | None = None) -> None:
     arguments = sys.argv[1:] if arguments is None else arguments
     if arguments:
@@ -1771,6 +2166,8 @@ def main(arguments: list[str] | None = None) -> None:
             _resolve_release_state_command(arguments[1:])
         elif arguments[0] == "resolve-remote-tag":
             _resolve_remote_tag_command(arguments[1:])
+        elif arguments[0] == "validate-recovery-run":
+            _validate_recovery_run_command(arguments[1:])
         else:
             raise SystemExit(f"unknown command: {arguments[0]}")
         return
@@ -1778,6 +2175,7 @@ def main(arguments: list[str] | None = None) -> None:
         raise SystemExit(f"release workflow is missing: {WORKFLOW_PATH}")
     errors = validate_workflow(WORKFLOW_PATH.read_text(encoding="utf-8"))
     errors.extend(validate_repository_metadata(REPOSITORY_ROOT))
+    errors.extend(validate_release_notes_contract(RELEASE_NOTES_PATH))
     if errors:
         raise SystemExit("release workflow is missing: " + ", ".join(errors))
     print("Release workflow contract is complete")

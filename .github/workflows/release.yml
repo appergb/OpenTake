@@ -9,6 +9,10 @@ on:
         description: Existing v<semver> tag from a failed run; this workflow never creates or moves tags
         required: true
         type: string
+      failed_run_id:
+        description: Failed tag-push Release run ID whose exact source is being recovered
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -23,8 +27,11 @@ jobs:
     runs-on: ubuntu-latest
     env:
       RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      FAILED_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.failed_run_id || '' }}
+      RELEASE_TOOLING_SHA: ${{ github.workflow_sha }}
     outputs:
       source_sha: ${{ steps.bind.outputs.source_sha }}
+      tooling_sha: ${{ steps.bind.outputs.tooling_sha }}
       tag: ${{ steps.bind.outputs.tag }}
       version: ${{ steps.bind.outputs.version }}
       notes_path: ${{ steps.bind.outputs.notes_path }}
@@ -38,6 +45,8 @@ jobs:
 
       - name: Validate tag, source SHA, versions, and notes
         id: bind
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
@@ -49,15 +58,55 @@ jobs:
           git cat-file -e "${source_sha}^{commit}"
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
 
+          tooling_sha="$(printf '%s' "$RELEASE_TOOLING_SHA" | tr '[:upper:]' '[:lower:]')"
+          [[ "$tooling_sha" =~ ^[0-9a-f]{40}$ ]]
           read -r remote_main remote_ref < <(git ls-remote --exit-code origin refs/heads/main)
           remote_main="$(printf '%s' "$remote_main" | tr '[:upper:]' '[:lower:]')"
           test "$remote_ref" = "refs/heads/main"
-          if [[ "$source_sha" != "$remote_main" ]]; then
-            echo "tag commit does not equal current remote main HEAD" >&2
+          if [[ "$GITHUB_EVENT_NAME" = "push" ]]; then
+            test -z "$FAILED_RUN_ID"
+            test "$tooling_sha" = "$source_sha"
+            if [[ "$source_sha" != "$remote_main" ]]; then
+              echo "tag commit does not equal current remote main HEAD" >&2
+              exit 1
+            fi
+          elif [[ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]]; then
+            [[ "$FAILED_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+            test "$tooling_sha" = "$remote_main"
+            recovery_root="$RUNNER_TEMP/opentake-release-recovery-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            mkdir -p "$recovery_root/tooling"
+            if ! git cat-file -e "${tooling_sha}^{commit}" 2>/dev/null; then
+              git fetch --no-tags --depth=1 origin "$tooling_sha"
+            fi
+            test "$(git rev-parse "${tooling_sha}^{commit}")" = "$tooling_sha"
+            git cat-file blob "$tooling_sha:scripts/check_release_workflow.py" \
+              > "$recovery_root/tooling/check_release_workflow.py"
+            git cat-file blob "$tooling_sha:scripts/workflow_yaml.py" \
+              > "$recovery_root/tooling/workflow_yaml.py"
+            test -s "$recovery_root/tooling/check_release_workflow.py"
+            test -s "$recovery_root/tooling/workflow_yaml.py"
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FAILED_RUN_ID" \
+              > "$recovery_root/run.json"
+            gh api "repos/$GITHUB_REPOSITORY/actions/runs/$FAILED_RUN_ID/jobs?per_page=100" \
+              > "$recovery_root/jobs.json"
+            gh api "repos/$GITHUB_REPOSITORY/compare/$source_sha...$remote_main" \
+              > "$recovery_root/comparison.json"
+            PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$recovery_root/tooling" \
+              python3 "$recovery_root/tooling/check_release_workflow.py" \
+              validate-recovery-run \
+              --run "$recovery_root/run.json" \
+              --jobs "$recovery_root/jobs.json" \
+              --comparison "$recovery_root/comparison.json" \
+              --run-id "$FAILED_RUN_ID" \
+              --tag "$RELEASE_TAG" \
+              --sha "$source_sha"
+          else
+            echo "unsupported release event: $GITHUB_EVENT_NAME" >&2
             exit 1
           fi
 
           printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
+          printf 'tooling_sha=%s\n' "$tooling_sha" >> "$GITHUB_OUTPUT"
           RELEASE_TAG="$RELEASE_TAG" python3 - <<'PY'
           import json
           import os
@@ -131,6 +180,7 @@ jobs:
     timeout-minutes: 120
     env:
       TARGET_SHA: ${{ needs.validate.outputs.source_sha }}
+      RELEASE_TOOLING_SHA: ${{ needs.validate.outputs.tooling_sha }}
       CI: true
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -214,15 +264,60 @@ jobs:
 
       - name: Validate Windows and release workflow contracts
         run: |
+          set -euo pipefail
           python3 -B scripts/check_windows_product_ci.py
           python3 -B -m unittest discover -s scripts -p 'test_check_windows_product_ci.py'
-          python3 -B scripts/check_release_workflow.py
-          python3 -B -m unittest discover -s scripts -p 'test_check_release_workflow.py'
           python3 -B -m unittest discover -s scripts -p 'test_write_updater_attestation.py'
           python3 -B -m unittest discover -s scripts -p 'test_write_updater_manifest.py'
+          tooling_root="$RUNNER_TEMP/opentake-release-tooling-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$tooling_root"
+          if ! git cat-file -e "${RELEASE_TOOLING_SHA}^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "$RELEASE_TOOLING_SHA"
+          fi
+          test "$(git rev-parse "${RELEASE_TOOLING_SHA}^{commit}")" = "$RELEASE_TOOLING_SHA"
+          git cat-file blob "$RELEASE_TOOLING_SHA:scripts/check_release_workflow.py" \
+            > "$tooling_root/check_release_workflow.py"
+          git cat-file blob "$RELEASE_TOOLING_SHA:scripts/test_check_release_workflow.py" \
+            > "$tooling_root/test_check_release_workflow.py"
+          git cat-file blob "$RELEASE_TOOLING_SHA:scripts/workflow_yaml.py" \
+            > "$tooling_root/workflow_yaml.py"
+          git cat-file blob "$RELEASE_TOOLING_SHA:scripts/provision_ffmpeg_sidecars.py" \
+            > "$tooling_root/provision_ffmpeg_sidecars.py"
+          git cat-file blob "$RELEASE_TOOLING_SHA:scripts/tests/test_provision_ffmpeg_sidecars.py" \
+            > "$tooling_root/test_provision_ffmpeg_sidecars.py"
+          git cat-file blob "$RELEASE_TOOLING_SHA:.github/workflows/release.yml" \
+            > "$tooling_root/release.yml"
+          git cat-file blob "$RELEASE_TOOLING_SHA:docs/releases/1.0.0-beta.4.md" \
+            > "$tooling_root/release-notes.md"
+          test -s "$tooling_root/check_release_workflow.py"
+          test -s "$tooling_root/test_check_release_workflow.py"
+          test -s "$tooling_root/workflow_yaml.py"
+          test -s "$tooling_root/provision_ffmpeg_sidecars.py"
+          test -s "$tooling_root/test_provision_ffmpeg_sidecars.py"
+          test -s "$tooling_root/release.yml"
+          test -s "$tooling_root/release-notes.md"
+          OPENTAKE_REPOSITORY_ROOT="$GITHUB_WORKSPACE" \
+            OPENTAKE_RELEASE_WORKFLOW_PATH="$tooling_root/release.yml" \
+            OPENTAKE_RELEASE_NOTES_PATH="$tooling_root/release-notes.md" \
+            PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$tooling_root" \
+            python3 -B "$tooling_root/check_release_workflow.py"
+          OPENTAKE_REPOSITORY_ROOT="$GITHUB_WORKSPACE" \
+            OPENTAKE_RELEASE_WORKFLOW_PATH="$tooling_root/release.yml" \
+            OPENTAKE_RELEASE_NOTES_PATH="$tooling_root/release-notes.md" \
+            PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$tooling_root" \
+            python3 -B -m unittest discover -s "$tooling_root" \
+            -p 'test_check_release_workflow.py'
 
       - name: Provisioner unit tests
-        run: python3 -B -m unittest discover -s scripts/tests -p 'test_*.py'
+        run: |
+          set -euo pipefail
+          python3 -B -m unittest discover -s scripts/tests -p 'test_*.py'
+          tooling_root="$RUNNER_TEMP/opentake-release-tooling-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          OPENTAKE_REPOSITORY_ROOT="$GITHUB_WORKSPACE" \
+            OPENTAKE_PROVISIONER_PATH="$tooling_root/provision_ffmpeg_sidecars.py" \
+            PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$tooling_root" \
+            python3 -B -m unittest discover \
+            -s "$tooling_root" -p 'test_provision_ffmpeg_sidecars.py'
 
       - name: Install locked Web dependencies
         run: pnpm -C web install --frozen-lockfile
@@ -527,6 +622,7 @@ jobs:
     timeout-minutes: 120
     env:
       TARGET_SHA: ${{ needs.validate.outputs.source_sha }}
+      RELEASE_TOOLING_SHA: ${{ needs.validate.outputs.tooling_sha }}
       RELEASE_TAG: ${{ needs.validate.outputs.tag }}
       RELEASE_VERSION: ${{ needs.validate.outputs.version }}
       CI: true
@@ -575,7 +671,30 @@ jobs:
           ruby-version: '3.3'
 
       - name: Provision checksum-pinned Windows FFmpeg sidecars
-        run: python scripts/provision_ffmpeg_sidecars.py --target x86_64-pc-windows-msvc
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_TOOLING_SHA -notmatch '^[0-9a-f]{40}$') {
+            throw 'release tooling SHA must be lowercase 40-hex'
+          }
+          $toolingRoot = Join-Path $env:RUNNER_TEMP "opentake-sidecar-tooling-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          New-Item -ItemType Directory -Force -Path $toolingRoot | Out-Null
+          $provisioner = Join-Path $toolingRoot 'provision_ffmpeg_sidecars.py'
+          git cat-file -e "$($env:RELEASE_TOOLING_SHA)^{commit}" 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            git fetch --no-tags --depth=1 origin $env:RELEASE_TOOLING_SHA
+            if ($LASTEXITCODE -ne 0) { throw 'failed to fetch exact release tooling commit' }
+          }
+          $resolvedTooling = (git rev-parse "$($env:RELEASE_TOOLING_SHA)^{commit}").Trim().ToLowerInvariant()
+          if ($LASTEXITCODE -ne 0 -or $resolvedTooling -ne $env:RELEASE_TOOLING_SHA) {
+            throw 'release tooling commit did not resolve exactly'
+          }
+          git cat-file blob "$($env:RELEASE_TOOLING_SHA):scripts/provision_ffmpeg_sidecars.py" > $provisioner
+          if ($LASTEXITCODE -ne 0) { throw 'failed to extract exact sidecar provisioner blob' }
+          if (-not (Test-Path $provisioner -PathType Leaf) -or (Get-Item $provisioner).Length -le 0) {
+            throw 'release sidecar provisioner blob is missing or empty'
+          }
+          $env:OPENTAKE_REPOSITORY_ROOT = $env:GITHUB_WORKSPACE
+          python $provisioner --target x86_64-pc-windows-msvc
 
       - name: Verify pinned sidecar supply
         shell: bash
@@ -806,6 +925,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ needs.validate.outputs.tag }}
       RELEASE_SHA: ${{ needs.validate.outputs.source_sha }}
+      RELEASE_TOOLING_SHA: ${{ needs.validate.outputs.tooling_sha }}
       RELEASE_VERSION: ${{ needs.validate.outputs.version }}
       NOTES_PATH: ${{ needs.validate.outputs.notes_path }}
       PYTHONDONTWRITEBYTECODE: '1'
@@ -1317,12 +1437,27 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cp "$NOTES_PATH" "$PUBLISH_ROOT/release-body.md"
+          notes_sha="$RELEASE_SHA"
+          if [[ "$RELEASE_TOOLING_SHA" = "$RELEASE_SHA" ]]; then
+            cp "$NOTES_PATH" "$PUBLISH_ROOT/release-body.md"
+          else
+            [[ "$RELEASE_TOOLING_SHA" =~ ^[0-9a-f]{40}$ ]]
+            if ! git cat-file -e "${RELEASE_TOOLING_SHA}^{commit}" 2>/dev/null; then
+              git fetch --no-tags --depth=1 origin "$RELEASE_TOOLING_SHA"
+            fi
+            test "$(git rev-parse "${RELEASE_TOOLING_SHA}^{commit}")" = "$RELEASE_TOOLING_SHA"
+            git cat-file blob "$RELEASE_TOOLING_SHA:$NOTES_PATH" \
+              > "$PUBLISH_ROOT/release-body.md"
+            notes_sha="$RELEASE_TOOLING_SHA"
+          fi
+          test -s "$PUBLISH_ROOT/release-body.md"
           cat >> "$PUBLISH_ROOT/release-body.md" <<EOF
 
           ## Automated release provenance
 
           - Source commit: \`$RELEASE_SHA\`
+          - Release tooling commit: \`$RELEASE_TOOLING_SHA\`
+          - Release notes commit: \`$notes_sha\`
           - GitHub Actions run: [$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)
           - Updater trust: updater packages are signed with the dedicated Tauri updater key; the private key is supplied only from GitHub Actions secrets and is never published.
           - Platform signing limits: the macOS app uses ad-hoc signing only; it is not Developer ID signed or notarized. Windows installers are not Authenticode-signed.
