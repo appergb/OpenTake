@@ -5,7 +5,7 @@ We welcome contributions! Please open an [Issue](https://github.com/appergb/Open
 ## Development Setup
 
 ```bash
-# Prerequisites: Rust >= 1.82, Node.js >= 20, pnpm, FFmpeg >= 6.0
+# Prerequisites: Rust >= 1.96, Node.js >= 20, pnpm, FFmpeg >= 6.0
 cargo build
 cargo test
 cd web && pnpm install && pnpm build

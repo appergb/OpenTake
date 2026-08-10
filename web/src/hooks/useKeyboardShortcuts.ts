@@ -19,6 +19,10 @@ import { isTauri } from "../lib/api";
 import { resolveTimelinePlaybackRoute } from "../components/preview/playbackRoute";
 import { rustEngineEnabled } from "../components/preview/rustEngine";
 import { runApplicationMenuCommand } from "../components/shell/ViewMenu";
+import {
+  isUpdateInstallationBlocking,
+  useUpdateStore,
+} from "../store/updateStore";
 
 /** Per-keypress zoom step for ⌘+ / ⌘- (剪映: Cmd + +/-). */
 const ZOOM_KEY_STEP = 1.3;
@@ -48,7 +52,7 @@ function isNativeInteractionControl(target: EventTarget | null): boolean {
   if (typeof Element === "undefined" || !(target instanceof Element)) return false;
   return Boolean(
     target.closest(
-      'button, a[href], select, option, summary, [role="button"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="checkbox"], [role="radio"], [role="switch"], [role="slider"], [role="spinbutton"], [role="combobox"], [role="listbox"]',
+      'input, button, a[href], select, option, summary, [role="button"], [role="menuitem"], [role="menuitemcheckbox"], [role="menuitemradio"], [role="checkbox"], [role="radio"], [role="switch"], [role="slider"], [role="spinbutton"], [role="combobox"], [role="listbox"], [role="separator"]',
     ),
   );
 }
@@ -425,6 +429,13 @@ export function handleViewShortcutKeyDown(e: KeyboardEvent, ui: ViewShortcutUi):
 
 export function useKeyboardShortcuts() {
   useEffect(() => {
+    const blockDuringUpdateInstallation = (e: KeyboardEvent): boolean => {
+      if (!isUpdateInstallationBlocking(useUpdateStore.getState().phase)) return false;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      return true;
+    };
+
     const context = (): DocumentedShortcutContext => {
       const ui = useEditorUiStore.getState();
       return {
@@ -437,6 +448,7 @@ export function useKeyboardShortcuts() {
     };
 
     const handleSpaceKeyDown = (e: KeyboardEvent) => {
+      if (blockDuringUpdateInstallation(e)) return;
       const ui = useEditorUiStore.getState();
       if (resolveDocumentedShortcut(e, context())?.type !== "transport") return;
       const timeline = useProjectStore.getState().timeline;
@@ -512,6 +524,7 @@ export function useKeyboardShortcuts() {
     };
 
     const handler = (e: KeyboardEvent) => {
+      if (blockDuringUpdateInstallation(e)) return;
       const ui = useEditorUiStore.getState();
       const command = resolveDocumentedShortcut(e, context());
       const mod = e.metaKey || e.ctrlKey;

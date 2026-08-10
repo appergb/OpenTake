@@ -22,7 +22,7 @@ same-file = "1.0.6"
 
 half = "2"
 byteorder = "1"
-ndarray = "0.16"
+ndarray = "0.17"
 tracing = "0.1"
 unicode-normalization = "0.1"
 tempfile = "3"
@@ -90,19 +90,19 @@ whisper-backend = ["dep:whisper-rs"]
 model-download = ["dep:reqwest", "dep:zip", "dep:futures-util", "dep:sha1"]
 
 [target.'cfg(not(windows))'.dependencies.ort]
-version = "=2.0.0-rc.10"
+version = "=2.0.0-rc.11"
 default-features = false
-features = ["std", "ndarray", "download-binaries", "copy-dylibs"]
+features = ["std", "ndarray", "download-binaries", "copy-dylibs", "tls-rustls"]
 optional = true
 
 [target.'cfg(windows)'.dependencies.ort]
-version = "=2.0.0-rc.10"
+version = "=2.0.0-rc.11"
 default-features = false
 features = ["std", "ndarray", "alternative-backend"]
 optional = true
 
 [target.'cfg(windows)'.dependencies.ort-tract]
-version = "=0.1.0"
+version = "=0.2.0"
 optional = true
 
 [dependencies.whisper-rs]

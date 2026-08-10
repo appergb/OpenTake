@@ -62,6 +62,7 @@ APPROVED_STEP_IDENTITIES = {
     "macos_arm64": (
         f"uses:actions/checkout@{PINNED_ACTIONS['actions/checkout']}",
         "name:Assert exact checked-out SHA",
+        "name:Require updater signing secrets",
         "name:Install Rust toolchain",
         f"uses:pnpm/action-setup@{PINNED_ACTIONS['pnpm/action-setup']}",
         f"uses:actions/setup-node@{PINNED_ACTIONS['actions/setup-node']}",
@@ -70,15 +71,17 @@ APPROVED_STEP_IDENTITIES = {
         "name:Verify pinned sidecar supply",
         "name:Install locked Web dependencies",
         "name:Reassert exact source before macOS build",
-        "name:Build ad-hoc Tauri app and DMG",
-        "name:Verify complete app, sidecars, and DMG",
+        "name:Build ad-hoc Tauri app, DMG, and signed updater",
+        "name:Verify complete app, sidecars, DMG, and signed updater",
         "name:Reassert exact source after macOS packaging",
+        "name:Create and sign macOS updater attestation",
         "name:Create macOS exact-SHA receipt",
-        "name:Upload exact-SHA macOS package",
+        "name:Upload exact-SHA macOS packages and updater",
     ),
     "windows_x64": (
         f"uses:actions/checkout@{PINNED_ACTIONS['actions/checkout']}",
         "name:Assert exact checked-out SHA",
+        "name:Require updater signing secrets",
         "name:Install Rust toolchain",
         f"uses:pnpm/action-setup@{PINNED_ACTIONS['pnpm/action-setup']}",
         f"uses:actions/setup-node@{PINNED_ACTIONS['actions/setup-node']}",
@@ -93,19 +96,23 @@ APPROVED_STEP_IDENTITIES = {
         "name:Minimal-feature Tauri clippy",
         "name:Web production build",
         "name:Reassert exact source before Windows build",
-        "name:Build native MSI and NSIS installers",
-        "name:Install NSIS and smoke installed app and sidecars",
+        "name:Build native MSI, NSIS, and signed updater artifacts",
+        "name:Install NSIS and smoke installed app, sidecars, and updater artifacts",
         "name:Reassert exact source after Windows packaging",
+        "name:Create and sign Windows updater attestations",
         "name:Create Windows exact-SHA receipt",
-        "name:Upload exact-SHA Windows packages",
+        "name:Upload exact-SHA Windows packages and updater signatures",
     ),
     "publish": (
         f"uses:actions/checkout@{PINNED_ACTIONS['actions/checkout']}",
         "name:Assert exact checked-out SHA",
         "name:Initialize isolated publish root",
+        "name:Install Minisign verifier",
         "name:Download macOS artifact",
         "name:Download Windows artifact",
         "name:Stage and verify the exact release payload",
+        "name:Verify updater signatures against embedded public key",
+        "name:Write and verify tag-specific updater manifest",
         "name:Create and verify SHA256SUMS",
         "name:Prepare release notes with provenance",
         "name:Reassert exact source before draft mutation",
@@ -135,7 +142,7 @@ APPROVED_SIMPLE_RUNS = {
     ("macos_arm64", "Provision checksum-pinned ARM64 FFmpeg sidecars"): "python3 scripts/provision_ffmpeg_sidecars.py --target aarch64-apple-darwin",
     ("macos_arm64", "Verify pinned sidecar supply"): "ruby scripts/tests/packaged-sidecars-test.rb --name packaged_macos_windows_sidecars_resolve_and_execute",
     ("macos_arm64", "Install locked Web dependencies"): "pnpm -C web install --frozen-lockfile",
-    ("macos_arm64", "Build ad-hoc Tauri app and DMG"): "./web/node_modules/.bin/tauri build --ci --target aarch64-apple-darwin --bundles app,dmg --config '{\"bundle\":{\"macOS\":{\"signingIdentity\":\"-\"}}}'",
+    ("macos_arm64", "Build ad-hoc Tauri app, DMG, and signed updater"): "./web/node_modules/.bin/tauri build --ci --target aarch64-apple-darwin --bundles app,dmg --config '{\"bundle\":{\"createUpdaterArtifacts\":true,\"macOS\":{\"signingIdentity\":\"-\"}}}'",
     ("windows_x64", "Install Rust toolchain"): "rustup component add rustfmt clippy",
     ("windows_x64", "Provision checksum-pinned Windows FFmpeg sidecars"): "python scripts/provision_ffmpeg_sidecars.py --target x86_64-pc-windows-msvc",
     ("windows_x64", "Verify pinned sidecar supply"): "ruby scripts/tests/packaged-sidecars-test.rb --name packaged_macos_windows_sidecars_resolve_and_execute",
@@ -150,47 +157,54 @@ APPROVED_SIMPLE_RUNS = {
 }
 
 APPROVED_COMPLEX_RUN_SHA256 = {
-    ("validate", "Validate tag, source SHA, versions, and notes"): "120a1dc8347fb5989f607f6965b1f9ce5167e934a41631d1ac0cee01e0b83876",
+    ("validate", "Validate tag, source SHA, versions, and notes"): "a8098fcb30554344d8821c32540b2116efef5877c4fc992cd2a98b955e73a346",
     ("validate", "Reassert exact source after validation"): "953657d26d2eda8490c18e7030c66ddb19aba64a5c8b19808da9a853fd1bfdd2",
     ("quality", "Assert exact checked-out SHA"): "ff0b148eecdf8603712586a6c4a05e752df0b36b5c97a366760f6cba10e58ddd",
     ("quality", "Free disk space"): "5848415c4d0e696f46965d62a2e17c8b7a0dd45ae600d28102af0b04108d9bf6",
     ("quality", "Install system deps (ffmpeg + Tauri/GTK)"): "ee466d2d3fff1c3703d50f9dabe4d21e1cee4b399924d064c6d2714dae34d16b",
     ("quality", "Audit Motion Canvas dependencies and licenses"): "a3517fae1a8663e519138196c9f3721d8f4df19ac8f115c49a079c4aaa60c8b3",
     ("quality", "Test and reproduce Motion Canvas runner"): "8bcd55de9b045f9d7be6343163a5422cba0ab545f7844da50ca1a7c8623fe640",
-    ("quality", "Validate Windows and release workflow contracts"): "45c70d24aae54d1409f0594a65256d7c1397459d97d1fdacfc74d9f8d6f4105f",
+    ("quality", "Validate Windows and release workflow contracts"): "a3eee0e4912440340c2be717b3b635f9eb121f68e8f3dd1e3c58f19b4c2ace36",
     ("quality", "Live playback transport integration"): "461f79546009551e5e7adbf50f869abb9449c2ae7666a66a425c7cd3c24acea9",
     ("quality", "Reassert exact source after quality gates"): "953657d26d2eda8490c18e7030c66ddb19aba64a5c8b19808da9a853fd1bfdd2",
     ("macos_arm64", "Assert exact checked-out SHA"): "ff0b148eecdf8603712586a6c4a05e752df0b36b5c97a366760f6cba10e58ddd",
+    ("macos_arm64", "Require updater signing secrets"): "d03a04c4866ac7ecb9eba9d53aabbf92de24f452e6b5448d438d863988e797c4",
     ("macos_arm64", "Reassert exact source before macOS build"): "953657d26d2eda8490c18e7030c66ddb19aba64a5c8b19808da9a853fd1bfdd2",
-    ("macos_arm64", "Verify complete app, sidecars, and DMG"): "4122545856cbbcdec2d7f835c005007d723ffb2432ee18bb1173acc10453123b",
+    ("macos_arm64", "Verify complete app, sidecars, DMG, and signed updater"): "17dabc0d92b8958c44f315d7c874f4db97ae3efe1ced73d7994e8654e42e80fe",
     ("macos_arm64", "Reassert exact source after macOS packaging"): "953657d26d2eda8490c18e7030c66ddb19aba64a5c8b19808da9a853fd1bfdd2",
-    ("macos_arm64", "Create macOS exact-SHA receipt"): "67d51abe727feb1d2593927c70e68d9c5c2f64a7db42ab1907dc3e40a4e44ab7",
+    ("macos_arm64", "Create and sign macOS updater attestation"): "5fd8f5af4dcf6a11740d531a39cd716f93478fb65bb4b4fcbafd88191d245d4a",
+    ("macos_arm64", "Create macOS exact-SHA receipt"): "06f89a7122f8257ad14b8ae5fa59426e87ecbae4936f0db69a37ee6cc748bd2a",
     ("windows_x64", "Assert exact checked-out SHA"): "ff0b148eecdf8603712586a6c4a05e752df0b36b5c97a366760f6cba10e58ddd",
+    ("windows_x64", "Require updater signing secrets"): "d03a04c4866ac7ecb9eba9d53aabbf92de24f452e6b5448d438d863988e797c4",
     ("windows_x64", "Reassert exact source before Windows build"): "953657d26d2eda8490c18e7030c66ddb19aba64a5c8b19808da9a853fd1bfdd2",
-    ("windows_x64", "Build native MSI and NSIS installers"): "3c814b49684a64df810c052dbf021890df348967d5767bb453800fc36518c6ce",
-    ("windows_x64", "Install NSIS and smoke installed app and sidecars"): "3e3909b29d79f338edbe186daf42b341618feb720326eacfac6ea068bf3e8c42",
+    ("windows_x64", "Build native MSI, NSIS, and signed updater artifacts"): "efa3fa9c3659a91dcbeb3b16e95bbb17482e50f5e71ef9ff4f037b69d7ee335f",
+    ("windows_x64", "Install NSIS and smoke installed app, sidecars, and updater artifacts"): "556af3fe7ee52b0dfde26824abf39b589c897782f1a311a8c64a044dc3cf7010",
     ("windows_x64", "Reassert exact source after Windows packaging"): "953657d26d2eda8490c18e7030c66ddb19aba64a5c8b19808da9a853fd1bfdd2",
-    ("windows_x64", "Create Windows exact-SHA receipt"): "e80a5bf08f311dfb353c19c4ada500726ed9c5d8e4f817c513d12e791b19f558",
+    ("windows_x64", "Create and sign Windows updater attestations"): "40c7f2ea8696db15adf49a688a446637df5b1625fe0b39de32502e66af71f2c6",
+    ("windows_x64", "Create Windows exact-SHA receipt"): "0072244797bdcbe7a26f57a5a83e5c2ba880ffa96499f18f4c5affd30b0e54f4",
     ("publish", "Assert exact checked-out SHA"): "b1cd768e31e2924c14421c62357ae200ddee50b2a6c2ddc24618717a3c876267",
     ("publish", "Initialize isolated publish root"): "ab0b76ab253b0497067e6d8650a0fd6b37fb3a0ac72b2ff11d1738a88b46c2dd",
-    ("publish", "Stage and verify the exact release payload"): "69097e2a084dee0d4a0eb313be47e545b7a8ae59abfc9e52dbe0c1eccb659d11",
-    ("publish", "Create and verify SHA256SUMS"): "c205b22264de125ac603558c06b8a93aff726f6eddd8cda07ca7df0862641705",
-    ("publish", "Prepare release notes with provenance"): "e2761070b29f27142a750829e0aa831577a7016690a1012d970637983b54ecbc",
+    ("publish", "Install Minisign verifier"): "444027a1ab2942d223b3e16e286d2de585fdc1175e94e093b012b13aefea2416",
+    ("publish", "Stage and verify the exact release payload"): "4cdd6d245891e535e6f11a29371b4b0c7e343702f36d37f56262387f3523b534",
+    ("publish", "Verify updater signatures against embedded public key"): "d0da4c84101149e7853b764db8f770d25f61b4fa654f9f927fd813bd22604fe5",
+    ("publish", "Write and verify tag-specific updater manifest"): "faef05e038dd082d81e1ec12a8c6f933575e8766e73df1b4ecb28cb794156579",
+    ("publish", "Create and verify SHA256SUMS"): "67975ac408cc96209261e8c397402acaac47e1a689d7572d5634d3b8dabd66d8",
+    ("publish", "Prepare release notes with provenance"): "efa2e3d9cd3b576a5e6ef3f25788a9d2156e0c0a5c8f53d3f8f9a1dbc1bbb5ea",
     ("publish", "Reassert exact source before draft mutation"): "953657d26d2eda8490c18e7030c66ddb19aba64a5c8b19808da9a853fd1bfdd2",
     ("publish", "Revalidate remote tag before draft mutation"): "2eac9a1203d96969b545c9447b9637c8ad16689d2704b32c7e710e9ae4bff47c",
     ("publish", "Create or refresh draft prerelease"): "e3cee76806b604359715ec91cf1a7c6d7c8919e05dd5b5c99f77b98686debc6b",
-    ("publish", "Verify draft target and exact assets"): "440e618009c30184e66a02d4f695bc25af708b09558ec25471e3c52bde417764",
+    ("publish", "Verify draft target and exact assets"): "16b9ac363a7f10417e01332035e2419341f762a46afb586fd2f214641142d0fe",
     ("publish", "Revalidate remote tag before publication"): "89cd8010bf65a4a3d7b85b2666e13eeddc4554e24e53eb700592bd6dc77cea6f",
     ("publish", "Reassert exact source before publication"): "953657d26d2eda8490c18e7030c66ddb19aba64a5c8b19808da9a853fd1bfdd2",
     ("publish", "Verify public release through API and checksums"): "bdd6671280f89cfe71fad7c0eb9fecb24a6f66931910ee5075c5c2e9e96f52fe",
 }
 
 APPROVED_JOB_SHA256 = {
-    "validate": "386c4e21bdcc884a2246eea1d078b12378b25bfef52043e5e9520a2845f51142",
-    "quality": "43599825f68088f3cc744220227267f77454e2c7ce389a52b8aee5a492491eec",
-    "macos_arm64": "f913508e4f041614a967f680515cc0b8779800f0b2a7b4b6ff29f24f4bb1efd2",
-    "windows_x64": "5f012278c20843ba1b38cffb27f3c614716bd92e3fec63a11885b41692be78b5",
-    "publish": "89192ac021d48cc8c8ef17b612a2da666d96c01d195c4e2b58eec24b2cc24d1b",
+    "validate": "36c12ee29b323f04d1ac48b046de6786d130e85bae8e89d831bb64c96f2b5c26",
+    "quality": "54f73cef43a8a808cf481f807cf08fccfa281112cd4c365edd06a1d7d6f68187",
+    "macos_arm64": "1785d765c96278190c25e312c9e610070619e17b7b2b0d922f0bd234501df525",
+    "windows_x64": "7a95b56230b09f34c3abf31a9d1c226e290115934285eab008568ade516145c3",
+    "publish": "945d07ecb63de230c8ba38f27a082a019370ee9e233adf9ae733f32669c231cb",
 }
 
 
@@ -638,8 +652,63 @@ def validate_workflow(workflow: str) -> list[str]:
     if skipped:
         errors.append("required steps are unconditional")
     scalar_strings = _all_scalar_strings(document)
-    if any("secrets." in value for value in scalar_strings):
-        errors.append("no production secrets")
+    signing_env = {
+        "TAURI_SIGNING_PRIVATE_KEY": "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}",
+        "TAURI_SIGNING_PRIVATE_KEY_PASSWORD": "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}",
+    }
+    secret_steps = {
+        ("macos_arm64", "Require updater signing secrets"),
+        ("macos_arm64", "Build ad-hoc Tauri app, DMG, and signed updater"),
+        ("macos_arm64", "Create and sign macOS updater attestation"),
+        ("windows_x64", "Require updater signing secrets"),
+        ("windows_x64", "Build native MSI, NSIS, and signed updater artifacts"),
+        ("windows_x64", "Create and sign Windows updater attestations"),
+    }
+    seen_secret_steps: set[tuple[str, str]] = set()
+    secret_scope_valid = True
+    for job_name, job in structured_jobs.items():
+        if job is None:
+            continue
+        for step in _as_steps(job.get("steps")) or []:
+            step_name = step.get("name")
+            env = _as_mapping(step.get("env"))
+            secret_values = (
+                []
+                if env is None
+                else [value for value in env.values() if "secrets." in str(value)]
+            )
+            if secret_values:
+                key = (job_name, str(step_name))
+                if key not in secret_steps or env != signing_env:
+                    secret_scope_valid = False
+                else:
+                    seen_secret_steps.add(key)
+    actual_secret_scalars = sorted(
+        value for value in scalar_strings if "secrets." in value
+    )
+    expected_secret_scalars = sorted(
+        [signing_env["TAURI_SIGNING_PRIVATE_KEY"]] * 6
+        + [signing_env["TAURI_SIGNING_PRIVATE_KEY_PASSWORD"]] * 6
+    )
+    if not secret_scope_valid or actual_secret_scalars != expected_secret_scalars:
+        errors.append("updater signing secrets limited to guard and build steps")
+    guard_lines = (
+        'test -n "${TAURI_SIGNING_PRIVATE_KEY:-}"',
+        'test -n "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"',
+    )
+    guards_valid = True
+    for job, name in secret_steps:
+        if name != "Require updater signing secrets":
+            continue
+        guard = _structured_step(structured_jobs[job], name)
+        if (
+            guard is None
+            or _as_mapping(guard.get("env")) != signing_env
+            or not _has_code_lines(guard, guard_lines)
+        ):
+            guards_valid = False
+    if seen_secret_steps != secret_steps or not guards_valid:
+        errors.append("updater signing secrets fail closed")
 
     action_pins_valid = True
     has_action = False
@@ -770,19 +839,21 @@ def validate_workflow(workflow: str) -> list[str]:
             'notes = Path("docs/releases") / f"{version}.md"',
             'if versions != {version}:',
             'wix_version = tauri["bundle"]["windows"]["wix"]["version"]',
-            'if wix_version != "1.0.0.3":',
+            'if wix_version != "1.0.0.4":',
         ),
     ):
         errors.append("Cargo, Tauri, and Web versions match tag")
     if not _has_code_lines(
         bind,
         (
+            'if "+" in tag:',
+            'raise SystemExit("SemVer build metadata is unsupported for updater asset URLs")',
             'if SEMVER_RE.fullmatch(tag) is None:',
-            'if version == "1.0.0-beta.3" and not prerelease:',
+            'if version == "1.0.0-beta.4" and not prerelease:',
             'emit("prerelease", "true")',
         ),
     ):
-        errors.append("Beta 3 is a SemVer prerelease")
+        errors.append("SemVer build metadata is unsupported")
     if not _has_code_lines(bind, validate_order[1:5]):
         errors.append("validate binds exact clean checkout")
 
@@ -852,6 +923,8 @@ def validate_workflow(workflow: str) -> list[str]:
         ("Validate Windows and release workflow contracts", ("python3", "-B", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_check_windows_product_ci.py")),
         ("Validate Windows and release workflow contracts", ("python3", "-B", "scripts/check_release_workflow.py")),
         ("Validate Windows and release workflow contracts", ("python3", "-B", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_check_release_workflow.py")),
+        ("Validate Windows and release workflow contracts", ("python3", "-B", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_write_updater_attestation.py")),
+        ("Validate Windows and release workflow contracts", ("python3", "-B", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_write_updater_manifest.py")),
         ("Provisioner unit tests", ("python3", "-B", "-m", "unittest", "discover", "-s", "scripts/tests", "-p", "test_*.py")),
         ("Rust formatting", ("cargo", "fmt", "--all", "--check")),
         ("Rust workspace clippy", ("cargo", "clippy", "--workspace", "--all-targets", "--", "-D", "warnings")),
@@ -893,23 +966,62 @@ def validate_workflow(workflow: str) -> list[str]:
         errors.append("quality pins Ruby Psych before the release validator")
 
     macos = structured_jobs["macos_arm64"]
-    mac_build = _structured_step(macos, "Build ad-hoc Tauri app and DMG")
-    mac_verify = _structured_step(macos, "Verify complete app, sidecars, and DMG")
+    mac_build = _structured_step(
+        macos, "Build ad-hoc Tauri app, DMG, and signed updater"
+    )
+    mac_verify = _structured_step(
+        macos, "Verify complete app, sidecars, DMG, and signed updater"
+    )
+    mac_attestation = _structured_step(
+        macos, "Create and sign macOS updater attestation"
+    )
     mac_receipt = _structured_step(macos, "Create macOS exact-SHA receipt")
     mac_uploads = _action_step(macos, "actions/upload-artifact")
     mac_ok = (
         macos is not None
         and macos.get("runs-on") == "macos-14"
         and _as_mapping(macos.get("env", {})).get("APPLE_SIGNING_IDENTITY") == "-"
+        and mac_build is not None
         and _has_command(_structured_step(macos, "Provision checksum-pinned ARM64 FFmpeg sidecars"), ("python3", "scripts/provision_ffmpeg_sidecars.py", "--target", "aarch64-apple-darwin"))
         and _has_command(_structured_step(macos, "Install locked Web dependencies"), ("pnpm", "-C", "web", "install", "--frozen-lockfile"))
-        and _has_command(mac_build, ("./web/node_modules/.bin/tauri", "build", "--ci", "--target", "aarch64-apple-darwin", "--bundles", "app,dmg", "--config", '{"bundle":{"macOS":{"signingIdentity":"-"}}}'))
+        and _as_mapping(mac_build.get("env")) == signing_env
+        and _has_command(mac_build, ("./web/node_modules/.bin/tauri", "build", "--ci", "--target", "aarch64-apple-darwin", "--bundles", "app,dmg", "--config", '{"bundle":{"createUpdaterArtifacts":true,"macOS":{"signingIdentity":"-"}}}'))
         and _has_command(mac_verify, ("codesign", "--verify", "--deep", "--strict", "--verbose=2", "$app"))
         and _has_command(mac_verify, ("hdiutil", "verify", "$dmg"))
         and _has_command(mac_verify, ("hdiutil", "attach", "$dmg", "-nobrowse", "-readonly", "-mountpoint", "$mountpoint"))
         and _has_command(mac_verify, ("ruby", "scripts/tests/packaged-sidecars-test.rb", "--name", "packaged_macos_windows_sidecars_resolve_and_execute", "--package", "$mounted_app"))
-        and _has_code_lines(mac_verify, ("codesign -dv --verbose=4 \"$app\" 2>&1 | grep -F 'Signature=adhoc'",))
-        and _has_code_lines(mac_receipt, ('"schema": "opentake-macos-arm64-receipt-v1",', '"source_sha": os.environ["RECEIPT_SHA"],', '"signature_mode": "ad-hoc",', '"sha256": sha256(artifact),', '"bytes": artifact.stat().st_size,'))
+        and _has_code_lines(mac_verify, ("codesign -dv --verbose=4 \"$app\" 2>&1 | grep -F 'Signature=adhoc'", 'test "$updater_signature" = "$updater.sig"', 'test -s "$updater"', 'test -s "$updater_signature"'))
+        and mac_attestation is not None
+        and _as_mapping(mac_attestation.get("env")) == signing_env
+        and _has_command(
+            mac_attestation,
+            (
+                "python3", "scripts/write_updater_attestation.py",
+                "--repository", "appergb/OpenTake",
+                "--tag", "$RELEASE_TAG",
+                "--version", "$RELEASE_VERSION",
+                "--source-sha", "$TARGET_SHA",
+                "--platform", "darwin-aarch64",
+                "--artifact", "$updater",
+                "--output", "$attestation",
+            ),
+        )
+        and _has_command(
+            mac_attestation,
+            ("./web/node_modules/.bin/tauri", "signer", "sign", "$attestation"),
+        )
+        and _has_code_lines(
+            mac_attestation,
+            ('attestation="$updater.attestation.json"', 'test -s "$attestation.sig"'),
+        )
+        and _has_code_lines(mac_receipt, ('"schema": "opentake-macos-arm64-receipt-v2",', '"source_sha": os.environ["RECEIPT_SHA"],', '"platform_signing_mode": "ad-hoc",', '"updater_signature_mode": "tauri-minisign",', '"sha256": sha256(artifact),', '"bytes": artifact.stat().st_size,'))
+        and _has_code_lines(
+            mac_receipt,
+            (
+                'if attestations[0] != Path(f"{updaters[0]}.attestation.json"):',
+                'if attestation_signatures[0] != Path(f"{attestations[0]}.sig"):',
+            ),
+        )
         and len(mac_uploads) == 1
         and mac_uploads[0][1].get("uses") == f"actions/upload-artifact@{PINNED_ACTIONS['actions/upload-artifact']}"
     )
@@ -917,8 +1029,16 @@ def validate_workflow(workflow: str) -> list[str]:
         errors.append("complete ad-hoc macOS ARM64 bundle gate")
 
     windows = structured_jobs["windows_x64"]
-    windows_build = _structured_step(windows, "Build native MSI and NSIS installers")
-    windows_install = _structured_step(windows, "Install NSIS and smoke installed app and sidecars")
+    windows_build = _structured_step(
+        windows, "Build native MSI, NSIS, and signed updater artifacts"
+    )
+    windows_install = _structured_step(
+        windows,
+        "Install NSIS and smoke installed app, sidecars, and updater artifacts",
+    )
+    windows_attestation = _structured_step(
+        windows, "Create and sign Windows updater attestations"
+    )
     windows_receipt = _structured_step(windows, "Create Windows exact-SHA receipt")
     windows_uploads = _action_step(windows, "actions/upload-artifact")
     windows_commands = (
@@ -936,14 +1056,62 @@ def validate_workflow(workflow: str) -> list[str]:
     )
     windows_ok = windows_ok and _has_command(
         windows_build,
-        ("&", ".\\web\\node_modules\\.bin\\tauri.cmd", "build", "--ci", "--bundles", "msi,nsis"),
+        ("&", ".\\web\\node_modules\\.bin\\tauri.cmd", "build", "--ci", "--bundles", "msi,nsis", "--config", "'{\"bundle\":{\"createUpdaterArtifacts\":true}}'"),
         powershell=True,
+    )
+    windows_ok = windows_ok and windows_build is not None and _as_mapping(
+        windows_build.get("env")
+    ) == signing_env
+    windows_ok = (
+        windows_ok
+        and windows_attestation is not None
+        and _as_mapping(windows_attestation.get("env")) == signing_env
+        and _has_command(
+            windows_attestation,
+            (
+                "python", "scripts/write_updater_attestation.py",
+                "--repository", "appergb/OpenTake",
+                "--tag", "$env:RELEASE_TAG",
+                "--version", "$env:RELEASE_VERSION",
+                "--source-sha", "$env:TARGET_SHA",
+                "--platform", "windows-x86_64-msi",
+                "--artifact", "$msi[0].FullName",
+                "--output", "$msiAttestation",
+            ),
+            powershell=True,
+        )
+        and _has_command(
+            windows_attestation,
+            ("&", ".\\web\\node_modules\\.bin\\tauri.cmd", "signer", "sign", "$msiAttestation"),
+            powershell=True,
+        )
+        and _has_command(
+            windows_attestation,
+            (
+                "python", "scripts/write_updater_attestation.py",
+                "--repository", "appergb/OpenTake",
+                "--tag", "$env:RELEASE_TAG",
+                "--version", "$env:RELEASE_VERSION",
+                "--source-sha", "$env:TARGET_SHA",
+                "--platform", "windows-x86_64-nsis",
+                "--artifact", "$nsis[0].FullName",
+                "--output", "$nsisAttestation",
+            ),
+            powershell=True,
+        )
+        and _has_command(
+            windows_attestation,
+            ("&", ".\\web\\node_modules\\.bin\\tauri.cmd", "signer", "sign", "$nsisAttestation"),
+            powershell=True,
+        )
     )
     windows_ok = windows_ok and _has_code_lines(
         windows_install,
         (
             "if ($msi.Count -ne 1) { throw 'expected exactly one MSI installer' }",
             "if ($installer.Count -ne 1) { throw 'expected exactly one NSIS installer' }",
+            "if ($msiSignature.Count -ne 1) { throw 'expected exactly one MSI updater signature' }",
+            "if ($nsisSignature.Count -ne 1) { throw 'expected exactly one NSIS updater signature' }",
             "$app = Start-Process -FilePath $application -PassThru",
             "--name packaged_macos_windows_sidecars_resolve_and_execute `",
         ),
@@ -951,10 +1119,16 @@ def validate_workflow(workflow: str) -> list[str]:
     windows_ok = windows_ok and _has_code_lines(
         windows_receipt,
         (
-            "schema = 'opentake-windows-release-receipt-v1'",
+            "schema = 'opentake-windows-release-receipt-v2'",
             "source_sha = $env:RECEIPT_SHA",
+            "platform_signing_mode = 'unsigned-authenticode'",
+            "updater_signature_mode = 'tauri-minisign'",
             "sha256 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()",
             "bytes = $_.Length",
+            "if ($msiAttestation[0].FullName -ne \"$($msi[0].FullName).attestation.json\") { throw 'MSI attestation is not the installer companion' }",
+            "if ($msiAttestationSignature[0].FullName -ne \"$($msiAttestation[0].FullName).sig\") { throw 'MSI attestation signature is not its companion' }",
+            "if ($nsisAttestation[0].FullName -ne \"$($nsis[0].FullName).attestation.json\") { throw 'NSIS attestation is not the installer companion' }",
+            "if ($nsisAttestationSignature[0].FullName -ne \"$($nsisAttestation[0].FullName).sig\") { throw 'NSIS attestation signature is not its companion' }",
         ),
     )
     windows_ok = windows_ok and len(windows_uploads) == 1 and windows_uploads[0][1].get(
@@ -962,6 +1136,157 @@ def validate_workflow(workflow: str) -> list[str]:
     ) == f"actions/upload-artifact@{PINNED_ACTIONS['actions/upload-artifact']}"
     if not windows_ok:
         errors.append("complete Windows x64 installer gate")
+
+    mac_upload_with = (
+        _with_mapping(mac_uploads[0][1]) if len(mac_uploads) == 1 else None
+    )
+    windows_upload_with = (
+        _with_mapping(windows_uploads[0][1]) if len(windows_uploads) == 1 else None
+    )
+    expected_mac_upload = {
+        "name": "opentake-macos-arm64-${{ needs.validate.outputs.source_sha }}",
+        "path": (
+            "target/aarch64-apple-darwin/release/bundle/dmg/*.dmg\n"
+            "target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz\n"
+            "target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig\n"
+            "target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz.attestation.json\n"
+            "target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz.attestation.json.sig\n"
+            "macos-arm64-receipt.json\n"
+        ),
+        "if-no-files-found": "error",
+        "retention-days": 30,
+    }
+    expected_windows_upload = {
+        "name": "opentake-windows-x64-${{ needs.validate.outputs.source_sha }}",
+        "path": (
+            "target/release/bundle/msi/*.msi\n"
+            "target/release/bundle/msi/*.msi.sig\n"
+            "target/release/bundle/msi/*.msi.attestation.json\n"
+            "target/release/bundle/msi/*.msi.attestation.json.sig\n"
+            "target/release/bundle/nsis/*.exe\n"
+            "target/release/bundle/nsis/*.exe.sig\n"
+            "target/release/bundle/nsis/*.exe.attestation.json\n"
+            "target/release/bundle/nsis/*.exe.attestation.json.sig\n"
+            "windows-x64-receipt.json\n"
+        ),
+        "if-no-files-found": "error",
+        "retention-days": 30,
+    }
+    if (
+        mac_upload_with != expected_mac_upload
+        or windows_upload_with != expected_windows_upload
+    ):
+        errors.append("exact signed updater artifact uploads")
+    upload_paths = "\n".join(
+        str(mapping.get("path", ""))
+        for mapping in (mac_upload_with, windows_upload_with)
+        if mapping is not None
+    ).lower()
+    if any(
+        marker in upload_paths
+        for marker in ("*.key", "*.pem", "private_key", "signing_private")
+    ):
+        errors.append("private updater signing material is never uploaded")
+    signed_bundles_ok = (
+        mac_build is not None
+        and _as_mapping(mac_build.get("env")) == signing_env
+        and _has_command(
+            mac_build,
+            (
+                "./web/node_modules/.bin/tauri",
+                "build",
+                "--ci",
+                "--target",
+                "aarch64-apple-darwin",
+                "--bundles",
+                "app,dmg",
+                "--config",
+                '{"bundle":{"createUpdaterArtifacts":true,"macOS":{"signingIdentity":"-"}}}',
+            ),
+        )
+        and windows_build is not None
+        and _as_mapping(windows_build.get("env")) == signing_env
+        and _has_command(
+            windows_build,
+            (
+                "&",
+                ".\\web\\node_modules\\.bin\\tauri.cmd",
+                "build",
+                "--ci",
+                "--bundles",
+                "msi,nsis",
+                "--config",
+                "'{\"bundle\":{\"createUpdaterArtifacts\":true}}'",
+            ),
+            powershell=True,
+        )
+    )
+    if not signed_bundles_ok:
+        errors.append("signed Tauri v2 updater bundles")
+
+    signed_attestations_ok = (
+        mac_attestation is not None
+        and _as_mapping(mac_attestation.get("env")) == signing_env
+        and _has_command(
+            mac_attestation,
+            (
+                "python3", "scripts/write_updater_attestation.py",
+                "--repository", "appergb/OpenTake",
+                "--tag", "$RELEASE_TAG",
+                "--version", "$RELEASE_VERSION",
+                "--source-sha", "$TARGET_SHA",
+                "--platform", "darwin-aarch64",
+                "--artifact", "$updater",
+                "--output", "$attestation",
+            ),
+        )
+        and _has_command(
+            mac_attestation,
+            ("./web/node_modules/.bin/tauri", "signer", "sign", "$attestation"),
+        )
+        and windows_attestation is not None
+        and _as_mapping(windows_attestation.get("env")) == signing_env
+        and _has_command(
+            windows_attestation,
+            (
+                "python", "scripts/write_updater_attestation.py",
+                "--repository", "appergb/OpenTake",
+                "--tag", "$env:RELEASE_TAG",
+                "--version", "$env:RELEASE_VERSION",
+                "--source-sha", "$env:TARGET_SHA",
+                "--platform", "windows-x86_64-msi",
+                "--artifact", "$msi[0].FullName",
+                "--output", "$msiAttestation",
+            ),
+            powershell=True,
+        )
+        and _has_command(
+            windows_attestation,
+            ("&", ".\\web\\node_modules\\.bin\\tauri.cmd", "signer", "sign", "$msiAttestation"),
+            powershell=True,
+        )
+        and _has_command(
+            windows_attestation,
+            (
+                "python", "scripts/write_updater_attestation.py",
+                "--repository", "appergb/OpenTake",
+                "--tag", "$env:RELEASE_TAG",
+                "--version", "$env:RELEASE_VERSION",
+                "--source-sha", "$env:TARGET_SHA",
+                "--platform", "windows-x86_64-nsis",
+                "--artifact", "$nsis[0].FullName",
+                "--output", "$nsisAttestation",
+            ),
+            powershell=True,
+        )
+        and _has_command(
+            windows_attestation,
+            ("&", ".\\web\\node_modules\\.bin\\tauri.cmd", "signer", "sign", "$nsisAttestation"),
+            powershell=True,
+        )
+    )
+    if not signed_attestations_ok:
+        errors.append("signed updater attestations bind release identity and payload")
 
     if publish is None or publish.get("needs") != [
         "validate", "quality", "macos_arm64", "windows_x64"
@@ -997,24 +1322,250 @@ def validate_workflow(workflow: str) -> list[str]:
     stage = _structured_step(publish, "Stage and verify the exact release payload")
     stage_commands = (
         ("test", "${#dmgs[@]}", "-eq", "1"),
+        ("test", "${#mac_updaters[@]}", "-eq", "1"),
+        ("test", "${#mac_signatures[@]}", "-eq", "1"),
+        ("test", "${#mac_attestations[@]}", "-eq", "1"),
+        ("test", "${#mac_attestation_signatures[@]}", "-eq", "1"),
         ("test", "${#msis[@]}", "-eq", "1"),
         ("test", "${#exes[@]}", "-eq", "1"),
+        ("test", "${#windows_signatures[@]}", "-eq", "2"),
+        ("test", "${#msi_attestations[@]}", "-eq", "1"),
+        ("test", "${#msi_attestation_signatures[@]}", "-eq", "1"),
+        ("test", "${#nsis_attestations[@]}", "-eq", "1"),
+        ("test", "${#nsis_attestation_signatures[@]}", "-eq", "1"),
         ("test", "${#mac_receipts[@]}", "-eq", "1"),
         ("test", "${#windows_receipts[@]}", "-eq", "1"),
     )
-    if not all(_has_command(stage, command) for command in stage_commands) or not _has_code_lines(
-        stage, ('expected = {"dmg": 1, "msi": 1, "exe": 1, "json": 2}',)
-    ):
+    if not all(_has_command(stage, command) for command in stage_commands):
         errors.append("strict release asset counts")
+    signed_stage_commands = stage_commands[1:5] + stage_commands[7:12]
+    manifest = _structured_step(
+        publish, "Write and verify tag-specific updater manifest"
+    )
+    manifest_counts = (
+        ("test", "${#mac_updaters[@]}", "-eq", "1"),
+        ("test", "${#mac_signatures[@]}", "-eq", "1"),
+        ("test", "${#mac_attestations[@]}", "-eq", "1"),
+        ("test", "${#mac_attestation_signatures[@]}", "-eq", "1"),
+        ("test", "${#msi_installers[@]}", "-eq", "1"),
+        ("test", "${#msi_signatures[@]}", "-eq", "1"),
+        ("test", "${#msi_attestations[@]}", "-eq", "1"),
+        ("test", "${#msi_attestation_signatures[@]}", "-eq", "1"),
+        ("test", "${#nsis_installers[@]}", "-eq", "1"),
+        ("test", "${#nsis_signatures[@]}", "-eq", "1"),
+        ("test", "${#nsis_attestations[@]}", "-eq", "1"),
+        ("test", "${#nsis_attestation_signatures[@]}", "-eq", "1"),
+        ("test", "${#manifests[@]}", "-eq", "1"),
+    )
+    if not all(
+        _has_command(stage, command) for command in signed_stage_commands
+    ) or not all(_has_command(manifest, command) for command in manifest_counts):
+        errors.append("strict signed updater asset counts")
+
+    manifest_command = (
+        "python3",
+        "scripts/write_updater_manifest.py",
+        "--repository",
+        "appergb/OpenTake",
+        "--tag",
+        "$RELEASE_TAG",
+        "--version",
+        "$RELEASE_VERSION",
+        "--source-sha",
+        "$RELEASE_SHA",
+        "--darwin-artifact",
+        "${mac_updaters[0]}",
+        "--darwin-signature",
+        "${mac_signatures[0]}",
+        "--darwin-attestation",
+        "${mac_attestations[0]}",
+        "--darwin-attestation-signature",
+        "${mac_attestation_signatures[0]}",
+        "--windows-msi-artifact",
+        "${msi_installers[0]}",
+        "--windows-msi-signature",
+        "${msi_signatures[0]}",
+        "--windows-msi-attestation",
+        "${msi_attestations[0]}",
+        "--windows-msi-attestation-signature",
+        "${msi_attestation_signatures[0]}",
+        "--windows-nsis-artifact",
+        "${nsis_installers[0]}",
+        "--windows-nsis-signature",
+        "${nsis_signatures[0]}",
+        "--windows-nsis-attestation",
+        "${nsis_attestations[0]}",
+        "--windows-nsis-attestation-signature",
+        "${nsis_attestation_signatures[0]}",
+        "--output",
+        "$PUBLISH_ROOT/assets/updater-$RELEASE_TAG.json",
+    )
+    fixed_manifest_ok = (
+        _has_code_lines(bind, ('test "$GITHUB_REPOSITORY" = "appergb/OpenTake"',))
+        and _has_command(manifest, manifest_command)
+        and _has_code_lines(
+            manifest,
+            (
+                'test "${manifests[0]}" = "$PUBLISH_ROOT/assets/updater-$RELEASE_TAG.json"',
+            ),
+        )
+    )
+    if not fixed_manifest_ok:
+        errors.append("fixed HTTPS exact-tag updater manifest")
+
+    receipts_agree = _has_code_lines(
+        stage,
+        (
+            'if mac_signatures[0] != Path(f"{mac_updaters[0]}.sig"):',
+            'f"{msis[0].name}.sig",',
+            'f"{exes[0].name}.sig",',
+            '"opentake-macos-arm64-receipt-v2",',
+            '"opentake-windows-release-receipt-v2",',
+            'if entry.get("sha256") != sha256(artifact):',
+            'if entry.get("bytes") != artifact.stat().st_size:',
+            'if receipt.get("updater_signature_mode") != "tauri-minisign":',
+            'if attestation.get("sourceSha") != source_sha:',
+            'if attestation.get("sha256") != sha256(artifact):',
+            'if attestation != expected:',
+            'msi_attestations[0], msis[0], "windows-x86_64-msi"',
+            'nsis_attestations[0], exes[0], "windows-x86_64-nsis"',
+        ),
+    ) and _has_command(manifest, manifest_command)
+    if not receipts_agree:
+        errors.append("updater receipts, digests, sizes, and signatures agree")
+    attestations_bind = _has_code_lines(
+        stage,
+        (
+            '"schemaVersion": 1,',
+            '"repository": "appergb/OpenTake",',
+            '"tag": release_tag,',
+            '"version": release_version,',
+            '"sourceSha": source_sha,',
+            '"platform": platform,',
+            '"assetName": artifact.name,',
+            '"size": artifact.stat().st_size,',
+            '"sha256": sha256(artifact),',
+            'type(attestation["schemaVersion"]) is not int',
+            'or type(attestation["size"]) is not int',
+            'or attestation["size"] <= 0',
+            'or any(type(attestation[field]) is not str for field in string_fields)',
+            'if attestation.get("sourceSha") != source_sha:',
+            'if attestation.get("sha256") != sha256(artifact):',
+            'if attestation != expected:',
+            'if path.read_text(encoding="utf-8") != canonical:',
+        ),
+    ) and _has_command(manifest, manifest_command)
+    if not attestations_bind:
+        errors.append("attestations bind exact release identity and updater bytes")
+
+    install_minisign = _structured_step(publish, "Install Minisign verifier")
+    verify_signatures = _structured_step(
+        publish, "Verify updater signatures against embedded public key"
+    )
+    signatures_verify = (
+        _has_command(install_minisign, ("sudo", "apt-get", "update"))
+        and _has_command(
+            install_minisign,
+            (
+                "sudo",
+                "apt-get",
+                "install",
+                "--yes",
+                "--no-install-recommends",
+                "minisign",
+            ),
+        )
+        and _has_command(
+            install_minisign, ("command", "-v", "minisign", ">/dev/null")
+        )
+        and _has_code_lines(
+            verify_signatures,
+            (
+                'pubkey = config["plugins"]["updater"]["pubkey"]',
+                'return base64.b64decode(value, validate=True)',
+                '"macos-attestation.sig",',
+                '"msi-attestation.sig",',
+                '"nsis-attestation.sig",',
+                'test "${mac_signatures[0]}" = "${mac_updaters[0]}.sig"',
+                'test "${msi_signatures[0]}" = "${msis[0]}.sig"',
+                'test "${exe_signatures[0]}" = "${exes[0]}.sig"',
+                'test "${mac_attestation_signatures[0]}" = "${mac_attestations[0]}.sig"',
+                'test "${msi_attestation_signatures[0]}" = "${msi_attestations[0]}.sig"',
+                'test "${nsis_attestation_signatures[0]}" = "${nsis_attestations[0]}.sig"',
+            ),
+        )
+        and _has_command(
+            verify_signatures,
+            (
+                "minisign",
+                "-Vm",
+                "${mac_updaters[0]}",
+                "-p",
+                "$verification_root/updater.pub",
+                "-x",
+                "$verification_root/macos.sig",
+            ),
+        )
+        and _has_command(
+            verify_signatures,
+            (
+                "minisign",
+                "-Vm",
+                "${msis[0]}",
+                "-p",
+                "$verification_root/updater.pub",
+                "-x",
+                "$verification_root/msi.sig",
+            ),
+        )
+        and _has_command(
+            verify_signatures,
+            (
+                "minisign",
+                "-Vm",
+                "${exes[0]}",
+                "-p",
+                "$verification_root/updater.pub",
+                "-x",
+                "$verification_root/nsis.sig",
+            ),
+        )
+        and _has_command(
+            verify_signatures,
+            (
+                "minisign", "-Vm", "${mac_attestations[0]}",
+                "-p", "$verification_root/updater.pub",
+                "-x", "$verification_root/macos-attestation.sig",
+            ),
+        )
+        and _has_command(
+            verify_signatures,
+            (
+                "minisign", "-Vm", "${msi_attestations[0]}",
+                "-p", "$verification_root/updater.pub",
+                "-x", "$verification_root/msi-attestation.sig",
+            ),
+        )
+        and _has_command(
+            verify_signatures,
+            (
+                "minisign", "-Vm", "${nsis_attestations[0]}",
+                "-p", "$verification_root/updater.pub",
+                "-x", "$verification_root/nsis-attestation.sig",
+            ),
+        )
+    )
+    if not signatures_verify:
+        errors.append("updater signatures verify against embedded public key")
 
     checksum = _structured_step(publish, "Create and verify SHA256SUMS")
     checksum_lines = (
         'payload_names=("${asset_names[@]}")',
-        'test "${#payload_names[@]}" -eq 5',
+        'test "${#payload_names[@]}" -eq 16',
         'sha256sum "${payload_names[@]}" > SHA256SUMS',
-        'test "$(wc -l < SHA256SUMS | tr -d \' \')" -eq 5',
+        'test "$(wc -l < SHA256SUMS | tr -d \' \')" -eq 16',
         'sha256sum --check SHA256SUMS',
-        'test "$(wc -l < "$PUBLISH_ROOT/expected-assets.txt" | tr -d \' \')" -eq 6',
+        'test "$(wc -l < "$PUBLISH_ROOT/expected-assets.txt" | tr -d \' \')" -eq 17',
     )
     if not _has_code_lines(checksum, checksum_lines):
         errors.append("SHA256SUMS covers and verifies every payload")
@@ -1065,9 +1616,33 @@ def validate_workflow(workflow: str) -> list[str]:
         errors.append("draft payload upload supports failed-run retry")
     if not (
         _has_command(inspect_draft, ("python3", "scripts/check_release_workflow.py", "resolve-release-state", "--input", "$PUBLISH_ROOT/draft-release-graphql.json", "--tag", "$RELEASE_TAG", "--sha", "$RELEASE_SHA", "--output", "$PUBLISH_ROOT/draft-state.json"))
-        and _has_code_lines(inspect_draft, ('test "$(jq -r \'.action\' "$PUBLISH_ROOT/draft-state.json")" = "refresh"', 'cmp "$PUBLISH_ROOT/expected-assets.txt" "$PUBLISH_ROOT/draft-assets.txt"', "jq -e '.asset_sizes | length == 6 and all(. > 0)' \"$PUBLISH_ROOT/draft-state.json\" >/dev/null"))
+        and _has_code_lines(inspect_draft, ('test "$(jq -r \'.action\' "$PUBLISH_ROOT/draft-state.json")" = "refresh"', 'cmp "$PUBLISH_ROOT/expected-assets.txt" "$PUBLISH_ROOT/draft-assets.txt"', "jq -e '.asset_sizes | length == 17 and all(. > 0)' \"$PUBLISH_ROOT/draft-state.json\" >/dev/null"))
     ):
         errors.append("draft API verification")
+    draft_payload_verified = (
+        _has_code_lines(
+            inspect_draft,
+            (
+                "if remote_sizes != local_sizes:",
+                'cmp "$PUBLISH_ROOT/expected-assets.txt" "$PUBLISH_ROOT/verified-draft-assets.txt"',
+                'cmp "$PUBLISH_ROOT/assets/SHA256SUMS" "$PUBLISH_ROOT/verified-draft/SHA256SUMS"',
+                "sha256sum --check SHA256SUMS",
+            ),
+        )
+        and _has_command(
+            inspect_draft,
+            (
+                "gh",
+                "release",
+                "download",
+                "$RELEASE_TAG",
+                "--dir",
+                "$PUBLISH_ROOT/verified-draft",
+            ),
+        )
+    )
+    if not draft_payload_verified:
+        errors.append("draft assets verified by exact name, size, and SHA-256")
 
     def remote_rebind_ok(step: dict[str, object] | None, output: str) -> bool:
         return _has_command(
@@ -1104,7 +1679,8 @@ def validate_workflow(workflow: str) -> list[str]:
         (
             "- Source commit: \\`$RELEASE_SHA\\`",
             "- GitHub Actions run: [$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)",
-            "- Signing limits: the macOS asset uses ad-hoc signing only; it is not Developer ID signed or notarized. Windows installers are not claimed to be Authenticode-signed.",
+            "- Updater trust: updater packages are signed with the dedicated Tauri updater key; the private key is supplied only from GitHub Actions secrets and is never published.",
+            "- Platform signing limits: the macOS app uses ad-hoc signing only; it is not Developer ID signed or notarized. Windows installers are not Authenticode-signed.",
         ),
     ):
         errors.append("release notes record source, run, and signing limits")
@@ -1136,11 +1712,11 @@ def validate_repository_metadata(repository_root: Path) -> list[str]:
     except (KeyError, OSError, TypeError, UnicodeError, ValueError):
         return ["readable Cargo, Tauri, and Web version metadata"]
 
-    if versions != {"1.0.0-beta.3"}:
-        errors.append("repository metadata is OpenTake 1.0.0-beta.3")
-    if wix_version != "1.0.0.3":
-        errors.append("Windows installer version is 1.0.0.3")
-    notes = repository_root / "docs" / "releases" / "1.0.0-beta.3.md"
+    if versions != {"1.0.0-beta.4"}:
+        errors.append("repository metadata is OpenTake 1.0.0-beta.4")
+    if wix_version != "1.0.0.4":
+        errors.append("Windows installer version is 1.0.0.4")
+    notes = repository_root / "docs" / "releases" / "1.0.0-beta.4.md"
     try:
         notes_missing = not notes.is_file() or not notes.read_text(
             encoding="utf-8"
@@ -1148,7 +1724,7 @@ def validate_repository_metadata(repository_root: Path) -> list[str]:
     except (OSError, UnicodeError):
         notes_missing = True
     if notes_missing:
-        errors.append("Beta 3 release notes exist")
+        errors.append("Beta 4 release notes exist")
     return errors
 
 

@@ -173,7 +173,7 @@ fn windows_bundle_uses_the_pure_rust_ort_backend() {
         media_manifest.contains("features = [\"std\", \"ndarray\", \"alternative-backend\"]"),
         "Windows ort must not link the native ONNX Runtime"
     );
-    assert!(media_manifest.contains("version = \"=0.1.0\""));
+    assert!(media_manifest.contains("version = \"=0.2.0\""));
 
     let config = windows_config();
     let resources = config["bundle"]["resources"]

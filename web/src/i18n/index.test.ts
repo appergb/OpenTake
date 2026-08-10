@@ -40,3 +40,11 @@ it("defaults_zh_cn_supports_en_and_preserves_unknown_named_placeholders", async 
   expect(invalid.useI18nStore.getState().locale).toBe("zh-CN");
   expect(localStorage.getItem("locale")).toBeNull();
 });
+
+it("formats the video export type with the selected codec container", async () => {
+  const runtime = await freshRuntime();
+  expect(runtime.t("export.mode.video", { ext: "mov" })).toBe("视频 (.mov)");
+
+  runtime.useI18nStore.getState().setLocale("en");
+  expect(runtime.t("export.mode.video", { ext: "mov" })).toBe("Video (.mov)");
+});

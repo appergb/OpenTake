@@ -72,7 +72,12 @@ fn read_source(path: &Path) -> Result<Vec<u8>, String> {
 /// Validate an untrusted `.cube`, publish it by content hash inside the active
 /// bundle, and return the path-free authored reference for a later `SetLut`.
 #[tauri::command]
-pub fn import_lut(core: State<'_, AppCore>, path: String) -> Result<LutReference, String> {
+pub fn import_lut(
+    core: State<'_, AppCore>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
+    path: String,
+) -> Result<LutReference, String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
     import_lut_impl(&core, &path)
 }
 

@@ -278,7 +278,9 @@ pub fn search_model_status(media: State<'_, MediaState>) -> SearchModelStatusDto
 pub async fn download_search_model(
     app: AppHandle,
     media: State<'_, MediaState>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
 ) -> Result<SearchModelStatusDto, String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
     let models_dir = media.engine().models_dir().to_path_buf();
     let manifest = search_config::manifest();
     let base_url = search_config::MODEL_DOWNLOAD_BASE_URL;
@@ -351,9 +353,11 @@ pub fn search_index_start(
     app: AppHandle,
     core: State<'_, AppCore>,
     media: State<'_, MediaState>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
     expected_project_epoch: u64,
     expected_project_path: String,
 ) -> Result<SearchIndexStatusDto, String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
     let handle = with_verified_index_assets(
         &core,
         expected_project_epoch,

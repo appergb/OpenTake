@@ -24,6 +24,9 @@ const dialogMocks = vi.hoisted(() => ({
 
 vi.mock("../../lib/api", () => ({
   isTauri: false,
+  checkForAppUpdate: vi.fn().mockResolvedValue(null),
+  closeAppUpdate: vi.fn().mockResolvedValue(undefined),
+  installAppUpdate: vi.fn().mockResolvedValue(undefined),
   getWaveform: vi.fn().mockResolvedValue(null),
   preloadMedia: vi.fn().mockResolvedValue("cached"),
   generateThumbnail: vi.fn().mockResolvedValue(null),

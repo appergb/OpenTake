@@ -60,10 +60,16 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
 
     def test_validation_must_bind_windows_installer_version(self) -> None:
         mutated = self.mutate(
+            'if wix_version != "1.0.0.4":',
             'if wix_version != "1.0.0.3":',
-            'if wix_version != "1.0.0.2":',
         )
         self.assert_rejected(mutated, "Cargo, Tauri, and Web versions match tag")
+
+    def test_release_tag_must_reject_semver_build_metadata(self) -> None:
+        guard = '          if "+" in tag:\n'
+        self.assertEqual(1, WORKFLOW.count(guard))
+        mutated = self.mutate(guard, '          if False:\n')
+        self.assert_rejected(mutated, "SemVer build metadata is unsupported")
 
     def test_publish_must_depend_on_every_gate(self) -> None:
         mutated = self.mutate(
@@ -79,6 +85,235 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assert_rejected(mutated, "strict release asset counts")
 
+    def test_both_build_jobs_require_private_key_and_password_secrets(self) -> None:
+        private_key = (
+            "          TAURI_SIGNING_PRIVATE_KEY: "
+            "${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}\n"
+        )
+        password = (
+            "          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: "
+            "${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}\n"
+        )
+        self.assertEqual(6, WORKFLOW.count(private_key))
+        self.assertEqual(6, WORKFLOW.count(password))
+        for old, new in (
+            (private_key, "          TAURI_SIGNING_PRIVATE_KEY: ''\n"),
+            (password, "          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''\n"),
+        ):
+            self.assert_rejected(
+                self.mutate(old, new), "updater signing secrets fail closed"
+            )
+
+    def test_updater_signing_secret_guard_checks_nonempty_values(self) -> None:
+        guard = (
+            '          test -n "${TAURI_SIGNING_PRIVATE_KEY:-}"\n'
+            '          test -n "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"\n'
+        )
+        self.assertEqual(2, WORKFLOW.count(guard))
+        mutated = self.mutate(
+            '          test -n "${TAURI_SIGNING_PRIVATE_KEY:-}"\n',
+            '          test -z "${TAURI_SIGNING_PRIVATE_KEY:-}"\n',
+        )
+        self.assert_rejected(mutated, "updater signing secrets fail closed")
+
+    def test_bundlers_cannot_disable_signed_tauri_v2_updater_artifacts(self) -> None:
+        self.assertEqual(2, WORKFLOW.count('"createUpdaterArtifacts":true'))
+        mutated = self.mutate(
+            '"createUpdaterArtifacts":true', '"createUpdaterArtifacts":false'
+        )
+        self.assert_rejected(mutated, "signed Tauri v2 updater bundles")
+
+    def test_platform_uploads_require_exact_updater_packages_and_signatures(self) -> None:
+        for path in (
+            "target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz\n",
+            "target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz.sig\n",
+            "target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz.attestation.json\n",
+            "target/aarch64-apple-darwin/release/bundle/macos/*.app.tar.gz.attestation.json.sig\n",
+            "target/release/bundle/msi/*.msi.sig\n",
+            "target/release/bundle/msi/*.msi.attestation.json\n",
+            "target/release/bundle/msi/*.msi.attestation.json.sig\n",
+            "target/release/bundle/nsis/*.exe.sig\n",
+            "target/release/bundle/nsis/*.exe.attestation.json\n",
+            "target/release/bundle/nsis/*.exe.attestation.json.sig\n",
+        ):
+            with self.subTest(path=path.strip()):
+                self.assert_rejected(
+                    self.mutate(f"            {path}", ""),
+                    "exact signed updater artifact uploads",
+                )
+
+    def test_publish_generates_only_the_fixed_repo_exact_tag_manifest(self) -> None:
+        mutations = (
+            ("--repository appergb/OpenTake", "--repository attacker/OpenTake"),
+            (
+                '--tag "$RELEASE_TAG" \\\n            --version "$RELEASE_VERSION"',
+                '--tag "v1.0.0-beta.2" \\\n            --version "$RELEASE_VERSION"',
+            ),
+            ('--version "$RELEASE_VERSION"', '--version "1.0.0-beta.2"'),
+            (
+                '--source-sha "$RELEASE_SHA"',
+                '--source-sha "0000000000000000000000000000000000000000"',
+            ),
+            (
+                '--output "$PUBLISH_ROOT/assets/updater-$RELEASE_TAG.json"',
+                '--output "$PUBLISH_ROOT/assets/latest.json"',
+            ),
+            ("--darwin-artifact \"${mac_updaters[0]}\"", "--darwin-artifact \"${dmgs[0]}\""),
+            ("--windows-msi-artifact \"${msi_installers[0]}\"", "--windows-msi-artifact \"${nsis_installers[0]}\""),
+            ("--windows-nsis-artifact \"${nsis_installers[0]}\"", "--windows-nsis-artifact \"${msi_installers[0]}\""),
+            (
+                '--darwin-attestation "${mac_attestations[0]}"',
+                '--darwin-attestation "${mac_updaters[0]}"',
+            ),
+            (
+                '--windows-msi-attestation "${msi_attestations[0]}"',
+                '--windows-msi-attestation "${msi_installers[0]}"',
+            ),
+            (
+                '--windows-nsis-attestation "${nsis_attestations[0]}"',
+                '--windows-nsis-attestation "${nsis_installers[0]}"',
+            ),
+        )
+        for old, new in mutations:
+            with self.subTest(mutation=old):
+                self.assert_rejected(
+                    self.mutate_last(old, new),
+                    "fixed HTTPS exact-tag updater manifest",
+                )
+
+    def test_staged_payload_requires_exact_updater_asset_and_signature_counts(self) -> None:
+        mutations = (
+            ('test "${#mac_updaters[@]}" -eq 1', 'test "${#mac_updaters[@]}" -ge 1'),
+            ('test "${#mac_signatures[@]}" -eq 1', 'test "${#mac_signatures[@]}" -ge 1'),
+            ('test "${#windows_signatures[@]}" -eq 2', 'test "${#windows_signatures[@]}" -ge 1'),
+            ('test "${#mac_attestations[@]}" -eq 1', 'test "${#mac_attestations[@]}" -ge 1'),
+            ('test "${#msi_attestations[@]}" -eq 1', 'test "${#msi_attestations[@]}" -ge 1'),
+            ('test "${#nsis_attestations[@]}" -eq 1', 'test "${#nsis_attestations[@]}" -ge 1'),
+            ('test "${#manifests[@]}" -eq 1', 'test "${#manifests[@]}" -ge 1'),
+        )
+        for old, new in mutations:
+            with self.subTest(mutation=old):
+                self.assert_rejected(
+                    self.mutate(old, new), "strict signed updater asset counts"
+                )
+
+    def test_updater_private_key_cannot_reach_receipts_or_artifacts(self) -> None:
+        marker = "          RECEIPT_SHA: ${{ needs.validate.outputs.source_sha }}\n"
+        leaked = marker + (
+            "          LEAKED_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}\n"
+        )
+        self.assert_rejected(
+            self.mutate(marker, leaked),
+            "updater signing secrets limited to guard and build steps",
+        )
+        upload_path = "            macos-arm64-receipt.json\n"
+        self.assert_rejected(
+            self.mutate(
+                upload_path,
+                upload_path + "            target/**/*.key\n",
+            ),
+            "private updater signing material is never uploaded",
+        )
+
+    def test_receipts_and_manifest_cross_check_every_updater_file(self) -> None:
+        mutated = self.mutate(
+            'if entry.get("sha256") != sha256(artifact):',
+            'if entry.get("sha256") == "":',
+        )
+        self.assert_rejected(
+            mutated, "updater receipts, digests, sizes, and signatures agree"
+        )
+
+    def test_every_updater_signature_is_verified_with_the_embedded_public_key(self) -> None:
+        mutations = (
+            (
+                "sudo apt-get install --yes --no-install-recommends minisign",
+                "true # minisign verifier bypassed",
+            ),
+            (
+                'pubkey = config["plugins"]["updater"]["pubkey"]',
+                'pubkey = "attacker-controlled-key"',
+            ),
+            (
+                'minisign -Vm "${mac_updaters[0]}"',
+                'true # macOS updater signature bypassed',
+            ),
+            (
+                'minisign -Vm "${msis[0]}"',
+                'true # MSI updater signature bypassed',
+            ),
+            (
+                'minisign -Vm "${exes[0]}"',
+                'true # NSIS updater signature bypassed',
+            ),
+            (
+                'minisign -Vm "${mac_attestations[0]}"',
+                'true # macOS attestation signature bypassed',
+            ),
+            (
+                'minisign -Vm "${msi_attestations[0]}"',
+                'true # MSI attestation signature bypassed',
+            ),
+            (
+                'minisign -Vm "${nsis_attestations[0]}"',
+                'true # NSIS attestation signature bypassed',
+            ),
+        )
+        for old, new in mutations:
+            with self.subTest(mutation=old):
+                self.assert_rejected(
+                    self.mutate(old, new),
+                    "updater signatures verify against embedded public key",
+                )
+
+    def test_build_jobs_create_and_sign_release_bound_attestations(self) -> None:
+        mutations = (
+            ("--platform darwin-aarch64", "--platform darwin-x86_64"),
+            ("--platform windows-x86_64-msi", "--platform windows-aarch64-msi"),
+            ("--platform windows-x86_64-nsis", "--platform windows-aarch64-nsis"),
+            (
+                '--source-sha "$TARGET_SHA"',
+                '--source-sha "0000000000000000000000000000000000000000"',
+            ),
+            (
+                './web/node_modules/.bin/tauri signer sign "$attestation"',
+                'echo "attestation signing bypassed"',
+            ),
+            (
+                '& .\\web\\node_modules\\.bin\\tauri.cmd signer sign $msiAttestation',
+                "Write-Output 'MSI attestation signing bypassed'",
+            ),
+            (
+                '& .\\web\\node_modules\\.bin\\tauri.cmd signer sign $nsisAttestation',
+                "Write-Output 'NSIS attestation signing bypassed'",
+            ),
+        )
+        for old, new in mutations:
+            with self.subTest(mutation=old):
+                self.assert_rejected(
+                    self.mutate(old, new),
+                    "signed updater attestations bind release identity and payload",
+                )
+
+    def test_publish_rejects_forged_attestation_fields_or_payload_hash(self) -> None:
+        mutations = (
+            ('"schemaVersion": 1,', '"schemaVersion": 2,'),
+            (
+                'if attestation.get("sha256") != sha256(artifact):',
+                'if attestation.get("sha256") == "":',
+            ),
+            (
+                'if attestation.get("sourceSha") != source_sha:',
+                'if not attestation.get("sourceSha"):',
+            ),
+        )
+        for old, new in mutations:
+            with self.subTest(mutation=old):
+                self.assert_rejected(
+                    self.mutate_last(old, new),
+                    "attestations bind exact release identity and updater bytes",
+                )
+
     def test_release_must_be_draft_before_upload_and_publish(self) -> None:
         mutated = self.mutate(
             "--draft --prerelease --latest=false",
@@ -92,6 +327,34 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             'md5sum "${payload_names[@]}" > SHA256SUMS',
         )
         self.assert_rejected(mutated, "SHA256SUMS covers and verifies every payload")
+
+    def test_draft_assets_are_downloaded_and_verified_before_publication(self) -> None:
+        mutations = (
+            (
+                'gh release download "$RELEASE_TAG" --dir "$PUBLISH_ROOT/verified-draft"',
+                'true # draft download bypassed',
+            ),
+            (
+                'if remote_sizes != local_sizes:',
+                'if set(remote_sizes) != set(local_sizes):',
+            ),
+            (
+                'cmp "$PUBLISH_ROOT/assets/SHA256SUMS" "$PUBLISH_ROOT/verified-draft/SHA256SUMS"',
+                'true # draft checksum asset comparison bypassed',
+            ),
+            (
+                'cd "$PUBLISH_ROOT/verified-draft"\n'
+                '          sha256sum --check SHA256SUMS',
+                'cd "$PUBLISH_ROOT/verified-draft"\n'
+                '          sha256sum --status SHA256SUMS || true',
+            ),
+        )
+        for old, new in mutations:
+            with self.subTest(mutation=old):
+                self.assert_rejected(
+                    self.mutate(old, new),
+                    "draft assets verified by exact name, size, and SHA-256",
+                )
 
     def test_required_work_cannot_ignore_failures(self) -> None:
         mutated = self.mutate(
@@ -367,13 +630,13 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "        run: >-\n"
             "          ./web/node_modules/.bin/tauri build --ci\n"
             "          --target aarch64-apple-darwin --bundles app,dmg\n"
-            "          --config '{\"bundle\":{\"macOS\":{\"signingIdentity\":\"-\"}}}'\n"
+            "          --config '{\"bundle\":{\"createUpdaterArtifacts\":true,\"macOS\":{\"signingIdentity\":\"-\"}}}'\n"
         )
         decoy = (
             "        run: >-\n"
             "          echo './web/node_modules/.bin/tauri build --ci\n"
             "          --target aarch64-apple-darwin --bundles app,dmg\n"
-            "          --config {\"bundle\":{\"macOS\":{\"signingIdentity\":\"-\"}}}'\n"
+            "          --config {\"bundle\":{\"createUpdaterArtifacts\":true,\"macOS\":{\"signingIdentity\":\"-\"}}}'\n"
         )
         self.assert_rejected(
             self.mutate(original, decoy), "complete ad-hoc macOS ARM64 bundle gate"
@@ -381,8 +644,8 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
 
     def test_windows_package_command_cannot_be_faked_by_a_string(self) -> None:
         mutated = self.mutate(
-            "          & .\\web\\node_modules\\.bin\\tauri.cmd build --ci --bundles msi,nsis\n",
-            "          $decoy = '& .\\web\\node_modules\\.bin\\tauri.cmd build --ci --bundles msi,nsis'\n",
+            "          & .\\web\\node_modules\\.bin\\tauri.cmd build --ci --bundles msi,nsis --config '{\"bundle\":{\"createUpdaterArtifacts\":true}}'\n",
+            "          $decoy = '& .\\web\\node_modules\\.bin\\tauri.cmd build --ci --bundles msi,nsis --config {\"bundle\":{\"createUpdaterArtifacts\":true}}'\n",
         )
         self.assert_rejected(mutated, "complete Windows x64 installer gate")
 
@@ -393,7 +656,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assert_rejected(mutated, "verified prerelease publication")
 
-    def test_repository_metadata_is_beta3_and_release_notes_exist(self) -> None:
+    def test_repository_metadata_is_beta4_and_release_notes_exist(self) -> None:
         self.assertEqual([], contract.validate_repository_metadata(REPOSITORY_ROOT))
 
 
@@ -405,21 +668,21 @@ class ReleaseRepositoryMetadataTests(unittest.TestCase):
         (root / "web").mkdir()
         (root / "docs" / "releases").mkdir(parents=True)
         (root / "Cargo.toml").write_text(
-            '[workspace.package]\nversion = "1.0.0-beta.3"\n', encoding="utf-8"
+            '[workspace.package]\nversion = "1.0.0-beta.4"\n', encoding="utf-8"
         )
         (root / "src-tauri" / "tauri.conf.json").write_text(
             json.dumps(
                 {
-                    "version": "1.0.0-beta.3",
-                    "bundle": {"windows": {"wix": {"version": "1.0.0.3"}}},
+                    "version": "1.0.0-beta.4",
+                    "bundle": {"windows": {"wix": {"version": "1.0.0.4"}}},
                 }
             ),
             encoding="utf-8",
         )
         (root / "web" / "package.json").write_text(
-            json.dumps({"version": "1.0.0-beta.3"}), encoding="utf-8"
+            json.dumps({"version": "1.0.0-beta.4"}), encoding="utf-8"
         )
-        (root / "docs" / "releases" / "1.0.0-beta.3.md").write_text(
+        (root / "docs" / "releases" / "1.0.0-beta.4.md").write_text(
             "release notes\n", encoding="utf-8"
         )
         return temporary, root
@@ -438,7 +701,7 @@ class ReleaseRepositoryMetadataTests(unittest.TestCase):
     def test_release_notes_io_error_returns_a_contract_error(self) -> None:
         temporary, root = self.make_repository()
         self.addCleanup(temporary.cleanup)
-        notes = root / "docs" / "releases" / "1.0.0-beta.3.md"
+        notes = root / "docs" / "releases" / "1.0.0-beta.4.md"
         real_read_text = Path.read_text
 
         def fail_notes(path: Path, *args, **kwargs):
@@ -448,7 +711,7 @@ class ReleaseRepositoryMetadataTests(unittest.TestCase):
 
         with mock.patch.object(Path, "read_text", autospec=True, side_effect=fail_notes):
             self.assertEqual(
-                ["Beta 3 release notes exist"],
+                ["Beta 4 release notes exist"],
                 contract.validate_repository_metadata(root),
             )
 
@@ -458,14 +721,14 @@ class ReleaseRepositoryMetadataTests(unittest.TestCase):
         (root / "src-tauri" / "tauri.conf.json").write_text(
             json.dumps(
                 {
-                    "version": "1.0.0-beta.3",
-                    "bundle": {"windows": {"wix": {"version": "1.0.0.2"}}},
+                    "version": "1.0.0-beta.4",
+                    "bundle": {"windows": {"wix": {"version": "1.0.0.3"}}},
                 }
             ),
             encoding="utf-8",
         )
         self.assertEqual(
-            ["Windows installer version is 1.0.0.3"],
+            ["Windows installer version is 1.0.0.4"],
             contract.validate_repository_metadata(root),
         )
 

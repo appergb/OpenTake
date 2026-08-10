@@ -103,8 +103,10 @@ pub fn storage_usage(media: State<'_, MediaState>) -> StorageUsageDto {
 #[tauri::command]
 pub fn storage_clear(
     media: State<'_, MediaState>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
     request: StorageClearRequest,
 ) -> Result<StorageUsageDto, String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
     let engine = media.engine();
     clear_at(engine.cache_root(), engine.models_dir(), &request)?;
     Ok(usage_at(engine.cache_root(), engine.models_dir()))

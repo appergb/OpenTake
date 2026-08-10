@@ -29,8 +29,10 @@ tauri-plugin-dialog = "2"
 # previous global `**` asset exposure. The fs plugin must initialize first.
 tauri-plugin-fs = "2"
 tauri-plugin-persisted-scope = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-updater = "=2.10.1"
 serde = { workspace = true }
 serde_json = { workspace = true }
+semver = "1"
 opentake-core = { workspace = true }
 opentake-project = { workspace = true }
 opentake-ops = { workspace = true }
@@ -54,6 +56,7 @@ opentake-motion = { workspace = true, features = ["chromium"] }
 # the agent's `inspect_timeline` bridge encodes composited frames as JPEG.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 base64 = "0.22"
+minisign-verify = "=0.2.5"
 same-file = "1.0.6"
 cap-std = "4.0.2"
 cap-fs-ext = "4.0.2"
@@ -62,8 +65,13 @@ uuid = { workspace = true }
 tempfile = "3"
 # Optional account scaffold: verify a token only against a user-configured
 # backend. Rustls keeps the desktop build independent of a system OpenSSL.
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "multipart", "rustls-tls", "system-proxy"] }
+# Keep the updater plugin's reqwest line explicit so its redirect policy can be
+# configured without changing the app's existing 0.12 HTTP surface.
+reqwest-updater = { package = "reqwest", version = "=0.13.4", default-features = false, features = ["system-proxy"] }
+rustls = { version = "=0.23.40", default-features = false, features = ["ring", "std"] }
 futures-util = "0.3"
+quick-xml = "=0.41.0"
 crossbeam-channel = "0.5"
 velato = { workspace = true }
 sentry = { workspace = true }
@@ -104,6 +112,7 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 opentake-media = { workspace = true, features = ["test-faults"] }
 tauri = { version = "2", features = ["protocol-asset", "test"] }
+tokio = { version = "1", features = ["test-util"] }
 
 [features]
 # `default` now includes `playback-engine`: the continuous Rust streaming engine

@@ -36,6 +36,7 @@ mod secret;
 mod storage;
 pub mod telemetry;
 mod transcribe;
+mod updater;
 
 // Streaming playback engine (#53). Feature-gated (`playback-engine`, now a DEFAULT
 // feature) and `pub` so the gated GPU+ffmpeg integration test can drive the render
@@ -49,10 +50,7 @@ use std::sync::Arc;
 use opentake_core::{AppCore, CoreEvent, IdGen};
 use opentake_media::library::LibraryStore;
 use opentake_media::MediaEngine;
-use tauri::{Emitter, Manager, WindowEvent};
-// `RunEvent::Reopen` (Dock click) is a macOS-only variant.
-#[cfg(target_os = "macos")]
-use tauri::RunEvent;
+use tauri::{Emitter, Manager, RunEvent, WindowEvent};
 
 use crate::media::prewarm::PrewarmScheduler;
 use crate::media::MediaState;
@@ -126,6 +124,7 @@ pub fn run() {
         // Tauri requires fs to be initialized before persisted-scope.
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_persisted_scope::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 // Background-run: don't quit, hide and return to Home.
@@ -133,9 +132,20 @@ pub fn run() {
                 // Flush the open project before hiding so background-run never
                 // loses edits (autosave is debounced; this is the final write).
                 // No-op when no project is open (save_project returns an error we
-                // intentionally ignore).
+                // intentionally ignore). Once an update owns admission, its
+                // own final save is authoritative and no later close event may
+                // write across that barrier.
                 if let Some(core) = window.app_handle().try_state::<AppCore>() {
-                    let _ = core.save_project(None);
+                    if let Some(admission) = window
+                        .app_handle()
+                        .try_state::<updater::InstallAdmissionGate>()
+                    {
+                        if let Ok(_activity) = updater::begin_mutating_activity(&admission) {
+                            let _ = core.save_project(None);
+                        }
+                    } else {
+                        let _ = core.save_project(None);
+                    }
                 }
                 let _ = window.hide();
                 let _ = window.app_handle().emit("go_home", ());
@@ -188,8 +198,13 @@ pub fn run() {
                 .app_data_dir()
                 .unwrap_or_else(|_| std::env::temp_dir())
                 .join("workflows");
-            let generation_bridge =
-                generation::build_bridge(core.clone(), cache_root.clone(), models_dir.clone());
+            let install_admission = updater::InstallAdmissionGate::default();
+            let generation_bridge = generation::build_bridge(
+                core.clone(),
+                cache_root.clone(),
+                models_dir.clone(),
+                install_admission.clone(),
+            );
             let motion_bridge = Arc::new(motion::TauriMotionBridge::new(
                 core.clone(),
                 cache_root.clone(),
@@ -207,6 +222,7 @@ pub fn run() {
                 generation_bridge.clone(),
                 motion_bridge.clone(),
                 advanced_bridge.clone(),
+                install_admission.clone(),
             );
             // The fixed-port external MCP endpoint is disabled for Beta until
             // the product has an authenticated pairing UX. Official Codex
@@ -227,7 +243,8 @@ pub fn run() {
             app.manage(core);
             app.manage(commands::ProjectLifecycleCoordinator::default());
             app.manage(generation_bridge);
-            let motion_state = motion::MotionCommandState::new(motion_bridge);
+            let motion_state =
+                motion::MotionCommandState::new(motion_bridge, install_admission.clone());
             let motion_transition_state = motion_state.clone();
             app.state::<AppCore>()
                 .subscribe_project_identity_transition(move |pending| {
@@ -236,8 +253,13 @@ pub fn run() {
                     }
                 });
             app.manage(motion_state);
-            app.manage(advanced::AdvancedWorkflowCommandState::new(advanced_bridge));
-            app.manage(advanced::MattingModelInstallState::default());
+            app.manage(advanced::AdvancedWorkflowCommandState::new(
+                advanced_bridge,
+                install_admission.clone(),
+            ));
+            app.manage(advanced::MattingModelInstallState::new(
+                install_admission.clone(),
+            ));
             let advanced_transition_handle = app.handle().clone();
             app.state::<AppCore>()
                 .subscribe_project_identity_transition(move |pending| {
@@ -249,10 +271,15 @@ pub fn run() {
                 });
             app.manage(chat_state);
             app.manage(codex::CodexAuthState::default());
-            app.manage(MediaState::new(engine));
-            app.manage(media::StabilizationAnalysisState::default());
-            app.manage(media::LoudnessAnalysisState::default());
-            app.manage(media::DenoiseAnalysisState::default());
+            app.manage(MediaState::new_with_admission(
+                engine,
+                install_admission.clone(),
+            ));
+            app.manage(media::StabilizationAnalysisState::new(
+                install_admission.clone(),
+            ));
+            app.manage(media::LoudnessAnalysisState::new(install_admission.clone()));
+            app.manage(media::DenoiseAnalysisState::new(install_admission.clone()));
             let analysis_transition_handle = app.handle().clone();
             app.state::<AppCore>()
                 .subscribe_project_identity_transition(move |pending| {
@@ -265,8 +292,8 @@ pub fn run() {
                         );
                     }
                 });
-            app.manage(media::StemSeparationState::default());
-            app.manage(media::MediaProxyState::default());
+            app.manage(media::StemSeparationState::new(install_admission.clone()));
+            app.manage(media::MediaProxyState::new(install_admission.clone()));
             let proxy_transition_handle = app.handle().clone();
             app.state::<AppCore>()
                 .subscribe_project_identity_transition(move |pending| {
@@ -276,7 +303,10 @@ pub fn run() {
                             .cancel();
                     }
                 });
-            app.manage(PrewarmScheduler::new(initial_project_epoch));
+            app.manage(PrewarmScheduler::new_with_admission(
+                initial_project_epoch,
+                install_admission.clone(),
+            ));
             app.manage(library_state);
             // Lazily-acquired GPU context for timeline composite previews (#47).
             app.manage(render::RenderState::new());
@@ -287,6 +317,8 @@ pub fn run() {
             // Optional account scaffold. It starts offline and never performs
             // network I/O until the user configures a backend and logs in.
             app.manage(account::AccountState::default());
+            app.manage(install_admission);
+            app.manage(updater::UpdateCoordinator::default());
 
             // Streaming playback (#53): start the loopback MJPEG transport on the
             // Tauri async runtime (mirrors the MCP server spawn) and register the
@@ -418,6 +450,10 @@ pub fn run() {
             library::library_import_to_project,
             storage::storage_usage,
             storage::storage_clear,
+            updater::check_for_update,
+            updater::close_update,
+            updater::install_update,
+            updater::open_update_releases,
             #[cfg(feature = "playback-engine")]
             playback::commands::playback_start,
             #[cfg(feature = "playback-engine")]
@@ -432,6 +468,18 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, _event| {
+            // A user-driven Quit must not interrupt bundle replacement. The
+            // updater's own restart has a programmatic exit code and remains
+            // allowed after both save barriers succeed.
+            if let RunEvent::ExitRequested { code, api, .. } = &_event {
+                if code.is_none()
+                    && _app
+                        .try_state::<updater::UpdateCoordinator>()
+                        .is_some_and(|coordinator| coordinator.prevents_user_exit())
+                {
+                    api.prevent_exit();
+                }
+            }
             // Dock-reopen with no visible window (we hide on close) shows it again.
             // `RunEvent::Reopen` only exists on macOS; other platforms rely on the
             // tray / OS to re-surface the window (a cross-platform follow-up).

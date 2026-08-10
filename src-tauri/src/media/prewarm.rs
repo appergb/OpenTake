@@ -79,6 +79,7 @@ struct SchedulerInner {
     sender: SyncSender<PrewarmJob>,
     low_sender: SyncSender<PrewarmJob>,
     state: Mutex<SchedulerState>,
+    admission: crate::updater::InstallAdmissionGate,
 }
 
 type PrewarmWork = Box<dyn FnOnce(JobContext) + Send + 'static>;
@@ -88,6 +89,7 @@ struct PrewarmJob {
     token: MediaCancelToken,
     reservation: ReservationKey,
     low_priority: bool,
+    admission: crate::updater::ActivityLease,
     work: PrewarmWork,
 }
 
@@ -111,11 +113,22 @@ struct ReservationGuard {
 
 impl PrewarmScheduler {
     pub fn new(active_epoch: u64) -> Self {
+        Self::new_with_admission(
+            active_epoch,
+            crate::updater::InstallAdmissionGate::default(),
+        )
+    }
+
+    pub(crate) fn new_with_admission(
+        active_epoch: u64,
+        admission: crate::updater::InstallAdmissionGate,
+    ) -> Self {
         let (sender, receiver) = mpsc::sync_channel(PREWARM_QUEUE_CAPACITY);
         let (low_sender, low_receiver) = mpsc::sync_channel(LOW_PRIORITY_QUEUE_CAPACITY);
         let inner = Arc::new(SchedulerInner {
             sender,
             low_sender,
+            admission,
             state: Mutex::new(SchedulerState {
                 active_epoch,
                 transitioning: false,
@@ -226,7 +239,7 @@ impl PrewarmScheduler {
             cache_key: cache_key.into(),
         };
         let low_priority = kind == PrewarmKind::TimelineSprite;
-        let token = {
+        let (token, admission) = {
             let mut state = self.inner.state.lock().unwrap_or_else(|p| p.into_inner());
             if state.transitioning || state.active_epoch != epoch {
                 return PrewarmResult::StaleProject;
@@ -246,23 +259,35 @@ impl PrewarmScheduler {
                 );
                 return PrewarmResult::Cancelled;
             }
-            if !state.in_flight.insert(reservation.clone()) {
+            if state.in_flight.contains(&reservation) {
                 return PrewarmResult::Duplicate;
             }
-            if low_priority {
+            let Ok(admission) = crate::updater::begin_mutating_activity(&self.inner.admission)
+            else {
+                if low_priority {
+                    state
+                        .timeline_sprite_statuses
+                        .insert(reservation.cache_key.clone(), TimelineSpriteStatus::Busy);
+                }
+                return PrewarmResult::Busy;
+            };
+            state.in_flight.insert(reservation.clone());
+            let token = if low_priority {
                 state
                     .timeline_sprite_statuses
                     .insert(reservation.cache_key.clone(), TimelineSpriteStatus::Queued);
                 state.low_cancel.clone()
             } else {
                 state.cancel.clone()
-            }
+            };
+            (token, admission)
         };
         let job = PrewarmJob {
             epoch,
             token,
             reservation: reservation.clone(),
             low_priority,
+            admission,
             work: Box::new(work),
         };
         let send = if low_priority {
@@ -514,6 +539,7 @@ fn prewarm_worker(inner: Weak<SchedulerInner>, receiver: Arc<Mutex<Receiver<Prew
             reservation: Some(job.reservation.clone()),
             token: job.token.clone(),
         };
+        let admission = job.admission;
         let context = JobContext {
             inner: inner.clone(),
             epoch: job.epoch,
@@ -529,6 +555,7 @@ fn prewarm_worker(inner: Weak<SchedulerInner>, receiver: Arc<Mutex<Receiver<Prew
                 (job.work)(context);
             }));
         }
+        drop(admission);
         drop(guard);
     }
 }
@@ -911,5 +938,62 @@ mod tests {
             .recv_timeout(Duration::from_secs(2))
             .expect("poster is not blocked behind sprite");
         low_release_tx.send(()).expect("release low");
+    }
+
+    #[test]
+    fn update_install_rejects_new_cache_work_but_not_cached_reads() {
+        let admission = crate::updater::InstallAdmissionGate::default();
+        let scheduler = PrewarmScheduler::new_with_admission(1, admission.clone());
+        let install = admission.begin_install().expect("install starts");
+        let ran = Arc::new(AtomicUsize::new(0));
+        let ran_work = Arc::clone(&ran);
+
+        assert_eq!(
+            scheduler.schedule(1, PrewarmKind::GridPoster, "cached", true, |_| {}),
+            PrewarmResult::Cached,
+            "a cache hit is read-only and needs no update admission"
+        );
+        let result = scheduler.schedule(1, PrewarmKind::GridPoster, "uncached", false, move |_| {
+            ran_work.fetch_add(1, Ordering::SeqCst);
+        });
+        wait_until(Duration::from_millis(100), || {
+            result != PrewarmResult::Queued || ran.load(Ordering::SeqCst) != 0
+        });
+
+        assert_eq!(result, PrewarmResult::Busy);
+        assert_eq!(ran.load(Ordering::SeqCst), 0);
+        assert_eq!(scheduler.in_flight_count(), 0);
+        drop(install);
+    }
+
+    #[test]
+    fn admitted_prewarm_job_blocks_install_until_real_work_finishes() {
+        let admission = crate::updater::InstallAdmissionGate::default();
+        let scheduler = PrewarmScheduler::new_with_admission(1, admission.clone());
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+
+        assert_eq!(
+            scheduler.schedule(1, PrewarmKind::PreviewPoster, "active", false, move |_| {
+                entered_tx.send(()).expect("announce active job");
+                release_rx.recv().expect("release active job");
+            }),
+            PrewarmResult::Queued
+        );
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("prewarm work starts");
+
+        let install_was_rejected = admission.begin_install().is_err();
+        release_tx.send(()).expect("release active job");
+        wait_until(Duration::from_secs(2), || scheduler.in_flight_count() == 0);
+        assert!(
+            install_was_rejected,
+            "install must not cross a running cache writer"
+        );
+        let install = admission
+            .begin_install()
+            .expect("finished prewarm releases admission");
+        drop(install);
     }
 }

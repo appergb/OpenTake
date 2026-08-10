@@ -43,6 +43,7 @@ pub struct ChatState {
     sessions: Arc<Mutex<HashMap<SessionKey, ChatSession>>>,
     turns: Arc<Mutex<TurnRegistry>>,
     persistence: Arc<Mutex<()>>,
+    admission: crate::updater::InstallAdmissionGate,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -154,11 +155,33 @@ impl ChatState {
             None,
             None,
             None,
+            crate::updater::InstallAdmissionGate::default(),
+        )
+    }
+
+    #[cfg(test)]
+    fn new_with_admission(
+        core: AppCore,
+        workflows_dir: PathBuf,
+        cache_root: PathBuf,
+        models_dir: PathBuf,
+        admission: crate::updater::InstallAdmissionGate,
+    ) -> Self {
+        Self::new_inner(
+            core,
+            workflows_dir,
+            cache_root,
+            models_dir,
+            None,
+            None,
+            None,
+            admission,
         )
     }
 
     /// Build the state in `setup`: a dispatcher over the live core + workflow
     /// registry + the same media bridge the desktop MCP server uses.
+    #[allow(clippy::too_many_arguments)] // explicit dependency-injection boundary
     pub fn new_with_capabilities(
         core: AppCore,
         workflows_dir: PathBuf,
@@ -167,6 +190,7 @@ impl ChatState {
         generation_bridge: Arc<dyn GenerationBridge>,
         motion_bridge: Arc<dyn MotionBridge>,
         advanced_bridge: Arc<dyn AdvancedWorkflowBridge>,
+        admission: crate::updater::InstallAdmissionGate,
     ) -> Self {
         Self::new_inner(
             core,
@@ -176,9 +200,11 @@ impl ChatState {
             Some(generation_bridge),
             Some(motion_bridge),
             Some(advanced_bridge),
+            admission,
         )
     }
 
+    #[allow(clippy::too_many_arguments)] // keeps optional production bridges explicit in tests
     fn new_inner(
         core: AppCore,
         workflows_dir: PathBuf,
@@ -187,6 +213,7 @@ impl ChatState {
         generation_bridge: Option<Arc<dyn GenerationBridge>>,
         motion_bridge: Option<Arc<dyn MotionBridge>>,
         advanced_bridge: Option<Arc<dyn AdvancedWorkflowBridge>>,
+        admission: crate::updater::InstallAdmissionGate,
     ) -> Self {
         let handle: Arc<dyn CoreHandle> = Arc::new(AppCoreHandle::new(core.clone()));
         let registry = Arc::new(RwLock::new(crate::mcp::build_registry(&workflows_dir)));
@@ -210,6 +237,7 @@ impl ChatState {
             sessions: sessions.clone(),
             turns: turns.clone(),
             persistence: Arc::new(Mutex::new(())),
+            admission,
         };
         let transition_turns = turns.clone();
         state
@@ -433,7 +461,12 @@ impl ChatState {
         Ok(session)
     }
 
-    fn reserve_turn(&self, key: SessionKey, cancel: Arc<TurnCancel>) -> Result<(), String> {
+    fn reserve_turn(
+        &self,
+        key: SessionKey,
+        cancel: Arc<TurnCancel>,
+    ) -> Result<crate::updater::ActivityLease, String> {
+        let admission = self.admission.begin_activity()?;
         let mut turns = self.turns.lock().map_err(|e| e.to_string())?;
         if turns.transition_depth > 0 {
             cancel.request();
@@ -442,7 +475,7 @@ impl ChatState {
         match turns.running.entry(key) {
             Entry::Vacant(entry) => {
                 entry.insert(cancel);
-                Ok(())
+                Ok(admission)
             }
             Entry::Occupied(_) => Err("a turn is already running on this session".into()),
         }
@@ -650,7 +683,7 @@ pub async fn chat_send(
     let session_key = project.key(&session_id);
     let undo_scope = agent_undo_scope(&session_key);
     let turn_cancel = Arc::new(TurnCancel::new());
-    state.reserve_turn(session_key.clone(), turn_cancel.clone())?;
+    let turn_admission = state.reserve_turn(session_key.clone(), turn_cancel.clone())?;
     let cancel = turn_cancel.requested.clone();
 
     let mut session = match state.take_open_project_session_for_turn(&project, &session_id) {
@@ -670,6 +703,7 @@ pub async fn chat_send(
     let sid = session_id.clone();
 
     tauri::async_runtime::spawn(async move {
+        let _turn_admission = turn_admission;
         let emitter = AppEmitter {
             app: app.clone(),
             state: state_clone.clone(),
@@ -868,6 +902,7 @@ pub fn chat_session_set_open(
     expected_project_epoch: u64,
     expected_project_path: String,
 ) -> Result<ChatSession, String> {
+    let _activity = crate::updater::begin_mutating_activity(&state.admission)?;
     let project = state.project_context_for(expected_project_epoch, &expected_project_path)?;
     state.set_project_session_open(&project, &session_id, is_open)
 }
@@ -1506,6 +1541,43 @@ mod tests {
 
         assert!(error.contains("already running"));
         assert_eq!(state.turns.lock().unwrap().running.len(), 1);
+    }
+
+    #[test]
+    fn chat_turn_admission_spans_reservation_and_rejects_turns_during_install() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = AppCore::new();
+        let admission = crate::updater::InstallAdmissionGate::default();
+        let state = ChatState::new_with_admission(
+            core,
+            temp.path().join("no-workflows"),
+            temp.path().join("chat-cache"),
+            temp.path().join("chat-models"),
+            admission.clone(),
+        );
+        let key = SessionKey {
+            project_epoch: 7,
+            project_dir: temp.path().join("A.opentake"),
+            session_id: "chat-admission".into(),
+        };
+
+        let turn_admission = state
+            .reserve_turn(key.clone(), Arc::new(TurnCancel::new()))
+            .unwrap();
+        assert!(admission.begin_install().is_err());
+        state.release_turn(&key);
+        drop(turn_admission);
+
+        let install = admission.begin_install().unwrap();
+        assert!(state
+            .reserve_turn(key.clone(), Arc::new(TurnCancel::new()))
+            .is_err());
+        drop(install);
+        let resumed = state
+            .reserve_turn(key.clone(), Arc::new(TurnCancel::new()))
+            .unwrap();
+        state.release_turn(&key);
+        drop(resumed);
     }
 
     #[test]

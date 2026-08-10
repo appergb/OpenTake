@@ -8,7 +8,11 @@ import type { Clip, Timeline } from "../../lib/types";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useProjectStore } from "../../store/projectStore";
 import { PanelShell } from "../ui/PanelShell";
+import { MediaTabBar } from "./MediaTabBar";
 import { resolveTransitionPair, TransitionTab } from "./TransitionTab";
+
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
+  .IS_REACT_ACT_ENVIRONMENT = true;
 
 function clip(id: string, startFrame: number, durationFrames: number): Clip {
   return {
@@ -115,6 +119,10 @@ describe("TransitionTab", () => {
       ]),
     });
     await act(async () => undefined);
+    expect(
+      container.querySelector<HTMLButtonElement>('button[aria-pressed="true"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[role="status"]')?.textContent).toContain("应用");
     await act(async () =>
       container
         .querySelector<HTMLButtonElement>('[data-action="remove-transition"]')!
@@ -155,13 +163,14 @@ describe("TransitionTab", () => {
     const b = clip("b", 60, 60);
     useProjectStore.setState({ timeline: timeline([a, b]) });
     useEditorUiStore.setState({ selectedClipIds: new Set([a.id]) });
+    const applyTransition = vi.fn().mockResolvedValue(undefined);
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
     await act(async () =>
       root.render(
         <PanelShell panel="media">
-          <TransitionTab onApply={vi.fn().mockResolvedValue(undefined)} />
+          <TransitionTab onApply={applyTransition} />
         </PanelShell>,
       ),
     );
@@ -169,8 +178,35 @@ describe("TransitionTab", () => {
     const apply = container.querySelector<HTMLButtonElement>('[data-action="apply-transition"]')!;
     await act(async () => {
       apply.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+      apply.focus();
+      apply.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
       apply.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
+    expect(useEditorUiStore.getState().selectedClipIds).toEqual(new Set([a.id]));
+    expect(applyTransition).toHaveBeenCalledWith("a", "b", "crossDissolve", 15);
+    await act(async () => root.unmount());
+  });
+
+  it("keeps_the_timeline_cut_selected_when_accessibility_activation_focuses_the_panel_shell", async () => {
+    const a = clip("a", 0, 60);
+    const b = clip("b", 60, 60);
+    useProjectStore.setState({ timeline: timeline([a, b]) });
+    useEditorUiStore.setState({ focusedPanel: "timeline", selectedClipIds: new Set([a.id]) });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () =>
+      root.render(
+        <PanelShell panel="media">
+          <MediaTabBar active="transition" onSelect={vi.fn()} />
+          <TransitionTab onApply={vi.fn().mockResolvedValue(undefined)} />
+        </PanelShell>,
+      ),
+    );
+
+    await act(async () =>
+      container.querySelector<HTMLElement>("[data-editor-panel='media']")!.focus(),
+    );
     expect(useEditorUiStore.getState().selectedClipIds).toEqual(new Set([a.id]));
     await act(async () => root.unmount());
   });

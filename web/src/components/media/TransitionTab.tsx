@@ -115,6 +115,8 @@ export function TransitionTab({
     return (
       <div
         data-testid="transition-tab"
+        data-preserve-timeline-selection
+        data-transition-selection-context
         role="status"
         onMouseDown={(event) => event.stopPropagation()}
         style={{ flex: 1, display: "grid", placeItems: "center", padding: "var(--space-lg)", color: "var(--text-tertiary)", fontSize: "var(--fs-sm)", textAlign: "center" }}
@@ -140,6 +142,8 @@ export function TransitionTab({
   return (
     <div
       data-testid="transition-tab"
+      data-preserve-timeline-selection
+      data-transition-selection-context
       onMouseDown={(event) => event.stopPropagation()}
       style={{ display: "flex", flexDirection: "column", gap: "var(--space-md)", padding: "var(--space-md)" }}
     >

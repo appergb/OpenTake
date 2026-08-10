@@ -63,5 +63,5 @@ docs/
 | [CHANGELOG.md](../CHANGELOG.md) | 变更历史 |
 | [CONTRIBUTING.md](../CONTRIBUTING.md) | 贡献指南 |
 | [Specs Index](specs/INDEX.md) | 已批准/历史规格目录 |
-| [Beta 发布与验证](releases/1.0.0-beta.2.md) · [功能验证记录](audit/2026-08-02/beta-functional-verification.md) | ★ 当前 Beta 2 范围、发布门槛与逐项执行证据 |
+| [Beta 发布与验证](releases/1.0.0-beta.4.md) · [最终模块验收](audit/2026-08-10/final-module-validation.md) | ★ 当前 Beta 4 范围、发布门槛与逐项执行证据 |
 | [Superpowers Recovery](superpowers/specs/2026-07-08-opentake-recovery-integration-design.md) | 历史恢复集成设计与计划入口（Beta 2 已收口） |

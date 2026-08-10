@@ -16,7 +16,8 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../../i18n", () => ({
-  useT: () => (key: string) => key,
+  useT: () => (key: string, vars?: Record<string, string | number>) =>
+    key === "export.mode.video" ? `Video (.${vars?.ext ?? "mp4"})` : key,
 }));
 
 vi.mock("../../lib/api", () => ({
@@ -200,8 +201,21 @@ describe("ExportDialog control acceptance", () => {
     });
     expect(container?.textContent).toContain("stale export error");
 
-    await chooseDropdown("export.mode", "export.mode.video");
+    await chooseDropdown("export.mode: Video (.mp4)", "Video (.mp4)");
     expect(container?.textContent).not.toContain("stale export error");
+  });
+
+  it("labels the video export type with the selected codec container", async () => {
+    await renderDialog();
+    expect(buttonWithLabel("export.mode: Video (.mp4)").textContent).toContain(".mp4");
+
+    await chooseDropdown("export.format", "export.codec.h265");
+    expect(buttonWithLabel("export.mode: Video (.mp4)").textContent).not.toContain(".mov");
+
+    await chooseDropdown("export.format", "export.codec.prores");
+
+    expect(buttonWithLabel("export.mode: Video (.mov)").textContent).toContain(".mov");
+    expect(buttonWithLabel("export.mode: Video (.mov)").textContent).not.toContain(".mp4");
   });
 
   it("control-6846958c0e19c8e9 choose export codec", async () => {

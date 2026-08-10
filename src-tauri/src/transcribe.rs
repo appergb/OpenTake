@@ -143,7 +143,9 @@ pub fn transcribe_model_status(media: State<'_, MediaState>) -> ModelStatusDto {
 pub async fn download_transcribe_model(
     app: AppHandle,
     media: State<'_, MediaState>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
 ) -> Result<ModelStatusDto, String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
     let models_dir = media.engine().models_dir().to_path_buf();
     let on_progress = |fraction: f64| {
         let _ = app.emit("transcribe://progress", DownloadProgress { fraction });
@@ -167,9 +169,11 @@ pub async fn download_transcribe_model(
 pub fn transcribe_media(
     core: State<'_, AppCore>,
     media: State<'_, MediaState>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
     media_id: String,
     language: Option<String>,
 ) -> Result<TranscriptDto, String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
     let (path, is_video) = resolve_asset(&core, &media_id)?;
     let result = transcribe_with_cache(media.engine(), &path, is_video, language.as_deref())?;
     Ok(TranscriptDto::from_result(&media_id, result))

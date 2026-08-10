@@ -280,7 +280,7 @@ Key files for comparison:
 
 ### Prerequisites
 
-- **Rust** ≥ 1.82 (via [rustup](https://rustup.rs))
+- **Rust** ≥ 1.96 (via [rustup](https://rustup.rs))
 - **Node.js** ≥ 20 + **pnpm**
 - **FFmpeg** ≥ 6.0 (`brew install ffmpeg` / `winget install ffmpeg` / `apt install ffmpeg`)
 
@@ -303,9 +303,9 @@ cd ..
 cargo tauri dev
 ```
 
-> **Current Status**: `1.0.0-beta.3` candidate. The local editing, preview,
+> **Current Status**: `1.0.0-beta.4` candidate. The local editing, preview,
 > persistence, export, Agent, Motion Canvas, and reviewed AI workflow verticals
-> are implemented. See the [Beta release notes](docs/releases/1.0.0-beta.3.md)
+> are implemented. See the [Beta release notes](docs/releases/1.0.0-beta.4.md)
 > for validation scope and platform/provider limits.
 
 The sibling directory `palmier-pro-upstream/` contains upstream Swift sources for reference during porting.
@@ -320,6 +320,7 @@ The sibling directory `palmier-pro-upstream/` contains upstream Swift sources fo
 | `1.0.0-beta.1` | 2026-08-01 | First installable Beta: end-to-end local editor, Agent, Motion and reviewed AI workflows |
 | `1.0.0-beta.2` | 2026-08-08 | Hardened Beta: official Codex login, atomic timeline gestures, secure MCP and interaction polish |
 | `1.0.0-beta.3` | 2026-08-09 | Playback Beta: app-wide Space transport, native HEVC source preview and release-pipeline hardening |
+| `1.0.0-beta.4` | 2026-08-10 | Release candidate: timing and transition persistence, export consistency, signed updater and Windows tract security upgrade |
 | *(planned)* `1.0.0` | TBD | Phase 10: Full release — CapCut parity + deep Agent integration |
 
 📖 [Full Roadmap](docs/architecture/ROADMAP.md)

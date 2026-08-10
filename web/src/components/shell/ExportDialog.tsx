@@ -230,10 +230,14 @@ export function ExportDialog() {
   const modeOptions = useMemo(
     () => [
       // C1A fail closed: Rust-owned destination and disclosure are not integrated yet.
-      { id: "video" as const, label: t("export.mode.video") },
+      {
+        id: "video" as const,
+        label: t("export.mode.video", { ext: extForCodec(codec) }),
+      },
     ],
-    [t],
+    [codec, t],
   );
+  const selectedModeLabel = modeOptions.find((option) => option.id === mode)?.label ?? mode;
 
   /** Switch export target, clearing any prior run's error / missing report so a
    *  stale notice from the other mode doesn't linger. Blocked while busy. */
@@ -490,7 +494,7 @@ export function ExportDialog() {
               value={mode}
               options={modeOptions}
               onChange={(id) => onModeChange(id)}
-              ariaLabel={t("export.mode")}
+              ariaLabel={`${t("export.mode")}: ${selectedModeLabel}`}
               minWidth={160}
             />
           </Row>

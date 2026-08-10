@@ -999,9 +999,13 @@ pub async fn home_projects_sync(
     app: AppHandle,
     entries: Vec<LegacyRecentProject>,
 ) -> Result<Vec<HomeProjectEntry>, String> {
+    let activity = crate::updater::begin_mutating_activity(
+        &app.state::<crate::updater::InstallAdmissionGate>(),
+    )?;
     let scope = app.asset_protocol_scope();
     let registry_scope = scope.clone();
     let registry_entries = tauri::async_runtime::spawn_blocking(move || {
+        let _activity = activity;
         let authorized_legacy = entries
             .into_iter()
             .filter(|entry| {
@@ -1040,7 +1044,11 @@ pub async fn home_project_register(
     path: String,
     opened_at: Option<u64>,
 ) -> Result<(), String> {
+    let activity = crate::updater::begin_mutating_activity(
+        &app.state::<crate::updater::InstallAdmissionGate>(),
+    )?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _activity = activity;
         let path = validated_project_path(Path::new(&path))?;
         let scope = app.asset_protocol_scope();
         if !crate::safe_asset_protocol::scope_allows_lexical_path(&scope, &path) {
@@ -1057,7 +1065,11 @@ pub async fn home_project_register(
 
 #[tauri::command]
 pub async fn home_project_remove(app: AppHandle, path: String) -> Result<(), String> {
+    let activity = crate::updater::begin_mutating_activity(
+        &app.state::<crate::updater::InstallAdmissionGate>(),
+    )?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _activity = activity;
         with_registry(&app, |registry| {
             registry.remove(Path::new(&path)).map(|_| ())
         })
@@ -1068,7 +1080,11 @@ pub async fn home_project_remove(app: AppHandle, path: String) -> Result<(), Str
 
 #[tauri::command]
 pub async fn home_project_trash(app: AppHandle, path: String) -> Result<(), String> {
+    let activity = crate::updater::begin_mutating_activity(
+        &app.state::<crate::updater::InstallAdmissionGate>(),
+    )?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _activity = activity;
         let path = validated_project_path(Path::new(&path))?;
         if !crate::safe_asset_protocol::scope_allows_lexical_path(
             &app.asset_protocol_scope(),

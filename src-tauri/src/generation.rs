@@ -38,9 +38,14 @@ const RESULT_REDIRECT_MAX: usize = 5;
 
 #[derive(Default)]
 struct GenerationRuntime {
-    jobs: Mutex<HashMap<String, MediaCancelToken>>,
+    jobs: Mutex<HashMap<String, ActiveGenerationJob>>,
     terminal_leases: Mutex<BTreeSet<String>>,
     completed: Mutex<BTreeSet<String>>,
+}
+
+struct ActiveGenerationJob {
+    cancel: MediaCancelToken,
+    _admission: crate::updater::ActivityLease,
 }
 
 #[derive(Clone)]
@@ -50,6 +55,7 @@ pub(crate) struct TauriGenerationBridge {
     staging_root: PathBuf,
     runtime: Arc<GenerationRuntime>,
     clients: Arc<dyn GenerationClientFactory>,
+    admission: crate::updater::InstallAdmissionGate,
 }
 
 trait GenerationClientFactory: Send + Sync {
@@ -153,6 +159,7 @@ pub(crate) fn build_bridge(
     core: AppCore,
     cache_root: PathBuf,
     models_dir: PathBuf,
+    admission: crate::updater::InstallAdmissionGate,
 ) -> Arc<TauriGenerationBridge> {
     Arc::new(TauriGenerationBridge {
         core,
@@ -160,6 +167,7 @@ pub(crate) fn build_bridge(
         staging_root: cache_root.join("generation-staging"),
         runtime: Arc::new(GenerationRuntime::default()),
         clients: Arc::new(ProductionGenerationClientFactory),
+        admission,
     })
 }
 
@@ -170,24 +178,62 @@ fn build_bridge_with_clients(
     models_dir: PathBuf,
     clients: Arc<dyn GenerationClientFactory>,
 ) -> Arc<TauriGenerationBridge> {
+    build_bridge_with_clients_and_admission(
+        core,
+        cache_root,
+        models_dir,
+        clients,
+        crate::updater::InstallAdmissionGate::default(),
+    )
+}
+
+#[cfg(test)]
+fn build_bridge_with_clients_and_admission(
+    core: AppCore,
+    cache_root: PathBuf,
+    models_dir: PathBuf,
+    clients: Arc<dyn GenerationClientFactory>,
+    admission: crate::updater::InstallAdmissionGate,
+) -> Arc<TauriGenerationBridge> {
     Arc::new(TauriGenerationBridge {
         core,
         engine: Arc::new(MediaEngine::new(cache_root.clone(), models_dir)),
         staging_root: cache_root.join("generation-staging"),
         runtime: Arc::new(GenerationRuntime::default()),
         clients,
+        admission,
     })
 }
 
 impl TauriGenerationBridge {
+    pub(crate) fn has_active(&self) -> bool {
+        self.runtime
+            .jobs
+            .lock()
+            .map(|jobs| !jobs.is_empty())
+            .unwrap_or(true)
+    }
+
+    pub(crate) fn cancel_all_active(&self) -> usize {
+        let jobs = self
+            .runtime
+            .jobs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for job in jobs.values() {
+            job.cancel.cancel();
+        }
+        jobs.len()
+    }
+
     pub(crate) fn cancel(&self, job_id: &str) -> bool {
         self.runtime
             .jobs
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(job_id)
-            .is_some_and(|token| {
-                token.cancel();
+            .is_some_and(|job| {
+                job.cancel.cancel();
                 true
             })
     }
@@ -351,13 +397,16 @@ impl TauriGenerationBridge {
             if !job.has_active_output {
                 continue;
             }
-            let already_running = self
+            let Ok(admission) = self.admission.begin_activity() else {
+                continue;
+            };
+            if self
                 .runtime
                 .jobs
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .contains_key(&job_id);
-            if already_running {
+                .contains_key(&job_id)
+            {
                 continue;
             }
             job.placeholders.sort_by_key(|(index, _)| *index);
@@ -396,7 +445,13 @@ impl TauriGenerationBridge {
                 .jobs
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .insert(job_id.clone(), cancel.clone());
+                .insert(
+                    job_id.clone(),
+                    ActiveGenerationJob {
+                        cancel: cancel.clone(),
+                        _admission: admission,
+                    },
+                );
             let bridge = self.clone();
             let recovery_dir = project_dir.clone();
             let managed = !provider_job_id.starts_with(&format!("{}::", job.provider));
@@ -1234,6 +1289,7 @@ impl GenerationBridge for TauriGenerationBridge {
         cancel: &MediaCancelToken,
     ) -> Result<GenerationSubmission, String> {
         cancelled(cancel)?;
+        let admission = self.admission.begin_activity()?;
         let prepared = self.prepare(request)?;
         let snapshot = self.core.runtime_snapshot();
         let project_dir = snapshot
@@ -1253,7 +1309,13 @@ impl GenerationBridge for TauriGenerationBridge {
             .jobs
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(committed.job_id.clone(), background_cancel.clone());
+            .insert(
+                committed.job_id.clone(),
+                ActiveGenerationJob {
+                    cancel: background_cancel.clone(),
+                    _admission: admission,
+                },
+            );
         let bridge = self.clone();
         let job_id = committed.job_id.clone();
         let placeholder_ids = committed.placeholder_asset_ids.clone();
@@ -2036,6 +2098,90 @@ mod tests {
             estimated_cost_credits: None,
             created_at: Some(800_000_000.0),
         }
+    }
+
+    #[test]
+    fn updater_gate_observes_and_cancels_every_active_generation() {
+        let (_temp, bundle, core) = saved_core();
+        let mock = MockTransport::new();
+        let (cache, models) = runtime_dirs(&bundle);
+        let bridge = build_bridge_with_clients(
+            core,
+            cache,
+            models,
+            Arc::new(FixtureClients {
+                client: fixture_client(&mock),
+            }),
+        );
+        let first = MediaCancelToken::new();
+        let second = MediaCancelToken::new();
+        {
+            let mut jobs = bridge
+                .runtime
+                .jobs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            jobs.insert(
+                "job-1".to_string(),
+                ActiveGenerationJob {
+                    cancel: first.clone(),
+                    _admission: bridge.admission.begin_activity().unwrap(),
+                },
+            );
+            jobs.insert(
+                "job-2".to_string(),
+                ActiveGenerationJob {
+                    cancel: second.clone(),
+                    _admission: bridge.admission.begin_activity().unwrap(),
+                },
+            );
+        }
+
+        assert!(bridge.has_active());
+        assert_eq!(bridge.cancel_all_active(), 2);
+        assert!(first.is_cancelled());
+        assert!(second.is_cancelled());
+
+        bridge
+            .runtime
+            .jobs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        assert!(!bridge.has_active());
+        assert_eq!(bridge.cancel_all_active(), 0);
+    }
+
+    #[test]
+    fn generation_cannot_submit_after_update_install_claims_admission() {
+        let (_temp, bundle, core) = saved_core();
+        let mock = MockTransport::new();
+        let (cache, models) = runtime_dirs(&bundle);
+        let admission = crate::updater::InstallAdmissionGate::default();
+        let bridge = build_bridge_with_clients_and_admission(
+            core,
+            cache,
+            models,
+            Arc::new(FixtureClients {
+                client: fixture_client(&mock),
+            }),
+            admission.clone(),
+        );
+        let _install = admission.begin_install().unwrap();
+
+        assert_eq!(
+            bridge
+                .submit(
+                    GenerationRequest::Image(GenerateImageArgs {
+                        prompt: "must not submit".to_string(),
+                        ..Default::default()
+                    }),
+                    &MediaCancelToken::new(),
+                )
+                .unwrap_err(),
+            "app update installation is in progress"
+        );
+        assert!(bridge.runtime.jobs.lock().unwrap().is_empty());
     }
 
     fn runtime_dirs(bundle: &Path) -> (PathBuf, PathBuf) {

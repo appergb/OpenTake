@@ -240,7 +240,10 @@ impl SessionRegistry {
             return false;
         }
         match control {
-            SessionControl::Pause => active.phase = SessionPhase::Paused,
+            SessionControl::Pause => {
+                active.phase = SessionPhase::Paused;
+                active.publication_open = false;
+            }
             SessionControl::Seek => {}
             SessionControl::Stop => {
                 self.active = None;
@@ -365,6 +368,25 @@ mod tests {
         registry
             .install_if_current(ticket, identity.revision())
             .expect("install accepted");
+    }
+
+    #[test]
+    fn pause_closes_publication_until_the_exact_session_resumes() {
+        let mut registry = SessionRegistry::default();
+        let current = identity(4, 9, "pause-publication");
+        install(&mut registry, current.clone());
+        assert!(registry.publication_is_open(&current));
+
+        assert!(registry.control(&current, SessionControl::Pause));
+        assert!(!registry.publication_is_open(&current));
+
+        assert!(matches!(
+            registry
+                .begin_start(current.clone(), current.revision())
+                .expect("resume exact paused session"),
+            StartDecision::Resume
+        ));
+        assert!(registry.publication_is_open(&current));
     }
 
     #[test]

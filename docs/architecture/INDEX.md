@@ -12,6 +12,7 @@
 |---|---|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 总体架构：分层 crate、数据流、单一真理状态 + 命令事务、渲染管线、Agent 集成 |
 | [ADVANCED-FEATURES.md](ADVANCED-FEATURES.md) | 进阶能力设计：wgpu 着色器、AI 推理、FFmpeg 音频工程、跨平台特性 |
+| [UPDATER.md](UPDATER.md) | GitHub Beta 发现、Tauri 签名验证、一键安装、安全保存/任务 gate 与发布密钥契约 |
 
 ## 路线与移植
 

@@ -8,6 +8,7 @@ import { EditorSplit } from "./components/shell/EditorSplit";
 import { CompatibilityBanner } from "./components/shell/CompatibilityBanner";
 import { HomeView } from "./components/home/HomeView";
 import { SettingsView } from "./components/settings/SettingsView";
+import { UpdateCenter } from "./components/settings/UpdateDialog";
 import { LibraryView } from "./components/media/LibraryView";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useTimelinePlaybackEngine } from "./components/preview/previewEngine";
@@ -18,8 +19,10 @@ import { startLibrarySync, stopLibrarySync } from "./store/libraryStore";
 import { useEditorUiStore } from "./store/uiStore";
 import { initI18n } from "./i18n";
 import { initProxyPlayback, initTheme, initWindowSize } from "./store/settingsStore";
-import { onGoHome } from "./lib/api";
+import { isTauri, onGoHome } from "./lib/api";
 import { stopNativePlaybackForProjectBoundary } from "./components/preview/nativePlaybackSession";
+import { useUpdateStore } from "./store/updateStore";
+import { startUpdateScheduler } from "./lib/updateScheduler";
 
 const LIFECYCLE_RETRY_DELAYS_MS = [100, 500, 2_000] as const;
 
@@ -101,6 +104,9 @@ export default function App() {
     initTheme();
     initWindowSize();
     initProxyPlayback();
+    const stopUpdateScheduler = isTauri
+      ? startUpdateScheduler(() => useUpdateStore.getState().check("background"))
+      : undefined;
     let disposed = false;
     const retryTimers = new Set<ReturnType<typeof setTimeout>>();
     let unlisten: (() => void) | undefined;
@@ -203,6 +209,7 @@ export default function App() {
     document.addEventListener("contextmenu", onContextMenu);
     return () => {
       disposed = true;
+      stopUpdateScheduler?.();
       for (const timer of retryTimers) clearTimeout(timer);
       retryTimers.clear();
       unsubscribeView();
@@ -253,6 +260,7 @@ export default function App() {
         },
       )}
       {settingsOpen && <SettingsView />}
+      <UpdateCenter />
       <ExportDialog />
       <SaveAsProgress />
       <ProjectSettingsMismatchDialog />

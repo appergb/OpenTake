@@ -317,7 +317,7 @@ interface UiState {
   setCanvasZoom: (zoom: number) => void;
   setCanvasOffset: (offset: { width: number; height: number }) => void;
 
-  focusPanel: (panel: Panel) => void;
+  focusPanel: (panel: Panel, preserveTimelineSelection?: boolean) => void;
   setMaximizedPanel: (panel: Panel | null) => void;
   toggleMaximizedFocusedPanel: () => void;
   syncFullscreen: () => Promise<void>;
@@ -553,10 +553,14 @@ export const createEditorUiStore = () => create<UiState>((set, get) => ({
   setCanvasOffset: (canvasOffset) => set({ canvasOffset }),
   setPreviewQualityShortEdge: (previewQualityShortEdge) => set({ previewQualityShortEdge }),
 
-  focusPanel: (panel) => {
+  focusPanel: (panel, preserveTimelineSelection = false) => {
     // Panel-click side effects (EditorWindowController.swift:188-189):
     // entering media clears clip selection; entering timeline clears asset sel.
-    if (panel === "media") set({ focusedPanel: panel, selectedClipIds: new Set() });
+    // Transition authoring is the one media-panel flow that consumes the
+    // timeline cut selection, so its marked controls focus without clearing it.
+    if (panel === "media" && !preserveTimelineSelection)
+      set({ focusedPanel: panel, selectedClipIds: new Set() });
+    else if (panel === "media") set({ focusedPanel: panel });
     else if (panel === "timeline")
       set({ focusedPanel: panel, selectedMediaAssetIds: new Set() });
     else set({ focusedPanel: panel });

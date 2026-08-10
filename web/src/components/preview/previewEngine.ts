@@ -284,6 +284,25 @@ export function pausedPlayheadFrameFromFrozenVideo(
   return Number.isFinite(frame) ? Math.max(0, Math.floor(frame)) : null;
 }
 
+/** Settle a pause without ever moving the transport backwards. A decoded DOM
+ * video frame may be ahead of the rAF playhead by a fraction of a frame (the
+ * original pause-twitch fix), but under decode pressure it can also lag by many
+ * frames. Only the former is allowed to advance the authoritative playhead. */
+export function settlePausedPlayheadFrame(
+  activeFrame: number,
+  frozenFrame: number | null,
+): number {
+  const authoritative = Number.isFinite(activeFrame)
+    ? Math.max(0, Math.floor(activeFrame))
+    : 0;
+  if (frozenFrame === null || !Number.isFinite(frozenFrame)) return authoritative;
+  return Math.max(authoritative, Math.max(0, Math.floor(frozenFrame)));
+}
+
+export function transportAcceptsNativePlayhead(isPlaying: boolean, isScrubbing: boolean): boolean {
+  return isPlaying && !isScrubbing;
+}
+
 export function shouldSeekPlayingFollower(args: {
   previousClipId: string | null;
   currentClipId: string;
@@ -458,8 +477,15 @@ export function useTimelinePlaybackEngine(): void {
       if (prev.isPlaying && !nativeDrovePreviousPlay) {
         const visual = activeVideoForPausedSnap(tl, Math.max(0, Math.floor(activeFrame)));
         const el = visual ? previewElements.get(previewElementKey(visual)) : null;
-        const pausedFrame = pausedPlayheadFrameFromFrozenVideo(visual, el?.currentTime ?? NaN, fps);
-        if (pausedFrame !== null) useEditorUiStore.getState().setActiveFrame(pausedFrame);
+        const frozenFrame = pausedPlayheadFrameFromFrozenVideo(
+          visual,
+          el?.currentTime ?? NaN,
+          fps,
+        );
+        const pausedFrame = settlePausedPlayheadFrame(activeFrame, frozenFrame);
+        if (pausedFrame !== Math.max(0, Math.floor(activeFrame))) {
+          useEditorUiStore.getState().setActiveFrame(pausedFrame);
+        }
       } else if (
         // A scrub just ended: settle every active element on the final frame.
         // Without this, a clip the scrub entered near the end can be left on its
@@ -505,8 +531,11 @@ export function useTimelinePlaybackEngine(): void {
       const unsubscribePublication = subscribeNativePlaybackPublication(() => {
         const current = getNativePlaybackPublication();
         if (!current || disposed || !activeNativeIdentityRef.current) return;
-        lastEngineFrameRef.current = current.frame;
         const ui = useEditorUiStore.getState();
+        // Zustand flips transport synchronously, while React effect cleanup runs
+        // after commit. Reject a frame crossing that small boundary window.
+        if (!transportAcceptsNativePlayhead(ui.isPlaying, ui.isScrubbing)) return;
+        lastEngineFrameRef.current = current.frame;
         ui.setActiveFrame(current.frame);
       });
 

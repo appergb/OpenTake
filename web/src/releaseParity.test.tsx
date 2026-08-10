@@ -60,7 +60,9 @@ it("sample_projects_accessibility_visual_and_interaction_gate", async () => {
 
   const panel = container.querySelector<HTMLElement>('[data-editor-panel="preview"]');
   expect(panel).not.toBeNull();
-  expect(panel?.tabIndex).toBe(0);
+  // Named panel regions are programmatically focusable, while their native
+  // controls own the sequential keyboard Tab order.
+  expect(panel?.tabIndex).toBe(-1);
   await act(async () => panel?.focus());
   expect(useEditorUiStore.getState().focusedPanel).toBe("preview");
   expect(panel?.getAttribute("role")).toBe("region");

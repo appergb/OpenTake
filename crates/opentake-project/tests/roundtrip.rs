@@ -6,7 +6,8 @@ mod common;
 use std::path::Path;
 
 use opentake_domain::{
-    Clip, ClipType, MediaManifest, MediaManifestEntry, MediaSource, Timeline, Track,
+    Clip, ClipType, MediaManifest, MediaManifestEntry, MediaSource, Timeline, Track, Transition,
+    TransitionKind,
 };
 use opentake_project::{GenerationLog, GenerationLogEntry, Project};
 
@@ -125,6 +126,38 @@ fn save_then_open_is_lossless() {
     assert!(reopened.thumbnail.is_none());
     let thumb = std::fs::read(bundle.join("thumbnail.jpg")).unwrap();
     assert_eq!(thumb, b"\xff\xd8\xff\xe0JPEGDATA");
+}
+
+#[test]
+fn transition_survives_project_save_and_reopen() {
+    let tmp = TempDir::new("transition-roundtrip");
+    let bundle = tmp.child("Transition.opentake");
+    let mut project = sample_project(&bundle);
+    project.timeline.tracks[0].clips[0].transition_out = Some(Transition {
+        from_clip_id: "clip-1".into(),
+        to_clip_id: "clip-2".into(),
+        kind: TransitionKind::CrossDissolve,
+        duration_frames: 12,
+    });
+
+    project.save().expect("save transition project");
+    let project_json =
+        std::fs::read_to_string(bundle.join("project.json")).expect("read persisted timeline");
+    assert!(project_json.contains("\"transitionOut\""));
+    assert!(project_json.contains("\"fromClipId\": \"clip-1\""));
+    assert!(project_json.contains("\"toClipId\": \"clip-2\""));
+
+    let reopened = Project::open(&bundle).expect("reopen transition project");
+    assert_eq!(
+        reopened.timeline.tracks[0].clips[0]
+            .transition_out
+            .as_ref()
+            .expect("transition restored"),
+        project.timeline.tracks[0].clips[0]
+            .transition_out
+            .as_ref()
+            .unwrap()
+    );
 }
 
 #[test]

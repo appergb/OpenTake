@@ -34,7 +34,13 @@ vi.mock("./store/libraryStore", () => ({
   startLibrarySync: srv.startLibrarySync,
   stopLibrarySync: srv.stopLibrarySync,
 }));
-vi.mock("./lib/api", () => ({ onGoHome: srv.onGoHome }));
+vi.mock("./lib/api", () => ({
+  isTauri: false,
+  onGoHome: srv.onGoHome,
+  checkForAppUpdate: vi.fn().mockResolvedValue(null),
+  closeAppUpdate: vi.fn().mockResolvedValue(undefined),
+  installAppUpdate: vi.fn().mockResolvedValue(undefined),
+}));
 vi.mock("./components/preview/nativePlaybackSession", () => ({
   stopNativePlaybackForProjectBoundary: srv.stopNativePlayback,
 }));

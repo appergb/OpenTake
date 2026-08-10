@@ -110,6 +110,8 @@ export function MediaTabBar({
             aria-controls={`media-main-panel-${tab.id}`}
             aria-selected={selected}
             aria-disabled={!tab.enabled}
+            data-media-main-tab
+            data-preserve-timeline-selection={tab.id === "transition" ? "true" : undefined}
             tabIndex={selected && tab.enabled ? 0 : -1}
             disabled={!tab.enabled}
             ref={(element) => {

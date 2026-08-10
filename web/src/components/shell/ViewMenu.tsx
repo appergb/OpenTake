@@ -25,6 +25,10 @@ import { isTauri } from "../../lib/api";
 import { useProjectStore } from "../../store/projectStore";
 import { useClipboardStore } from "../../store/clipboardStore";
 import { useMediaStore } from "../../store/mediaStore";
+import {
+  isUpdateInstallationBlocking,
+  useUpdateStore,
+} from "../../store/updateStore";
 import * as edit from "../../store/editActions";
 import {
   deleteSelectedFolders,
@@ -54,7 +58,7 @@ export interface ApplicationMenuSpecEntry {
  *  View menu or its keyboard handlers. */
 export const APPLICATION_MENU_SPEC: readonly ApplicationMenuSpecEntry[] = [
   { group: "app", id: "about", labelKey: "menu.about", kind: "predefined" },
-  { group: "app", id: "checkUpdates", labelKey: "menu.checkUpdates", kind: "disabled" },
+  { group: "app", id: "checkUpdates", labelKey: "menu.checkUpdates", kind: "action" },
   { group: "app", id: "settings", labelKey: "settings.title", accelerator: "CmdOrCtrl+,", kind: "action" },
   { group: "app", id: "quit", labelKey: "menu.quit", accelerator: "CmdOrCtrl+Q", kind: "predefined" },
   { group: "file", id: "new", labelKey: "menu.new", accelerator: "CmdOrCtrl+N", kind: "action" },
@@ -110,8 +114,12 @@ function reportMediaDeleteFailure(operation: Promise<void>): void {
  *  global shortcut layer. Exported so the command boundary remains directly
  *  testable without requiring an OS menu server. */
 export function runApplicationMenuCommand(id: string): void {
+  if (isUpdateInstallationBlocking(useUpdateStore.getState().phase)) return;
   const ui = useEditorUiStore.getState();
   switch (id) {
+    case "checkUpdates":
+      ignoreRejected(useUpdateStore.getState().check("manual"));
+      return;
     case "settings":
       ui.openSettingsPane("general");
       return;
@@ -131,7 +139,10 @@ export function runApplicationMenuCommand(id: string): void {
       ignoreRejected(importFilesViaDialog());
       return;
     case "export":
-      ui.setExportDialogOpen(true);
+      // Native menu accelerators can still dispatch while an asynchronously
+      // synchronized menu item is stale. Re-check the same state contract at
+      // the command boundary so the empty-timeline path remains fail-closed.
+      if (applicationMenuStateSnapshot().enabled.export) ui.setExportDialogOpen(true);
       return;
     case "undo":
       ignoreRejected(edit.undo());
@@ -255,32 +266,39 @@ export function applicationMenuStateSnapshot(): ApplicationMenuStateSnapshot {
     ui.focusedPanel === "media" ? mediaSelection || folderSelection : clipSelection;
   const anySelectable = ui.focusedPanel === "media" ? media.items.length > 0 : hasClips;
   const mutableProject = editor && Boolean(project.projectPath) && !project.compatibilityReadOnly;
+  const actionsEnabled = !isUpdateInstallationBlocking(useUpdateStore.getState().phase);
 
   const enabled: Record<string, boolean> = {
-    checkUpdates: false,
-    save: mutableProject,
-    saveAs: mutableProject,
-    importMedia: mutableProject,
-    export: editor && hasClips,
-    undo: editor && project.canUndo,
-    redo: editor && project.canRedo,
-    cut: editor && selection,
-    copy: editor && selection,
-    paste: editor && clipboard.hasContent,
-    selectAll: editor && anySelectable,
-    split: editor && hasClips,
-    trimStart: editor && clipSelection,
-    trimEnd: editor && clipSelection,
-    delete: editor && deleteSelection,
-    mediaPanel: editor,
-    inspector: editor,
-    agentPanel: editor,
-    maximizeFocused: editor && ui.focusedPanel !== null,
-    layoutDefault: editor,
-    layoutMedia: editor,
-    layoutVertical: editor,
-    fullscreen: editor,
+    quit: actionsEnabled,
+    checkUpdates: actionsEnabled,
+    settings: actionsEnabled,
+    new: actionsEnabled,
+    open: actionsEnabled,
+    save: actionsEnabled && mutableProject,
+    saveAs: actionsEnabled && mutableProject,
+    importMedia: actionsEnabled && mutableProject,
+    export: actionsEnabled && editor && hasClips,
+    undo: actionsEnabled && editor && project.canUndo,
+    redo: actionsEnabled && editor && project.canRedo,
+    cut: actionsEnabled && editor && selection,
+    copy: actionsEnabled && editor && selection,
+    paste: actionsEnabled && editor && clipboard.hasContent,
+    selectAll: actionsEnabled && editor && anySelectable,
+    split: actionsEnabled && editor && hasClips,
+    trimStart: actionsEnabled && editor && clipSelection,
+    trimEnd: actionsEnabled && editor && clipSelection,
+    delete: actionsEnabled && editor && deleteSelection,
+    mediaPanel: actionsEnabled && editor,
+    inspector: actionsEnabled && editor,
+    agentPanel: actionsEnabled && editor,
+    maximizeFocused: actionsEnabled && editor && ui.focusedPanel !== null,
+    layoutDefault: actionsEnabled && editor,
+    layoutMedia: actionsEnabled && editor,
+    layoutVertical: actionsEnabled && editor,
+    fullscreen: actionsEnabled && editor,
     tutorial: false,
+    shortcuts: actionsEnabled,
+    mcp: actionsEnabled,
     feedback: false,
   };
   const checked: Record<string, boolean> = {
@@ -477,6 +495,7 @@ async function installNativeApplicationMenu(): Promise<() => void> {
     useProjectStore.subscribe(syncState),
     useClipboardStore.subscribe(syncState),
     useMediaStore.subscribe(syncState),
+    useUpdateStore.subscribe(syncState),
     useI18nStore.subscribe(syncText),
   ];
   syncState();

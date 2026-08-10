@@ -673,14 +673,14 @@ mod model {
         pub fn io_contract(&self) -> OrtIoContract {
             let session = self.session.lock().unwrap();
             let inputs = session
-                .inputs
+                .inputs()
                 .iter()
-                .map(|input| (input.name.clone(), format!("{:?}", input.input_type)))
+                .map(|input| (input.name().to_owned(), format!("{:?}", input.dtype())))
                 .collect();
             let outputs = session
-                .outputs
+                .outputs()
                 .iter()
-                .map(|output| (output.name.clone(), format!("{:?}", output.output_type)))
+                .map(|output| (output.name().to_owned(), format!("{:?}", output.dtype())))
                 .collect();
             (inputs, outputs)
         }

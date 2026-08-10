@@ -416,8 +416,10 @@ fn finish_login_failure(state: &AccountState, attempt: LoginAttempt, message: St
 #[tauri::command]
 pub fn account_set_backend_url(
     state: State<'_, AccountState>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
     url: Option<String>,
 ) -> Result<(), String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
     set_backend_url(&keyring_store(), &state, url)
 }
 
@@ -430,8 +432,10 @@ pub fn account_get_backend_url(state: State<'_, AccountState>) -> Result<Option<
 #[tauri::command]
 pub async fn account_login(
     state: State<'_, AccountState>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
     token: String,
 ) -> Result<AccountInfo, String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
     let token = token.trim().to_string();
     if token.is_empty() {
         return Err("Token is empty".to_string());
@@ -459,7 +463,11 @@ fn logout(store: &dyn KeyStore, state: &AccountState) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn account_logout(state: State<'_, AccountState>) -> Result<(), String> {
+pub fn account_logout(
+    state: State<'_, AccountState>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
+) -> Result<(), String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
     logout(&keyring_store(), &state)
 }
 

@@ -810,8 +810,9 @@ pub enum EditCommand {
     /// Overwrite-place clips (clears each destination range first).
     AddClips { entries: Vec<ClipEntry> },
     /// Overwrite-place clips on fresh shared tracks chosen by media type.
-    /// Visual entries share one new visual track; audio entries share one new
-    /// audio track. Track insertion and placement commit as one transaction.
+    /// Visual entries share one new topmost visual track (index 0); audio
+    /// entries share one new trailing audio track. Track insertion and
+    /// placement commit as one transaction.
     AddClipsAutoTrack { entries: Vec<ClipEntry> },
     /// Place each entry on its own fresh compatible track in one transaction.
     /// Used for aligned stems that intentionally overlap in time.
@@ -2654,10 +2655,11 @@ fn add_clips_auto_track(
         action_name,
         |added| format!("Added {} clip(s): {}", added.len(), added.join(", ")),
         |st| {
-            let visual_track_index = has_visual.then(|| {
-                let at = st.timeline.tracks.len();
-                ops::insert_track(&mut st.timeline, at, ClipType::Video, ids)
-            });
+            // Track 0 is the topmost visual layer. Generated motion and other
+            // auto-placed overlays must be visible above existing footage,
+            // matching AddTextsAutoTrack and the editor's media-drop behavior.
+            let visual_track_index =
+                has_visual.then(|| ops::insert_track(&mut st.timeline, 0, ClipType::Video, ids));
             let audio_track_index = has_audio.then(|| {
                 let at = st.timeline.tracks.len();
                 ops::insert_track(&mut st.timeline, at, ClipType::Audio, ids)

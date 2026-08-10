@@ -197,11 +197,13 @@ pub fn library_list(
 #[tauri::command]
 pub fn library_favorite(
     library: State<'_, LibraryState>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
     source: String,
     kind: String,
     category: Option<String>,
     thumb: Option<String>,
 ) -> Result<LibraryEntryDto, String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
     let _workflow = library.lock_workflow();
     let store = library.store()?;
     let source_path = PathBuf::from(&source);
@@ -225,8 +227,10 @@ pub fn library_favorite(
 pub fn library_unfavorite(
     core: State<'_, AppCore>,
     library: State<'_, LibraryState>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
     id: String,
 ) -> Result<bool, String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
     remove_from_library_and_project(&core, &library, &id)
 }
 
@@ -235,9 +239,11 @@ pub fn library_unfavorite(
 #[tauri::command]
 pub fn library_categorize(
     library: State<'_, LibraryState>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
     id: String,
     category: Option<String>,
 ) -> Result<LibraryEntryDto, String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
     let _workflow = library.lock_workflow();
     let store = library.store()?;
     let entry = store
@@ -253,9 +259,11 @@ pub fn library_categorize(
 #[tauri::command]
 pub fn library_rename(
     library: State<'_, LibraryState>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
     from: String,
     to: Option<String>,
 ) -> Result<usize, String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
     let _workflow = library.lock_workflow();
     library
         .store()?
@@ -270,8 +278,10 @@ pub fn library_rename(
 pub fn library_delete(
     core: State<'_, AppCore>,
     library: State<'_, LibraryState>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
     id: String,
 ) -> Result<bool, String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
     remove_from_library_and_project(&core, &library, &id)
 }
 
@@ -334,8 +344,10 @@ pub fn library_import_to_project(
     core: State<'_, AppCore>,
     media: State<'_, MediaState>,
     library: State<'_, LibraryState>,
+    admission: State<'_, crate::updater::InstallAdmissionGate>,
     id: String,
 ) -> Result<LibraryImportDto, String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
     library_import_to_project_impl(&core, &media, &library, &id)
 }
 

@@ -302,6 +302,48 @@ describe("paused native composite", () => {
     await act(async () => root.unmount());
   });
 
+  it("does not paint a live frame that finishes loading after transport paused", async () => {
+    const drawImage = vi.fn();
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({ drawImage } as never);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const event: PlaybackFrameEvent = {
+      projectEpoch: 3,
+      timelineVersion: 7,
+      sessionId: "pause-late-frame",
+      frame: 481,
+      sequence: 1,
+      terminal: false,
+    };
+    const render = (engineDriving: boolean) => (
+      <RustFrameBuffer
+        event={event}
+        endpoint="http://127.0.0.1/frame"
+        projectEpoch={3}
+        timelineVersion={7}
+        engineDriving={engineDriving}
+        stillFrame={engineDriving ? null : 480}
+        requestCompositeStill={vi.fn().mockResolvedValue(null)}
+        onTerminalFailure={vi.fn()}
+      />
+    );
+
+    await act(async () => root.render(render(true)));
+    const decoder = container.querySelector<HTMLImageElement>('img[data-rust-frame-slot][src]')!;
+    Object.defineProperties(decoder, {
+      currentSrc: { configurable: true, value: decoder.src },
+      naturalWidth: { configurable: true, value: 640 },
+      naturalHeight: { configurable: true, value: 360 },
+    });
+
+    await act(async () => root.render(render(false)));
+    await act(async () => decoder.dispatchEvent(new Event("load", { bubbles: true })));
+
+    expect(drawImage).not.toHaveBeenCalled();
+    await act(async () => root.unmount());
+  });
+
   it("retains the paused still when a live frame cannot get a canvas context", async () => {
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
     const requestCompositeStill = vi.fn().mockResolvedValue({
