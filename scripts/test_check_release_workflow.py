@@ -30,9 +30,9 @@ WORKFLOW = WORKFLOW_PATH.read_text(encoding="utf-8") if WORKFLOW_PATH.is_file() 
 CHECKOUT_SHA = "11d5960a326750d5838078e36cf38b85af677262"
 BETA4_FAILED_RUN_ID = 31412976593
 BETA4_SOURCE_SHA = "2c4efdff9d2587c90cbcac0919f9d1d333d67d6a"
-BETA4_RECOVERY2_RUN_ID = 31427093503
-BETA4_RECOVERY1_TOOLING_SHA = "6162466834bbabb8a16a2c08808e03a53c2b22b6"
-BETA4_NEXT_TOOLING_SHA = "d90c87df0c0b4194635cd20de5e5816b6797d0c0"
+BETA4_PREDECESSOR_RUN_ID = 31441693191
+BETA4_PREDECESSOR_TOOLING_SHA = "924bc1102a9343e14c3beea2a3622b5d92ebff13"
+BETA4_CURRENT_TOOLING_SHA = "d90c87df0c0b4194635cd20de5e5816b6797d0c0"
 RECOVERY_WINDOWS_STEP_OUTCOMES = (
     ("Set up job", "success"),
     (f"Run actions/checkout@{CHECKOUT_SHA}", "success"),
@@ -82,37 +82,32 @@ RECOVERY_WINDOWS_STEP_OUTCOMES = (
     ("Complete job", "success"),
 )
 RECOVERY_WINDOWS_STEP_NUMBERS = (*range(1, 25), 46, 47, 48, 49)
-RECOVERY2_WINDOWS_STEP_OUTCOMES = (
-    *RECOVERY_WINDOWS_STEP_OUTCOMES[:8],
-    ("Provision checksum-pinned Windows FFmpeg sidecars", "success"),
-    ("Verify pinned sidecar supply", "success"),
-    ("Cache Cargo dependencies", "success"),
-    ("Install locked Web dependencies", "success"),
-    ("Rust workspace clippy", "success"),
-    ("Rust workspace tests", "success"),
-    ("Web editor behavior suite", "success"),
-    ("Minimal-feature Tauri clippy", "success"),
-    ("Web production build", "success"),
-    ("Reassert exact source before Windows build", "success"),
-    ("Build native MSI, NSIS, and signed updater artifacts", "failure"),
-    ("Install NSIS and smoke installed app, sidecars, and updater artifacts", "skipped"),
-    ("Reassert exact source after Windows packaging", "skipped"),
-    ("Create and sign Windows updater attestations", "skipped"),
-    ("Create Windows exact-SHA receipt", "skipped"),
-    ("Upload exact-SHA Windows packages and updater signatures", "skipped"),
-    ("Post Cache Cargo dependencies", "skipped"),
-    (
-        "Post Run actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020",
-        "skipped",
-    ),
-    (
-        "Post Run pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1",
-        "success",
-    ),
+PREDECESSOR_PUBLISH_STEP_OUTCOMES = (
+    ("Set up job", "success"),
+    (f"Run actions/checkout@{CHECKOUT_SHA}", "success"),
+    ("Assert exact checked-out SHA", "success"),
+    ("Initialize isolated publish root", "success"),
+    ("Install Minisign verifier", "success"),
+    ("Download macOS artifact", "success"),
+    ("Download Windows artifact", "success"),
+    ("Stage and verify the exact release payload", "success"),
+    ("Verify updater signatures against embedded public key", "success"),
+    ("Write and verify tag-specific updater manifest", "success"),
+    ("Create and verify SHA256SUMS", "success"),
+    ("Prepare release notes with provenance", "success"),
+    ("Reassert exact source before draft mutation", "success"),
+    ("Revalidate remote tag before draft mutation", "success"),
+    ("Create or refresh draft prerelease", "failure"),
+    ("Upload the exact payload to the draft", "skipped"),
+    ("Verify draft target and exact assets", "skipped"),
+    ("Revalidate remote tag before publication", "skipped"),
+    ("Reassert exact source before publication", "skipped"),
+    ("Publish verified prerelease", "skipped"),
+    ("Verify public release through API and checksums", "skipped"),
     (f"Post Run actions/checkout@{CHECKOUT_SHA}", "success"),
     ("Complete job", "success"),
 )
-RECOVERY2_WINDOWS_STEP_NUMBERS = (*range(1, 25), 45, 46, 47, 48, 49)
+PREDECESSOR_PUBLISH_STEP_NUMBERS = (*range(1, 22), 42, 43)
 
 
 def recovery_windows_steps() -> list[dict[str, object]]:
@@ -131,7 +126,7 @@ def recovery_windows_steps() -> list[dict[str, object]]:
     ]
 
 
-def recovery2_windows_steps() -> list[dict[str, object]]:
+def predecessor_publish_steps() -> list[dict[str, object]]:
     return [
         {
             "number": number,
@@ -140,25 +135,39 @@ def recovery2_windows_steps() -> list[dict[str, object]]:
             "conclusion": conclusion,
         }
         for number, (name, conclusion) in zip(
-            RECOVERY2_WINDOWS_STEP_NUMBERS,
-            RECOVERY2_WINDOWS_STEP_OUTCOMES,
+            PREDECESSOR_PUBLISH_STEP_NUMBERS,
+            PREDECESSOR_PUBLISH_STEP_OUTCOMES,
             strict=True,
         )
     ]
 
 
-def recovery_artifacts(
+def predecessor_artifacts(
     run_id: int, head_branch: str, head_sha: str
 ) -> dict[str, object]:
     return {
-        "total_count": 1,
+        "total_count": 2,
         "artifacts": [
             {
-                "id": 9077851536,
-                "name": f"opentake-macos-arm64-{BETA4_SOURCE_SHA}",
-                "size_in_bytes": 142001290,
+                "id": 9084161184,
+                "name": f"opentake-windows-x64-{BETA4_SOURCE_SHA}",
+                "size_in_bytes": 563738459,
                 "expired": False,
-                "digest": "sha256:b62a8270268087d91bc4f8d2c8aac5d2ae2fe2cf32ec21d95bd2fd46787df612",
+                "digest": "sha256:fab634decf8ee1d74432bd003be49474c5790b97e45ad2c81d23aa3bc58613db",
+                "workflow_run": {
+                    "id": run_id,
+                    "repository_id": 1275692189,
+                    "head_repository_id": 1275692189,
+                    "head_branch": head_branch,
+                    "head_sha": head_sha,
+                },
+            },
+            {
+                "id": 9083298193,
+                "name": f"opentake-macos-arm64-{BETA4_SOURCE_SHA}",
+                "size_in_bytes": 142002569,
+                "expired": False,
+                "digest": "sha256:2c5a1ab7f80e59f812b47a37e316c61bc7feedc7b85dd0e20f94a328086ca0b7",
                 "workflow_run": {
                     "id": run_id,
                     "repository_id": 1275692189,
@@ -173,7 +182,7 @@ def recovery_artifacts(
 
 def recovery_comparison(
     base_sha: str,
-    head_sha: str = BETA4_RECOVERY1_TOOLING_SHA,
+    head_sha: str = BETA4_PREDECESSOR_TOOLING_SHA,
 ) -> dict[str, object]:
     return {
         "status": "ahead",
@@ -275,7 +284,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "total_commits": 1,
             "base_commit": {"sha": source_sha},
             "merge_base_commit": {"sha": source_sha},
-            "commits": [{"sha": BETA4_RECOVERY1_TOOLING_SHA}],
+            "commits": [{"sha": BETA4_PREDECESSOR_TOOLING_SHA}],
         }
 
         contract.validate_recovery_run(
@@ -285,7 +294,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             expected_run_id=run_id,
             expected_tag="v1.0.0-beta.4",
             expected_sha=source_sha,
-            expected_comparison_head_sha=BETA4_RECOVERY1_TOOLING_SHA,
+            expected_comparison_head_sha=BETA4_PREDECESSOR_TOOLING_SHA,
         )
 
         mutations = (
@@ -346,7 +355,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                         expected_run_id=run_id,
                         expected_tag="v1.0.0-beta.4",
                         expected_sha=source_sha,
-                        expected_comparison_head_sha=BETA4_RECOVERY1_TOOLING_SHA,
+                        expected_comparison_head_sha=BETA4_PREDECESSOR_TOOLING_SHA,
                     )
 
     def test_failed_run_recovery_requires_the_exact_windows_failure_job_set(
@@ -394,7 +403,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "total_commits": 1,
             "base_commit": {"sha": source_sha},
             "merge_base_commit": {"sha": source_sha},
-            "commits": [{"sha": BETA4_RECOVERY1_TOOLING_SHA}],
+            "commits": [{"sha": BETA4_PREDECESSOR_TOOLING_SHA}],
         }
         invalid_job_sets = {
             "missing": exact[:-1],
@@ -440,7 +449,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                         expected_run_id=run_id,
                         expected_tag="v1.0.0-beta.4",
                         expected_sha=source_sha,
-                        expected_comparison_head_sha=BETA4_RECOVERY1_TOOLING_SHA,
+                        expected_comparison_head_sha=BETA4_PREDECESSOR_TOOLING_SHA,
                     )
 
     def test_failed_run_recovery_requires_the_exact_sidecar_failure_step(
@@ -490,7 +499,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "total_commits": 1,
             "base_commit": {"sha": source_sha},
             "merge_base_commit": {"sha": source_sha},
-            "commits": [{"sha": BETA4_RECOVERY1_TOOLING_SHA}],
+            "commits": [{"sha": BETA4_PREDECESSOR_TOOLING_SHA}],
         }
         exact_steps = recovery_windows_steps()
         mutations: dict[str, list[dict[str, object]]] = {
@@ -561,12 +570,12 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                         expected_run_id=run_id,
                         expected_tag="v1.0.0-beta.4",
                         expected_sha=source_sha,
-                        expected_comparison_head_sha=BETA4_RECOVERY1_TOOLING_SHA,
+                        expected_comparison_head_sha=BETA4_PREDECESSOR_TOOLING_SHA,
                     )
 
-    def test_second_recovery_run_is_an_exact_fail_closed_chain_link(self) -> None:
+    def test_direct_predecessor_is_the_exact_publish_failure_chain_link(self) -> None:
         run = {
-            "id": BETA4_RECOVERY2_RUN_ID,
+            "id": BETA4_PREDECESSOR_RUN_ID,
             "workflow_id": 330325373,
             "name": "Release",
             "path": ".github/workflows/release.yml",
@@ -574,7 +583,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "status": "completed",
             "conclusion": "failure",
             "head_branch": "main",
-            "head_sha": BETA4_RECOVERY1_TOOLING_SHA,
+            "head_sha": BETA4_PREDECESSOR_TOOLING_SHA,
             "run_attempt": 1,
             "repository": {
                 "id": 1275692189,
@@ -588,36 +597,39 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             },
         }
         outcomes = (
-            ("Validate immutable release source", "success"),
-            ("Release quality gates", "success"),
-            ("macOS ARM64 app and DMG", "success"),
-            ("Windows x64 MSI and NSIS", "failure"),
-            ("Publish verified GitHub prerelease", "skipped"),
+            ("Validate immutable release source", 93627558806, "success"),
+            ("Release quality gates", 93627597989, "success"),
+            ("macOS ARM64 app and DMG", 93627597999, "success"),
+            ("Windows x64 MSI and NSIS", 93627598006, "success"),
+            ("Publish verified GitHub prerelease", 93637315893, "failure"),
         )
 
-        def jobs_with_steps(steps: list[dict[str, object]]) -> dict[str, object]:
+        def jobs_with_publish_steps(
+            steps: list[dict[str, object]],
+        ) -> dict[str, object]:
             entries = []
-            for name, conclusion in outcomes:
+            for name, job_id, conclusion in outcomes:
                 entry: dict[str, object] = {
+                    "id": job_id,
                     "name": name,
-                    "run_id": BETA4_RECOVERY2_RUN_ID,
+                    "run_id": BETA4_PREDECESSOR_RUN_ID,
                     "run_attempt": 1,
-                    "head_sha": BETA4_RECOVERY1_TOOLING_SHA,
+                    "head_sha": BETA4_PREDECESSOR_TOOLING_SHA,
                     "status": "completed",
                     "conclusion": conclusion,
                 }
-                if name == "Windows x64 MSI and NSIS":
+                if name == "Publish verified GitHub prerelease":
                     entry["steps"] = steps
                 entries.append(entry)
             return {"total_count": len(entries), "jobs": entries}
 
-        exact_jobs = jobs_with_steps(recovery2_windows_steps())
-        exact_artifacts = recovery_artifacts(
-            BETA4_RECOVERY2_RUN_ID, "main", BETA4_RECOVERY1_TOOLING_SHA
+        exact_jobs = jobs_with_publish_steps(predecessor_publish_steps())
+        exact_artifacts = predecessor_artifacts(
+            BETA4_PREDECESSOR_RUN_ID, "main", BETA4_PREDECESSOR_TOOLING_SHA
         )
         run_comparison = recovery_comparison(
-            BETA4_RECOVERY1_TOOLING_SHA,
-            BETA4_NEXT_TOOLING_SHA,
+            BETA4_PREDECESSOR_TOOLING_SHA,
+            BETA4_CURRENT_TOOLING_SHA,
         )
 
         contract.validate_failed_recovery_run(
@@ -625,11 +637,11 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             exact_jobs,
             exact_artifacts,
             run_comparison,
-            expected_run_id=BETA4_RECOVERY2_RUN_ID,
+            expected_run_id=BETA4_PREDECESSOR_RUN_ID,
             expected_tag="v1.0.0-beta.4",
             expected_source_sha=BETA4_SOURCE_SHA,
-            expected_tooling_sha=BETA4_RECOVERY1_TOOLING_SHA,
-            expected_current_tooling_sha=BETA4_NEXT_TOOLING_SHA,
+            expected_tooling_sha=BETA4_PREDECESSOR_TOOLING_SHA,
+            expected_current_tooling_sha=BETA4_CURRENT_TOOLING_SHA,
         )
 
         moved_failure_steps = [
@@ -638,18 +650,22 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                 "conclusion": (
                     "success"
                     if step["name"]
-                    == "Build native MSI, NSIS, and signed updater artifacts"
+                    == "Create or refresh draft prerelease"
                     else "failure"
-                    if step["name"] == "Rust workspace tests"
+                    if step["name"] == "Upload the exact payload to the draft"
                     else step["conclusion"]
                 ),
             }
-            for step in recovery2_windows_steps()
+            for step in predecessor_publish_steps()
         ]
-        artifact = exact_artifacts["artifacts"][0]
-        assert isinstance(artifact, dict)
-        artifact_run = artifact["workflow_run"]
-        assert isinstance(artifact_run, dict)
+        artifact_entries = exact_artifacts["artifacts"]
+        assert isinstance(artifact_entries, list)
+        windows_artifact = artifact_entries[0]
+        macos_artifact = artifact_entries[1]
+        assert isinstance(windows_artifact, dict)
+        assert isinstance(macos_artifact, dict)
+        windows_artifact_run = windows_artifact["workflow_run"]
+        assert isinstance(windows_artifact_run, dict)
         job_entries = exact_jobs["jobs"]
         assert isinstance(job_entries, list)
         run_repository = run["repository"]
@@ -658,7 +674,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         assert isinstance(run_head_repository, dict)
         mutations = (
             (
-                "wrong dispatcher head",
+                "wrong predecessor head",
                 {**run, "head_sha": "3" * 40},
                 exact_jobs,
                 exact_artifacts,
@@ -721,10 +737,11 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                     "jobs": [
                         *job_entries,
                         {
+                            "id": 1,
                             "name": "unexpected job",
-                            "run_id": BETA4_RECOVERY2_RUN_ID,
+                            "run_id": BETA4_PREDECESSOR_RUN_ID,
                             "run_attempt": 1,
-                            "head_sha": BETA4_RECOVERY1_TOOLING_SHA,
+                            "head_sha": BETA4_PREDECESSOR_TOOLING_SHA,
                             "status": "completed",
                             "conclusion": "failure",
                         },
@@ -747,61 +764,110 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                 run_comparison,
             ),
             (
-                "failure moved to workspace tests",
+                "wrong exact job ID",
                 run,
-                jobs_with_steps(moved_failure_steps),
+                {
+                    **exact_jobs,
+                    "jobs": [{**job_entries[0], "id": 1}, *job_entries[1:]],
+                },
                 exact_artifacts,
                 run_comparison,
             ),
             (
-                "boolean Windows step number",
+                "Windows job did not succeed",
                 run,
-                jobs_with_steps(
+                {
+                    **exact_jobs,
+                    "jobs": [
+                        *job_entries[:3],
+                        {**job_entries[3], "conclusion": "failure"},
+                        job_entries[4],
+                    ],
+                },
+                exact_artifacts,
+                run_comparison,
+            ),
+            (
+                "failure moved past draft creation",
+                run,
+                jobs_with_publish_steps(moved_failure_steps),
+                exact_artifacts,
+                run_comparison,
+            ),
+            (
+                "missing publish failure step",
+                run,
+                jobs_with_publish_steps(
                     [
-                        {**recovery2_windows_steps()[0], "number": True},
-                        *recovery2_windows_steps()[1:],
+                        step
+                        for step in predecessor_publish_steps()
+                        if step["name"] != "Create or refresh draft prerelease"
                     ]
                 ),
                 exact_artifacts,
                 run_comparison,
             ),
             (
-                "artifact ID",
+                "boolean publish step number",
+                run,
+                jobs_with_publish_steps(
+                    [
+                        {**predecessor_publish_steps()[0], "number": True},
+                        *predecessor_publish_steps()[1:],
+                    ]
+                ),
+                exact_artifacts,
+                run_comparison,
+            ),
+            (
+                "Windows artifact ID",
                 run,
                 exact_jobs,
                 {
                     **exact_artifacts,
-                    "artifacts": [{**artifact, "id": 9077851537}],
+                    "artifacts": [
+                        {**windows_artifact, "id": 1},
+                        macos_artifact,
+                    ],
                 },
                 run_comparison,
             ),
             (
-                "artifact name",
+                "macOS artifact name",
                 run,
                 exact_jobs,
                 {
                     **exact_artifacts,
-                    "artifacts": [{**artifact, "name": "unbound-artifact"}],
+                    "artifacts": [
+                        windows_artifact,
+                        {**macos_artifact, "name": "unbound-artifact"},
+                    ],
                 },
                 run_comparison,
             ),
             (
-                "artifact size drift",
+                "Windows artifact size drift",
                 run,
                 exact_jobs,
                 {
                     **exact_artifacts,
-                    "artifacts": [{**artifact, "size_in_bytes": 142001291}],
+                    "artifacts": [
+                        {**windows_artifact, "size_in_bytes": 563738460},
+                        macos_artifact,
+                    ],
                 },
                 run_comparison,
             ),
             (
-                "artifact digest",
+                "macOS artifact digest",
                 run,
                 exact_jobs,
                 {
                     **exact_artifacts,
-                    "artifacts": [{**artifact, "digest": "sha256:" + "0" * 64}],
+                    "artifacts": [
+                        windows_artifact,
+                        {**macos_artifact, "digest": "sha256:" + "0" * 64},
+                    ],
                 },
                 run_comparison,
             ),
@@ -813,30 +879,51 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                     **exact_artifacts,
                     "artifacts": [
                         {
-                            **artifact,
+                            **windows_artifact,
                             "workflow_run": {
-                                **artifact_run,
+                                **windows_artifact_run,
                                 "repository_id": 1,
                             },
-                        }
+                        },
+                        macos_artifact,
                     ],
                 },
                 run_comparison,
             ),
             (
-                "artifact head",
+                "artifact run head",
                 run,
                 exact_jobs,
                 {
                     **exact_artifacts,
                     "artifacts": [
                         {
-                            **artifact,
+                            **windows_artifact,
                             "workflow_run": {
-                                **artifact_run,
+                                **windows_artifact_run,
                                 "head_sha": BETA4_SOURCE_SHA,
                             },
-                        }
+                        },
+                        macos_artifact,
+                    ],
+                },
+                run_comparison,
+            ),
+            (
+                "artifact run ID",
+                run,
+                exact_jobs,
+                {
+                    **exact_artifacts,
+                    "artifacts": [
+                        {
+                            **windows_artifact,
+                            "workflow_run": {
+                                **windows_artifact_run,
+                                "id": BETA4_FAILED_RUN_ID,
+                            },
+                        },
+                        macos_artifact,
                     ],
                 },
                 run_comparison,
@@ -845,7 +932,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                 "missing artifact payload",
                 run,
                 exact_jobs,
-                {"total_count": 0, "artifacts": []},
+                {"total_count": 1, "artifacts": [windows_artifact]},
                 run_comparison,
             ),
             (
@@ -859,7 +946,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                 "malformed artifact payload",
                 run,
                 exact_jobs,
-                {"total_count": 1, "artifacts": ["not-an-object"]},
+                {
+                    "total_count": 2,
+                    "artifacts": [windows_artifact, "not-an-object"],
+                },
                 run_comparison,
             ),
             (
@@ -868,7 +958,10 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                 exact_jobs,
                 {
                     **exact_artifacts,
-                    "artifacts": [{**artifact, "expired": True}],
+                    "artifacts": [
+                        {**windows_artifact, "expired": True},
+                        macos_artifact,
+                    ],
                 },
                 run_comparison,
             ),
@@ -878,40 +971,18 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                 exact_jobs,
                 {
                     **exact_artifacts,
-                    "artifacts": [{**artifact, "expired": 0}],
-                },
-                run_comparison,
-            ),
-            (
-                "empty artifact",
-                run,
-                exact_jobs,
-                {
-                    **exact_artifacts,
-                    "artifacts": [{**artifact, "size_in_bytes": 0}],
-                },
-                run_comparison,
-            ),
-            (
-                "artifact run",
-                run,
-                exact_jobs,
-                {
-                    **exact_artifacts,
                     "artifacts": [
                         {
-                            **artifact,
-                            "workflow_run": {
-                                **artifact_run,
-                                "id": BETA4_FAILED_RUN_ID,
-                            },
-                        }
+                            **windows_artifact,
+                            "expired": 0,
+                        },
+                        macos_artifact,
                     ],
                 },
                 run_comparison,
             ),
             (
-                "prior tooling ancestry",
+                "predecessor tooling ancestry",
                 run,
                 exact_jobs,
                 exact_artifacts,
@@ -961,11 +1032,11 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                         mutated_jobs,
                         mutated_artifacts,
                         mutated_compare,
-                        expected_run_id=BETA4_RECOVERY2_RUN_ID,
+                        expected_run_id=BETA4_PREDECESSOR_RUN_ID,
                         expected_tag="v1.0.0-beta.4",
                         expected_source_sha=BETA4_SOURCE_SHA,
-                        expected_tooling_sha=BETA4_RECOVERY1_TOOLING_SHA,
-                        expected_current_tooling_sha=BETA4_NEXT_TOOLING_SHA,
+                        expected_tooling_sha=BETA4_PREDECESSOR_TOOLING_SHA,
+                        expected_current_tooling_sha=BETA4_CURRENT_TOOLING_SHA,
                     )
 
     def test_recovery_rejects_an_unlisted_failed_run(self) -> None:
@@ -979,20 +1050,20 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                     "status": "completed",
                     "conclusion": "failure",
                     "head_branch": "main",
-                    "head_sha": BETA4_RECOVERY1_TOOLING_SHA,
+                    "head_sha": BETA4_PREDECESSOR_TOOLING_SHA,
                     "run_attempt": 1,
                 },
                 {"total_count": 0, "jobs": []},
                 {"total_count": 0, "artifacts": []},
                 recovery_comparison(
-                    BETA4_RECOVERY1_TOOLING_SHA,
-                    BETA4_NEXT_TOOLING_SHA,
+                    BETA4_PREDECESSOR_TOOLING_SHA,
+                    BETA4_CURRENT_TOOLING_SHA,
                 ),
                 expected_run_id=99999999999,
                 expected_tag="v1.0.0-beta.4",
                 expected_source_sha=BETA4_SOURCE_SHA,
-                expected_tooling_sha=BETA4_RECOVERY1_TOOLING_SHA,
-                expected_current_tooling_sha=BETA4_NEXT_TOOLING_SHA,
+                expected_tooling_sha=BETA4_PREDECESSOR_TOOLING_SHA,
+                expected_current_tooling_sha=BETA4_CURRENT_TOOLING_SHA,
             )
 
     def test_dispatch_contract_requires_root_and_predecessor_run_ids(self) -> None:
@@ -1009,7 +1080,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assertEqual(
             {
-                "description": "Previous failed workflow_dispatch recovery Release run ID (31427093503) chained to the same immutable source",
+                "description": "Direct predecessor workflow_dispatch Release run ID (31441693191) whose publish job failed for the same immutable source",
                 "required": True,
                 "type": "string",
             },
@@ -1018,7 +1089,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
 
         mutated = self.mutate(
             "      failed_recovery_run_id:\n"
-            "        description: Previous failed workflow_dispatch recovery Release run ID (31427093503) chained to the same immutable source\n"
+            "        description: Direct predecessor workflow_dispatch Release run ID (31441693191) whose publish job failed for the same immutable source\n"
             "        required: true\n"
             "        type: string\n",
             "      failed_recovery_run_id:\n"
@@ -1071,7 +1142,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                 '            test -n "$FAILED_RUN_ID"\n',
             ),
             (
-                '            test "$FAILED_RECOVERY_RUN_ID" = "31427093503"\n',
+                '            test "$FAILED_RECOVERY_RUN_ID" = "31441693191"\n',
                 '            test -n "$FAILED_RECOVERY_RUN_ID"\n',
             ),
             (
@@ -1092,7 +1163,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             ),
             (
                 '      FAILED_RECOVERY_RUN_ID: ${{ github.event_name == \'workflow_dispatch\' && inputs.failed_recovery_run_id || \'\' }}\n',
-                '      FAILED_RECOVERY_RUN_ID: 31427093503\n',
+                '      FAILED_RECOVERY_RUN_ID: 31441693191\n',
             ),
         )
         for old, new in mutations:
@@ -1560,12 +1631,144 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assert_rejected(mutated, "published same-tag release is immutable")
 
-    def test_final_api_verification_must_bind_target_sha(self) -> None:
-        mutated = self.mutate_last(
-            'release.get("target_commitish") != expected_sha',
-            'release.get("target_commitish") == ""',
+    def test_release_mutations_omit_workflow_protected_target_commitish(self) -> None:
+        draft_start = WORKFLOW.index("      - name: Create or refresh draft prerelease\n")
+        upload_start = WORKFLOW.index("      - name: Upload the exact payload to the draft\n")
+        draft_step = WORKFLOW[draft_start:upload_start]
+        self.assertIn("--verify-tag", draft_step)
+        self.assertNotIn('--target "$RELEASE_SHA"', draft_step)
+        self.assertIn(
+            "jq -e '.target_commitish | (type == \"string\" and length > 0)'",
+            draft_step,
         )
-        self.assert_rejected(mutated, "final API verification binds target SHA")
+        mutations = (
+            (
+                "                --verify-tag \\\n",
+                "                --verify-tag \\\n"
+                '                --target "$RELEASE_SHA" \\\n',
+            ),
+            (
+                '              gh release edit "$RELEASE_TAG" \\\n'
+                '                --title "OpenTake $RELEASE_VERSION" \\\n',
+                '              gh release edit "$RELEASE_TAG" \\\n'
+                '                --target="$RELEASE_SHA" \\\n'
+                '                --title "OpenTake $RELEASE_VERSION" \\\n',
+            ),
+        )
+        for old, new in mutations:
+            with self.subTest(target_mutation=new.strip()):
+                self.assert_rejected(
+                    self.mutate(old, new),
+                    "release mutations omit workflow-protected target_commitish",
+                )
+
+    def test_final_verification_rebinds_remote_tag_and_graphql_tag_commit(self) -> None:
+        final_start = WORKFLOW.index(
+            "      - name: Verify public release through API and checksums\n"
+        )
+        final_step = WORKFLOW[final_start:]
+        self.assertIn("remote-tag-after-publication.txt", final_step)
+        self.assertIn("resolve-remote-tag", final_step)
+        self.assertIn("public-release-graphql.json", final_step)
+        self.assertIn("resolve-public-release-state", final_step)
+        self.assertNotIn('release.get("target_commitish") != expected_sha', final_step)
+        remote_mutation = self.mutate_last(
+            'python3 -B "$PUBLISH_ROOT/tooling/check_release_workflow.py" resolve-remote-tag \\\n',
+            'python3 -B "$PUBLISH_ROOT/tooling/check_release_workflow.py" trust-remote-tag \\\n',
+        )
+        self.assert_rejected(
+            remote_mutation, "final remote tag rebound after publication"
+        )
+        graphql_mutation = self.mutate(
+            '          python3 -B "$PUBLISH_ROOT/tooling/check_release_workflow.py" resolve-public-release-state \\\n',
+            '          python3 -B "$PUBLISH_ROOT/tooling/check_release_workflow.py" trust-public-release-state \\\n',
+        )
+        self.assert_rejected(
+            graphql_mutation,
+            "final GraphQL verification binds immutable tag commit and assets",
+        )
+
+    def test_public_graphql_state_binds_tag_commit_and_exact_assets(self) -> None:
+        assets = [
+            {"id": f"asset-{index}", "name": f"asset-{index}", "size": index + 1}
+            for index in range(17)
+        ]
+        payload = {
+            "data": {
+                "repository": {
+                    "release": {
+                        "databaseId": 123,
+                        "tagName": "v1.0.0-beta.4",
+                        "tagCommit": {"oid": BETA4_SOURCE_SHA},
+                        "isDraft": False,
+                        "isPrerelease": True,
+                        "releaseAssets": {
+                            "nodes": assets,
+                            "pageInfo": {"hasNextPage": False},
+                        },
+                    }
+                }
+            }
+        }
+        expected_names = [asset["name"] for asset in assets]
+        state = contract.resolve_public_release_state(
+            payload,
+            "v1.0.0-beta.4",
+            BETA4_SOURCE_SHA,
+        )
+        self.assertEqual(expected_names, state["asset_names"])
+
+        release = payload["data"]["repository"]["release"]
+        mutations = (
+            {**release, "tagCommit": {"oid": "1" * 40}},
+            {**release, "isDraft": True},
+            {**release, "isPrerelease": False},
+            {
+                **release,
+                "releaseAssets": {
+                    "nodes": assets[:-1],
+                    "pageInfo": {"hasNextPage": False},
+                },
+            },
+            {
+                **release,
+                "releaseAssets": {
+                    "nodes": assets,
+                    "pageInfo": {"hasNextPage": True},
+                },
+            },
+            {
+                **release,
+                "releaseAssets": {
+                    "nodes": [
+                        assets[0],
+                        {**assets[1], "name": assets[0]["name"]},
+                        *assets[2:],
+                    ],
+                    "pageInfo": {"hasNextPage": False},
+                },
+            },
+            {
+                **release,
+                "releaseAssets": {
+                    "nodes": [{**assets[0], "size": True}, *assets[1:]],
+                    "pageInfo": {"hasNextPage": False},
+                },
+            },
+        )
+        for mutation in mutations:
+            with self.assertRaises(contract.ReleaseStateError):
+                contract.resolve_public_release_state(
+                    {"data": {"repository": {"release": mutation}}},
+                    "v1.0.0-beta.4",
+                    BETA4_SOURCE_SHA,
+                )
+        with self.assertRaises(contract.ReleaseStateError):
+            contract.resolve_public_release_state(
+                {**payload, "errors": [{"message": "forged partial response"}]},
+                "v1.0.0-beta.4",
+                BETA4_SOURCE_SHA,
+            )
 
     def test_draft_lookup_uses_graphql_not_the_rest_tag_endpoint(self) -> None:
         draft_start = WORKFLOW.index("      - name: Create or refresh draft prerelease\n")
@@ -1855,6 +2058,45 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                     "complete Windows x64 installer gate",
                 )
 
+    def test_publish_helpers_are_exact_tooling_blobs_outside_the_worktree(self) -> None:
+        publish_start = WORKFLOW.index("  publish:\n")
+        publish = WORKFLOW[publish_start:]
+        initialize_start = publish.index(
+            "      - name: Initialize isolated publish root\n"
+        )
+        minisign_start = publish.index("      - name: Install Minisign verifier\n")
+        initialize = publish[initialize_start:minisign_start]
+        self.assertIn(
+            'git cat-file blob "$RELEASE_TOOLING_SHA:scripts/check_release_workflow.py"',
+            initialize,
+        )
+        self.assertIn(
+            'git cat-file blob "$RELEASE_TOOLING_SHA:scripts/workflow_yaml.py"',
+            initialize,
+        )
+        self.assertNotIn("raw.githubusercontent.com", initialize)
+        self.assertNotIn("python3 scripts/check_release_workflow.py", publish)
+        self.assertIn(
+            'python3 -B "$PUBLISH_ROOT/tooling/check_release_workflow.py"',
+            publish,
+        )
+        mutations = (
+            (
+                '          git cat-file blob "$RELEASE_TOOLING_SHA:scripts/check_release_workflow.py" \\\n',
+                '          curl --fail "https://raw.githubusercontent.com/appergb/OpenTake/$RELEASE_TOOLING_SHA/scripts/check_release_workflow.py" \\\n',
+            ),
+            (
+                '          git cat-file blob "$RELEASE_TOOLING_SHA:scripts/workflow_yaml.py" \\\n',
+                '          git cat-file blob "$RELEASE_SHA:scripts/workflow_yaml.py" \\\n',
+            ),
+        )
+        for old, new in mutations:
+            with self.subTest(helper_mutation=new.strip()):
+                self.assert_rejected(
+                    self.mutate_last(old, new),
+                    "publish helpers use exact tooling commit outside the worktree",
+                )
+
     def test_publish_command_cannot_be_faked_by_echo(self) -> None:
         mutated = self.mutate(
             '        run: gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false\n',
@@ -1882,9 +2124,9 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         canonical = RELEASE_NOTES_PATH.read_text(encoding="utf-8")
         for marker in (
             "`failed_run_id=31412976593`",
-            "`failed_recovery_run_id=31427093503`",
+            "`failed_recovery_run_id=31441693191`",
             "`2c4efdff9d2587c90cbcac0919f9d1d333d67d6a`",
-            "`6162466834bbabb8a16a2c08808e03a53c2b22b6`",
+            "`924bc1102a9343e14c3beea2a3622b5d92ebff13`",
         ):
             with self.subTest(marker=marker):
                 with tempfile.TemporaryDirectory() as directory:

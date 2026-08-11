@@ -169,7 +169,7 @@ APPROVED_SIMPLE_RUNS = {
 }
 
 APPROVED_COMPLEX_RUN_SHA256 = {
-    ("validate", "Validate tag, source SHA, versions, and notes"): "57f984fba1ddd7171444f54b3f086b86b563e55ac7b298b6e9271446bbfdb54f",
+    ("validate", "Validate tag, source SHA, versions, and notes"): "d451f703d50cd202d583cd42cc631927bfb97ea64aa6988bca5210dc40509379",
     ("validate", "Reassert exact source after validation"): "953657d26d2eda8490c18e7030c66ddb19aba64a5c8b19808da9a853fd1bfdd2",
     ("quality", "Assert exact checked-out SHA"): "ff0b148eecdf8603712586a6c4a05e752df0b36b5c97a366760f6cba10e58ddd",
     ("quality", "Free disk space"): "5848415c4d0e696f46965d62a2e17c8b7a0dd45ae600d28102af0b04108d9bf6",
@@ -197,28 +197,28 @@ APPROVED_COMPLEX_RUN_SHA256 = {
     ("windows_x64", "Create and sign Windows updater attestations"): "40c7f2ea8696db15adf49a688a446637df5b1625fe0b39de32502e66af71f2c6",
     ("windows_x64", "Create Windows exact-SHA receipt"): "0072244797bdcbe7a26f57a5a83e5c2ba880ffa96499f18f4c5affd30b0e54f4",
     ("publish", "Assert exact checked-out SHA"): "b1cd768e31e2924c14421c62357ae200ddee50b2a6c2ddc24618717a3c876267",
-    ("publish", "Initialize isolated publish root"): "ab0b76ab253b0497067e6d8650a0fd6b37fb3a0ac72b2ff11d1738a88b46c2dd",
+    ("publish", "Initialize isolated publish root"): "79b191e8b5c59e59d847c59edb73d17069736c54bc1cb56f2588051ab3e3f433",
     ("publish", "Install Minisign verifier"): "444027a1ab2942d223b3e16e286d2de585fdc1175e94e093b012b13aefea2416",
     ("publish", "Stage and verify the exact release payload"): "4cdd6d245891e535e6f11a29371b4b0c7e343702f36d37f56262387f3523b534",
     ("publish", "Verify updater signatures against embedded public key"): "d0da4c84101149e7853b764db8f770d25f61b4fa654f9f927fd813bd22604fe5",
     ("publish", "Write and verify tag-specific updater manifest"): "faef05e038dd082d81e1ec12a8c6f933575e8766e73df1b4ecb28cb794156579",
     ("publish", "Create and verify SHA256SUMS"): "67975ac408cc96209261e8c397402acaac47e1a689d7572d5634d3b8dabd66d8",
-    ("publish", "Prepare release notes with provenance"): "3f8dc1f9ab2680cb4d0c7989830cac37e536844bdbbee05f8955dfb40673a271",
+    ("publish", "Prepare release notes with provenance"): "25aa357cc5ce5620686b2b66155dfaf4d967c3977eb6cb5dcad628449a161f71",
     ("publish", "Reassert exact source before draft mutation"): "953657d26d2eda8490c18e7030c66ddb19aba64a5c8b19808da9a853fd1bfdd2",
-    ("publish", "Revalidate remote tag before draft mutation"): "2eac9a1203d96969b545c9447b9637c8ad16689d2704b32c7e710e9ae4bff47c",
-    ("publish", "Create or refresh draft prerelease"): "e3cee76806b604359715ec91cf1a7c6d7c8919e05dd5b5c99f77b98686debc6b",
-    ("publish", "Verify draft target and exact assets"): "16b9ac363a7f10417e01332035e2419341f762a46afb586fd2f214641142d0fe",
-    ("publish", "Revalidate remote tag before publication"): "89cd8010bf65a4a3d7b85b2666e13eeddc4554e24e53eb700592bd6dc77cea6f",
+    ("publish", "Revalidate remote tag before draft mutation"): "cd6a3662a7a43dbd837170c734a41f3832f258b14468b3bdbee36b1e42d7a75c",
+    ("publish", "Create or refresh draft prerelease"): "f636c39fe330986ae5fe717a5005554fd11a6a9df3e1b8303c4e42c5263b39a7",
+    ("publish", "Verify draft target and exact assets"): "99620971b48abd650be72d91bcdd6f2af47ba56446d124c105580ee79bc5d40e",
+    ("publish", "Revalidate remote tag before publication"): "502a7ccd2c1d6b81642aa7824c168521caaefd5d6118f4e9cdafa359ce57ce3c",
     ("publish", "Reassert exact source before publication"): "953657d26d2eda8490c18e7030c66ddb19aba64a5c8b19808da9a853fd1bfdd2",
-    ("publish", "Verify public release through API and checksums"): "bdd6671280f89cfe71fad7c0eb9fecb24a6f66931910ee5075c5c2e9e96f52fe",
+    ("publish", "Verify public release through API and checksums"): "136ae6eb7805f2f0e59f11bc1624860f51defa3d0449aab4b519a2506a554522",
 }
 
 APPROVED_JOB_SHA256 = {
-    "validate": "e0749abbec85f8a9dade905f4e98e903350168a79b2c972dcc5b839070f4e9c5",
+    "validate": "eb09b22d3681439d20d6a2e793d81b18aa2901e0d5f646dbcc9b809226954b46",
     "quality": "a2947370289ebd299042159fbe8fd046f7fedf72b47037d58b4398ed8e85baee",
     "macos_arm64": "1785d765c96278190c25e312c9e610070619e17b7b2b0d922f0bd234501df525",
     "windows_x64": "63bd70d85e40a3f1177e9059d4674d7f93d4502181fc378f7706e839af953378",
-    "publish": "c7d84471185df270f1d30129b936dccc8cb6c1069020e34924037be2976425ec",
+    "publish": "ea3fe6d18a94c0850d3ac7f21c4e23fb8fcf572189f77f659e5b34eab776bd85",
 }
 
 EXPECTED_RECOVERY_JOB_CONCLUSIONS = {
@@ -303,64 +303,54 @@ EXPECTED_RECOVERY_WINDOWS_STEPS = (
     ("Complete job", "completed", "success"),
 )
 EXPECTED_RECOVERY_WINDOWS_STEP_NUMBERS = (*range(1, 25), 46, 47, 48, 49)
-EXPECTED_FAILED_RECOVERY_RUN_ID = 31427093503
+EXPECTED_FAILED_RECOVERY_RUN_ID = 31441693191
 EXPECTED_FAILED_RECOVERY_TAG = "v1.0.0-beta.4"
 EXPECTED_FAILED_RECOVERY_SOURCE_SHA = (
     "2c4efdff9d2587c90cbcac0919f9d1d333d67d6a"
 )
 EXPECTED_FAILED_RECOVERY_TOOLING_SHA = (
-    "6162466834bbabb8a16a2c08808e03a53c2b22b6"
+    "924bc1102a9343e14c3beea2a3622b5d92ebff13"
 )
-EXPECTED_FAILED_RECOVERY_ARTIFACT_ID = 9077851536
-EXPECTED_FAILED_RECOVERY_ARTIFACT_SIZE = 142001290
-EXPECTED_FAILED_RECOVERY_ARTIFACT_DIGEST = (
-    "sha256:b62a8270268087d91bc4f8d2c8aac5d2ae2fe2cf32ec21d95bd2fd46787df612"
-)
-EXPECTED_FAILED_RECOVERY_WINDOWS_STEPS = (
-    *EXPECTED_RECOVERY_WINDOWS_STEPS[:8],
+EXPECTED_FAILED_RECOVERY_JOB_CONCLUSIONS = {
+    "Validate immutable release source": "success",
+    "Release quality gates": "success",
+    "macOS ARM64 app and DMG": "success",
+    "Windows x64 MSI and NSIS": "success",
+    "Publish verified GitHub prerelease": "failure",
+}
+EXPECTED_FAILED_RECOVERY_JOB_IDS = {
+    "Validate immutable release source": 93627558806,
+    "Release quality gates": 93627597989,
+    "macOS ARM64 app and DMG": 93627597999,
+    "Windows x64 MSI and NSIS": 93627598006,
+    "Publish verified GitHub prerelease": 93637315893,
+}
+EXPECTED_FAILED_RECOVERY_PUBLISH_STEPS = (
+    ("Set up job", "completed", "success"),
     (
-        "Provision checksum-pinned Windows FFmpeg sidecars",
+        f"Run actions/checkout@{PINNED_ACTIONS['actions/checkout']}",
         "completed",
         "success",
     ),
-    ("Verify pinned sidecar supply", "completed", "success"),
-    ("Cache Cargo dependencies", "completed", "success"),
-    ("Install locked Web dependencies", "completed", "success"),
-    ("Rust workspace clippy", "completed", "success"),
-    ("Rust workspace tests", "completed", "success"),
-    ("Web editor behavior suite", "completed", "success"),
-    ("Minimal-feature Tauri clippy", "completed", "success"),
-    ("Web production build", "completed", "success"),
-    ("Reassert exact source before Windows build", "completed", "success"),
-    (
-        "Build native MSI, NSIS, and signed updater artifacts",
-        "completed",
-        "failure",
-    ),
-    (
-        "Install NSIS and smoke installed app, sidecars, and updater artifacts",
-        "completed",
-        "skipped",
-    ),
-    ("Reassert exact source after Windows packaging", "completed", "skipped"),
-    ("Create and sign Windows updater attestations", "completed", "skipped"),
-    ("Create Windows exact-SHA receipt", "completed", "skipped"),
-    (
-        "Upload exact-SHA Windows packages and updater signatures",
-        "completed",
-        "skipped",
-    ),
-    ("Post Cache Cargo dependencies", "completed", "skipped"),
-    (
-        f"Post Run actions/setup-node@{PINNED_ACTIONS['actions/setup-node']}",
-        "completed",
-        "skipped",
-    ),
-    (
-        f"Post Run pnpm/action-setup@{PINNED_ACTIONS['pnpm/action-setup']}",
-        "completed",
-        "success",
-    ),
+    ("Assert exact checked-out SHA", "completed", "success"),
+    ("Initialize isolated publish root", "completed", "success"),
+    ("Install Minisign verifier", "completed", "success"),
+    ("Download macOS artifact", "completed", "success"),
+    ("Download Windows artifact", "completed", "success"),
+    ("Stage and verify the exact release payload", "completed", "success"),
+    ("Verify updater signatures against embedded public key", "completed", "success"),
+    ("Write and verify tag-specific updater manifest", "completed", "success"),
+    ("Create and verify SHA256SUMS", "completed", "success"),
+    ("Prepare release notes with provenance", "completed", "success"),
+    ("Reassert exact source before draft mutation", "completed", "success"),
+    ("Revalidate remote tag before draft mutation", "completed", "success"),
+    ("Create or refresh draft prerelease", "completed", "failure"),
+    ("Upload the exact payload to the draft", "completed", "skipped"),
+    ("Verify draft target and exact assets", "completed", "skipped"),
+    ("Revalidate remote tag before publication", "completed", "skipped"),
+    ("Reassert exact source before publication", "completed", "skipped"),
+    ("Publish verified prerelease", "completed", "skipped"),
+    ("Verify public release through API and checksums", "completed", "skipped"),
     (
         f"Post Run actions/checkout@{PINNED_ACTIONS['actions/checkout']}",
         "completed",
@@ -368,14 +358,19 @@ EXPECTED_FAILED_RECOVERY_WINDOWS_STEPS = (
     ),
     ("Complete job", "completed", "success"),
 )
-EXPECTED_FAILED_RECOVERY_WINDOWS_STEP_NUMBERS = (
-    *range(1, 25),
-    45,
-    46,
-    47,
-    48,
-    49,
-)
+EXPECTED_FAILED_RECOVERY_PUBLISH_STEP_NUMBERS = (*range(1, 22), 42, 43)
+EXPECTED_FAILED_RECOVERY_ARTIFACTS = {
+    f"opentake-windows-x64-{EXPECTED_FAILED_RECOVERY_SOURCE_SHA}": {
+        "id": 9084161184,
+        "size_in_bytes": 563738459,
+        "digest": "sha256:fab634decf8ee1d74432bd003be49474c5790b97e45ad2c81d23aa3bc58613db",
+    },
+    f"opentake-macos-arm64-{EXPECTED_FAILED_RECOVERY_SOURCE_SHA}": {
+        "id": 9083298193,
+        "size_in_bytes": 142002569,
+        "digest": "sha256:2c5a1ab7f80e59f812b47a37e316c61bc7feedc7b85dd0e20f94a328086ca0b7",
+    },
+}
 
 
 class ReleaseStateError(ValueError):
@@ -570,7 +565,7 @@ def validate_failed_recovery_run(
 
     total_count = jobs.get("total_count")
     entries = jobs.get("jobs")
-    expected_job_count = len(EXPECTED_RECOVERY_JOB_CONCLUSIONS)
+    expected_job_count = len(EXPECTED_FAILED_RECOVERY_JOB_CONCLUSIONS)
     if (
         total_count != expected_job_count
         or not isinstance(entries, list)
@@ -582,13 +577,14 @@ def validate_failed_recovery_run(
     if (
         not all(isinstance(name, str) for name in names)
         or len(set(names)) != expected_job_count
-        or set(names) != set(EXPECTED_RECOVERY_JOB_CONCLUSIONS)
+        or set(names) != set(EXPECTED_FAILED_RECOVERY_JOB_CONCLUSIONS)
     ):
         raise RecoveryRunError("failed recovery job set is not exact")
     by_name = {str(entry["name"]): entry for entry in entries}
-    for name, conclusion in EXPECTED_RECOVERY_JOB_CONCLUSIONS.items():
+    for name, conclusion in EXPECTED_FAILED_RECOVERY_JOB_CONCLUSIONS.items():
         entry = by_name[name]
         expected_fields = {
+            "id": EXPECTED_FAILED_RECOVERY_JOB_IDS[name],
             "run_id": EXPECTED_FAILED_RECOVERY_RUN_ID,
             "run_attempt": 1,
             "head_sha": EXPECTED_FAILED_RECOVERY_TOOLING_SHA,
@@ -602,28 +598,28 @@ def validate_failed_recovery_run(
                 f"failed recovery job outcome is not whitelisted: {name}"
             )
 
-    windows_steps = by_name["Windows x64 MSI and NSIS"].get("steps")
-    if not isinstance(windows_steps, list) or not all(
-        isinstance(step, dict) for step in windows_steps
+    publish_steps = by_name["Publish verified GitHub prerelease"].get("steps")
+    if not isinstance(publish_steps, list) or not all(
+        isinstance(step, dict) for step in publish_steps
     ):
         raise RecoveryRunError(
-            "failed recovery Windows steps are missing or malformed"
+            "failed recovery publish steps are missing or malformed"
         )
-    step_numbers = tuple(step.get("number") for step in windows_steps)
+    step_numbers = tuple(step.get("number") for step in publish_steps)
     step_outcomes = tuple(
         (step.get("name"), step.get("status"), step.get("conclusion"))
-        for step in windows_steps
+        for step in publish_steps
     )
     if (
         any(
             not isinstance(number, int) or isinstance(number, bool)
             for number in step_numbers
         )
-        or step_numbers != EXPECTED_FAILED_RECOVERY_WINDOWS_STEP_NUMBERS
-        or step_outcomes != EXPECTED_FAILED_RECOVERY_WINDOWS_STEPS
+        or step_numbers != EXPECTED_FAILED_RECOVERY_PUBLISH_STEP_NUMBERS
+        or step_outcomes != EXPECTED_FAILED_RECOVERY_PUBLISH_STEPS
     ):
         raise RecoveryRunError(
-            "failed recovery is not the exact Windows config argv failure"
+            "failed recovery is not the exact draft-creation permission failure"
         )
 
     artifact_total_count = artifacts.get("total_count")
@@ -631,24 +627,20 @@ def validate_failed_recovery_run(
     if (
         not isinstance(artifact_total_count, int)
         or isinstance(artifact_total_count, bool)
-        or artifact_total_count != 1
+        or artifact_total_count != len(EXPECTED_FAILED_RECOVERY_ARTIFACTS)
         or not isinstance(artifact_entries, list)
-        or len(artifact_entries) != 1
-        or not isinstance(artifact_entries[0], dict)
+        or len(artifact_entries) != len(EXPECTED_FAILED_RECOVERY_ARTIFACTS)
+        or not all(isinstance(entry, dict) for entry in artifact_entries)
     ):
         raise RecoveryRunError("failed recovery artifact list is not exact")
-    artifact = artifact_entries[0]
-    artifact_fields = {
-        "id": EXPECTED_FAILED_RECOVERY_ARTIFACT_ID,
-        "name": f"opentake-macos-arm64-{EXPECTED_FAILED_RECOVERY_SOURCE_SHA}",
-        "size_in_bytes": EXPECTED_FAILED_RECOVERY_ARTIFACT_SIZE,
-        "digest": EXPECTED_FAILED_RECOVERY_ARTIFACT_DIGEST,
-    }
-    if artifact.get("expired") is not False or any(
-        artifact.get(field) != value for field, value in artifact_fields.items()
+    artifact_names = [entry.get("name") for entry in artifact_entries]
+    if (
+        not all(isinstance(name, str) for name in artifact_names)
+        or len(set(artifact_names)) != len(EXPECTED_FAILED_RECOVERY_ARTIFACTS)
+        or set(artifact_names) != set(EXPECTED_FAILED_RECOVERY_ARTIFACTS)
     ):
-        raise RecoveryRunError("failed recovery macOS artifact is not exact")
-    artifact_run = artifact.get("workflow_run")
+        raise RecoveryRunError("failed recovery artifact set is not exact")
+    artifacts_by_name = {str(entry["name"]): entry for entry in artifact_entries}
     expected_artifact_run = {
         "id": EXPECTED_FAILED_RECOVERY_RUN_ID,
         "repository_id": 1275692189,
@@ -656,11 +648,24 @@ def validate_failed_recovery_run(
         "head_branch": "main",
         "head_sha": EXPECTED_FAILED_RECOVERY_TOOLING_SHA,
     }
-    if not isinstance(artifact_run, dict) or any(
-        artifact_run.get(field) != value
-        for field, value in expected_artifact_run.items()
-    ):
-        raise RecoveryRunError("failed recovery artifact provenance is not exact")
+    for name, expected_fields in EXPECTED_FAILED_RECOVERY_ARTIFACTS.items():
+        artifact = artifacts_by_name[name]
+        artifact_run = artifact.get("workflow_run")
+        if (
+            artifact.get("expired") is not False
+            or any(
+                artifact.get(field) != value
+                for field, value in expected_fields.items()
+            )
+            or not isinstance(artifact_run, dict)
+            or any(
+                artifact_run.get(field) != value
+                for field, value in expected_artifact_run.items()
+            )
+        ):
+            raise RecoveryRunError(
+                f"failed recovery artifact provenance is not exact: {name}"
+            )
 
     base = tooling_comparison.get("base_commit")
     merge_base = tooling_comparison.get("merge_base_commit")
@@ -788,6 +793,74 @@ def resolve_release_state(
         asset_sizes.append(size)
     return {
         "action": "refresh",
+        "release_id": release_id,
+        "asset_node_ids": asset_node_ids,
+        "asset_names": asset_names,
+        "asset_sizes": asset_sizes,
+    }
+
+
+def resolve_public_release_state(
+    payload: dict[str, object], expected_tag: str, expected_sha: str
+) -> dict[str, object]:
+    """Validate one published GraphQL release against its immutable tag commit."""
+    if re.fullmatch(r"[0-9a-f]{40}", expected_sha) is None:
+        raise ReleaseStateError("expected source SHA must be lowercase 40-hex")
+    if payload.get("errors"):
+        raise ReleaseStateError("GraphQL public release lookup returned errors")
+    data = payload.get("data")
+    repository = data.get("repository") if isinstance(data, dict) else None
+    release = repository.get("release") if isinstance(repository, dict) else None
+    if not isinstance(release, dict):
+        raise ReleaseStateError("GraphQL public release lookup is malformed")
+    if release.get("tagName") != expected_tag:
+        raise ReleaseStateError("GraphQL public release tag does not match")
+    tag_commit = release.get("tagCommit")
+    target = tag_commit.get("oid") if isinstance(tag_commit, dict) else None
+    if not isinstance(target, str) or target.lower() != expected_sha:
+        raise ReleaseStateError(
+            "GraphQL public release tag commit does not match source SHA"
+        )
+    if release.get("isDraft") is not False or release.get("isPrerelease") is not True:
+        raise ReleaseStateError("GraphQL release is not a published prerelease")
+    release_id = release.get("databaseId")
+    if (
+        not isinstance(release_id, int)
+        or isinstance(release_id, bool)
+        or release_id <= 0
+    ):
+        raise ReleaseStateError("GraphQL public release has no numeric database ID")
+    connection = release.get("releaseAssets")
+    if not isinstance(connection, dict):
+        raise ReleaseStateError("GraphQL public release has no asset connection")
+    page_info = connection.get("pageInfo")
+    if not isinstance(page_info, dict) or page_info.get("hasNextPage") is not False:
+        raise ReleaseStateError("GraphQL public release asset list is incomplete")
+    nodes = connection.get("nodes")
+    if not isinstance(nodes, list) or len(nodes) != 17:
+        raise ReleaseStateError("GraphQL public release must contain 17 assets")
+
+    asset_node_ids: list[str] = []
+    asset_names: list[str] = []
+    asset_sizes: list[int] = []
+    for asset in nodes:
+        if not isinstance(asset, dict):
+            raise ReleaseStateError("GraphQL public release asset is malformed")
+        asset_id = asset.get("id")
+        name = asset.get("name")
+        size = asset.get("size")
+        if not isinstance(asset_id, str) or not asset_id:
+            raise ReleaseStateError("GraphQL public release asset has no node ID")
+        if not isinstance(name, str) or not name:
+            raise ReleaseStateError("GraphQL public release asset has no name")
+        if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+            raise ReleaseStateError("GraphQL public release asset has invalid size")
+        asset_node_ids.append(asset_id)
+        asset_names.append(name)
+        asset_sizes.append(size)
+    if len(set(asset_node_ids)) != 17 or len(set(asset_names)) != 17:
+        raise ReleaseStateError("GraphQL public release assets are not unique")
+    return {
         "release_id": release_id,
         "asset_node_ids": asset_node_ids,
         "asset_names": asset_names,
@@ -1056,7 +1129,7 @@ def validate_workflow(workflow: str) -> list[str]:
         or failed_recovery_run_input is None
         or set(failed_recovery_run_input) != {"description", "required", "type"}
         or failed_recovery_run_input.get("description")
-        != "Previous failed workflow_dispatch recovery Release run ID (31427093503) chained to the same immutable source"
+        != "Direct predecessor workflow_dispatch Release run ID (31441693191) whose publish job failed for the same immutable source"
         or failed_recovery_run_input.get("required") is not True
         or failed_recovery_run_input.get("type") != "string"
     ):
@@ -1344,9 +1417,9 @@ def validate_workflow(workflow: str) -> list[str]:
         '[[ "$FAILED_RUN_ID" =~ ^[1-9][0-9]*$ ]]',
         '[[ "$FAILED_RECOVERY_RUN_ID" =~ ^[1-9][0-9]*$ ]]',
         'test "$FAILED_RUN_ID" = "31412976593"',
-        'test "$FAILED_RECOVERY_RUN_ID" = "31427093503"',
+        'test "$FAILED_RECOVERY_RUN_ID" = "31441693191"',
         'test "$tooling_sha" = "$remote_main"',
-        'predecessor_tooling_sha="6162466834bbabb8a16a2c08808e03a53c2b22b6"',
+        'predecessor_tooling_sha="924bc1102a9343e14c3beea2a3622b5d92ebff13"',
         'if ! git cat-file -e "${tooling_sha}^{commit}" 2>/dev/null; then',
         'git fetch --no-tags --depth=1 origin "$tooling_sha"',
         'test "$(git rev-parse "${tooling_sha}^{commit}")" = "$tooling_sha"',
@@ -1966,7 +2039,14 @@ def validate_workflow(workflow: str) -> list[str]:
     if publish.get("permissions") != {"contents": "write"}:
         errors.append("publish-only contents write permission")
     publish_env = _as_mapping(publish.get("env"))
-    if publish_env is None or publish_env.get("PYTHONDONTWRITEBYTECODE") != "1":
+    if (
+        publish_env is None
+        or publish_env.get("PYTHONDONTWRITEBYTECODE") != "1"
+        or publish_env.get("ROOT_FAILED_RUN_ID")
+        != "${{ github.event_name == 'workflow_dispatch' && inputs.failed_run_id || '' }}"
+        or publish_env.get("PREDECESSOR_RUN_ID")
+        != "${{ github.event_name == 'workflow_dispatch' && inputs.failed_recovery_run_id || '' }}"
+    ):
         errors.append("publish Python helpers cannot write bytecode into the checkout")
     initialize_publish = _structured_step(publish, "Initialize isolated publish root")
     download_macos = _structured_step(publish, "Download macOS artifact")
@@ -1978,15 +2058,24 @@ def validate_workflow(workflow: str) -> list[str]:
             initialize_publish,
             (
                 'publish_root="$RUNNER_TEMP/opentake-release-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"',
+                'if ! git cat-file -e "${RELEASE_TOOLING_SHA}^{commit}" 2>/dev/null; then',
+                'git fetch --no-tags --depth=1 origin "$RELEASE_TOOLING_SHA"',
+                'test "$(git rev-parse "${RELEASE_TOOLING_SHA}^{commit}")" = "$RELEASE_TOOLING_SHA"',
+                'git cat-file blob "$RELEASE_TOOLING_SHA:scripts/check_release_workflow.py" \\',
+                'git cat-file blob "$RELEASE_TOOLING_SHA:scripts/workflow_yaml.py" \\',
+                'test -s "$publish_root/tooling/check_release_workflow.py"',
+                'test -s "$publish_root/tooling/workflow_yaml.py"',
                 'printf \'PUBLISH_ROOT=%s\\n\' "$publish_root" >> "$GITHUB_ENV"',
             ),
         )
+        and "raw.githubusercontent.com" not in _run_script(initialize_publish)
         and download_macos_with.get("path")
         == "${{ runner.temp }}/opentake-release-${{ github.run_id }}-${{ github.run_attempt }}/input/macos"
         and download_windows_with.get("path")
         == "${{ runner.temp }}/opentake-release-${{ github.run_id }}-${{ github.run_attempt }}/input/windows"
     ):
         errors.append("publish outputs stay outside the worktree")
+        errors.append("publish helpers use exact tooling commit outside the worktree")
 
     stage = _structured_step(publish, "Stage and verify the exact release payload")
     stage_commands = (
@@ -2257,9 +2346,9 @@ def validate_workflow(workflow: str) -> list[str]:
     make_public = _structured_step(publish, ordered_names[5])
     final = _structured_step(publish, ordered_names[6])
     draft_commands = _commands(_run_script(draft))
-    create_command = ("gh", "release", "create", "$RELEASE_TAG", "--verify-tag", "--target", "$RELEASE_SHA", "--title", "OpenTake $RELEASE_VERSION", "--notes-file", "$PUBLISH_ROOT/release-body.md", "--draft", "--prerelease", "--latest=false")
-    refresh_command = ("gh", "release", "edit", "$RELEASE_TAG", "--target", "$RELEASE_SHA", "--title", "OpenTake $RELEASE_VERSION", "--notes-file", "$PUBLISH_ROOT/release-body.md", "--draft", "--prerelease", "--latest=false")
-    resolver_command = ("python3", "scripts/check_release_workflow.py", "resolve-release-state", "--input", "$PUBLISH_ROOT/existing-release-graphql.json", "--tag", "$RELEASE_TAG", "--sha", "$RELEASE_SHA", "--output", "$PUBLISH_ROOT/release-state.json")
+    create_command = ("gh", "release", "create", "$RELEASE_TAG", "--verify-tag", "--title", "OpenTake $RELEASE_VERSION", "--notes-file", "$PUBLISH_ROOT/release-body.md", "--draft", "--prerelease", "--latest=false")
+    refresh_command = ("gh", "release", "edit", "$RELEASE_TAG", "--title", "OpenTake $RELEASE_VERSION", "--notes-file", "$PUBLISH_ROOT/release-body.md", "--draft", "--prerelease", "--latest=false")
+    resolver_command = ("python3", "-B", "$PUBLISH_ROOT/tooling/check_release_workflow.py", "resolve-release-state", "--input", "$PUBLISH_ROOT/existing-release-graphql.json", "--tag", "$RELEASE_TAG", "--sha", "$RELEASE_SHA", "--output", "$PUBLISH_ROOT/release-state.json")
     delete_command = ("gh", "api", "--method", "DELETE", "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id")
     published_guard = ("echo", "release is already published; refusing to mutate it", ">&2")
     draft_ok = (
@@ -2272,19 +2361,35 @@ def validate_workflow(workflow: str) -> list[str]:
         and ("gh", "api", "repos/$GITHUB_REPOSITORY/releases/$release_id", ">", "$PUBLISH_ROOT/existing-draft-rest.json") in draft_commands
         and delete_command in draft_commands
         and published_guard in draft_commands
+        and _has_code_lines(
+            draft,
+            (
+                'jq -e \'.target_commitish | (type == "string" and length > 0)\' "$PUBLISH_ROOT/existing-draft-rest.json" >/dev/null',
+            ),
+        )
         and draft_commands.index(resolver_command) < draft_commands.index(delete_command)
         and draft_commands.index(published_guard) < draft_commands.index(delete_command)
     )
     if not draft_ok:
         errors.append("draft exists before release upload")
         errors.append("published same-tag release is immutable")
+    if (
+        create_command not in draft_commands
+        or refresh_command not in draft_commands
+        or any(
+            token == "--target" or token.startswith("--target=")
+            for command in draft_commands
+            for token in command
+        )
+    ):
+        errors.append("release mutations omit workflow-protected target_commitish")
     if not _has_command(
         upload,
         ("gh", "release", "upload", "$RELEASE_TAG", "$PUBLISH_ROOT/assets/*", "--clobber"),
     ):
         errors.append("draft payload upload supports failed-run retry")
     if not (
-        _has_command(inspect_draft, ("python3", "scripts/check_release_workflow.py", "resolve-release-state", "--input", "$PUBLISH_ROOT/draft-release-graphql.json", "--tag", "$RELEASE_TAG", "--sha", "$RELEASE_SHA", "--output", "$PUBLISH_ROOT/draft-state.json"))
+        _has_command(inspect_draft, ("python3", "-B", "$PUBLISH_ROOT/tooling/check_release_workflow.py", "resolve-release-state", "--input", "$PUBLISH_ROOT/draft-release-graphql.json", "--tag", "$RELEASE_TAG", "--sha", "$RELEASE_SHA", "--output", "$PUBLISH_ROOT/draft-state.json"))
         and _has_code_lines(inspect_draft, ('test "$(jq -r \'.action\' "$PUBLISH_ROOT/draft-state.json")" = "refresh"', 'cmp "$PUBLISH_ROOT/expected-assets.txt" "$PUBLISH_ROOT/draft-assets.txt"', "jq -e '.asset_sizes | length == 17 and all(. > 0)' \"$PUBLISH_ROOT/draft-state.json\" >/dev/null"))
     ):
         errors.append("draft API verification")
@@ -2319,7 +2424,7 @@ def validate_workflow(workflow: str) -> list[str]:
             ("git", "ls-remote", "--exit-code", "origin", "refs/tags/$RELEASE_TAG", "refs/tags/$RELEASE_TAG^{}", ">", output),
         ) and _has_command(
             step,
-            ("python3", "scripts/check_release_workflow.py", "resolve-remote-tag", "--input", output, "--tag", "$RELEASE_TAG", "--sha", "$RELEASE_SHA"),
+            ("python3", "-B", "$PUBLISH_ROOT/tooling/check_release_workflow.py", "resolve-remote-tag", "--input", output, "--tag", "$RELEASE_TAG", "--sha", "$RELEASE_SHA"),
         )
 
     if not remote_rebind_ok(rebind_draft, "$PUBLISH_ROOT/remote-tag-before-draft.txt"):
@@ -2331,16 +2436,40 @@ def validate_workflow(workflow: str) -> list[str]:
         ("gh", "release", "edit", "$RELEASE_TAG", "--draft=false", "--prerelease", "--latest=false"),
     ):
         errors.append("verified prerelease publication")
+    if not remote_rebind_ok(
+        final, "$PUBLISH_ROOT/remote-tag-after-publication.txt"
+    ):
+        errors.append("final remote tag rebound after publication")
+    final_graphql_ok = (
+        _has_command(
+            final,
+            ("gh", "api", "graphql", "-f", "query=$query", "-f", "owner=$owner", "-f", "name=$repository", "-f", "tag=$RELEASE_TAG", ">", "$PUBLISH_ROOT/public-release-graphql.json"),
+        )
+        and _has_command(
+            final,
+            ("python3", "-B", "$PUBLISH_ROOT/tooling/check_release_workflow.py", "resolve-public-release-state", "--input", "$PUBLISH_ROOT/public-release-graphql.json", "--tag", "$RELEASE_TAG", "--sha", "$RELEASE_SHA", "--output", "$PUBLISH_ROOT/public-release-state.json"),
+        )
+        and _has_code_lines(
+            final,
+            (
+                'cmp "$PUBLISH_ROOT/expected-assets.txt" "$PUBLISH_ROOT/public-graphql-assets.txt"',
+                "jq -e '.asset_sizes | length == 17 and all(. > 0)' \"$PUBLISH_ROOT/public-release-state.json\" >/dev/null",
+            ),
+        )
+    )
+    if not final_graphql_ok:
+        errors.append("final GraphQL verification binds immutable tag commit and assets")
     if not _has_code_lines(
         final,
         (
-            'if release.get("target_commitish") != expected_sha:',
             'if release.get("draft") is not False or release.get("prerelease") is not True:',
+            'target_commitish = release.get("target_commitish")',
+            "if not isinstance(target_commitish, str) or not target_commitish:",
             "if expected_names != actual_names:",
             "sha256sum --check SHA256SUMS",
         ),
     ) or not _has_command(final, ("gh", "release", "download", "$RELEASE_TAG", "--dir", "$PUBLISH_ROOT/verified-release")):
-        errors.append("final API verification binds target SHA")
+        errors.append("final REST schema, exact assets, and checksums")
 
     notes = _structured_step(publish, "Prepare release notes with provenance")
     if not _has_code_lines(
@@ -2356,7 +2485,12 @@ def validate_workflow(workflow: str) -> list[str]:
             'git cat-file blob "$RELEASE_TOOLING_SHA:$NOTES_PATH" \\',
             'notes_sha="$RELEASE_TOOLING_SHA"',
             'test -s "$PUBLISH_ROOT/release-body.md"',
+            'recovery_chain="normal tag push"',
+            'test "$ROOT_FAILED_RUN_ID" = "31412976593"',
+            'test "$PREDECESSOR_RUN_ID" = "31441693191"',
+            'recovery_chain="root run $ROOT_FAILED_RUN_ID; direct predecessor run $PREDECESSOR_RUN_ID"',
             "- Release notes commit: \\`$notes_sha\\`",
+            "- Recovery chain: $recovery_chain",
         ),
     ):
         errors.append("recovery release notes use exact tooling commit")
@@ -2389,14 +2523,16 @@ def validate_release_notes_contract(notes_path: Path) -> list[str]:
         "当前远端 `main` HEAD",
         "`failed_run_id`",
         "`failed_run_id=31412976593`",
-        "`failed_recovery_run_id=31427093503`",
+        "`failed_recovery_run_id=31441693191`",
         "`2c4efdff9d2587c90cbcac0919f9d1d333d67d6a`",
-        "`6162466834bbabb8a16a2c08808e03a53c2b22b6`",
+        "`924bc1102a9343e14c3beea2a3622b5d92ebff13`",
         "`workflow_dispatch` 恢复",
         "原不可变 tag SHA",
         "`github.workflow_sha`",
-        "source → `61624668…`",
-        "`61624668…` → 当前远端 `main`",
+        "source → `924bc110…`",
+        "`924bc110…` → 当前远端 `main`",
+        "REST `target_commitish` 只做非空 schema 校验",
+        "GraphQL `tagCommit.oid`",
         "不创建、移动或删除 tag",
         "公开 release notes",
         "notes commit",
@@ -2462,6 +2598,27 @@ def _resolve_release_state_command(arguments: list[str]) -> None:
         raise SystemExit(f"unsafe release state: {error}") from error
     options.output.write_text(
         json.dumps(plan, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
+def _resolve_public_release_state_command(arguments: list[str]) -> None:
+    parser = argparse.ArgumentParser(
+        prog="check_release_workflow.py resolve-public-release-state"
+    )
+    parser.add_argument("--input", required=True, type=Path)
+    parser.add_argument("--tag", required=True)
+    parser.add_argument("--sha", required=True)
+    parser.add_argument("--output", required=True, type=Path)
+    options = parser.parse_args(arguments)
+    try:
+        payload = json.loads(options.input.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ReleaseStateError("GraphQL public release must be a JSON object")
+        state = resolve_public_release_state(payload, options.tag, options.sha)
+    except (OSError, json.JSONDecodeError, ReleaseStateError) as error:
+        raise SystemExit(f"unsafe public release state: {error}") from error
+    options.output.write_text(
+        json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
 
 
@@ -2567,6 +2724,8 @@ def main(arguments: list[str] | None = None) -> None:
     if arguments:
         if arguments[0] == "resolve-release-state":
             _resolve_release_state_command(arguments[1:])
+        elif arguments[0] == "resolve-public-release-state":
+            _resolve_public_release_state_command(arguments[1:])
         elif arguments[0] == "resolve-remote-tag":
             _resolve_remote_tag_command(arguments[1:])
         elif arguments[0] == "validate-recovery-run":
