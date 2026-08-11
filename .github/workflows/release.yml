@@ -14,7 +14,7 @@ on:
         required: true
         type: string
       failed_recovery_run_id:
-        description: Previous failed workflow_dispatch recovery Release run ID (31427093503) chained to the same immutable source
+        description: Direct predecessor workflow_dispatch Release run ID (31441693191) whose publish job failed for the same immutable source
         required: true
         type: string
 
@@ -71,7 +71,7 @@ jobs:
           read -r remote_main remote_ref < <(git ls-remote --exit-code origin refs/heads/main)
           remote_main="$(printf '%s' "$remote_main" | tr '[:upper:]' '[:lower:]')"
           test "$remote_ref" = "refs/heads/main"
-          predecessor_tooling_sha="6162466834bbabb8a16a2c08808e03a53c2b22b6"
+          predecessor_tooling_sha="924bc1102a9343e14c3beea2a3622b5d92ebff13"
           if [[ "$GITHUB_EVENT_NAME" = "push" ]]; then
             test -z "$FAILED_RUN_ID"
             test -z "$FAILED_RECOVERY_RUN_ID"
@@ -84,7 +84,7 @@ jobs:
             [[ "$FAILED_RUN_ID" =~ ^[1-9][0-9]*$ ]]
             [[ "$FAILED_RECOVERY_RUN_ID" =~ ^[1-9][0-9]*$ ]]
             test "$FAILED_RUN_ID" = "31412976593"
-            test "$FAILED_RECOVERY_RUN_ID" = "31427093503"
+            test "$FAILED_RECOVERY_RUN_ID" = "31441693191"
             test "$tooling_sha" = "$remote_main"
             recovery_root="$RUNNER_TEMP/opentake-release-recovery-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
             mkdir -p "$recovery_root/tooling"
@@ -1009,6 +1009,8 @@ jobs:
       RELEASE_TOOLING_SHA: ${{ needs.validate.outputs.tooling_sha }}
       RELEASE_VERSION: ${{ needs.validate.outputs.version }}
       NOTES_PATH: ${{ needs.validate.outputs.notes_path }}
+      ROOT_FAILED_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.failed_run_id || '' }}
+      PREDECESSOR_RUN_ID: ${{ github.event_name == 'workflow_dispatch' && inputs.failed_recovery_run_id || '' }}
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -1037,6 +1039,17 @@ jobs:
             "$RUNNER_TEMP"/opentake-release-*) ;;
             *) exit 1 ;;
           esac
+          mkdir -p "$publish_root/tooling"
+          if ! git cat-file -e "${RELEASE_TOOLING_SHA}^{commit}" 2>/dev/null; then
+            git fetch --no-tags --depth=1 origin "$RELEASE_TOOLING_SHA"
+          fi
+          test "$(git rev-parse "${RELEASE_TOOLING_SHA}^{commit}")" = "$RELEASE_TOOLING_SHA"
+          git cat-file blob "$RELEASE_TOOLING_SHA:scripts/check_release_workflow.py" \
+            > "$publish_root/tooling/check_release_workflow.py"
+          git cat-file blob "$RELEASE_TOOLING_SHA:scripts/workflow_yaml.py" \
+            > "$publish_root/tooling/workflow_yaml.py"
+          test -s "$publish_root/tooling/check_release_workflow.py"
+          test -s "$publish_root/tooling/workflow_yaml.py"
           printf 'PUBLISH_ROOT=%s\n' "$publish_root" >> "$GITHUB_ENV"
 
       - name: Install Minisign verifier
@@ -1532,6 +1545,15 @@ jobs:
             notes_sha="$RELEASE_TOOLING_SHA"
           fi
           test -s "$PUBLISH_ROOT/release-body.md"
+          recovery_chain="normal tag push"
+          if [[ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]]; then
+            test "$ROOT_FAILED_RUN_ID" = "31412976593"
+            test "$PREDECESSOR_RUN_ID" = "31441693191"
+            recovery_chain="root run $ROOT_FAILED_RUN_ID; direct predecessor run $PREDECESSOR_RUN_ID"
+          else
+            test -z "$ROOT_FAILED_RUN_ID"
+            test -z "$PREDECESSOR_RUN_ID"
+          fi
           cat >> "$PUBLISH_ROOT/release-body.md" <<EOF
 
           ## Automated release provenance
@@ -1539,6 +1561,7 @@ jobs:
           - Source commit: \`$RELEASE_SHA\`
           - Release tooling commit: \`$RELEASE_TOOLING_SHA\`
           - Release notes commit: \`$notes_sha\`
+          - Recovery chain: $recovery_chain
           - GitHub Actions run: [$GITHUB_RUN_ID/$GITHUB_RUN_ATTEMPT]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)
           - Updater trust: updater packages are signed with the dedicated Tauri updater key; the private key is supplied only from GitHub Actions secrets and is never published.
           - Platform signing limits: the macOS app uses ad-hoc signing only; it is not Developer ID signed or notarized. Windows installers are not Authenticode-signed.
@@ -1566,7 +1589,7 @@ jobs:
           git ls-remote --exit-code origin \
             "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}" \
             > "$PUBLISH_ROOT/remote-tag-before-draft.txt"
-          python3 scripts/check_release_workflow.py resolve-remote-tag \
+          python3 -B "$PUBLISH_ROOT/tooling/check_release_workflow.py" resolve-remote-tag \
             --input "$PUBLISH_ROOT/remote-tag-before-draft.txt" \
             --tag "$RELEASE_TAG" --sha "$RELEASE_SHA"
 
@@ -1580,7 +1603,7 @@ jobs:
           gh api graphql \
             -f query="$query" -f owner="$owner" -f name="$repository" -f tag="$RELEASE_TAG" \
             > "$PUBLISH_ROOT/existing-release-graphql.json"
-          python3 scripts/check_release_workflow.py resolve-release-state \
+          python3 -B "$PUBLISH_ROOT/tooling/check_release_workflow.py" resolve-release-state \
             --input "$PUBLISH_ROOT/existing-release-graphql.json" \
             --tag "$RELEASE_TAG" \
             --sha "$RELEASE_SHA" \
@@ -1588,9 +1611,11 @@ jobs:
           action="$(jq -r '.action' "$PUBLISH_ROOT/release-state.json")"
           case "$action" in
             create)
+              # The existing, independently verified tag binds the source commit.
+              # Passing target_commitish would require a Workflows-write token when
+              # release tooling changed workflow files; GITHUB_TOKEN cannot have it.
               gh release create "$RELEASE_TAG" \
                 --verify-tag \
-                --target "$RELEASE_SHA" \
                 --title "OpenTake $RELEASE_VERSION" \
                 --notes-file "$PUBLISH_ROOT/release-body.md" \
                 --draft --prerelease --latest=false
@@ -1605,13 +1630,12 @@ jobs:
               fi
               test "$(jq -r '.prerelease' "$PUBLISH_ROOT/existing-draft-rest.json")" = "true"
               test "$(jq -r '.tag_name' "$PUBLISH_ROOT/existing-draft-rest.json")" = "$RELEASE_TAG"
-              test "$(jq -r '.target_commitish' "$PUBLISH_ROOT/existing-draft-rest.json" | tr '[:upper:]' '[:lower:]')" = "$RELEASE_SHA"
+              jq -e '.target_commitish | (type == "string" and length > 0)' "$PUBLISH_ROOT/existing-draft-rest.json" >/dev/null
               jq -e 'all(.assets[]; (.id | type) == "number")' "$PUBLISH_ROOT/existing-draft-rest.json" >/dev/null
               while read -r asset_id; do
                 gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"
               done < <(jq -r '.assets[].id' "$PUBLISH_ROOT/existing-draft-rest.json")
               gh release edit "$RELEASE_TAG" \
-                --target "$RELEASE_SHA" \
                 --title "OpenTake $RELEASE_VERSION" \
                 --notes-file "$PUBLISH_ROOT/release-body.md" \
                 --draft --prerelease --latest=false
@@ -1633,7 +1657,7 @@ jobs:
           gh api graphql \
             -f query="$query" -f owner="$owner" -f name="$repository" -f tag="$RELEASE_TAG" \
             > "$PUBLISH_ROOT/draft-release-graphql.json"
-          python3 scripts/check_release_workflow.py resolve-release-state \
+          python3 -B "$PUBLISH_ROOT/tooling/check_release_workflow.py" resolve-release-state \
             --input "$PUBLISH_ROOT/draft-release-graphql.json" \
             --tag "$RELEASE_TAG" \
             --sha "$RELEASE_SHA" \
@@ -1681,7 +1705,7 @@ jobs:
           git ls-remote --exit-code origin \
             "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}" \
             > "$PUBLISH_ROOT/remote-tag-before-publication.txt"
-          python3 scripts/check_release_workflow.py resolve-remote-tag \
+          python3 -B "$PUBLISH_ROOT/tooling/check_release_workflow.py" resolve-remote-tag \
             --input "$PUBLISH_ROOT/remote-tag-before-publication.txt" \
             --tag "$RELEASE_TAG" --sha "$RELEASE_SHA"
 
@@ -1706,6 +1730,28 @@ jobs:
       - name: Verify public release through API and checksums
         run: |
           set -euo pipefail
+          git ls-remote --exit-code origin \
+            "refs/tags/$RELEASE_TAG" "refs/tags/$RELEASE_TAG^{}" \
+            > "$PUBLISH_ROOT/remote-tag-after-publication.txt"
+          python3 -B "$PUBLISH_ROOT/tooling/check_release_workflow.py" resolve-remote-tag \
+            --input "$PUBLISH_ROOT/remote-tag-after-publication.txt" \
+            --tag "$RELEASE_TAG" --sha "$RELEASE_SHA"
+
+          owner="${GITHUB_REPOSITORY%%/*}"
+          repository="${GITHUB_REPOSITORY#*/}"
+          query='query($owner:String!,$name:String!,$tag:String!){repository(owner:$owner,name:$name){release(tagName:$tag){databaseId tagName tagCommit{oid} isDraft isPrerelease releaseAssets(first:100){nodes{id name size} pageInfo{hasNextPage}}}}}'
+          gh api graphql \
+            -f query="$query" -f owner="$owner" -f name="$repository" -f tag="$RELEASE_TAG" \
+            > "$PUBLISH_ROOT/public-release-graphql.json"
+          python3 -B "$PUBLISH_ROOT/tooling/check_release_workflow.py" resolve-public-release-state \
+            --input "$PUBLISH_ROOT/public-release-graphql.json" \
+            --tag "$RELEASE_TAG" \
+            --sha "$RELEASE_SHA" \
+            --output "$PUBLISH_ROOT/public-release-state.json"
+          jq -r '.asset_names[]' "$PUBLISH_ROOT/public-release-state.json" | LC_ALL=C sort > "$PUBLISH_ROOT/public-graphql-assets.txt"
+          cmp "$PUBLISH_ROOT/expected-assets.txt" "$PUBLISH_ROOT/public-graphql-assets.txt"
+          jq -e '.asset_sizes | length == 17 and all(. > 0)' "$PUBLISH_ROOT/public-release-state.json" >/dev/null
+
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$PUBLISH_ROOT/public-release.json"
           python3 - <<'PY'
           import json
@@ -1714,15 +1760,15 @@ jobs:
 
           root = Path(os.environ["PUBLISH_ROOT"])
           release = json.loads((root / "public-release.json").read_text(encoding="utf-8"))
-          expected_sha = os.environ["RELEASE_SHA"]
           expected_names = set((root / "expected-assets.txt").read_text(encoding="utf-8").splitlines())
           actual_names = {asset["name"] for asset in release.get("assets", [])}
           if release.get("draft") is not False or release.get("prerelease") is not True:
               raise SystemExit("release was not published as a prerelease")
           if release.get("tag_name") != os.environ["RELEASE_TAG"]:
               raise SystemExit("public release tag mismatch")
-          if release.get("target_commitish") != expected_sha:
-              raise SystemExit("public release target SHA mismatch")
+          target_commitish = release.get("target_commitish")
+          if not isinstance(target_commitish, str) or not target_commitish:
+              raise SystemExit("public release target_commitish schema is malformed")
           if expected_names != actual_names:
               raise SystemExit(f"public release assets mismatch: {sorted(actual_names)}")
           PY
