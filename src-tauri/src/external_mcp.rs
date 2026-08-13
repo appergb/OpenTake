@@ -16,6 +16,7 @@ use crate::secret::McpSecretStore;
 const CATALOG_VERSION: u32 = 1;
 const CATALOG_DIRECTORY: &str = "external-mcp";
 const CATALOG_FILE: &str = "clients.json";
+const PENDING_FILE: &str = "clients.pending.json";
 const EXTERNAL_MCP_ENDPOINT: &str = "http://127.0.0.1:19789/mcp";
 const MAX_CLIENT_NAME_CHARS: usize = 128;
 const TOKEN_BYTES: usize = 32;
@@ -45,7 +46,7 @@ impl Default for ExternalMcpClientSummary {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ExternalMcpPairingReceipt {
     pub(crate) client: ExternalMcpClientSummary,
@@ -53,17 +54,43 @@ pub(crate) struct ExternalMcpPairingReceipt {
     pub(crate) bearer_token: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ExternalMcpCredential {
-    pub(crate) client_id: String,
-    pub(crate) bearer_token: String,
+impl std::fmt::Debug for ExternalMcpPairingReceipt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExternalMcpPairingReceipt")
+            .field("client", &self.client)
+            .field("endpoint", &self.endpoint)
+            .field("bearer_token", &"<redacted>")
+            .finish()
+    }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 struct PersistedCatalog {
     version: u32,
     clients: Vec<ExternalMcpClientSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum PendingSecretState {
+    Present { token_digest: String },
+    Absent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingCatalogCommit {
+    client_id: String,
+    target: PersistedCatalog,
+    secret_state: PendingSecretState,
+}
+
+#[derive(Debug)]
+struct PublishError {
+    error: String,
+    published: bool,
 }
 
 impl Default for PersistedCatalog {
@@ -79,10 +106,11 @@ pub(crate) struct ExternalMcpCatalog {
     root: PathBuf,
     clients: Vec<ExternalMcpClientSummary>,
     secrets: Arc<dyn McpSecretStore>,
+    pending: bool,
     #[cfg(test)]
     fail_next_rename: std::sync::atomic::AtomicBool,
     #[cfg(test)]
-    fail_next_parent_sync: std::sync::atomic::AtomicBool,
+    fail_parent_sync_on_call: std::sync::atomic::AtomicUsize,
 }
 
 impl ExternalMcpCatalog {
@@ -92,30 +120,19 @@ impl ExternalMcpCatalog {
     ) -> Result<Self, String> {
         let root = app_data_dir.join(CATALOG_DIRECTORY);
         let path = root.join(CATALOG_FILE);
-        let clients = match fs::read(&path) {
-            Ok(bytes) => {
-                let persisted: PersistedCatalog = serde_json::from_slice(&bytes)
-                    .map_err(|error| format!("read external MCP catalog: {error}"))?;
-                if persisted.version != CATALOG_VERSION {
-                    return Err("unsupported external MCP catalog version".to_string());
-                }
-                for client in &persisted.clients {
-                    validate_client(client)?;
-                }
-                persisted.clients
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(error) => return Err(format!("read external MCP catalog: {error}")),
-        };
-        Ok(Self {
+        let clients = read_catalog(&path)?;
+        let mut catalog = Self {
             root,
             clients,
             secrets,
+            pending: false,
             #[cfg(test)]
             fail_next_rename: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
-            fail_next_parent_sync: std::sync::atomic::AtomicBool::new(false),
-        })
+            fail_parent_sync_on_call: std::sync::atomic::AtomicUsize::new(0),
+        };
+        catalog.recover_pending_commit()?;
+        Ok(catalog)
     }
 
     pub(crate) fn clients(&self) -> &[ExternalMcpClientSummary] {
@@ -126,7 +143,35 @@ impl ExternalMcpCatalog {
         self.root.join(CATALOG_FILE)
     }
 
+    fn pending_path(&self) -> PathBuf {
+        self.root.join(PENDING_FILE)
+    }
+
+    fn recover_pending_commit(&mut self) -> Result<(), String> {
+        let path = self.pending_path();
+        let pending = match fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice::<PendingCatalogCommit>(&bytes)
+                .map_err(|error| format!("read external MCP pending commit: {error}"))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(format!("read external MCP pending commit: {error}")),
+        };
+        validate_pending(&pending)?;
+        let secret = self
+            .secrets
+            .load_mcp_secret(&secret_account(&pending.client_id))?;
+        if pending_matches_secret(&pending.secret_state, secret.as_deref()) {
+            self.publish_clients(&pending.target.clients)
+                .map_err(|error| error.error)?;
+            self.clients = pending.target.clients;
+        } else if self.clients == pending.target.clients {
+            return Err("external MCP pending commit has inconsistent secret state".to_string());
+        }
+        self.clear_pending()?;
+        Ok(())
+    }
+
     pub(crate) fn pair(&mut self, name: &str) -> Result<ExternalMcpPairingReceipt, String> {
+        self.ensure_ready()?;
         let name = validate_name(name)?;
         let token = generate_token()?;
         let client = ExternalMcpClientSummary {
@@ -138,16 +183,43 @@ impl ExternalMcpCatalog {
             revoked_at: None,
         };
         let account = secret_account(&client.id);
-        self.secrets.save_mcp_secret(&account, &token)?;
-        self.clients.push(client.clone());
-        if let Err(error) = self.persist() {
-            self.clients.pop();
-            if let Err(rollback_error) = self.secrets.delete_mcp_secret(&account) {
-                return Err(format!(
-                    "{error}; external MCP credential cleanup failed: {rollback_error}"
-                ));
+        let mut next = self.clients.clone();
+        next.push(client.clone());
+        if let Err(error) = self.prepare_pending(
+            &client.id,
+            &next,
+            PendingSecretState::Present {
+                token_digest: client.token_digest.clone(),
+            },
+        ) {
+            if self.pending {
+                return Err(error);
             }
+            self.clear_pending()?;
             return Err(error);
+        }
+        self.pending = true;
+        self.secrets.save_mcp_secret(&account, &token)?;
+        match self.publish_clients(&next) {
+            Ok(()) => {
+                self.clients = next;
+                self.clear_pending()?;
+            }
+            Err(error) if error.published => {
+                self.clients = next;
+                self.pending = true;
+                return Err(error.error);
+            }
+            Err(error) => {
+                if let Err(rollback_error) = self.secrets.delete_mcp_secret(&account) {
+                    return Err(format!(
+                        "{}; external MCP credential cleanup failed: {rollback_error}",
+                        error.error
+                    ));
+                }
+                self.clear_pending()?;
+                return Err(error.error);
+            }
         }
         Ok(receipt(client, token))
     }
@@ -156,6 +228,7 @@ impl ExternalMcpCatalog {
         &mut self,
         client_id: &str,
     ) -> Result<ExternalMcpPairingReceipt, String> {
+        self.ensure_ready()?;
         let index = self.client_index(client_id)?;
         if self.clients[index].revoked_at.is_some() {
             return Err("external MCP client is revoked".to_string());
@@ -166,66 +239,114 @@ impl ExternalMcpCatalog {
             .load_mcp_secret(&account)?
             .ok_or_else(|| "external MCP client credential is unavailable".to_string())?;
         let token = generate_token()?;
-        self.secrets.save_mcp_secret(&account, &token)?;
-        let previous_client = self.clients[index].clone();
-        self.clients[index].token_digest = token_digest(&token);
-        if let Err(error) = self.persist() {
-            self.clients[index] = previous_client;
-            if let Err(rollback_error) = self.secrets.save_mcp_secret(&account, &previous_token) {
-                return Err(format!(
-                    "{error}; external MCP credential rollback failed: {rollback_error}"
-                ));
+        let mut next = self.clients.clone();
+        next[index].token_digest = token_digest(&token);
+        if let Err(error) = self.prepare_pending(
+            client_id,
+            &next,
+            PendingSecretState::Present {
+                token_digest: next[index].token_digest.clone(),
+            },
+        ) {
+            if self.pending {
+                return Err(error);
             }
+            self.clear_pending()?;
             return Err(error);
+        }
+        self.pending = true;
+        self.secrets.save_mcp_secret(&account, &token)?;
+        match self.publish_clients(&next) {
+            Ok(()) => {
+                self.clients = next;
+                self.clear_pending()?;
+            }
+            Err(error) if error.published => {
+                self.clients = next;
+                self.pending = true;
+                return Err(error.error);
+            }
+            Err(error) => {
+                if let Err(rollback_error) = self.secrets.save_mcp_secret(&account, &previous_token)
+                {
+                    return Err(format!(
+                        "{}; external MCP credential rollback failed: {rollback_error}",
+                        error.error
+                    ));
+                }
+                self.clear_pending()?;
+                return Err(error.error);
+            }
         }
         Ok(receipt(self.clients[index].clone(), token))
     }
 
     pub(crate) fn revoke(&mut self, client_id: &str) -> Result<(), String> {
+        self.ensure_ready()?;
         let index = self.client_index(client_id)?;
         if self.clients[index].revoked_at.is_some() {
             return Ok(());
         }
-        let previous_client = self.clients[index].clone();
         let account = secret_account(client_id);
         let previous_token = self.secrets.load_mcp_secret(&account)?;
-        self.secrets.delete_mcp_secret(&account)?;
-        self.clients[index].revoked_at = Some(unix_timestamp()?);
-        if let Err(error) = self.persist() {
-            self.clients[index] = previous_client;
-            if let Some(token) = previous_token {
-                if let Err(rollback_error) = self.secrets.save_mcp_secret(&account, &token) {
-                    return Err(format!(
-                        "{error}; external MCP credential rollback failed: {rollback_error}"
-                    ));
-                }
+        let revoked_at = unix_timestamp()?;
+        let mut next = self.clients.clone();
+        next[index].revoked_at = Some(revoked_at);
+        if let Err(error) = self.prepare_pending(client_id, &next, PendingSecretState::Absent) {
+            if self.pending {
+                return Err(error);
             }
+            self.clear_pending()?;
             return Err(error);
+        }
+        self.pending = true;
+        self.secrets.delete_mcp_secret(&account)?;
+        match self.publish_clients(&next) {
+            Ok(()) => {
+                self.clients = next;
+                self.clear_pending()?;
+            }
+            Err(error) if error.published => {
+                self.clients = next;
+                self.pending = true;
+                return Err(error.error);
+            }
+            Err(error) => {
+                if let Some(token) = previous_token {
+                    if let Err(rollback_error) = self.secrets.save_mcp_secret(&account, &token) {
+                        return Err(format!(
+                            "{}; external MCP credential rollback failed: {rollback_error}",
+                            error.error
+                        ));
+                    }
+                }
+                self.clear_pending()?;
+                return Err(error.error);
+            }
         }
         Ok(())
     }
 
-    pub(crate) fn active_credentials(&self) -> Result<Vec<ExternalMcpCredential>, String> {
-        self.clients
+    pub(crate) fn verify_candidate(&self, candidate: &str) -> Result<Option<String>, String> {
+        self.ensure_ready()?;
+        let mut match_id = None;
+        for client in self
+            .clients
             .iter()
             .filter(|client| client.revoked_at.is_none())
-            .map(|client| {
-                let bearer_token = self
-                    .secrets
-                    .load_mcp_secret(&secret_account(&client.id))?
-                    .ok_or_else(|| "external MCP client credential is unavailable".to_string())?;
-                if bearer_token.len() != TOKEN_BYTES * 2
-                    || !bearer_token.bytes().all(|byte| byte.is_ascii_hexdigit())
-                    || token_digest(&bearer_token) != client.token_digest
-                {
-                    return Err("external MCP client credential is invalid".to_string());
-                }
-                Ok(ExternalMcpCredential {
-                    client_id: client.id.clone(),
-                    bearer_token,
-                })
-            })
-            .collect()
+        {
+            let secret = self
+                .secrets
+                .load_mcp_secret(&secret_account(&client.id))?
+                .ok_or_else(|| "external MCP client credential is unavailable".to_string())?;
+            if token_digest(&secret) != client.token_digest {
+                return Err("external MCP client credential is invalid".to_string());
+            }
+            if constant_time_eq(secret.as_bytes(), candidate.as_bytes()) {
+                match_id = Some(client.id.clone());
+            }
+        }
+        Ok(match_id)
     }
 
     fn client_index(&self, client_id: &str) -> Result<usize, String> {
@@ -235,31 +356,107 @@ impl ExternalMcpCatalog {
             .ok_or_else(|| "external MCP client not found".to_string())
     }
 
-    fn persist(&self) -> Result<(), String> {
-        fs::create_dir_all(&self.root)
-            .map_err(|error| format!("create external MCP catalog directory: {error}"))?;
-        let bytes = serde_json::to_vec_pretty(&PersistedCatalog {
-            version: CATALOG_VERSION,
-            clients: self.clients.clone(),
-        })
-        .map_err(|error| format!("encode external MCP catalog: {error}"))?;
+    fn ensure_ready(&self) -> Result<(), String> {
+        if self.pending {
+            Err("external MCP catalog recovery is pending".to_string())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn prepare_pending(
+        &mut self,
+        client_id: &str,
+        target_clients: &[ExternalMcpClientSummary],
+        secret_state: PendingSecretState,
+    ) -> Result<(), String> {
+        match self.write_json_atomically(
+            &self.pending_path(),
+            &PendingCatalogCommit {
+                client_id: client_id.to_string(),
+                target: PersistedCatalog {
+                    version: CATALOG_VERSION,
+                    clients: target_clients.to_vec(),
+                },
+                secret_state,
+            },
+        ) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.pending = error.published;
+                Err(error.error)
+            }
+        }
+    }
+
+    fn clear_pending(&mut self) -> Result<(), String> {
+        fs::remove_file(self.pending_path())
+            .or_else(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            })
+            .map_err(|error| format!("clear external MCP pending commit: {error}"))?;
+        if let Err(error) = self.sync_parent_directory() {
+            self.pending = true;
+            return Err(format!("sync external MCP catalog directory: {error}"));
+        }
+        self.pending = false;
+        Ok(())
+    }
+
+    fn publish_clients(&self, clients: &[ExternalMcpClientSummary]) -> Result<(), PublishError> {
+        self.write_json_atomically(
+            &self.metadata_path(),
+            &PersistedCatalog {
+                version: CATALOG_VERSION,
+                clients: clients.to_vec(),
+            },
+        )
+    }
+
+    fn write_json_atomically<T: Serialize>(
+        &self,
+        destination: &Path,
+        value: &T,
+    ) -> Result<(), PublishError> {
+        fs::create_dir_all(&self.root).map_err(|error| PublishError {
+            error: format!("create external MCP catalog directory: {error}"),
+            published: false,
+        })?;
+        let bytes = serde_json::to_vec_pretty(value).map_err(|error| PublishError {
+            error: format!("encode external MCP catalog: {error}"),
+            published: false,
+        })?;
         let temp = self
             .root
             .join(format!(".clients.{}.tmp", uuid::Uuid::new_v4()));
-        let result = (|| {
+        let result: Result<(), PublishError> = (|| {
             let mut file = OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(&temp)
-                .map_err(|error| format!("create external MCP catalog staging file: {error}"))?;
+                .map_err(|error| PublishError {
+                    error: format!("create external MCP catalog staging file: {error}"),
+                    published: false,
+                })?;
             file.write_all(&bytes)
                 .and_then(|()| file.sync_all())
-                .map_err(|error| format!("write external MCP catalog staging file: {error}"))?;
-            self.rename_atomically(&temp, &self.metadata_path())?;
-            // A successful rename has already made the new catalog authoritative.
-            // Do not roll back metadata/keychain state if the best-effort parent
-            // durability barrier fails after that point.
-            let _ = self.sync_parent_directory();
+                .map_err(|error| PublishError {
+                    error: format!("write external MCP catalog staging file: {error}"),
+                    published: false,
+                })?;
+            self.rename_atomically(&temp, destination)
+                .map_err(|error| PublishError {
+                    error,
+                    published: false,
+                })?;
+            self.sync_parent_directory().map_err(|error| PublishError {
+                error: format!("sync external MCP catalog directory: {error}"),
+                published: true,
+            })?;
             Ok(())
         })();
         if result.is_err() {
@@ -275,9 +472,10 @@ impl ExternalMcpCatalog {
     }
 
     #[cfg(test)]
-    fn fail_next_parent_sync_for_test(&self) {
-        self.fail_next_parent_sync
-            .store(true, std::sync::atomic::Ordering::SeqCst);
+    fn fail_parent_sync_during_publish_for_test(&self) {
+        // One sync seals the pending journal; the second seals clients.json.
+        self.fail_parent_sync_on_call
+            .store(2, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn rename_atomically(&self, temp: &Path, destination: &Path) -> Result<(), String> {
@@ -294,11 +492,17 @@ impl ExternalMcpCatalog {
 
     fn sync_parent_directory(&self) -> std::io::Result<()> {
         #[cfg(test)]
-        if self
-            .fail_next_parent_sync
-            .swap(false, std::sync::atomic::Ordering::SeqCst)
         {
-            return Err(std::io::Error::other("injected parent sync failure"));
+            let remaining = self
+                .fail_parent_sync_on_call
+                .load(std::sync::atomic::Ordering::SeqCst);
+            if remaining != 0 {
+                self.fail_parent_sync_on_call
+                    .store(remaining - 1, std::sync::atomic::Ordering::SeqCst);
+                if remaining == 1 {
+                    return Err(std::io::Error::other("injected parent sync failure"));
+                }
+            }
         }
         sync_parent_directory(&self.root)
     }
@@ -314,6 +518,70 @@ fn sync_parent_directory(_parent: &Path) -> std::io::Result<()> {
     // Windows does not support opening a directory as a synchronizable File.
     // `rename` remains atomic; the OS owns the corresponding directory flush.
     Ok(())
+}
+
+fn read_catalog(path: &Path) -> Result<Vec<ExternalMcpClientSummary>, String> {
+    match fs::read(path) {
+        Ok(bytes) => {
+            let persisted: PersistedCatalog = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("read external MCP catalog: {error}"))?;
+            if persisted.version != CATALOG_VERSION {
+                return Err("unsupported external MCP catalog version".to_string());
+            }
+            for client in &persisted.clients {
+                validate_client(client)?;
+            }
+            Ok(persisted.clients)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(error) => Err(format!("read external MCP catalog: {error}")),
+    }
+}
+
+fn validate_pending(pending: &PendingCatalogCommit) -> Result<(), String> {
+    if pending.target.version != CATALOG_VERSION {
+        return Err("unsupported external MCP pending catalog version".to_string());
+    }
+    let client = pending
+        .target
+        .clients
+        .iter()
+        .find(|client| client.id == pending.client_id)
+        .ok_or_else(|| "external MCP pending commit has no target client".to_string())?;
+    for candidate in &pending.target.clients {
+        validate_client(candidate)?;
+    }
+    match &pending.secret_state {
+        PendingSecretState::Present { token_digest } if token_digest == &client.token_digest => {
+            Ok(())
+        }
+        PendingSecretState::Absent if client.revoked_at.is_some() => Ok(()),
+        _ => Err("external MCP pending commit has inconsistent target state".to_string()),
+    }
+}
+
+fn pending_matches_secret(state: &PendingSecretState, secret: Option<&str>) -> bool {
+    match (state, secret) {
+        (PendingSecretState::Absent, None) => true,
+        (
+            PendingSecretState::Present {
+                token_digest: digest,
+            },
+            Some(secret),
+        ) => digest == &token_digest(secret),
+        _ => false,
+    }
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let mut difference = left.len() ^ right.len();
+    let width = left.len().max(right.len());
+    for index in 0..width {
+        let a = left.get(index).copied().unwrap_or(0);
+        let b = right.get(index).copied().unwrap_or(0);
+        difference |= usize::from(a ^ b);
+    }
+    difference == 0
 }
 
 fn receipt(client: ExternalMcpClientSummary, bearer_token: String) -> ExternalMcpPairingReceipt {
@@ -412,12 +680,13 @@ mod tests {
         let first = catalog.pair("Claude Desktop").expect("pair first client");
         let second = catalog.pair("Cursor").expect("pair second client");
         assert_ne!(first.client.id, second.client.id);
-        assert_ne!(first.bearer_token, second.bearer_token);
+        assert_ne!(first.client.token_digest, second.client.token_digest);
         for token in [&first.bearer_token, &second.bearer_token] {
             assert_eq!(token.len(), 64, "token is 32 bytes encoded as hexadecimal");
             assert!(token.bytes().all(|byte| byte.is_ascii_hexdigit()));
         }
         assert_eq!(first.endpoint, EXTERNAL_MCP_ENDPOINT);
+        assert!(!format!("{first:?}").contains(&first.bearer_token));
     }
 
     #[test]
@@ -442,13 +711,13 @@ mod tests {
             catalog.pair("Claude Desktop").expect("pair client")
         };
         let catalog = load_catalog(&root, secrets);
-        let credentials = catalog
-            .active_credentials()
-            .expect("load active credentials");
         assert_eq!(catalog.clients(), &[receipt.client.clone()]);
-        assert_eq!(credentials.len(), 1);
-        assert_eq!(credentials[0].client_id, receipt.client.id);
-        assert_eq!(credentials[0].bearer_token, receipt.bearer_token);
+        assert_eq!(
+            catalog
+                .verify_candidate(&receipt.bearer_token)
+                .expect("verify stored secret"),
+            Some(receipt.client.id)
+        );
     }
 
     #[test]
@@ -460,14 +729,20 @@ mod tests {
         let regenerated = catalog
             .regenerate(&first.client.id)
             .expect("regenerate credential");
-        let credentials = catalog
-            .active_credentials()
-            .expect("load active credentials");
         assert_eq!(regenerated.client.id, first.client.id);
-        assert_ne!(regenerated.bearer_token, first.bearer_token);
         assert_ne!(regenerated.client.token_digest, first.client.token_digest);
-        assert_eq!(credentials[0].bearer_token, regenerated.bearer_token);
-        assert_ne!(credentials[0].bearer_token, first.bearer_token);
+        assert_eq!(
+            catalog
+                .verify_candidate(&first.bearer_token)
+                .expect("reject prior credential"),
+            None
+        );
+        assert_eq!(
+            catalog
+                .verify_candidate(&regenerated.bearer_token)
+                .expect("verify regenerated credential"),
+            Some(first.client.id)
+        );
     }
 
     #[test]
@@ -477,10 +752,12 @@ mod tests {
         let mut catalog = load_catalog(&root, secrets.clone());
         let receipt = catalog.pair("Claude Desktop").expect("pair client");
         catalog.revoke(&receipt.client.id).expect("revoke client");
-        assert!(catalog
-            .active_credentials()
-            .expect("load active credentials")
-            .is_empty());
+        assert_eq!(
+            catalog
+                .verify_candidate(&receipt.bearer_token)
+                .expect("reject revoked credential"),
+            None
+        );
         assert_eq!(
             secrets
                 .load_mcp_secret(&secret_account(&receipt.client.id))
@@ -510,27 +787,33 @@ mod tests {
         let first = catalog.pair("Claude Desktop").expect("pair first client");
         catalog.fail_next_atomic_rename_for_test();
         assert!(catalog.pair("Cursor").is_err());
-        let reloaded = load_catalog(&root, secrets);
+        let reloaded = load_catalog(&root, secrets.clone());
         assert_eq!(reloaded.clients(), &[first.client]);
     }
 
     #[test]
-    fn catalog_persists_after_the_post_rename_parent_sync_fails() {
+    fn catalog_recovers_after_the_post_rename_parent_sync_fails() {
         let root = catalog_root();
         let secrets = Arc::new(MemoryMcpSecretStore::default());
         let mut catalog = load_catalog(&root, secrets.clone());
 
-        catalog.fail_next_parent_sync_for_test();
-        let receipt = catalog.pair("Claude Desktop").expect("pair client");
+        catalog.fail_parent_sync_during_publish_for_test();
+        let receipt = match catalog.pair("Claude Desktop") {
+            Ok(_) => panic!("report sync failure"),
+            Err(error) => error,
+        };
 
-        let reloaded = load_catalog(&root, secrets);
-        assert_eq!(reloaded.clients(), &[receipt.client]);
-        assert_eq!(
-            reloaded
-                .active_credentials()
-                .expect("load active credentials")[0]
-                .bearer_token,
-            receipt.bearer_token
-        );
+        let reloaded = load_catalog(&root, secrets.clone());
+        assert_eq!(reloaded.clients().len(), 1);
+        assert!(receipt.contains("sync external MCP catalog directory"));
+        assert!(reloaded
+            .verify_candidate("not-the-stored-token")
+            .expect("catalog reconciles before authorization")
+            .is_none());
+        let stored = secrets
+            .load_mcp_secret(&secret_account(&reloaded.clients()[0].id))
+            .expect("read recovered secret")
+            .expect("recovered secret exists");
+        assert_eq!(token_digest(&stored), reloaded.clients()[0].token_digest);
     }
 }
