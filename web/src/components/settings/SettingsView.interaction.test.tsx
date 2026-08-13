@@ -56,7 +56,7 @@ function Harness() {
 beforeEach(() => {
   vi.clearAllMocks();
   useEditorUiStore.setState({ settingsOpen: false, settingsPane: "general" });
-  useSettingsStore.setState({ byokProvider: "anthropic" });
+  useSettingsStore.setState({ byokProvider: "anthropic", windowSize: "standard" });
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -176,6 +176,31 @@ it("keeps the compact proxy switch inside a 24px pointer target", async () => {
   expect(target?.style.height).toBe("24px");
   expect(proxySwitch.style.width).toBe("16px");
   expect(proxySwitch.style.height).toBe("16px");
+});
+
+it("switches dark window layouts with an accessible radio group", async () => {
+  useEditorUiStore.setState({ settingsPane: "appearance" });
+  await act(async () => root.render(<Harness />));
+  await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
+
+  const group = container.querySelector<HTMLElement>('[role="radiogroup"]');
+  const choices = [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
+  expect(group?.getAttribute("aria-label")).toBe(t("settings.windowSize"));
+  expect(choices.map((choice) => choice.textContent?.trim())).toEqual(["深色 · 标准", "深色 · 紧凑"]);
+  expect(choices[0]?.getAttribute("aria-checked")).toBe("true");
+  expect(choices[1]?.getAttribute("aria-checked")).toBe("false");
+
+  await act(async () => {
+    choices[0]!.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      bubbles: true,
+      cancelable: true,
+    }));
+  });
+
+  expect(useSettingsStore.getState().windowSize).toBe("compact");
+  expect(choices[1]?.getAttribute("aria-checked")).toBe("true");
+  expect(document.activeElement).toBe(choices[1]);
 });
 
 it("keeps unauthenticated external MCP fail-closed while preserving official Codex guidance", async () => {

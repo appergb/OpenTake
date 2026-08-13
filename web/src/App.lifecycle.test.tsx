@@ -45,10 +45,13 @@ vi.mock("./components/preview/nativePlaybackSession", () => ({
   stopNativePlaybackForProjectBoundary: srv.stopNativePlayback,
 }));
 vi.mock("./i18n", () => ({ initI18n: vi.fn() }));
-vi.mock("./store/settingsStore", () => ({
+const settings = vi.hoisted(() => ({
   initProxyPlayback: vi.fn(),
-  initTheme: vi.fn(),
   initWindowSize: vi.fn(),
+}));
+vi.mock("./store/settingsStore", () => ({
+  initProxyPlayback: settings.initProxyPlayback,
+  initWindowSize: settings.initWindowSize,
 }));
 vi.mock("./hooks/useKeyboardShortcuts", () => ({ useKeyboardShortcuts: vi.fn() }));
 vi.mock("./components/preview/previewEngine", () => ({ useTimelinePlaybackEngine: vi.fn() }));
@@ -131,6 +134,8 @@ describe("App lifecycle listeners", () => {
     srv.stopLibrarySync.mockReset();
     srv.onGoHome.mockReset().mockResolvedValue(vi.fn());
     srv.stopNativePlayback.mockReset().mockResolvedValue(undefined);
+    settings.initProxyPlayback.mockReset();
+    settings.initWindowSize.mockReset();
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -164,6 +169,13 @@ describe("App lifecycle listeners", () => {
     expect(unsubscribe).toHaveBeenCalledOnce();
     expect(srv.stopSync).toHaveBeenCalledOnce();
     expect(srv.stopMediaSync).toHaveBeenCalledOnce();
+  });
+
+  it("initializes persisted dark-window preferences without a theme initializer", async () => {
+    await act(async () => root?.render(<App />));
+
+    expect(settings.initWindowSize).toHaveBeenCalledOnce();
+    expect(settings.initProxyPlayback).toHaveBeenCalledOnce();
   });
 
   it("ignores an old go-home callback after its owning effect is disposed", async () => {

@@ -18,7 +18,7 @@ import { startMediaSync, stopMediaSync } from "./store/mediaStore";
 import { startLibrarySync, stopLibrarySync } from "./store/libraryStore";
 import { useEditorUiStore } from "./store/uiStore";
 import { initI18n } from "./i18n";
-import { initProxyPlayback, initTheme, initWindowSize } from "./store/settingsStore";
+import { initProxyPlayback, initWindowSize } from "./store/settingsStore";
 import { isTauri, onGoHome } from "./lib/api";
 import { stopNativePlaybackForProjectBoundary } from "./components/preview/nativePlaybackSession";
 import { useUpdateStore } from "./store/updateStore";
@@ -101,7 +101,6 @@ export default function App() {
 
   useEffect(() => {
     initI18n();
-    initTheme();
     initWindowSize();
     initProxyPlayback();
     const stopUpdateScheduler = isTauri

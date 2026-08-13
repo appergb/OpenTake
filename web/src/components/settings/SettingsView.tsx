@@ -1,7 +1,7 @@
 /**
  * Settings view. Reachable from both the Home sidebar and the editor title bar.
  * Panes (single scrollable page in this phase): General (language), Appearance
- * (theme), Import, AI (BYOK), MCP, optional Account, and About.
+ * (dark window layout), Import, AI (BYOK), MCP, optional Account, and About.
  * Preferences persist via `settingsStore` / `i18nStore`;
  * the BYOK key is stored in the OS keychain via the `secret_*` Tauri commands
  * (see `lib/api.ts`) — the plaintext key never reaches this component's
@@ -11,7 +11,6 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   Bot,
-  Check,
   Copy,
   Download,
   ExternalLink,
@@ -30,7 +29,6 @@ import { Dropdown } from "../ui/Dropdown";
 import { useT, useI18nStore, LOCALES } from "../../i18n";
 import {
   useSettingsStore,
-  type Theme,
   type ByokProvider,
   type WindowSizeOpt,
 } from "../../store/settingsStore";
@@ -386,55 +384,6 @@ function Field({
   );
 }
 
-/** Segmented control used for enum settings (language/theme). */
-function Segmented<T extends string>({
-  value,
-  options,
-  onChange,
-}: {
-  value: T;
-  options: Array<{ id: T; label: string }>;
-  onChange: (id: T) => void;
-}) {
-  return (
-    <div
-      style={{
-        display: "inline-flex",
-        padding: 2,
-        gap: 2,
-        ...settingsControlStyle,
-        borderRadius: "var(--radius-sm)",
-      }}
-    >
-      {options.map((opt) => {
-        const active = opt.id === value;
-        return (
-          <button
-            key={opt.id}
-            type="button"
-            onClick={() => onChange(opt.id)}
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 4,
-              height: 24,
-              padding: "0 var(--space-md)",
-              borderRadius: "var(--radius-xs-sm)",
-              background: active ? "var(--home-selected)" : "transparent",
-              color: active ? "var(--text-primary)" : "var(--text-tertiary)",
-              fontSize: "var(--fs-sm)",
-              fontWeight: "var(--fw-medium)",
-            }}
-          >
-            {active && <Icon icon={Check} size={11} />}
-            {opt.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
 function GeneralPane() {
   const t = useT();
   const locale = useI18nStore((s) => s.locale);
@@ -485,39 +434,74 @@ function GeneralPane() {
 
 function AppearancePane() {
   const t = useT();
-  const theme = useSettingsStore((s) => s.theme);
-  const setTheme = useSettingsStore((s) => s.setTheme);
   const windowSize = useSettingsStore((s) => s.windowSize);
   const setWindowSize = useSettingsStore((s) => s.setWindowSize);
+  const options: Array<{ id: WindowSizeOpt; label: string }> = [
+    { id: "standard", label: t("settings.darkLayout.standard") },
+    { id: "compact", label: t("settings.darkLayout.compact") },
+  ];
+
+  const select = (size: WindowSizeOpt) => {
+    void setWindowSize(size);
+  };
 
   return (
     <Section title={t("settings.section.appearance")}>
       <Field
-        label={t("settings.theme")}
-        description={t("settings.themeDesc")}
-        control={
-          <Segmented<Theme>
-            value={theme}
-            options={[
-              { id: "dark", label: t("settings.theme.dark") },
-              { id: "light", label: t("settings.theme.light") },
-            ]}
-            onChange={setTheme}
-          />
-        }
-      />
-      <Field
-        label={t("settings.windowSize")}
+        label={t("settings.darkLayout")}
         description={t("settings.windowSizeDesc")}
         control={
-          <Segmented<WindowSizeOpt>
-            value={windowSize}
-            options={[
-              { id: "standard", label: t("settings.windowSize.standard") },
-              { id: "compact", label: t("settings.windowSize.compact") },
-            ]}
-            onChange={setWindowSize}
-          />
+          <div
+            role="radiogroup"
+            aria-label={t("settings.windowSize")}
+            style={{
+              display: "flex",
+              width: 244,
+              padding: 2,
+              gap: 2,
+              background: "var(--home-hover)",
+              borderRadius: "var(--radius-sm)",
+            }}
+          >
+            {options.map((option, index) => {
+              const active = option.id === windowSize;
+              return (
+                <button
+                  key={option.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  tabIndex={active ? 0 : -1}
+                  onClick={() => select(option.id)}
+                  onKeyDown={(event) => {
+                    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight" && event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+                    event.preventDefault();
+                    const direction = event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 1;
+                    const nextIndex = (index + direction + options.length) % options.length;
+                    const next = options[nextIndex]!;
+                    select(next.id);
+                    (event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[nextIndex])?.focus();
+                  }}
+                  style={{
+                    display: "flex",
+                    flex: "1 1 0",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    height: 28,
+                    padding: "0 var(--space-sm)",
+                    border: active ? "var(--bw-thin) solid var(--border-primary)" : "var(--bw-thin) solid transparent",
+                    borderRadius: "var(--radius-xs-sm)",
+                    background: active ? "var(--home-selected)" : "transparent",
+                    color: active ? "var(--text-primary)" : "var(--text-tertiary)",
+                    fontSize: "var(--fs-sm)",
+                    fontWeight: "var(--fw-medium)",
+                  }}
+                >
+                  <span style={{ display: "flex", width: "100%", justifyContent: "center" }}>{option.label}</span>
+                </button>
+              );
+            })}
+          </div>
         }
       />
     </Section>
