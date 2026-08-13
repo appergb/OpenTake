@@ -26,6 +26,8 @@ const MAX_PROJECT_PATH_BYTES: usize = 32_768;
 const MAX_REGISTRY_BYTES: u64 = 512 * 1024;
 const MAX_PROJECT_PREVIEW_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_PROJECT_PREVIEW_TRACKS: usize = 64;
+const MAX_HOME_THUMBNAIL_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_HOME_THUMBNAIL_DIMENSION: u32 = 16_384;
 const HOME_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -470,10 +472,49 @@ fn probe_project_entry(
         .or_else(|| modified_millis(&bundle_metadata))
         .unwrap_or_else(|| stored_modified_at(entry));
     let thumbnail = entry.path.join("thumbnail.jpg");
-    let thumbnail_path = authorize_thumbnail(&thumbnail).then_some(thumbnail);
+    let thumbnail_path =
+        (valid_home_thumbnail(&thumbnail) && authorize_thumbnail(&thumbnail)).then_some(thumbnail);
     let mut result = home_entry(entry, modified_at, thumbnail_path, false, false);
     result.preview = read_project_preview(&entry.path);
     result
+}
+
+fn valid_home_thumbnail(path: &Path) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > MAX_HOME_THUMBNAIL_BYTES
+    {
+        return false;
+    }
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    if file
+        .take(MAX_HOME_THUMBNAIL_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() as u64 != metadata.len()
+    {
+        return false;
+    }
+    let Ok(reader) = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()
+    else {
+        return false;
+    };
+    if reader.format() != Some(image::ImageFormat::Jpeg) {
+        return false;
+    }
+    reader.into_dimensions().is_ok_and(|(width, height)| {
+        width > 0
+            && height > 0
+            && width <= MAX_HOME_THUMBNAIL_DIMENSION
+            && height <= MAX_HOME_THUMBNAIL_DIMENSION
+    })
 }
 
 fn probe_project_entries_with(
@@ -1227,6 +1268,15 @@ pub async fn home_project_reveal(app: AppHandle, path: String) -> Result<(), Str
 mod tests {
     use super::*;
 
+    fn write_test_jpeg(path: &Path, color: [u8; 3]) {
+        let pixels = color.repeat(16 * 9);
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 80)
+            .encode(&pixels, 16, 9, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+
     #[test]
     fn missing_entry_survives_registry_load_and_safe_trash_removes_only_after_success() {
         let directory = tempfile::tempdir().unwrap();
@@ -1485,7 +1535,7 @@ mod tests {
         let project = directory.path().join("Metadata.opentake");
         fs::create_dir(&project).unwrap();
         fs::write(project.join("project.json"), b"{}").unwrap();
-        fs::write(project.join("thumbnail.jpg"), b"jpeg").unwrap();
+        write_test_jpeg(&project.join("thumbnail.jpg"), [20, 40, 80]);
 
         let mut registry = ProjectRegistry::load(ledger).unwrap();
         registry
@@ -1509,6 +1559,61 @@ mod tests {
             .is_none());
         assert!(!entry.missing);
         assert!(!entry.offline);
+    }
+
+    #[test]
+    fn thumbnail_invalid_prior_jpeg_is_retained_but_not_advertised() {
+        let directory = tempfile::tempdir().unwrap();
+        let ledger = directory.path().join("project-registry.json");
+        let project = directory.path().join("InvalidCover.opentake");
+        fs::create_dir(&project).unwrap();
+        fs::write(project.join("project.json"), b"{}").unwrap();
+        fs::write(project.join("thumbnail.jpg"), b"not-a-jpeg").unwrap();
+
+        let mut registry = ProjectRegistry::load(ledger).unwrap();
+        registry
+            .register_at(
+                project.clone(),
+                10,
+                capture_registered_bundle_identity(&project).unwrap(),
+            )
+            .unwrap();
+        let entry = probe_project_entries_with(registry.entries_snapshot(), |_| true)
+            .pop()
+            .unwrap();
+
+        assert_eq!(entry.thumbnail_path, None);
+        assert_eq!(
+            fs::read(project.join("thumbnail.jpg")).unwrap(),
+            b"not-a-jpeg"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn thumbnail_atomic_replacement_failure_retains_previous_valid_jpeg() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let bundle = directory.path().join("AtomicCover.opentake");
+        let prior_path = directory.path().join("prior.jpg");
+        let replacement_path = directory.path().join("replacement.jpg");
+        write_test_jpeg(&prior_path, [20, 40, 80]);
+        write_test_jpeg(&replacement_path, [200, 10, 10]);
+        let prior = fs::read(&prior_path).unwrap();
+        let replacement = fs::read(&replacement_path).unwrap();
+        let mut project = opentake_project::Project::new(&bundle);
+        project.thumbnail = Some(prior.clone());
+        project.save().unwrap();
+        let original_mode = fs::metadata(&bundle).unwrap().permissions().mode();
+        fs::set_permissions(&bundle, fs::Permissions::from_mode(0o555)).unwrap();
+
+        project.thumbnail = Some(replacement);
+        let result = project.save();
+        fs::set_permissions(&bundle, fs::Permissions::from_mode(original_mode)).unwrap();
+
+        assert!(result.is_err(), "read-only atomic replacement must fail");
+        assert_eq!(fs::read(bundle.join("thumbnail.jpg")).unwrap(), prior);
     }
 
     #[test]

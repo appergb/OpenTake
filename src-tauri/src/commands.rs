@@ -562,19 +562,15 @@ pub async fn project_open(app: AppHandle, path: String) -> Result<TimelineSnapsh
 
 /// `project_save`: `path = None` saves back to the open bundle; `Some` is save-as.
 ///
-/// Before delegating to the core save, capture a cover `thumbnail.jpg` from the
-/// timeline's first video/image clip and hand the JPEG bytes in, so the bundle
-/// write persists it (upstream `captureThumbnail` → `snapshotThumbnail`,
-/// `Project/VideoProject.swift:92,261-300`). We deliberately use the **same
-/// source upstream does** — one representative clip frame via ffmpeg
-/// (`opentake_media::capture_project_thumbnail`) — rather than a GPU composite:
-/// upstream never composites for the cover, and the save runs under the session
-/// lock while `composite_frame` takes the GPU lock, so compositing here would
-/// risk lock reentrancy for no fidelity gain. Capture is best-effort: a failure
-/// yields `None`, leaving any existing cover untouched, and never fails the save.
+/// Before delegating to the core save, capture one stable representative frame
+/// through the authoritative preview/export compositor. Capture and JPEG encode
+/// happen before the identity-bound core save acquires its final session lock;
+/// `None` therefore leaves the last valid cover untouched without introducing a
+/// GPU/session lock cycle.
 #[tauri::command]
 pub fn project_save(
     core: State<'_, AppCore>,
+    render: State<'_, crate::render::RenderState>,
     admission: State<'_, crate::updater::InstallAdmissionGate>,
     path: Option<String>,
     expected_project_epoch: u64,
@@ -582,18 +578,58 @@ pub fn project_save(
 ) -> Result<String, CmdError> {
     let _activity =
         crate::updater::begin_mutating_activity(&admission).map_err(validation_error)?;
-    project_save_for_project(
+    save_project_with_composite_cover(
         &core,
+        &render,
         path,
         expected_project_epoch,
         expected_project_path,
-        |snapshot| {
-            opentake_media::capture_project_thumbnail(
-                &snapshot.timeline,
-                &snapshot.media,
-                snapshot.project_dir.as_deref(),
-            )
-        },
+    )
+}
+
+pub(crate) fn save_project_with_composite_cover(
+    core: &AppCore,
+    render: &crate::render::RenderState,
+    path: Option<String>,
+    expected_project_epoch: u64,
+    expected_project_path: Option<String>,
+) -> Result<String, CmdError> {
+    project_save_for_project(
+        core,
+        path,
+        expected_project_epoch,
+        expected_project_path,
+        |snapshot| capture_composite_project_thumbnail(snapshot, render),
+    )
+}
+
+fn capture_composite_project_thumbnail(
+    snapshot: &opentake_core::ProjectRuntimeSnapshot,
+    render: &crate::render::RenderState,
+) -> Option<Vec<u8>> {
+    let cover_snapshot = opentake_media::ProjectCompositeThumbnailSnapshot::new(
+        &snapshot.timeline,
+        snapshot.project_dir.as_deref(),
+    );
+    let frame_index = cover_snapshot.representative_frame(&snapshot.media)?;
+    let cancel = opentake_media::MediaCancelToken::new();
+    let bounds = opentake_media::PROJECT_COMPOSITE_COVER_BOUNDS;
+    let composite = crate::render::composite_timeline_frame(
+        &snapshot.timeline,
+        &snapshot.media,
+        &snapshot.project_dir,
+        render,
+        frame_index,
+        bounds.0.max(bounds.1),
+        &cancel,
+    )
+    .ok()?;
+    let frame = opentake_media::RgbaFrame::new(composite.width, composite.height, composite.rgba);
+    opentake_media::capture_project_composite_thumbnail(
+        cover_snapshot,
+        &snapshot.media,
+        &frame,
+        bounds,
     )
 }
 
@@ -2040,12 +2076,21 @@ impl KeyframeValueDto {
 #[cfg(test)]
 mod project_open_async_tests {
     use super::{
-        prepare_saved_project_off_thread, project_save_for_project, run_blocking_with_timeout,
-        ProjectLifecycleCoordinator,
+        capture_composite_project_thumbnail, prepare_saved_project_off_thread,
+        project_save_for_project, run_blocking_with_timeout, ProjectLifecycleCoordinator,
     };
     use opentake_core::core::PreparedProjectOpen;
     use opentake_core::AppCore;
     use std::time::Duration;
+
+    fn jpeg_bytes(color: [u8; 3]) -> Vec<u8> {
+        let pixels = color.repeat(16 * 9);
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 80)
+            .encode(&pixels, 16, 9, image::ExtendedColorType::Rgb8)
+            .expect("encode test JPEG");
+        bytes
+    }
     #[cfg(unix)]
     #[test]
     fn prepared_project_detects_an_ambient_namespace_rebind_before_commit() {
@@ -2396,6 +2441,160 @@ mod project_open_async_tests {
         assert_eq!(
             core.runtime_snapshot().project_dir.as_deref(),
             Some(second.as_path())
+        );
+    }
+
+    #[test]
+    fn thumbnail_capture_failure_preserves_the_previous_valid_cover() {
+        let fixture = tempfile::tempdir().expect("fixture tempdir");
+        let bundle = fixture.path().join("KeepCover.opentake");
+        let previous = jpeg_bytes([20, 40, 80]);
+        let mut project = opentake_project::Project::new(&bundle);
+        project.thumbnail = Some(previous.clone());
+        project.save().expect("save prior cover fixture");
+        let core = AppCore::new();
+        core.open_project(&bundle).expect("open fixture");
+        let snapshot = core.runtime_snapshot();
+
+        project_save_for_project(
+            &core,
+            None,
+            snapshot.project_epoch,
+            Some(bundle.to_string_lossy().into_owned()),
+            |_| None,
+        )
+        .expect("project save remains best effort");
+
+        assert_eq!(
+            std::fs::read(bundle.join("thumbnail.jpg")).expect("read retained cover"),
+            previous
+        );
+    }
+
+    #[test]
+    fn thumbnail_authoritative_composite_contains_transition_overlay_transform_and_text() {
+        use opentake_domain::{
+            Clip, ClipType, Fill, MediaManifestEntry, MediaSource, Point, Rgba, TextStyle, Track,
+            Transform, Transition, TransitionKind,
+        };
+        use opentake_media::{
+            ffmpeg_status::ffmpeg_available, ExportPreset, ExportResolution, RgbaFrame, VideoCodec,
+            VideoEncoder,
+        };
+
+        if !ffmpeg_available() || opentake_render::RenderDevice::try_new().is_err() {
+            eprintln!("skip: authoritative cover fixture needs ffmpeg and a GPU adapter");
+            return;
+        }
+        let fixture = tempfile::tempdir().expect("fixture tempdir");
+        let video = fixture.path().join("background.mp4");
+        let preset = ExportPreset::new(VideoCodec::H264, ExportResolution::P720);
+        let mut encoder =
+            VideoEncoder::new(&video, 320, 180, 30, &preset).expect("start background encoder");
+        for _ in 0..60 {
+            encoder
+                .push_frame(&RgbaFrame::new(
+                    320,
+                    180,
+                    [210, 20, 20, 255].repeat(320 * 180),
+                ))
+                .expect("encode background frame");
+        }
+        encoder.finish().expect("finish background video");
+        let incoming = fixture.path().join("incoming.png");
+        let overlay = fixture.path().join("overlay.png");
+        image::RgbaImage::from_pixel(320, 180, image::Rgba([20, 180, 20, 255]))
+            .save(&incoming)
+            .expect("save incoming image");
+        image::RgbaImage::from_pixel(320, 180, image::Rgba([20, 40, 220, 255]))
+            .save(&overlay)
+            .expect("save overlay image");
+
+        let entry = |id: &str, kind: ClipType, path: &std::path::Path| MediaManifestEntry {
+            id: id.into(),
+            name: id.into(),
+            kind,
+            source: MediaSource::External {
+                absolute_path: path.to_string_lossy().into_owned(),
+            },
+            duration: 2.0,
+            generation_input: None,
+            source_width: Some(320),
+            source_height: Some(180),
+            source_fps: (kind == ClipType::Video).then_some(30.0),
+            has_audio: Some(false),
+            color: None,
+            proxy: None,
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        };
+        let mut outgoing = Clip::new("outgoing", "background", 0, 30);
+        outgoing.transition_out = Some(Transition {
+            from_clip_id: "outgoing".into(),
+            to_clip_id: "incoming".into(),
+            kind: TransitionKind::CrossDissolve,
+            duration_frames: 10,
+        });
+        let mut incoming_clip = Clip::new("incoming", "incoming", 30, 30);
+        incoming_clip.media_type = ClipType::Image;
+        let mut background_track = Track::new("background", ClipType::Video);
+        background_track.clips = vec![outgoing, incoming_clip];
+        let mut overlay_clip = Clip::new("overlay", "overlay", 20, 12);
+        overlay_clip.media_type = ClipType::Image;
+        overlay_clip.transform = Transform::from_center(Point { x: 0.78, y: 0.5 }, 0.3, 0.6);
+        overlay_clip.transform.rotation = 8.0;
+        let mut overlay_track = Track::new("overlay", ClipType::Video);
+        overlay_track.clips.push(overlay_clip);
+        let mut text_clip = Clip::new("text", "", 20, 20);
+        text_clip.media_type = ClipType::Text;
+        text_clip.text_content = Some("Composite".into());
+        let mut text_style = TextStyle::default();
+        text_style.background = Fill::new(true, Rgba::new(0.8, 0.1, 0.8, 1.0));
+        text_clip.text_style = Some(text_style);
+        text_clip.transform = Transform::from_center(Point { x: 0.28, y: 0.5 }, 0.4, 0.2);
+        let mut text_track = Track::new("text", ClipType::Text);
+        text_track.clips.push(text_clip);
+        let mut timeline = opentake_domain::Timeline::new();
+        timeline.width = 320;
+        timeline.height = 180;
+        // Track zero is the topmost visual track, matching the production render
+        // plan. Keep the transformed overlay above the transition background.
+        timeline.tracks = vec![overlay_track, background_track, text_track];
+        let mut project = opentake_project::Project::new(fixture.path().join("Composite.opentake"));
+        project.timeline = timeline;
+        project.manifest.entries = vec![
+            entry("background", ClipType::Video, &video),
+            entry("incoming", ClipType::Image, &incoming),
+            entry("overlay", ClipType::Image, &overlay),
+        ];
+        project.save().expect("save composite fixture");
+        let core = AppCore::new();
+        core.open_project(&project.bundle_path)
+            .expect("open composite fixture");
+
+        let bytes = capture_composite_project_thumbnail(
+            &core.runtime_snapshot(),
+            &crate::render::RenderState::new(),
+        )
+        .expect("capture authoritative cover");
+        let cover = image::load_from_memory(&bytes)
+            .expect("decode authoritative cover")
+            .to_rgb8();
+        assert_eq!((cover.width(), cover.height()), (640, 360));
+        let transition = cover.get_pixel(360, 40).0;
+        let overlay_pixel = cover.get_pixel(500, 180).0;
+        let outside_overlay = cover.get_pixel(620, 180).0;
+        let text_background = cover.get_pixel(180, 180).0;
+        assert!(transition[0] > 70 && transition[1] > 50, "{transition:?}");
+        assert!(
+            overlay_pixel[2] > 120 && overlay_pixel[0] < 100,
+            "{overlay_pixel:?}"
+        );
+        assert!(outside_overlay[2] < 100, "{outside_overlay:?}");
+        assert!(
+            text_background[0] > 120 && text_background[2] > 120,
+            "{text_background:?}"
         );
     }
 }

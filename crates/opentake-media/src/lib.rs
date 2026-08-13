@@ -170,9 +170,10 @@ pub use decode::{
 pub use encode::{ExportPreset, ExportResolution, VideoCodec, VideoEncoder};
 
 pub use thumbnail::{
-    capture_project_thumbnail, image_thumbnail, pick_thumbnail_source, video_thumbnail_times,
-    video_thumbnails, PartialThumbCallback, ThumbnailCacheMeta, ThumbnailKind, ThumbnailSource,
-    VideoThumb,
+    capture_project_composite_thumbnail, capture_project_thumbnail, image_thumbnail,
+    pick_thumbnail_source, representative_project_thumbnail_frame, video_thumbnail_times,
+    video_thumbnails, PartialThumbCallback, ProjectCompositeThumbnailSnapshot, ThumbnailCacheMeta,
+    ThumbnailKind, ThumbnailSource, VideoThumb, PROJECT_COMPOSITE_COVER_BOUNDS,
 };
 
 pub use timecode::{parse_smpte_timecode, read_start_timecode_frame};
