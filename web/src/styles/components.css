@@ -1,0 +1,26 @@
+.reveal {
+  overflow: hidden;
+  block-size: 0;
+  opacity: 0;
+  translate: 0 -4px;
+  transition:
+    block-size var(--motion-disclosure-duration) var(--motion-disclosure-ease),
+    opacity var(--motion-disclosure-duration) var(--motion-disclosure-ease),
+    translate var(--motion-disclosure-duration) var(--motion-disclosure-ease);
+}
+
+.reveal[data-state="open"] {
+  block-size: var(--reveal-block-size, 0);
+  opacity: 1;
+  translate: 0 0;
+}
+
+.reveal__content {
+  min-block-size: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal {
+    transition: none;
+  }
+}
