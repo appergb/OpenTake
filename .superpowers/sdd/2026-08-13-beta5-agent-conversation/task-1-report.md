@@ -40,3 +40,41 @@ Owned changes are limited to:
 - this report
 
 Concurrent core, project, media, render, commands, home, and audit changes were not staged or reverted.
+
+## Review fix round 1
+
+Commit target: `fix(agent): preserve provider block order`
+
+### Result
+
+- The live Anthropic SSE decoder now treats provider `content_block_start`, `content_block_delta`, and `content_block_stop` indices as authoritative. It emits block upserts at start/stop and indexed text deltas between them, so `text A → tool use → text B` remains in that order through loop events and persistence.
+- Anthropic `input_json_delta.partial_json` is accumulated on its addressed tool block. The live HTTP path and the deterministic SSE regression test share the same decoder.
+- OpenAI and Anthropic request builders now derive text, tool calls, tool-use IDs, and native tool-result content directly from `ChatMessage.blocks`. In particular, the next Anthropic round serializes interleaved assistant blocks in their original order instead of reconstructing `text + tools` from Beta 4 compatibility fields.
+- The deserialize wire uses `Option<Vec<AgentContentBlock>>`: only a missing `blocks` property migrates legacy fields. Explicit `blocks: []` remains empty, clears stale flat fields/tool metadata, and serializes back as a Beta 5 empty array.
+- Large inline tests moved to `chat/session/tests.rs` and `chat/loop/tests.rs`; production `session.rs` is 533 lines and `loop.rs` is 610 lines.
+
+### RED evidence
+
+- The explicit-empty tests first failed with a missing serialized array (`null` versus `[]`) and with stale legacy text/tool calls being migrated into non-empty blocks.
+- The authoritative Anthropic body test first failed with `text AB → tool` instead of `text A → tool → text B`.
+- The interleaved SSE test first failed to compile because the indexed Anthropic decoder and shared loop event application path did not exist; after implementation it exercises split raw SSE chunks through loop events into the next-round request body.
+- The explicit-empty tool-message test first failed because stale `toolCallId` survived an authoritative empty block array.
+
+### Fresh verification
+
+- `cargo test -p opentake-agent chat:: -- --nocapture` — 53 passed, 0 failed.
+- `cargo test -p opentake-tauri chat::tests --lib -- --nocapture` — 19 passed, 0 failed.
+- `cargo clippy -p opentake-agent --all-targets -- -D warnings` — passed.
+- `cargo clippy -p opentake-tauri --lib -- -D warnings` — passed (only Cargo's existing future-incompatibility notice for `block v0.1.6`).
+- `cargo fmt -p opentake-agent -- --check` — passed.
+- Owned-file `git diff --check` — passed.
+- `cargo fmt --all -- --check` was also run; its only diff is the concurrent unowned `crates/opentake-render/src/plan/build.rs` formatting change, so Task 1 did not rewrite it.
+
+### Round 1 scope
+
+- `crates/opentake-agent/src/chat/llm.rs`
+- `crates/opentake-agent/src/chat/session.rs`
+- `crates/opentake-agent/src/chat/session/tests.rs`
+- `crates/opentake-agent/src/chat/loop.rs`
+- `crates/opentake-agent/src/chat/loop/tests.rs`
+- this report

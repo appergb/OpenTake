@@ -95,11 +95,13 @@ pub struct ToolSchema {
 /// matching Tauri event so the UI renders incrementally.
 #[derive(Clone, Debug)]
 pub enum StreamEvent {
-    /// A text chunk from the assistant. Concatenated in order = full turn text.
-    Delta(String),
-    /// The assistant requested a tool call. `ToolCall.result` is `None` here;
-    /// the loop dispatches, fills the result, and re-feeds the LLM.
-    ToolCall(ToolCall),
+    /// A text chunk addressed to the provider's content-block index.
+    BlockDelta { block_index: usize, delta: String },
+    /// Insert or replace one provider-addressed content block.
+    BlockUpsert {
+        block_index: usize,
+        block: AgentContentBlock,
+    },
 }
 
 /// The final assistant turn after the stream closes: full text + any tool calls
@@ -108,6 +110,7 @@ pub enum StreamEvent {
 pub struct TurnResult {
     pub content: String,
     pub tool_calls: Vec<ToolCall>,
+    pub blocks: Vec<AgentContentBlock>,
 }
 
 /// Everything a chat turn needs: the full history (system + user + assistant +
@@ -253,35 +256,63 @@ fn openai_body(model: &str, messages: &[ChatMessage], tools: &[ToolSchema]) -> s
 /// Map one [`ChatMessage`] to the OpenAI wire shape. Tool-result messages carry
 /// `tool_call_id`; assistant turns with tool calls carry `tool_calls`.
 fn openai_message(m: &ChatMessage) -> serde_json::Value {
+    let text = m
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            AgentContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
     match m.role {
-        Role::System => serde_json::json!({"role": "system", "content": m.content}),
-        Role::User => serde_json::json!({"role": "user", "content": m.content}),
+        Role::System => serde_json::json!({"role": "system", "content": text}),
+        Role::User => serde_json::json!({"role": "user", "content": text}),
         Role::Assistant => {
-            let mut v = serde_json::json!({"role": "assistant", "content": m.content});
-            if !m.tool_calls.is_empty() {
-                v["tool_calls"] = serde_json::Value::Array(
-                    m.tool_calls
-                        .iter()
-                        .map(|tc| {
-                            serde_json::json!({
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.name,
-                                    "arguments": tc.args.to_string(),
-                                }
-                            })
-                        })
-                        .collect(),
-                );
+            let tool_calls = m
+                .blocks
+                .iter()
+                .filter_map(|block| match block {
+                    AgentContentBlock::ToolUse {
+                        id, name, input, ..
+                    } => Some(serde_json::json!({
+                        "id": id,
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": input.to_string(),
+                        }
+                    })),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let mut v = serde_json::json!({"role": "assistant", "content": text});
+            if !tool_calls.is_empty() {
+                v["tool_calls"] = serde_json::Value::Array(tool_calls);
             }
             v
         }
-        Role::Tool => serde_json::json!({
-            "role": "tool",
-            "content": m.content,
-            "tool_call_id": m.tool_call_id.clone().unwrap_or_default(),
-        }),
+        Role::Tool => {
+            let (tool_call_id, content) = m
+                .blocks
+                .iter()
+                .find_map(|block| match block {
+                    AgentContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } => Some((
+                        tool_use_id.clone(),
+                        legacy_tool_result_content(content, is_error.unwrap_or(false)),
+                    )),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            serde_json::json!({
+                "role": "tool",
+                "content": content,
+                "tool_call_id": tool_call_id,
+            })
+        }
     }
 }
 
@@ -335,7 +366,10 @@ where
                 if let Some(text) = delta.get("content").and_then(|c| c.as_str()) {
                     if !text.is_empty() {
                         full.push_str(text);
-                        on_event(StreamEvent::Delta(text.to_string()));
+                        on_event(StreamEvent::BlockDelta {
+                            block_index: 0,
+                            delta: text.to_string(),
+                        });
                     }
                 }
                 if let Some(arr) = delta.get("tool_calls").and_then(|t| t.as_array()) {
@@ -361,37 +395,58 @@ where
         }
     }
 
+    let mut blocks = (!full.is_empty())
+        .then(|| AgentContentBlock::Text { text: full.clone() })
+        .into_iter()
+        .collect::<Vec<_>>();
     let mut tool_calls = Vec::new();
     if cancel.load(Ordering::Relaxed) {
         return Err(LlmError::Cancelled);
     }
-    for (_, (id, name, args_str)) in tool_buf {
+    for (index, (id, name, args_str)) in tool_buf {
         let args = if args_str.is_empty() {
             serde_json::json!({})
         } else {
             serde_json::from_str(&args_str).unwrap_or(serde_json::json!({"_raw": args_str}))
         };
         let tc = ToolCall::request(id, name, args);
-        on_event(StreamEvent::ToolCall(tc.clone()));
+        let block_index = blocks.len();
+        debug_assert_eq!(block_index, index + usize::from(!full.is_empty()));
+        let block = AgentContentBlock::from(tc.clone());
+        on_event(StreamEvent::BlockUpsert {
+            block_index,
+            block: block.clone(),
+        });
+        blocks.push(block);
         tool_calls.push(tc);
     }
 
     Ok(TurnResult {
         content: full,
         tool_calls,
+        blocks,
     })
 }
 
 // MARK: - Anthropic streaming
 
-fn anthropic_tool_result_content(message: &ChatMessage) -> serde_json::Value {
-    let Some(AgentContentBlock::ToolResult { content, .. }) = message
-        .blocks
+fn legacy_tool_result_content(content: &[Block], is_error: bool) -> String {
+    if let [Block::Text { text }] = content {
+        if serde_json::from_str::<serde_json::Value>(text).is_ok() {
+            return text.clone();
+        }
+    }
+    let summary = content
         .iter()
-        .find(|block| matches!(block, AgentContentBlock::ToolResult { .. }))
-    else {
-        return serde_json::Value::String(message.content.clone());
-    };
+        .filter_map(|block| match block {
+            Block::Text { text } => Some(text.as_str()),
+            Block::Image { .. } => None,
+        })
+        .collect::<String>();
+    serde_json::json!({"summary": summary, "isError": is_error}).to_string()
+}
+
+fn anthropic_tool_result_content(content: &[Block]) -> serde_json::Value {
     serde_json::Value::Array(
         content
             .iter()
@@ -415,7 +470,7 @@ fn anthropic_tool_result_content(message: &ChatMessage) -> serde_json::Value {
 
 /// Build the Anthropic request body. System prompt is a top-level field (not a
 /// message); tool results are `role:user` `tool_result` content blocks.
-fn anthropic_body(
+pub(crate) fn anthropic_body(
     model: &str,
     messages: &[ChatMessage],
     tools: &[ToolSchema],
@@ -428,45 +483,76 @@ fn anthropic_body(
                 if !system.is_empty() {
                     system.push_str("\n\n");
                 }
-                system.push_str(&m.content);
+                for block in &m.blocks {
+                    if let AgentContentBlock::Text { text } = block {
+                        system.push_str(text);
+                    }
+                }
             }
-            Role::User => turns.push(serde_json::json!({
-                "role": "user",
-                "content": [{"type": "text", "text": m.content}],
-            })),
+            Role::User => {
+                let blocks = m
+                    .blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        AgentContentBlock::Text { text } => {
+                            Some(serde_json::json!({"type": "text", "text": text}))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                turns.push(serde_json::json!({"role": "user", "content": blocks}));
+            }
             Role::Assistant => {
-                let mut blocks = Vec::new();
-                if !m.content.is_empty() {
-                    blocks.push(serde_json::json!({"type": "text", "text": m.content}));
-                }
-                for tc in &m.tool_calls {
-                    blocks.push(serde_json::json!({
-                        "type": "tool_use",
-                        "id": tc.id,
-                        "name": tc.name,
-                        "input": tc.args,
-                    }));
-                }
+                let blocks = m
+                    .blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        AgentContentBlock::Text { text } => {
+                            Some(serde_json::json!({"type": "text", "text": text}))
+                        }
+                        AgentContentBlock::ToolUse {
+                            id, name, input, ..
+                        } => Some(serde_json::json!({
+                            "type": "tool_use",
+                            "id": id,
+                            "name": name,
+                            "input": input,
+                        })),
+                        AgentContentBlock::ToolResult { .. } => None,
+                    })
+                    .collect::<Vec<_>>();
                 turns.push(serde_json::json!({"role": "assistant", "content": blocks}));
             }
             Role::Tool => {
-                let mut block = serde_json::json!({
-                    "type": "tool_result",
-                    "tool_use_id": m.tool_call_id.clone().unwrap_or_default(),
-                    "content": anthropic_tool_result_content(m),
-                });
-                if let Some(is_error) = m.tool_is_error {
-                    block["is_error"] = serde_json::Value::Bool(is_error);
-                }
-                if let Some(last) = turns.last_mut() {
-                    if last.get("role").and_then(|r| r.as_str()) == Some("user") {
-                        if let Some(arr) = last.get_mut("content").and_then(|c| c.as_array_mut()) {
-                            arr.push(block);
-                            continue;
+                for result in &m.blocks {
+                    let AgentContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        is_error,
+                    } = result
+                    else {
+                        continue;
+                    };
+                    let mut block = serde_json::json!({
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": anthropic_tool_result_content(content),
+                    });
+                    if let Some(is_error) = is_error {
+                        block["is_error"] = serde_json::Value::Bool(*is_error);
+                    }
+                    if let Some(last) = turns.last_mut() {
+                        if last.get("role").and_then(|r| r.as_str()) == Some("user") {
+                            if let Some(arr) =
+                                last.get_mut("content").and_then(|c| c.as_array_mut())
+                            {
+                                arr.push(block);
+                                continue;
+                            }
                         }
                     }
+                    turns.push(serde_json::json!({"role": "user", "content": vec![block]}));
                 }
-                turns.push(serde_json::json!({"role": "user", "content": vec![block]}));
             }
         }
     }
@@ -524,6 +610,234 @@ struct AnthEvent {
     index: Option<u64>,
 }
 
+#[derive(Clone, Debug)]
+enum AnthropicBlockState {
+    Text(String),
+    ToolUse {
+        id: String,
+        name: String,
+        initial_input: serde_json::Value,
+        partial_json: String,
+    },
+}
+
+impl AnthropicBlockState {
+    fn content_block(&self) -> AgentContentBlock {
+        match self {
+            Self::Text(text) => AgentContentBlock::Text { text: text.clone() },
+            Self::ToolUse {
+                id,
+                name,
+                initial_input,
+                partial_json,
+            } => {
+                let input = if partial_json.is_empty() {
+                    initial_input.clone()
+                } else {
+                    serde_json::from_str(partial_json)
+                        .unwrap_or_else(|_| serde_json::json!({"_raw": partial_json}))
+                };
+                AgentContentBlock::ToolUse {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input,
+                    result: None,
+                    is_error: None,
+                }
+            }
+        }
+    }
+}
+
+/// Stateful Anthropic SSE decoder shared by the live HTTP path and protocol
+/// tests. Content-block indices remain authoritative from start through stop.
+#[derive(Default)]
+pub(crate) struct AnthropicStreamDecoder {
+    buffer: Vec<u8>,
+    blocks: BTreeMap<usize, AnthropicBlockState>,
+    message_stopped: bool,
+}
+
+impl AnthropicStreamDecoder {
+    pub(crate) fn push_chunk<F>(&mut self, bytes: &[u8], on_event: &mut F) -> Result<bool, LlmError>
+    where
+        F: FnMut(StreamEvent),
+    {
+        if self.message_stopped {
+            return Ok(true);
+        }
+        self.buffer.extend_from_slice(bytes);
+        for frame in drain_sse_frames(&mut self.buffer)? {
+            if self.handle_frame(&frame, on_event)? {
+                self.message_stopped = true;
+                break;
+            }
+        }
+        Ok(self.message_stopped)
+    }
+
+    fn handle_frame<F>(&mut self, frame: &str, on_event: &mut F) -> Result<bool, LlmError>
+    where
+        F: FnMut(StreamEvent),
+    {
+        let data_line = frame
+            .lines()
+            .find_map(|line| line.strip_prefix("data: "))
+            .unwrap_or("");
+        if data_line.is_empty() {
+            return Ok(false);
+        }
+        let ev: AnthEvent = match serde_json::from_str(data_line) {
+            Ok(event) => event,
+            Err(_) => return Ok(false),
+        };
+        match ev.typ.as_str() {
+            "content_block_start" => {
+                let index = ev.index.unwrap_or(0) as usize;
+                if index != self.blocks.len() {
+                    return Err(LlmError::Stream(format!(
+                        "non-contiguous Anthropic content block index {index}"
+                    )));
+                }
+                let Some(content_block) = ev.content_block else {
+                    return Err(LlmError::Stream(
+                        "Anthropic content block start omitted content_block".into(),
+                    ));
+                };
+                let state = match content_block.get("type").and_then(|value| value.as_str()) {
+                    Some("text") => AnthropicBlockState::Text(
+                        content_block
+                            .get("text")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                    ),
+                    Some("tool_use") => AnthropicBlockState::ToolUse {
+                        id: content_block
+                            .get("id")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        name: content_block
+                            .get("name")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        initial_input: content_block
+                            .get("input")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!({})),
+                        partial_json: String::new(),
+                    },
+                    other => {
+                        return Err(LlmError::Stream(format!(
+                            "unsupported Anthropic content block type {other:?}"
+                        )))
+                    }
+                };
+                let block = state.content_block();
+                self.blocks.insert(index, state);
+                on_event(StreamEvent::BlockUpsert {
+                    block_index: index,
+                    block,
+                });
+            }
+            "content_block_delta" => {
+                let index = ev.index.unwrap_or(0) as usize;
+                let Some(delta) = ev.delta else {
+                    return Ok(false);
+                };
+                match delta.get("type").and_then(|value| value.as_str()) {
+                    Some("text_delta") => {
+                        let text = delta
+                            .get("text")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("");
+                        let Some(AnthropicBlockState::Text(full)) = self.blocks.get_mut(&index)
+                        else {
+                            return Err(LlmError::Stream(format!(
+                                "text delta addressed non-text block {index}"
+                            )));
+                        };
+                        full.push_str(text);
+                        if !text.is_empty() {
+                            on_event(StreamEvent::BlockDelta {
+                                block_index: index,
+                                delta: text.to_string(),
+                            });
+                        }
+                    }
+                    Some("input_json_delta") => {
+                        let partial = delta
+                            .get("partial_json")
+                            .or_else(|| delta.get("partial"))
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("");
+                        let Some(AnthropicBlockState::ToolUse { partial_json, .. }) =
+                            self.blocks.get_mut(&index)
+                        else {
+                            return Err(LlmError::Stream(format!(
+                                "input delta addressed non-tool block {index}"
+                            )));
+                        };
+                        partial_json.push_str(partial);
+                    }
+                    _ => {}
+                }
+            }
+            "content_block_stop" => {
+                let index = ev.index.unwrap_or(0) as usize;
+                let Some(state) = self.blocks.get(&index) else {
+                    return Err(LlmError::Stream(format!(
+                        "content block stop addressed missing block {index}"
+                    )));
+                };
+                on_event(StreamEvent::BlockUpsert {
+                    block_index: index,
+                    block: state.content_block(),
+                });
+            }
+            "message_stop" => return Ok(true),
+            _ => {}
+        }
+        Ok(false)
+    }
+
+    pub(crate) fn finish(self) -> Result<TurnResult, LlmError> {
+        if !self.buffer.iter().all(u8::is_ascii_whitespace) {
+            return Err(LlmError::Stream(
+                "Anthropic stream ended with an incomplete SSE frame".into(),
+            ));
+        }
+        let blocks = self
+            .blocks
+            .into_values()
+            .map(|state| state.content_block())
+            .collect::<Vec<_>>();
+        let content = blocks
+            .iter()
+            .filter_map(|block| match block {
+                AgentContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        let tool_calls = blocks
+            .iter()
+            .filter_map(|block| match block {
+                AgentContentBlock::ToolUse {
+                    id, name, input, ..
+                } => Some(ToolCall::request(id, name, input.clone())),
+                _ => None,
+            })
+            .collect();
+        Ok(TurnResult {
+            content,
+            tool_calls,
+            blocks,
+        })
+    }
+}
+
 async fn stream_anthropic<F>(
     key: &str,
     model: &str,
@@ -548,91 +862,19 @@ where
         return Err(LlmError::Provider(format!("HTTP {status}: {text}")));
     }
 
-    let mut full = String::new();
-    let mut tool_buf: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
     let mut stream = resp.bytes_stream();
-    let mut buf = Vec::new();
+    let mut decoder = AnthropicStreamDecoder::default();
     while let Some(chunk) = next_chunk_or_cancel(&mut stream, cancel).await? {
         let bytes = chunk.map_err(|e| LlmError::Stream(e.to_string()))?;
-        buf.extend_from_slice(bytes.as_ref());
-        for event in drain_sse_frames(&mut buf)? {
-            let data_line = event
-                .lines()
-                .find_map(|l| l.strip_prefix("data: "))
-                .unwrap_or("");
-            if data_line.is_empty() {
-                continue;
-            }
-            let ev: AnthEvent = match serde_json::from_str(data_line) {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            match ev.typ.as_str() {
-                "content_block_start" => {
-                    if let Some(cb) = ev.content_block {
-                        if cb.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
-                            let i = ev.index.unwrap_or(0) as usize;
-                            let id = cb
-                                .get("id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let name = cb
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            tool_buf.insert(i, (id, name, String::new()));
-                        }
-                    }
-                }
-                "content_block_delta" => {
-                    let Some(delta) = ev.delta else { continue };
-                    let i = ev.index.unwrap_or(0) as usize;
-                    match delta.get("type").and_then(|t| t.as_str()) {
-                        Some("text_delta") => {
-                            if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
-                                if !text.is_empty() {
-                                    full.push_str(text);
-                                    on_event(StreamEvent::Delta(text.to_string()));
-                                }
-                            }
-                        }
-                        Some("input_json_delta") => {
-                            if let Some(partial) = delta.get("partial").and_then(|p| p.as_str()) {
-                                if let Some(entry) = tool_buf.get_mut(&i) {
-                                    entry.2.push_str(partial);
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                "message_stop" => break,
-                _ => {}
-            }
+        if decoder.push_chunk(bytes.as_ref(), on_event)? {
+            break;
         }
     }
 
-    let mut tool_calls = Vec::new();
     if cancel.load(Ordering::Relaxed) {
         return Err(LlmError::Cancelled);
     }
-    for (_, (id, name, args_str)) in tool_buf {
-        let args = if args_str.is_empty() {
-            serde_json::json!({})
-        } else {
-            serde_json::from_str(&args_str).unwrap_or(serde_json::json!({"_raw": args_str}))
-        };
-        let tc = ToolCall::request(id, name, args);
-        on_event(StreamEvent::ToolCall(tc.clone()));
-        tool_calls.push(tc);
-    }
-
-    Ok(TurnResult {
-        content: full,
-        tool_calls,
-    })
+    decoder.finish()
 }
 
 #[cfg(test)]
@@ -740,6 +982,37 @@ mod tests {
     }
 
     #[test]
+    fn openai_message_derives_assistant_fields_from_authoritative_blocks() {
+        let mut message = ChatMessage::assistant_blocks_with_id(
+            "assistant-blocks",
+            vec![
+                AgentContentBlock::Text { text: "A".into() },
+                AgentContentBlock::ToolUse {
+                    id: "call-block".into(),
+                    name: "split_clip".into(),
+                    input: serde_json::json!({"atFrame": 10}),
+                    result: None,
+                    is_error: None,
+                },
+                AgentContentBlock::Text { text: "B".into() },
+            ],
+        );
+        message.content = "stale".into();
+        message.tool_calls = vec![ToolCall::request(
+            "call-stale",
+            "delete_clip",
+            serde_json::json!({}),
+        )];
+
+        let wire = openai_message(&message);
+
+        assert_eq!(wire["content"], "AB");
+        assert_eq!(wire["tool_calls"].as_array().unwrap().len(), 1);
+        assert_eq!(wire["tool_calls"][0]["id"], "call-block");
+        assert_eq!(wire["tool_calls"][0]["function"]["name"], "split_clip");
+    }
+
+    #[test]
     fn openai_tool_result_carries_tool_call_id() {
         let m = ChatMessage::tool_result("call-1", serde_json::json!({"summary": "ok"}));
         let v = openai_message(&m);
@@ -759,6 +1032,40 @@ mod tests {
         assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
         assert_eq!(body["messages"].as_array().unwrap().len(), 1);
         assert_eq!(body["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn anthropic_body_preserves_authoritative_interleaved_assistant_blocks() {
+        let message = ChatMessage::assistant_blocks_with_id(
+            "assistant-interleaved",
+            vec![
+                AgentContentBlock::Text { text: "A".into() },
+                AgentContentBlock::ToolUse {
+                    id: "call-1".into(),
+                    name: "split_clip".into(),
+                    input: serde_json::json!({"clipId": "c1"}),
+                    result: None,
+                    is_error: None,
+                },
+                AgentContentBlock::Text { text: "B".into() },
+            ],
+        );
+
+        let body = anthropic_body("claude", &[message], &[]);
+
+        assert_eq!(
+            body["messages"][0]["content"],
+            serde_json::json!([
+                {"type": "text", "text": "A"},
+                {
+                    "type": "tool_use",
+                    "id": "call-1",
+                    "name": "split_clip",
+                    "input": {"clipId": "c1"}
+                },
+                {"type": "text", "text": "B", "cache_control": {"type": "ephemeral"}}
+            ])
+        );
     }
 
     #[test]
