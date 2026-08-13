@@ -107,47 +107,77 @@ pub struct ChatMessage {
 
 impl ChatMessage {
     pub fn user(text: impl Into<String>) -> Self {
+        let text = text.into();
         let mut message = ChatMessage {
-            id: next_id(),
+            id: next_message_id(),
             role: Role::User,
-            content: text.into(),
+            content: String::new(),
             tool_calls: Vec::new(),
-            blocks: Vec::new(),
+            blocks: (!text.is_empty())
+                .then_some(AgentContentBlock::Text { text })
+                .into_iter()
+                .collect(),
             created_at: now_millis(),
             tool_call_id: None,
             tool_is_error: None,
         };
-        message.refresh_blocks();
+        message.refresh_legacy_fields();
         message
     }
 
     pub fn assistant(text: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
+        Self::assistant_with_id(next_message_id(), text, tool_calls)
+    }
+
+    pub fn assistant_with_id(
+        id: impl Into<String>,
+        text: impl Into<String>,
+        tool_calls: Vec<ToolCall>,
+    ) -> Self {
+        let text = text.into();
+        let mut blocks = Vec::with_capacity(usize::from(!text.is_empty()) + tool_calls.len());
+        if !text.is_empty() {
+            blocks.push(AgentContentBlock::Text { text });
+        }
+        blocks.extend(tool_calls.into_iter().map(AgentContentBlock::from));
+        Self::assistant_blocks_with_id(id, blocks)
+    }
+
+    pub fn assistant_blocks(blocks: Vec<AgentContentBlock>) -> Self {
+        Self::assistant_blocks_with_id(next_message_id(), blocks)
+    }
+
+    pub fn assistant_blocks_with_id(id: impl Into<String>, blocks: Vec<AgentContentBlock>) -> Self {
         let mut message = ChatMessage {
-            id: next_id(),
+            id: id.into(),
             role: Role::Assistant,
-            content: text.into(),
-            tool_calls,
-            blocks: Vec::new(),
+            content: String::new(),
+            tool_calls: Vec::new(),
+            blocks,
             created_at: now_millis(),
             tool_call_id: None,
             tool_is_error: None,
         };
-        message.refresh_blocks();
+        message.refresh_legacy_fields();
         message
     }
 
     pub fn system(text: impl Into<String>) -> Self {
+        let text = text.into();
         let mut message = ChatMessage {
-            id: next_id(),
+            id: next_message_id(),
             role: Role::System,
-            content: text.into(),
+            content: String::new(),
             tool_calls: Vec::new(),
-            blocks: Vec::new(),
+            blocks: (!text.is_empty())
+                .then_some(AgentContentBlock::Text { text })
+                .into_iter()
+                .collect(),
             created_at: now_millis(),
             tool_call_id: None,
             tool_is_error: None,
         };
-        message.refresh_blocks();
+        message.refresh_legacy_fields();
         message
     }
 
@@ -174,7 +204,7 @@ impl ChatMessage {
     ) -> Self {
         let tool_call_id = tool_call_id.into();
         ChatMessage {
-            id: next_id(),
+            id: next_message_id(),
             role: Role::Tool,
             content: legacy_result.to_string(),
             tool_calls: Vec::new(),
@@ -200,9 +230,107 @@ impl ChatMessage {
         )
     }
 
-    /// Rebuild the structured representation after an in-place update to the
-    /// temporary legacy view fields.
-    pub(crate) fn refresh_blocks(&mut self) {
+    /// Append a streamed text chunk and return the authoritative block index.
+    /// Only an adjacent text block is consolidated; text separated by a tool
+    /// event remains a distinct block.
+    pub fn append_text_delta(&mut self, delta: impl AsRef<str>) -> usize {
+        let delta = delta.as_ref();
+        let block_index = match self.blocks.last_mut() {
+            Some(AgentContentBlock::Text { text }) => {
+                text.push_str(delta);
+                self.blocks.len() - 1
+            }
+            _ => {
+                self.blocks.push(AgentContentBlock::Text {
+                    text: delta.to_string(),
+                });
+                self.blocks.len() - 1
+            }
+        };
+        self.refresh_legacy_fields();
+        block_index
+    }
+
+    /// Insert a tool request in event order, or update the already-addressed
+    /// block when dispatch later fills its result.
+    pub fn upsert_tool_use(&mut self, tool_call: ToolCall) -> usize {
+        if let Some((index, block)) = self.blocks.iter_mut().enumerate().find(|(_, block)| {
+            matches!(block, AgentContentBlock::ToolUse { id, .. } if id == &tool_call.id)
+        }) {
+            *block = AgentContentBlock::from(tool_call);
+            self.refresh_legacy_fields();
+            return index;
+        }
+        self.blocks.push(AgentContentBlock::from(tool_call));
+        let index = self.blocks.len() - 1;
+        self.refresh_legacy_fields();
+        index
+    }
+
+    /// Derive temporary flat compatibility fields from authoritative blocks.
+    /// This never mutates or reorders `blocks`.
+    pub fn refresh_legacy_fields(&mut self) {
+        self.content = if self.role == Role::Tool {
+            self.blocks
+                .iter()
+                .find_map(|block| match block {
+                    AgentContentBlock::ToolResult {
+                        content, is_error, ..
+                    } => Some(legacy_tool_result_content(
+                        content,
+                        is_error.unwrap_or(false),
+                    )),
+                    _ => None,
+                })
+                .unwrap_or_default()
+        } else {
+            self.blocks
+                .iter()
+                .filter_map(|block| match block {
+                    AgentContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>()
+        };
+        self.tool_calls = self
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                AgentContentBlock::ToolUse {
+                    id,
+                    name,
+                    input,
+                    result,
+                    is_error,
+                } => Some(ToolCall {
+                    id: id.clone(),
+                    name: name.clone(),
+                    args: input.clone(),
+                    result: result.clone(),
+                    is_error: *is_error,
+                }),
+                _ => None,
+            })
+            .collect();
+        if self.role == Role::Tool {
+            if let Some(AgentContentBlock::ToolResult {
+                tool_use_id,
+                is_error,
+                ..
+            }) = self
+                .blocks
+                .iter()
+                .find(|block| matches!(block, AgentContentBlock::ToolResult { .. }))
+            {
+                self.tool_call_id = Some(tool_use_id.clone());
+                self.tool_is_error = *is_error;
+            }
+        }
+    }
+
+    /// Migrate the temporary Beta 4 flat fields when no authoritative blocks
+    /// were persisted yet.
+    fn migrate_legacy_fields_to_blocks(&mut self) {
         let mut blocks = Vec::new();
         if !self.content.is_empty() && self.role != Role::Tool {
             blocks.push(AgentContentBlock::Text {
@@ -230,6 +358,34 @@ impl ChatMessage {
             });
         }
         self.blocks = blocks;
+    }
+}
+
+fn legacy_tool_result_content(content: &[Block], is_error: bool) -> String {
+    if let [Block::Text { text }] = content {
+        if serde_json::from_str::<serde_json::Value>(text).is_ok() {
+            return text.clone();
+        }
+    }
+    let summary = content
+        .iter()
+        .filter_map(|block| match block {
+            Block::Text { text } => Some(text.as_str()),
+            Block::Image { .. } => None,
+        })
+        .collect::<String>();
+    serde_json::json!({"summary": summary, "isError": is_error}).to_string()
+}
+
+impl From<ToolCall> for AgentContentBlock {
+    fn from(tool_call: ToolCall) -> Self {
+        AgentContentBlock::ToolUse {
+            id: tool_call.id,
+            name: tool_call.name,
+            input: tool_call.args,
+            result: tool_call.result,
+            is_error: tool_call.is_error,
+        }
     }
 }
 
@@ -268,68 +424,11 @@ impl<'de> Deserialize<'de> for ChatMessage {
             tool_is_error: wire.tool_is_error,
         };
         if message.blocks.is_empty() {
-            message.refresh_blocks();
+            message.migrate_legacy_fields_to_blocks();
         } else {
-            message.apply_blocks_to_legacy_view();
+            message.refresh_legacy_fields();
         }
         Ok(message)
-    }
-}
-
-impl ChatMessage {
-    fn apply_blocks_to_legacy_view(&mut self) {
-        if self.role != Role::Tool {
-            self.content = self
-                .blocks
-                .iter()
-                .filter_map(|block| match block {
-                    AgentContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<String>();
-        }
-        if self.role == Role::Assistant {
-            self.tool_calls = self
-                .blocks
-                .iter()
-                .filter_map(|block| match block {
-                    AgentContentBlock::ToolUse {
-                        id,
-                        name,
-                        input,
-                        result,
-                        is_error,
-                    } => Some(ToolCall {
-                        id: id.clone(),
-                        name: name.clone(),
-                        args: input.clone(),
-                        result: result.clone(),
-                        is_error: *is_error,
-                    }),
-                    _ => None,
-                })
-                .collect();
-        }
-        if self.role == Role::Tool {
-            if let Some(AgentContentBlock::ToolResult {
-                tool_use_id,
-                content,
-                is_error,
-            }) = self
-                .blocks
-                .iter()
-                .find(|block| matches!(block, AgentContentBlock::ToolResult { .. }))
-            {
-                if self.content.is_empty() {
-                    self.content = match content.as_slice() {
-                        [Block::Text { text }] => text.clone(),
-                        _ => serde_json::to_string(content).unwrap_or_default(),
-                    };
-                }
-                self.tool_call_id = Some(tool_use_id.clone());
-                self.tool_is_error = *is_error;
-            }
-        }
     }
 }
 
@@ -376,7 +475,7 @@ fn default_true() -> bool {
 /// millisecond are disambiguated by the counter.
 static ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-fn next_id() -> String {
+pub fn next_message_id() -> String {
     let n = ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     format!("m{}-{n}", now_millis())
 }
@@ -452,7 +551,7 @@ mod tests {
     fn ids_are_unique_under_rapid_minting() {
         let mut ids = std::collections::HashSet::new();
         for _ in 0..1000 {
-            ids.insert(next_id());
+            ids.insert(next_message_id());
         }
         assert_eq!(ids.len(), 1000);
     }
@@ -501,6 +600,163 @@ mod tests {
                 "input": {"clipId": "c1"}
             })
         );
+    }
+
+    #[test]
+    fn blocks_preserve_interleaved_assistant_order_and_round_trip() {
+        let blocks = vec![
+            AgentContentBlock::Text { text: "A".into() },
+            AgentContentBlock::ToolUse {
+                id: "call-1".into(),
+                name: "split_clip".into(),
+                input: serde_json::json!({"clipId": "c1"}),
+                result: None,
+                is_error: None,
+            },
+            AgentContentBlock::Text { text: "B".into() },
+            AgentContentBlock::ToolUse {
+                id: "call-2".into(),
+                name: "delete_clip".into(),
+                input: serde_json::json!({"clipId": "c2"}),
+                result: Some(serde_json::json!({"ok": true})),
+                is_error: Some(false),
+            },
+        ];
+        let message = ChatMessage::assistant_blocks_with_id("assistant-ordered", blocks.clone());
+
+        assert_eq!(message.blocks, blocks);
+        assert_eq!(message.content, "AB");
+        assert_eq!(
+            message
+                .tool_calls
+                .iter()
+                .map(|call| call.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["call-1", "call-2"]
+        );
+
+        let wire = serde_json::to_value(&message).unwrap();
+        assert_eq!(wire["id"], "assistant-ordered");
+        assert_eq!(wire["blocks"], serde_json::to_value(&blocks).unwrap());
+        let restored: ChatMessage = serde_json::from_value(wire).unwrap();
+        assert_eq!(restored.blocks, blocks);
+    }
+
+    #[test]
+    fn blocks_append_text_deltas_only_consolidates_adjacent_text() {
+        let mut message = ChatMessage::assistant_blocks_with_id("assistant-stream", Vec::new());
+
+        assert_eq!(message.append_text_delta("A"), 0);
+        assert_eq!(message.append_text_delta("1"), 0);
+        assert_eq!(
+            message.upsert_tool_use(ToolCall::request(
+                "call-1",
+                "split_clip",
+                serde_json::json!({"clipId": "c1"}),
+            )),
+            1
+        );
+        assert_eq!(message.append_text_delta("B"), 2);
+        assert_eq!(message.append_text_delta("2"), 2);
+
+        assert_eq!(
+            message.blocks,
+            vec![
+                AgentContentBlock::Text { text: "A1".into() },
+                AgentContentBlock::ToolUse {
+                    id: "call-1".into(),
+                    name: "split_clip".into(),
+                    input: serde_json::json!({"clipId": "c1"}),
+                    result: None,
+                    is_error: None,
+                },
+                AgentContentBlock::Text { text: "B2".into() },
+            ]
+        );
+        assert_eq!(message.content, "A1B2");
+    }
+
+    #[test]
+    fn blocks_tool_result_wire_preserves_text_and_image_order() {
+        let block = AgentContentBlock::ToolResult {
+            tool_use_id: "call-image".into(),
+            content: vec![
+                Block::text("before"),
+                Block::image("aW1hZ2U=", "image/png"),
+                Block::text("after"),
+            ],
+            is_error: Some(true),
+        };
+
+        let wire = serde_json::to_value(&block).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({
+                "type": "toolResult",
+                "toolUseId": "call-image",
+                "content": [
+                    {"kind": "text", "text": "before"},
+                    {"kind": "image", "base64": "aW1hZ2U=", "mediaType": "image/png"},
+                    {"kind": "text", "text": "after"}
+                ],
+                "isError": true
+            })
+        );
+        let restored: AgentContentBlock = serde_json::from_value(wire).unwrap();
+        assert_eq!(restored, block);
+    }
+
+    #[test]
+    fn blocks_refresh_legacy_fields_is_one_way_and_keeps_block_order() {
+        let original_blocks = vec![
+            AgentContentBlock::Text { text: "A".into() },
+            AgentContentBlock::ToolUse {
+                id: "call-1".into(),
+                name: "split_clip".into(),
+                input: serde_json::json!({"clipId": "c1"}),
+                result: None,
+                is_error: None,
+            },
+            AgentContentBlock::Text { text: "B".into() },
+        ];
+        let mut message = ChatMessage::assistant_blocks_with_id(
+            "assistant-authoritative",
+            original_blocks.clone(),
+        );
+        message.content = "stale legacy text".into();
+        message.tool_calls.clear();
+
+        message.refresh_legacy_fields();
+
+        assert_eq!(message.blocks, original_blocks);
+        assert_eq!(message.content, "AB");
+        assert_eq!(message.tool_calls.len(), 1);
+        assert_eq!(message.tool_calls[0].id, "call-1");
+    }
+
+    #[test]
+    fn blocks_legacy_flat_messages_migrate_to_stable_text_then_tool_order() {
+        let legacy = serde_json::json!({
+            "id": "legacy-ordered",
+            "role": "assistant",
+            "content": "working",
+            "toolCalls": [
+                {"id": "call-1", "name": "split_clip", "args": {"clipId": "c1"}},
+                {"id": "call-2", "name": "delete_clip", "args": {"clipId": "c2"}}
+            ],
+            "createdAt": 1
+        });
+
+        let message: ChatMessage = serde_json::from_value(legacy).unwrap();
+
+        assert!(matches!(
+            &message.blocks[..],
+            [
+                AgentContentBlock::Text { text },
+                AgentContentBlock::ToolUse { id: first, .. },
+                AgentContentBlock::ToolUse { id: second, .. }
+            ] if text == "working" && first == "call-1" && second == "call-2"
+        ));
     }
 
     #[test]

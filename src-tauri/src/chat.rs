@@ -18,8 +18,8 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
 use opentake_agent::chat::{
-    ChatLoop, ChatMessage, ChatSession, ChatSessionStore, ChatTurnGate, EmitLoop, LlmError,
-    LoopError, LoopEvent, Role,
+    next_message_id, AgentContentBlock, ChatLoop, ChatMessage, ChatSession, ChatSessionStore,
+    ChatTurn, ChatTurnGate, EmitLoop, LlmError, LoopError, LoopEvent, Role, ToolCall,
 };
 use opentake_agent::mcp::advanced::AdvancedWorkflowBridge;
 use opentake_agent::mcp::core_handle::{AppCoreHandle, CoreHandle};
@@ -531,20 +531,26 @@ impl ChatState {
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct DeltaPayload {
+struct BlockDeltaPayload {
     project_epoch: u64,
     project_path: String,
     session_id: String,
+    message_id: String,
+    block_index: usize,
     delta: String,
 }
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ToolCallPayload {
+struct BlockUpsertPayload {
     project_epoch: u64,
     project_path: String,
     session_id: String,
-    tool_call: opentake_agent::chat::ToolCall,
+    message_id: String,
+    block_index: usize,
+    block: AgentContentBlock,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call: Option<ToolCall>,
 }
 
 #[derive(Clone, Serialize)]
@@ -553,6 +559,7 @@ struct DonePayload {
     project_epoch: u64,
     project_path: String,
     session_id: String,
+    message_id: String,
     message: ChatMessage,
 }
 
@@ -571,33 +578,61 @@ impl EmitLoop for AppEmitter {
             return;
         }
         match event {
-            LoopEvent::Delta { session_id, delta } => {
+            LoopEvent::BlockDelta {
+                session_id,
+                message_id,
+                block_index,
+                delta,
+            } => {
                 let _ = self.app.emit(
                     "chat_delta",
-                    DeltaPayload {
+                    BlockDeltaPayload {
                         project_epoch: self.project.project_epoch,
                         project_path: self.project.project_dir.to_string_lossy().into_owned(),
                         session_id,
+                        message_id,
+                        block_index,
                         delta,
                     },
                 );
             }
-            LoopEvent::ToolCall {
+            LoopEvent::BlockUpsert {
                 session_id,
-                tool_call,
+                message_id,
+                block_index,
+                block,
             } => {
                 let _ = self.app.emit(
                     "chat_tool_call",
-                    ToolCallPayload {
+                    BlockUpsertPayload {
                         project_epoch: self.project.project_epoch,
                         project_path: self.project.project_dir.to_string_lossy().into_owned(),
                         session_id,
-                        tool_call,
+                        message_id,
+                        block_index,
+                        tool_call: match &block {
+                            AgentContentBlock::ToolUse {
+                                id,
+                                name,
+                                input,
+                                result,
+                                is_error,
+                            } => Some(ToolCall {
+                                id: id.clone(),
+                                name: name.clone(),
+                                args: input.clone(),
+                                result: result.clone(),
+                                is_error: *is_error,
+                            }),
+                            _ => None,
+                        },
+                        block,
                     },
                 );
             }
             LoopEvent::Done {
                 session_id,
+                message_id,
                 message,
             } => {
                 let _ = self.app.emit(
@@ -606,6 +641,7 @@ impl EmitLoop for AppEmitter {
                         project_epoch: self.project.project_epoch,
                         project_path: self.project.project_dir.to_string_lossy().into_owned(),
                         session_id,
+                        message_id,
                         message,
                     },
                 );
@@ -739,6 +775,7 @@ pub async fn chat_send(
     }
     let state_clone = state.inner().clone();
     let sid = session_id.clone();
+    let first_message_id = next_message_id();
 
     tauri::async_runtime::spawn(async move {
         let _turn_admission = turn_admission;
@@ -750,7 +787,7 @@ pub async fn chat_send(
         let turn_owner = turn_cancel.clone();
         let gate = state_clone.project_turn_gate(&project, &session_key, turn_cancel);
         let is_codex = chat_provider == "codex";
-        let mut codex_final: Option<(String, ChatMessage)> = None;
+        let mut codex_final: Option<ChatMessage> = None;
         let result = if is_codex {
             session.provider = Some("codex".into());
             session.model = Some("official-codex-default".into());
@@ -761,73 +798,134 @@ pub async fn chat_send(
                 gate: gate.clone(),
                 cancel: cancel.clone(),
             };
+            let mut draft = ChatMessage::assistant_blocks_with_id(&first_message_id, Vec::new());
             match crate::codex::run_agent_turn(context, &prompt, |tool_call| {
-                emitter.emit(LoopEvent::ToolCall {
-                    session_id: sid.clone(),
-                    tool_call,
-                });
+                let block_index = draft.upsert_tool_use(tool_call);
+                if let Some(block) = draft.blocks.get(block_index).cloned() {
+                    emitter.emit(LoopEvent::BlockUpsert {
+                        session_id: sid.clone(),
+                        message_id: first_message_id.clone(),
+                        block_index,
+                        block,
+                    });
+                }
             })
             .await
             {
                 Ok(output) => {
-                    let message = ChatMessage::assistant(output.text.clone(), output.tool_calls);
-                    session.messages.push(message.clone());
-                    codex_final = Some((output.text, message));
-                    Ok(())
+                    for tool_call in output.tool_calls {
+                        let block_index = draft.upsert_tool_use(tool_call);
+                        if let Some(block) = draft.blocks.get(block_index).cloned() {
+                            emitter.emit(LoopEvent::BlockUpsert {
+                                session_id: sid.clone(),
+                                message_id: first_message_id.clone(),
+                                block_index,
+                                block,
+                            });
+                        }
+                    }
+                    let block_index = draft.append_text_delta(&output.text);
+                    session.messages.push(draft.clone());
+                    emitter.emit(LoopEvent::BlockDelta {
+                        session_id: sid.clone(),
+                        message_id: first_message_id.clone(),
+                        block_index,
+                        delta: output.text,
+                    });
+                    codex_final = Some(draft);
+                    Ok(first_message_id.clone())
                 }
-                Err(crate::codex::CodexTurnError::Cancelled) => Err(LoopError::Cancelled),
+                Err(crate::codex::CodexTurnError::Cancelled) => {
+                    Err(LoopError::cancelled(&first_message_id))
+                }
                 Err(crate::codex::CodexTurnError::Unavailable) => {
                     let guide = "Official Codex CLI was not found. Install Codex, then return to Settings → AI and choose Official Codex / ChatGPT.".to_string();
-                    let message = ChatMessage::assistant(guide.clone(), Vec::new());
+                    let message =
+                        ChatMessage::assistant_with_id(&first_message_id, &guide, Vec::new());
                     session.messages.push(message.clone());
-                    codex_final = Some((guide, message));
-                    Ok(())
+                    emitter.emit(LoopEvent::BlockDelta {
+                        session_id: sid.clone(),
+                        message_id: first_message_id.clone(),
+                        block_index: 0,
+                        delta: guide,
+                    });
+                    codex_final = Some(message);
+                    Ok(first_message_id.clone())
                 }
                 Err(crate::codex::CodexTurnError::NotAuthenticated) => {
                     let guide = "Codex is not signed in. Open Settings → AI, choose Official Codex / ChatGPT, and sign in with ChatGPT.".to_string();
-                    let message = ChatMessage::assistant(guide.clone(), Vec::new());
+                    let message =
+                        ChatMessage::assistant_with_id(&first_message_id, &guide, Vec::new());
                     session.messages.push(message.clone());
-                    codex_final = Some((guide, message));
-                    Ok(())
+                    emitter.emit(LoopEvent::BlockDelta {
+                        session_id: sid.clone(),
+                        message_id: first_message_id.clone(),
+                        block_index: 0,
+                        delta: guide,
+                    });
+                    codex_final = Some(message);
+                    Ok(first_message_id.clone())
                 }
                 Err(crate::codex::CodexTurnError::IncompatibleCli)
                 | Err(crate::codex::CodexTurnError::StrictConfigRejected) => {
                     let guide = "The installed official Codex CLI is not compatible with this OpenTake Beta. Update Codex CLI to version 0.146.0 or newer, then try again.".to_string();
-                    let message = ChatMessage::assistant(guide.clone(), Vec::new());
+                    let message =
+                        ChatMessage::assistant_with_id(&first_message_id, &guide, Vec::new());
                     session.messages.push(message.clone());
-                    codex_final = Some((guide, message));
-                    Ok(())
+                    emitter.emit(LoopEvent::BlockDelta {
+                        session_id: sid.clone(),
+                        message_id: first_message_id.clone(),
+                        block_index: 0,
+                        delta: guide,
+                    });
+                    codex_final = Some(message);
+                    Ok(first_message_id.clone())
                 }
                 Err(crate::codex::CodexTurnError::McpStart)
                 | Err(crate::codex::CodexTurnError::Timeout)
                 | Err(crate::codex::CodexTurnError::Protocol)
-                | Err(crate::codex::CodexTurnError::ProviderFailed) => {
-                    Err(LoopError::Llm(LlmError::Provider(
+                | Err(crate::codex::CodexTurnError::ProviderFailed) => Err(LoopError::llm(
+                    LlmError::Provider(
                         "official Codex turn failed; check the Codex login status and try again"
                             .into(),
-                    )))
-                }
+                    ),
+                    &first_message_id,
+                )),
             }
         } else {
             state_clone
                 .loop_
-                .run_turn_gated(&mut session, chat_provider, text, &emitter, cancel, gate)
+                .run_turn_gated(
+                    &mut session,
+                    chat_provider,
+                    text,
+                    ChatTurn {
+                        first_message_id: first_message_id.clone(),
+                        cancel,
+                        gate,
+                    },
+                    &emitter,
+                )
                 .await
         };
 
         if is_codex {
-            let terminal = match result {
-                Ok(()) => codex_final,
-                Err(LoopError::Cancelled) => Some((
-                    String::new(),
-                    ChatMessage::assistant(String::new(), Vec::new()),
-                )),
-                Err(error) => {
-                    let message = ChatMessage::assistant(format!("⚠️ {error}"), Vec::new());
-                    session.messages.push(message.clone());
-                    Some((String::new(), message))
-                }
-            };
+            let terminal =
+                match result {
+                    Ok(_) => codex_final,
+                    Err(LoopError::Cancelled { message_id }) => Some(
+                        ChatMessage::assistant_with_id(message_id, String::new(), Vec::new()),
+                    ),
+                    Err(error) => {
+                        let message = ChatMessage::assistant_with_id(
+                            error.message_id(),
+                            format!("⚠️ {error}"),
+                            Vec::new(),
+                        );
+                        session.messages.push(message.clone());
+                        Some(message)
+                    }
+                };
             match state_clone.finalize_project_turn(
                 &project,
                 &session_key,
@@ -835,32 +933,38 @@ pub async fn chat_send(
                 session.clone(),
             ) {
                 Ok(TurnFinalization::Committed) => {
-                    if let Some((delta, message)) = terminal {
-                        if !delta.is_empty() {
-                            emitter.emit(LoopEvent::Delta {
-                                session_id: sid.clone(),
-                                delta,
-                            });
-                        }
+                    if let Some(message) = terminal {
                         emitter.emit(LoopEvent::Done {
                             session_id: sid.clone(),
+                            message_id: message.id.clone(),
                             message,
                         });
                     }
                 }
                 Ok(TurnFinalization::Cancelled) => {
+                    let message = terminal.unwrap_or_else(|| {
+                        ChatMessage::assistant_with_id(&first_message_id, String::new(), Vec::new())
+                    });
                     emitter.emit(LoopEvent::Done {
                         session_id: sid.clone(),
-                        message: ChatMessage::assistant(String::new(), Vec::new()),
+                        message_id: message.id.clone(),
+                        message,
                     });
                 }
                 Err(error) => {
+                    let message_id = terminal
+                        .as_ref()
+                        .map(|message| message.id.as_str())
+                        .unwrap_or(&first_message_id);
+                    let message = ChatMessage::assistant_with_id(
+                        message_id,
+                        format!("⚠️ Chat history could not be saved: {error}"),
+                        Vec::new(),
+                    );
                     emitter.emit(LoopEvent::Done {
                         session_id: sid.clone(),
-                        message: ChatMessage::assistant(
-                            format!("⚠️ Chat history could not be saved: {error}"),
-                            Vec::new(),
-                        ),
+                        message_id: message.id.clone(),
+                        message,
                     });
                 }
             }
@@ -868,30 +972,41 @@ pub async fn chat_send(
         }
 
         match &result {
-            Err(LoopError::Cancelled) => {
+            Err(LoopError::Cancelled { message_id }) => {
+                let message = ChatMessage::assistant_with_id(message_id, String::new(), Vec::new());
                 emitter.emit(LoopEvent::Done {
                     session_id: sid.clone(),
-                    message: ChatMessage::assistant(String::new(), Vec::new()),
+                    message_id: message.id.clone(),
+                    message,
                 });
             }
             Err(e) => {
-                let msg = ChatMessage::assistant(format!("⚠️ {e}"), Vec::new());
+                let msg =
+                    ChatMessage::assistant_with_id(e.message_id(), format!("⚠️ {e}"), Vec::new());
                 emitter.emit(LoopEvent::Done {
                     session_id: sid.clone(),
+                    message_id: msg.id.clone(),
                     message: msg.clone(),
                 });
                 session.messages.push(msg);
             }
-            Ok(()) => {}
+            Ok(_) => {}
         }
 
         if let Err(error) = state_clone.put_project_session(&project, session) {
+            let message_id = match &result {
+                Ok(message_id) => message_id.as_str(),
+                Err(error) => error.message_id(),
+            };
+            let message = ChatMessage::assistant_with_id(
+                message_id,
+                format!("⚠️ Chat history could not be saved: {error}"),
+                Vec::new(),
+            );
             emitter.emit(LoopEvent::Done {
                 session_id: sid.clone(),
-                message: ChatMessage::assistant(
-                    format!("⚠️ Chat history could not be saved: {error}"),
-                    Vec::new(),
-                ),
+                message_id: message.id.clone(),
+                message,
             });
         }
         state_clone.release_turn(&session_key);
@@ -1149,28 +1264,70 @@ mod tests {
     }
 
     #[test]
-    fn event_payloads_serialize_in_camel_case() {
-        let payload = DeltaPayload {
+    fn event_payloads_serialize_block_addresses_in_camel_case() {
+        let payload = BlockDeltaPayload {
             project_epoch: 7,
             project_path: "/tmp/A.opentake".into(),
             session_id: "sess-1".into(),
+            message_id: "assistant-1".into(),
+            block_index: 2,
             delta: "hi".into(),
         };
         let json = serde_json::to_value(payload).unwrap();
         assert_eq!(json["projectEpoch"], 7);
         assert_eq!(json["projectPath"], "/tmp/A.opentake");
         assert_eq!(json["sessionId"], "sess-1");
+        assert_eq!(json["messageId"], "assistant-1");
+        assert_eq!(json["blockIndex"], 2);
         assert_eq!(json["delta"], "hi");
 
+        let message = ChatMessage::assistant_with_id("assistant-1", "done", Vec::new());
         let done = DonePayload {
             project_epoch: 7,
             project_path: "/tmp/A.opentake".into(),
             session_id: "sess-1".into(),
-            message: ChatMessage::assistant("done", Vec::new()),
+            message_id: message.id.clone(),
+            message,
         };
         let json = serde_json::to_value(done).unwrap();
         assert_eq!(json["sessionId"], "sess-1");
+        assert_eq!(json["messageId"], "assistant-1");
         assert_eq!(json["message"]["role"], "assistant");
+        assert_eq!(json["message"]["id"], json["messageId"]);
+    }
+
+    #[test]
+    fn block_upsert_payload_retains_beta4_tool_call_decoder_fields() {
+        let block = AgentContentBlock::ToolUse {
+            id: "call-1".into(),
+            name: "split_clip".into(),
+            input: serde_json::json!({"clipId": "c1"}),
+            result: Some(serde_json::json!({"ok": true})),
+            is_error: Some(false),
+        };
+        let payload = BlockUpsertPayload {
+            project_epoch: 7,
+            project_path: "/tmp/A.opentake".into(),
+            session_id: "sess-1".into(),
+            message_id: "assistant-1".into(),
+            block_index: 1,
+            tool_call: Some(ToolCall {
+                id: "call-1".into(),
+                name: "split_clip".into(),
+                args: serde_json::json!({"clipId": "c1"}),
+                result: Some(serde_json::json!({"ok": true})),
+                is_error: Some(false),
+            }),
+            block: block.clone(),
+        };
+
+        let wire = serde_json::to_value(payload).unwrap();
+
+        assert_eq!(wire["messageId"], "assistant-1");
+        assert_eq!(wire["blockIndex"], 1);
+        assert_eq!(wire["block"], serde_json::to_value(block).unwrap());
+        assert_eq!(wire["toolCall"]["id"], "call-1");
+        assert_eq!(wire["toolCall"]["args"]["clipId"], "c1");
     }
 
     #[test]
