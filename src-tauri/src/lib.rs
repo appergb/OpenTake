@@ -225,22 +225,19 @@ pub fn run() {
                 advanced_bridge.clone(),
                 install_admission.clone(),
             );
-            let external_mcp_catalog = external_mcp::ExternalMcpCatalog::load(
-                &app.path().app_data_dir().map_err(|error| {
-                    std::io::Error::other(format!(
-                        "could not resolve external MCP application data directory: {error}"
-                    ))
-                })?,
-                Arc::new(opentake_gen::KeyringStore::new()),
-            )
-            .map_err(std::io::Error::other)?;
-            let external_mcp_state = external_mcp::ExternalMcpState::new(
-                core.clone(),
-                chat_state.external_mcp_components(),
-                external_mcp_catalog,
-            );
-            // Task 4 owns the explicit enable/pair listener lifecycle. This
-            // setup only shares the production gate and Agent tool universe.
+            let external_mcp_state = match app.path().app_data_dir() {
+                Ok(data_dir) => external_mcp::ExternalMcpState::load(
+                    core.clone(),
+                    chat_state.external_mcp_components(),
+                    &data_dir,
+                    Arc::new(opentake_gen::KeyringStore::new()),
+                ),
+                Err(error) => external_mcp::ExternalMcpState::auth_failure(
+                    core.clone(),
+                    chat_state.external_mcp_components(),
+                    format!("could not resolve external MCP application data directory: {error}"),
+                ),
+            };
 
             // A global favorite must never silently become a temporary file.
             // Keep the editor usable if app-data resolution fails, but make all
@@ -285,6 +282,13 @@ pub fn run() {
                 });
             app.manage(chat_state);
             app.manage(external_mcp_state);
+            external_mcp::install_status_emitter(
+                app.handle(),
+                &app.state::<external_mcp::ExternalMcpState>(),
+            );
+            tauri::async_runtime::block_on(
+                app.state::<external_mcp::ExternalMcpState>().initialize(),
+            );
             app.manage(codex::CodexAuthState::default());
             app.manage(MediaState::new_with_admission(
                 engine,
@@ -446,6 +450,11 @@ pub fn run() {
             chat::chat_sessions,
             chat::chat_session_set_open,
             chat::chat_cancel,
+            external_mcp::external_mcp_status,
+            external_mcp::external_mcp_set_enabled,
+            external_mcp::external_mcp_pair,
+            external_mcp::external_mcp_regenerate,
+            external_mcp::external_mcp_revoke,
             transcribe::transcribe_model_status,
             transcribe::download_transcribe_model,
             transcribe::transcribe_media,
@@ -483,6 +492,9 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, _event| {
+            if matches!(&_event, RunEvent::Exit) {
+                external_mcp::shutdown_on_exit(_app);
+            }
             // A user-driven Quit must not interrupt bundle replacement. The
             // updater's own restart has a programmatic exit code and remains
             // allowed after both save barriers succeed.

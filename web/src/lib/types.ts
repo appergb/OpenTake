@@ -9,6 +9,38 @@ export type ClipType = "video" | "audio" | "image" | "text" | "lottie";
 export type Interpolation = "linear" | "hold" | "smooth";
 export type TransitionKind = "crossDissolve";
 
+export type ExternalMcpListenerState =
+  | "disabled"
+  | "starting"
+  | "listening"
+  | "portConflict"
+  | "authFailure"
+  | "paused";
+
+export interface ExternalMcpClientSummary {
+  id: string;
+  name: string;
+  tokenDigest: string;
+  createdAt: number;
+  lastUsedAt: number | null;
+  revokedAt: number | null;
+}
+
+export interface ExternalMcpStatus {
+  revision: number;
+  enabled: boolean;
+  state: ExternalMcpListenerState;
+  endpoint: string;
+  clients: ExternalMcpClientSummary[];
+  error: string | null;
+}
+
+export interface ExternalMcpPairingReceipt {
+  client: ExternalMcpClientSummary;
+  endpoint: string;
+  bearerToken: string;
+}
+
 export interface Transition {
   fromClipId: string;
   toClipId: string;

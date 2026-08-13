@@ -8,10 +8,45 @@ import {
   decodePlaybackCommandError,
   decodePlaybackFrameEvent,
   decodePrewarmResult,
+  externalMcpPair,
+  externalMcpRegenerate,
+  externalMcpRevoke,
+  externalMcpSetEnabled,
+  externalMcpStatus,
   getTimeline,
+  onExternalMcpStatusChanged,
   projectNew,
   projectOpen,
 } from "./api";
+
+describe("browser external MCP safety defaults", () => {
+  it("reports the endpoint disabled without inventing clients or credentials", async () => {
+    await expect(externalMcpStatus()).resolves.toEqual({
+      revision: 0,
+      enabled: false,
+      state: "disabled",
+      endpoint: "http://127.0.0.1:19789/mcp",
+      clients: [],
+      error: null,
+    });
+  });
+
+  it("rejects every durable pairing mutation outside the desktop shell", async () => {
+    await expect(externalMcpSetEnabled(true)).rejects.toThrow("desktop app");
+    await expect(externalMcpPair("Cursor")).rejects.toThrow("desktop app");
+    await expect(externalMcpRegenerate("client-1")).rejects.toThrow("desktop app");
+    await expect(externalMcpRevoke("client-1")).rejects.toThrow("desktop app");
+  });
+
+  it("returns a harmless listener disposer outside the desktop shell", async () => {
+    let calls = 0;
+    const dispose = await onExternalMcpStatusChanged(() => {
+      calls += 1;
+    });
+    dispose();
+    expect(calls).toBe(0);
+  });
+});
 
 describe("browser account scaffold defaults", () => {
   it("stays offline and performs no login outside the desktop shell", async () => {

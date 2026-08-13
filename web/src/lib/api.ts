@@ -19,6 +19,8 @@ import type {
   ClipType,
   EditRequest,
   EditResult,
+  ExternalMcpPairingReceipt,
+  ExternalMcpStatus,
   GenerateCaptionsResult,
   GenerationLog,
   MediaList,
@@ -116,6 +118,83 @@ async function ensureTauri(): Promise<void> {
 }
 
 // MARK: - Commands
+
+const externalMcpBrowserStatus: ExternalMcpStatus = {
+  revision: 0,
+  enabled: false,
+  state: "disabled",
+  endpoint: "http://127.0.0.1:19789/mcp",
+  clients: [],
+  error: null,
+};
+
+function requireExternalMcpDesktop(): InvokeFn {
+  if (!invokeImpl) throw new Error("External MCP pairing requires the desktop app");
+  return invokeImpl;
+}
+
+export async function externalMcpStatus(): Promise<ExternalMcpStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<ExternalMcpStatus>("external_mcp_status");
+  return externalMcpBrowserStatus;
+}
+
+export async function externalMcpSetEnabled(enabled: boolean): Promise<ExternalMcpStatus> {
+  await ensureTauri();
+  return requireExternalMcpDesktop()<ExternalMcpStatus>("external_mcp_set_enabled", { enabled });
+}
+
+export async function externalMcpPair(name: string): Promise<ExternalMcpPairingReceipt> {
+  await ensureTauri();
+  return requireExternalMcpDesktop()<ExternalMcpPairingReceipt>("external_mcp_pair", { name });
+}
+
+export async function externalMcpRegenerate(
+  clientId: string,
+): Promise<ExternalMcpPairingReceipt> {
+  await ensureTauri();
+  return requireExternalMcpDesktop()<ExternalMcpPairingReceipt>("external_mcp_regenerate", {
+    clientId,
+  });
+}
+
+export async function externalMcpRevoke(clientId: string): Promise<ExternalMcpStatus> {
+  await ensureTauri();
+  return requireExternalMcpDesktop()<ExternalMcpStatus>("external_mcp_revoke", { clientId });
+}
+
+/**
+ * Subscribe before fetching a fresh snapshot. Events cover future transitions;
+ * the status command closes the registration gap if an event was missed.
+ */
+export async function onExternalMcpStatusChanged(
+  handler: (status: ExternalMcpStatus) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl || !invokeImpl) return () => {};
+  let disposed = false;
+  let latestRevision = -1;
+  const publish = (status: ExternalMcpStatus) => {
+    if (!disposed && status.revision >= latestRevision) {
+      latestRevision = status.revision;
+      handler(status);
+    }
+  };
+  const unlisten = await listenImpl("external_mcp_status_changed", (event) => {
+    publish(event.payload as ExternalMcpStatus);
+  });
+  try {
+    const current = await invokeImpl<ExternalMcpStatus>("external_mcp_status");
+    publish(current);
+  } catch (error) {
+    unlisten();
+    throw error;
+  }
+  return () => {
+    disposed = true;
+    unlisten();
+  };
+}
 
 /** Check OpenTake's pinned GitHub release channel for a signed update. */
 export async function checkForAppUpdate(): Promise<AppUpdateMetadata | null> {

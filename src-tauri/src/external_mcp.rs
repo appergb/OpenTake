@@ -1,17 +1,21 @@
-#![allow(dead_code)] // Task 1 establishes the catalog before listener/UI tasks consume it.
-
 use std::{
+    collections::HashMap,
     fs::{self, OpenOptions},
     io::Write,
+    net::Ipv4Addr,
     path::{Path, PathBuf},
-    sync::{Arc, RwLock},
+    sync::{atomic::AtomicU64, Arc, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use opentake_agent::mcp::{AuthenticatedMcpClient, BearerAuthorizer};
+use opentake_agent::mcp::{
+    server::{bind_managed_gated_on, ManagedMcpEndpoint},
+    AuthenticatedMcpClient, BearerAuthorizer,
+};
 use opentake_core::AppCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tauri::{Emitter, Manager};
 
 use crate::chat::ExternalMcpComponents;
 use crate::mcp::LiveProjectMcpGate;
@@ -21,10 +25,36 @@ const CATALOG_VERSION: u32 = 1;
 const CATALOG_DIRECTORY: &str = "external-mcp";
 const CATALOG_FILE: &str = "clients.json";
 const PENDING_FILE: &str = "clients.pending.json";
+const PREFERENCES_FILE: &str = "preferences.json";
 const EXTERNAL_MCP_ENDPOINT: &str = "http://127.0.0.1:19789/mcp";
+const EXTERNAL_MCP_STATUS_CHANGED: &str = "external_mcp_status_changed";
+const EXTERNAL_MCP_PORT: u16 = 19_789;
 const MAX_CLIENT_NAME_CHARS: usize = 128;
 const TOKEN_BYTES: usize = 32;
 const TOKEN_DIGEST_HEX_CHARS: usize = 12;
+const LAST_USED_WRITE_INTERVAL_SECS: i64 = 60;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum ExternalMcpListenerState {
+    Disabled,
+    Starting,
+    Listening,
+    PortConflict,
+    AuthFailure,
+    Paused,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ExternalMcpStatus {
+    pub(crate) revision: u64,
+    pub(crate) enabled: bool,
+    pub(crate) state: ExternalMcpListenerState,
+    pub(crate) endpoint: String,
+    pub(crate) clients: Vec<ExternalMcpClientSummary>,
+    pub(crate) error: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -76,6 +106,12 @@ struct PersistedCatalog {
     clients: Vec<ExternalMcpClientSummary>,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct ExternalMcpPreferences {
+    enabled: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 enum PendingSecretState {
@@ -111,10 +147,13 @@ pub(crate) struct ExternalMcpCatalog {
     clients: Vec<ExternalMcpClientSummary>,
     secrets: Arc<dyn McpSecretStore>,
     pending: bool,
+    last_used_published_at: HashMap<String, i64>,
     #[cfg(test)]
     fail_next_rename: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     fail_parent_sync_on_call: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    publish_count: std::sync::atomic::AtomicUsize,
 }
 
 struct ExternalMcpCatalogAuthorizer {
@@ -123,8 +162,11 @@ struct ExternalMcpCatalogAuthorizer {
 
 impl BearerAuthorizer for ExternalMcpCatalogAuthorizer {
     fn authorize(&self, candidate: &str) -> Option<AuthenticatedMcpClient> {
-        let catalog = self.catalog.read().ok()?;
+        let mut catalog = self.catalog.write().ok()?;
         let client_id = catalog.verify_candidate(candidate).ok()??;
+        if let Err(error) = catalog.record_last_used(&client_id) {
+            eprintln!("[mcp] could not persist external MCP client usage: {error}");
+        }
         Some(AuthenticatedMcpClient {
             client_id: client_id.into(),
             credential_generation: credential_generation(candidate),
@@ -133,11 +175,23 @@ impl BearerAuthorizer for ExternalMcpCatalogAuthorizer {
 }
 
 pub(crate) struct ExternalMcpState {
-    core: AppCore,
     components: ExternalMcpComponents,
     catalog: Arc<RwLock<ExternalMcpCatalog>>,
     gate: Arc<LiveProjectMcpGate>,
     authorizer: Arc<dyn BearerAuthorizer>,
+    lifecycle: tokio::sync::Mutex<ExternalMcpLifecycle>,
+    status_revision: AtomicU64,
+    status_sink: RwLock<Option<ExternalMcpStatusSink>>,
+}
+
+type ExternalMcpStatusSink = Arc<dyn Fn(ExternalMcpStatus) + Send + Sync>;
+
+struct ExternalMcpLifecycle {
+    enabled: bool,
+    state: ExternalMcpListenerState,
+    error: Option<String>,
+    auth_failure: Option<String>,
+    endpoint: Option<ManagedMcpEndpoint>,
 }
 
 impl ExternalMcpState {
@@ -152,16 +206,349 @@ impl ExternalMcpState {
         });
         let gate = LiveProjectMcpGate::new(core.clone());
         Self {
-            core,
             components,
             catalog,
             gate,
             authorizer,
+            lifecycle: tokio::sync::Mutex::new(ExternalMcpLifecycle {
+                enabled: false,
+                state: ExternalMcpListenerState::Disabled,
+                error: None,
+                auth_failure: None,
+                endpoint: None,
+            }),
+            status_revision: AtomicU64::new(0),
+            status_sink: RwLock::new(None),
         }
+    }
+
+    pub(crate) fn load(
+        core: AppCore,
+        components: ExternalMcpComponents,
+        app_data_dir: &Path,
+        secrets: Arc<dyn McpSecretStore>,
+    ) -> Self {
+        let root = app_data_dir.join(CATALOG_DIRECTORY);
+        let preferences = read_preferences(&root);
+        match ExternalMcpCatalog::load(app_data_dir, secrets.clone()) {
+            Ok(catalog) if preferences.is_ok() => {
+                let preferences = preferences.expect("checked external MCP preferences");
+                let mut state = Self::new(core, components, catalog);
+                state.lifecycle = tokio::sync::Mutex::new(ExternalMcpLifecycle {
+                    enabled: preferences.enabled,
+                    state: if preferences.enabled {
+                        ExternalMcpListenerState::Paused
+                    } else {
+                        ExternalMcpListenerState::Disabled
+                    },
+                    error: None,
+                    auth_failure: None,
+                    endpoint: None,
+                });
+                state
+            }
+            catalog => {
+                let error = match (catalog.err(), preferences.err()) {
+                    (Some(catalog), _) => catalog,
+                    (None, Some(preferences)) => preferences,
+                    (None, None) => "external MCP authentication is unavailable".to_string(),
+                };
+                let catalog = ExternalMcpCatalog::unavailable(app_data_dir, secrets);
+                let mut state = Self::new(core, components, catalog);
+                state.lifecycle = tokio::sync::Mutex::new(ExternalMcpLifecycle {
+                    enabled: false,
+                    state: ExternalMcpListenerState::AuthFailure,
+                    error: Some(sanitize_auth_failure(&error)),
+                    auth_failure: Some(error),
+                    endpoint: None,
+                });
+                state
+            }
+        }
+    }
+
+    pub(crate) fn auth_failure(
+        core: AppCore,
+        components: ExternalMcpComponents,
+        error: String,
+    ) -> Self {
+        let root = std::env::temp_dir().join("opentake-unavailable-app-data");
+        let catalog =
+            ExternalMcpCatalog::unavailable(&root, Arc::new(opentake_gen::KeyringStore::new()));
+        let mut state = Self::new(core, components, catalog);
+        state.lifecycle = tokio::sync::Mutex::new(ExternalMcpLifecycle {
+            enabled: false,
+            state: ExternalMcpListenerState::AuthFailure,
+            error: Some(sanitize_auth_failure(&error)),
+            auth_failure: Some(error),
+            endpoint: None,
+        });
+        state
+    }
+
+    pub(crate) async fn initialize(&self) {
+        let mut lifecycle = self.lifecycle.lock().await;
+        self.reconcile_listener(&mut lifecycle).await;
+    }
+
+    pub(crate) async fn status(&self) -> ExternalMcpStatus {
+        let lifecycle = self.lifecycle.lock().await;
+        self.status_for(&lifecycle)
+    }
+
+    pub(crate) async fn set_enabled(&self, enabled: bool) -> Result<ExternalMcpStatus, String> {
+        let mut lifecycle = self.lifecycle.lock().await;
+        self.ensure_auth_ready(&lifecycle)?;
+        persist_preferences(&self.catalog_root(), ExternalMcpPreferences { enabled })?;
+        lifecycle.enabled = enabled;
+        self.reconcile_listener(&mut lifecycle).await;
+        Ok(self.status_for(&lifecycle))
+    }
+
+    pub(crate) async fn pair(&self, name: &str) -> Result<ExternalMcpPairingReceipt, String> {
+        let mut lifecycle = self.lifecycle.lock().await;
+        self.ensure_auth_ready(&lifecycle)?;
+        let receipt = match self.with_catalog_write(|catalog| catalog.pair(name)) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                self.handle_catalog_failure(&mut lifecycle, &error).await;
+                return Err(error);
+            }
+        };
+        self.reconcile_listener(&mut lifecycle).await;
+        Ok(receipt)
+    }
+
+    pub(crate) async fn regenerate(
+        &self,
+        client_id: &str,
+    ) -> Result<ExternalMcpPairingReceipt, String> {
+        let mut lifecycle = self.lifecycle.lock().await;
+        self.ensure_auth_ready(&lifecycle)?;
+        self.stop_listener(&mut lifecycle).await?;
+        let receipt = match self.with_catalog_write(|catalog| catalog.regenerate(client_id)) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                self.handle_catalog_failure(&mut lifecycle, &error).await;
+                return Err(error);
+            }
+        };
+        self.reconcile_listener(&mut lifecycle).await;
+        Ok(receipt)
+    }
+
+    pub(crate) async fn revoke(&self, client_id: &str) -> Result<ExternalMcpStatus, String> {
+        let mut lifecycle = self.lifecycle.lock().await;
+        self.ensure_auth_ready(&lifecycle)?;
+        self.stop_listener(&mut lifecycle).await?;
+        if let Err(error) = self.with_catalog_write(|catalog| catalog.revoke(client_id)) {
+            self.handle_catalog_failure(&mut lifecycle, &error).await;
+            return Err(error);
+        }
+        self.reconcile_listener(&mut lifecycle).await;
+        Ok(self.status_for(&lifecycle))
+    }
+
+    pub(crate) async fn shutdown(&self) -> Result<(), String> {
+        let mut lifecycle = self.lifecycle.lock().await;
+        self.stop_listener(&mut lifecycle).await?;
+        if lifecycle.auth_failure.is_some() {
+            lifecycle.state = ExternalMcpListenerState::AuthFailure;
+        } else if lifecycle.enabled {
+            lifecycle.state = ExternalMcpListenerState::Paused;
+            lifecycle.error = None;
+        } else {
+            lifecycle.state = ExternalMcpListenerState::Disabled;
+            lifecycle.error = None;
+        }
+        self.emit_status(&lifecycle);
+        Ok(())
+    }
+
+    async fn reconcile_listener(&self, lifecycle: &mut ExternalMcpLifecycle) {
+        if lifecycle.auth_failure.is_some() {
+            let _ = self.stop_listener(lifecycle).await;
+            lifecycle.state = ExternalMcpListenerState::AuthFailure;
+            lifecycle.error = lifecycle.auth_failure.as_deref().map(sanitize_auth_failure);
+            self.emit_status(lifecycle);
+            return;
+        }
+        if !lifecycle.enabled {
+            let stop_error = self.stop_listener(lifecycle).await.err();
+            lifecycle.state = ExternalMcpListenerState::Disabled;
+            lifecycle.error = stop_error;
+            self.emit_status(lifecycle);
+            return;
+        }
+        if !self.has_active_clients() {
+            let stop_error = self.stop_listener(lifecycle).await.err();
+            lifecycle.state = ExternalMcpListenerState::Paused;
+            lifecycle.error = stop_error;
+            self.emit_status(lifecycle);
+            return;
+        }
+        if lifecycle.endpoint.is_some() {
+            lifecycle.state = ExternalMcpListenerState::Listening;
+            lifecycle.error = None;
+            self.emit_status(lifecycle);
+            return;
+        }
+        lifecycle.state = ExternalMcpListenerState::Starting;
+        lifecycle.error = None;
+        self.emit_status(lifecycle);
+        let listener =
+            match tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, EXTERNAL_MCP_PORT)).await {
+                Ok(listener) => listener,
+                Err(error) => {
+                    lifecycle.state = ExternalMcpListenerState::PortConflict;
+                    lifecycle.error = Some(format!(
+                        "external MCP port {EXTERNAL_MCP_PORT} is unavailable: {error}"
+                    ));
+                    self.emit_status(lifecycle);
+                    return;
+                }
+            };
+        match bind_managed_gated_on(
+            listener,
+            self.components.dispatcher.clone(),
+            self.components.registry.clone(),
+            self.gate.clone(),
+            self.authorizer.clone(),
+        )
+        .await
+        {
+            Ok(endpoint) => {
+                lifecycle.endpoint = Some(endpoint);
+                lifecycle.state = ExternalMcpListenerState::Listening;
+                lifecycle.error = None;
+            }
+            Err(error) => {
+                lifecycle.state = ExternalMcpListenerState::PortConflict;
+                lifecycle.error = Some(error.to_string());
+            }
+        }
+        self.emit_status(lifecycle);
+    }
+
+    async fn handle_catalog_failure(&self, lifecycle: &mut ExternalMcpLifecycle, error: &str) {
+        let ready = self.catalog.read().is_ok_and(|catalog| !catalog.pending);
+        if !ready {
+            lifecycle.auth_failure = Some(error.to_string());
+        }
+        self.reconcile_listener(lifecycle).await;
+    }
+
+    async fn stop_listener(&self, lifecycle: &mut ExternalMcpLifecycle) -> Result<(), String> {
+        let Some(endpoint) = lifecycle.endpoint.take() else {
+            return Ok(());
+        };
+        endpoint.shutdown();
+        let result = endpoint.wait().await.map_err(|error| error.to_string());
+        if let Err(error) = &result {
+            lifecycle.state = ExternalMcpListenerState::Paused;
+            lifecycle.error = Some(error.clone());
+            self.emit_status(lifecycle);
+        }
+        result
+    }
+
+    fn status_for(&self, lifecycle: &ExternalMcpLifecycle) -> ExternalMcpStatus {
+        let clients = self
+            .catalog
+            .read()
+            .map(|catalog| catalog.clients().to_vec())
+            .unwrap_or_default();
+        ExternalMcpStatus {
+            revision: self
+                .status_revision
+                .load(std::sync::atomic::Ordering::Acquire),
+            enabled: lifecycle.enabled,
+            state: lifecycle.state,
+            endpoint: EXTERNAL_MCP_ENDPOINT.to_string(),
+            clients,
+            error: lifecycle.error.clone(),
+        }
+    }
+
+    fn emit_status(&self, lifecycle: &ExternalMcpLifecycle) {
+        self.status_revision
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        let status = self.status_for(lifecycle);
+        let sink = self
+            .status_sink
+            .read()
+            .ok()
+            .and_then(|sink| sink.as_ref().cloned());
+        if let Some(sink) = sink {
+            sink(status);
+        }
+    }
+
+    fn ensure_auth_ready(&self, lifecycle: &ExternalMcpLifecycle) -> Result<(), String> {
+        lifecycle.auth_failure.as_ref().map_or(Ok(()), |_| {
+            Err("external MCP authentication is unavailable".to_string())
+        })
+    }
+
+    fn with_catalog_write<T>(
+        &self,
+        operation: impl FnOnce(&mut ExternalMcpCatalog) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let mut catalog = self
+            .catalog
+            .write()
+            .map_err(|_| "external MCP catalog lock is unavailable".to_string())?;
+        operation(&mut catalog)
+    }
+
+    fn catalog_root(&self) -> PathBuf {
+        self.catalog
+            .read()
+            .map(|catalog| catalog.root.clone())
+            .unwrap_or_default()
+    }
+
+    fn has_active_clients(&self) -> bool {
+        self.catalog.read().is_ok_and(|catalog| {
+            catalog
+                .clients()
+                .iter()
+                .any(|client| client.revoked_at.is_none())
+        })
+    }
+
+    #[cfg(test)]
+    fn set_status_sink(&self, sink: ExternalMcpStatusSink) {
+        *self.status_sink.write().expect("external MCP status sink") = Some(sink);
+    }
+
+    #[cfg(test)]
+    fn catalog_publish_count_for_test(&self) -> usize {
+        self.catalog
+            .read()
+            .expect("external MCP catalog")
+            .publish_count
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
 impl ExternalMcpCatalog {
+    fn unavailable(app_data_dir: &Path, secrets: Arc<dyn McpSecretStore>) -> Self {
+        Self {
+            root: app_data_dir.join(CATALOG_DIRECTORY),
+            clients: Vec::new(),
+            secrets,
+            pending: true,
+            last_used_published_at: HashMap::new(),
+            #[cfg(test)]
+            fail_next_rename: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            fail_parent_sync_on_call: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            publish_count: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
     pub(crate) fn load(
         app_data_dir: &Path,
         secrets: Arc<dyn McpSecretStore>,
@@ -171,6 +558,14 @@ impl ExternalMcpCatalog {
         let clients = read_catalog(&path)?;
         let mut catalog = Self {
             root,
+            last_used_published_at: clients
+                .iter()
+                .filter_map(|client| {
+                    client
+                        .last_used_at
+                        .map(|timestamp| (client.id.clone(), timestamp))
+                })
+                .collect(),
             clients,
             secrets,
             pending: false,
@@ -178,6 +573,8 @@ impl ExternalMcpCatalog {
             fail_next_rename: std::sync::atomic::AtomicBool::new(false),
             #[cfg(test)]
             fail_parent_sync_on_call: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            publish_count: std::sync::atomic::AtomicUsize::new(0),
         };
         catalog.recover_pending_commit()?;
         Ok(catalog)
@@ -397,6 +794,31 @@ impl ExternalMcpCatalog {
         Ok(match_id)
     }
 
+    fn record_last_used(&mut self, client_id: &str) -> Result<(), String> {
+        self.ensure_ready()?;
+        let index = self.client_index(client_id)?;
+        let now = unix_timestamp()?;
+        let previous = self.clients[index].last_used_at;
+        let should_publish = self
+            .last_used_published_at
+            .get(client_id)
+            .is_none_or(|timestamp| {
+                now.saturating_sub(*timestamp) >= LAST_USED_WRITE_INTERVAL_SECS
+            });
+        self.clients[index].last_used_at = Some(now);
+        if !should_publish {
+            return Ok(());
+        }
+        let next = self.clients.clone();
+        if let Err(error) = self.publish_clients(&next) {
+            self.clients[index].last_used_at = previous;
+            return Err(error.error);
+        }
+        self.last_used_published_at
+            .insert(client_id.to_string(), now);
+        Ok(())
+    }
+
     fn client_index(&self, client_id: &str) -> Result<usize, String> {
         self.clients
             .iter()
@@ -456,13 +878,19 @@ impl ExternalMcpCatalog {
     }
 
     fn publish_clients(&self, clients: &[ExternalMcpClientSummary]) -> Result<(), PublishError> {
-        self.write_json_atomically(
+        let result = self.write_json_atomically(
             &self.metadata_path(),
             &PersistedCatalog {
                 version: CATALOG_VERSION,
                 clients: clients.to_vec(),
             },
-        )
+        );
+        #[cfg(test)]
+        if result.is_ok() {
+            self.publish_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        result
     }
 
     fn write_json_atomically<T: Serialize>(
@@ -584,6 +1012,47 @@ fn read_catalog(path: &Path) -> Result<Vec<ExternalMcpClientSummary>, String> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(error) => Err(format!("read external MCP catalog: {error}")),
     }
+}
+
+fn read_preferences(root: &Path) -> Result<ExternalMcpPreferences, String> {
+    match fs::read(root.join(PREFERENCES_FILE)) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|error| format!("read external MCP preferences: {error}")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(ExternalMcpPreferences::default())
+        }
+        Err(error) => Err(format!("read external MCP preferences: {error}")),
+    }
+}
+
+fn persist_preferences(root: &Path, preferences: ExternalMcpPreferences) -> Result<(), String> {
+    fs::create_dir_all(root)
+        .map_err(|error| format!("create external MCP preferences directory: {error}"))?;
+    let bytes = serde_json::to_vec_pretty(&preferences)
+        .map_err(|error| format!("encode external MCP preferences: {error}"))?;
+    let staging = root.join(format!(".preferences.{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staging)
+            .map_err(|error| format!("create external MCP preferences staging file: {error}"))?;
+        file.write_all(&bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|error| format!("write external MCP preferences staging file: {error}"))?;
+        fs::rename(&staging, root.join(PREFERENCES_FILE))
+            .map_err(|error| format!("publish external MCP preferences: {error}"))?;
+        sync_parent_directory(root)
+            .map_err(|error| format!("sync external MCP preferences directory: {error}"))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(staging);
+    }
+    result
+}
+
+fn sanitize_auth_failure(_error: &str) -> String {
+    "external MCP authentication is unavailable".to_string()
 }
 
 fn validate_pending(pending: &PendingCatalogCommit) -> Result<(), String> {
@@ -710,14 +1179,88 @@ fn unix_timestamp() -> Result<i64, String> {
         })
 }
 
+pub(crate) fn install_status_emitter<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    state: &ExternalMcpState,
+) {
+    let handle = app.clone();
+    *state
+        .status_sink
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(move |status| {
+        if let Err(error) = handle.emit(EXTERNAL_MCP_STATUS_CHANGED, status) {
+            eprintln!("[mcp] could not emit external MCP status: {error}");
+        }
+    }));
+}
+
+#[tauri::command]
+pub(crate) async fn external_mcp_status(
+    state: tauri::State<'_, ExternalMcpState>,
+) -> Result<ExternalMcpStatus, String> {
+    Ok(state.status().await)
+}
+
+#[tauri::command]
+pub(crate) async fn external_mcp_set_enabled(
+    enabled: bool,
+    state: tauri::State<'_, ExternalMcpState>,
+    admission: tauri::State<'_, crate::updater::InstallAdmissionGate>,
+) -> Result<ExternalMcpStatus, String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
+    state.set_enabled(enabled).await
+}
+
+#[tauri::command]
+pub(crate) async fn external_mcp_pair(
+    name: String,
+    state: tauri::State<'_, ExternalMcpState>,
+    admission: tauri::State<'_, crate::updater::InstallAdmissionGate>,
+) -> Result<ExternalMcpPairingReceipt, String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
+    state.pair(&name).await
+}
+
+#[tauri::command]
+pub(crate) async fn external_mcp_regenerate(
+    client_id: String,
+    state: tauri::State<'_, ExternalMcpState>,
+    admission: tauri::State<'_, crate::updater::InstallAdmissionGate>,
+) -> Result<ExternalMcpPairingReceipt, String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
+    state.regenerate(&client_id).await
+}
+
+#[tauri::command]
+pub(crate) async fn external_mcp_revoke(
+    client_id: String,
+    state: tauri::State<'_, ExternalMcpState>,
+    admission: tauri::State<'_, crate::updater::InstallAdmissionGate>,
+) -> Result<ExternalMcpStatus, String> {
+    let _activity = crate::updater::begin_mutating_activity(&admission)?;
+    state.revoke(&client_id).await
+}
+
+pub(crate) fn shutdown_on_exit<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
+    let Some(state) = app.try_state::<ExternalMcpState>() else {
+        return;
+    };
+    let result = tauri::async_runtime::block_on(state.shutdown());
+    if let Err(error) = result {
+        eprintln!("[mcp] external endpoint did not drain cleanly on application exit: {error}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use super::*;
     use crate::chat::ChatState;
     use crate::secret::{McpSecretStore, MemoryMcpSecretStore};
     use opentake_agent::chat::ChatTurnGate;
+
+    static LIFECYCLE_PORT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn catalog_root() -> tempfile::TempDir {
         tempfile::tempdir().expect("create temporary application data directory")
@@ -744,6 +1287,407 @@ mod tests {
         let catalog = load_catalog(root, Arc::new(MemoryMcpSecretStore::default()));
         let external = ExternalMcpState::new(core, chat.external_mcp_components(), catalog);
         (chat, external)
+    }
+
+    fn lifecycle_state(
+        root: &tempfile::TempDir,
+        secrets: Arc<MemoryMcpSecretStore>,
+    ) -> ExternalMcpState {
+        let core = opentake_core::AppCore::new();
+        let chat = ChatState::new(
+            core.clone(),
+            root.path().join("no-workflows"),
+            root.path().join("chat-cache"),
+            root.path().join("chat-models"),
+        );
+        ExternalMcpState::load(core, chat.external_mcp_components(), root.path(), secrets)
+    }
+
+    async fn assert_fixed_port_available() {
+        let listener =
+            tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, EXTERNAL_MCP_PORT))
+                .await
+                .expect("fixed external MCP port is available");
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_disabled_startup_never_binds() {
+        let _port = LIFECYCLE_PORT.lock().await;
+        let root = catalog_root();
+        let state = lifecycle_state(&root, Arc::new(MemoryMcpSecretStore::default()));
+
+        state.initialize().await;
+
+        let status = state.status().await;
+        assert!(!status.enabled);
+        assert_eq!(status.state, ExternalMcpListenerState::Disabled);
+        assert!(status.clients.is_empty());
+        assert_fixed_port_available().await;
+    }
+
+    #[tokio::test]
+    async fn lifecycle_disable_stops_an_active_listener_and_persists() {
+        let _port = LIFECYCLE_PORT.lock().await;
+        let root = catalog_root();
+        let secrets = Arc::new(MemoryMcpSecretStore::default());
+        let state = lifecycle_state(&root, secrets.clone());
+        state.set_enabled(true).await.expect("enable endpoint");
+        state.pair("Cursor").await.expect("pair client");
+
+        let status = state.set_enabled(false).await.expect("disable endpoint");
+
+        assert_eq!(status.state, ExternalMcpListenerState::Disabled);
+        assert_fixed_port_available().await;
+        let restarted = lifecycle_state(&root, secrets);
+        restarted.initialize().await;
+        assert_eq!(
+            restarted.status().await.state,
+            ExternalMcpListenerState::Disabled
+        );
+    }
+
+    #[tokio::test]
+    async fn lifecycle_catalog_recovery_failure_is_a_fail_closed_status() {
+        let _port = LIFECYCLE_PORT.lock().await;
+        let root = catalog_root();
+        let metadata = root.path().join(CATALOG_DIRECTORY).join(CATALOG_FILE);
+        std::fs::create_dir_all(metadata.parent().expect("catalog parent"))
+            .expect("create corrupt catalog directory");
+        std::fs::write(&metadata, b"not-json").expect("write corrupt catalog");
+
+        let state = lifecycle_state(&root, Arc::new(MemoryMcpSecretStore::default()));
+        state.initialize().await;
+
+        let status = state.status().await;
+        assert_eq!(status.state, ExternalMcpListenerState::AuthFailure);
+        assert_eq!(
+            status.error.as_deref(),
+            Some("external MCP authentication is unavailable")
+        );
+        assert!(status.clients.is_empty());
+        assert_fixed_port_available().await;
+        assert!(state.pair("must fail closed").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn lifecycle_durability_failure_transitions_to_auth_failure() {
+        let _port = LIFECYCLE_PORT.lock().await;
+        let root = catalog_root();
+        let state = lifecycle_state(&root, Arc::new(MemoryMcpSecretStore::default()));
+        state.set_enabled(true).await.expect("enable endpoint");
+        let first = state.pair("Cursor").await.expect("pair first client");
+        state
+            .catalog
+            .read()
+            .expect("external MCP catalog")
+            .fail_parent_sync_during_publish_for_test();
+
+        let error = state
+            .regenerate(&first.client.id)
+            .await
+            .expect_err("injected durability failure is reported");
+
+        assert!(error.contains("sync external MCP catalog directory"));
+        let status = state.status().await;
+        assert_eq!(status.state, ExternalMcpListenerState::AuthFailure);
+        assert_eq!(
+            status.error.as_deref(),
+            Some("external MCP authentication is unavailable")
+        );
+        assert_fixed_port_available().await;
+    }
+
+    #[tokio::test]
+    async fn lifecycle_enabled_restart_recovers_the_fixed_listener() {
+        let _port = LIFECYCLE_PORT.lock().await;
+        let root = catalog_root();
+        let secrets = Arc::new(MemoryMcpSecretStore::default());
+        let first = lifecycle_state(&root, secrets.clone());
+        first.set_enabled(true).await.expect("persist enablement");
+        first.pair("Claude Desktop").await.expect("pair client");
+        assert_eq!(
+            first.status().await.state,
+            ExternalMcpListenerState::Listening
+        );
+        first.shutdown().await.expect("drain first listener");
+
+        let restarted = lifecycle_state(&root, secrets);
+        restarted.initialize().await;
+
+        let status = restarted.status().await;
+        assert!(status.enabled);
+        assert_eq!(status.state, ExternalMcpListenerState::Listening);
+        restarted
+            .shutdown()
+            .await
+            .expect("drain restarted listener");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_enabled_without_clients_stays_paused_and_unbound() {
+        let _port = LIFECYCLE_PORT.lock().await;
+        let root = catalog_root();
+        let state = lifecycle_state(&root, Arc::new(MemoryMcpSecretStore::default()));
+
+        let status = state.set_enabled(true).await.expect("enable endpoint");
+
+        assert_eq!(status.state, ExternalMcpListenerState::Paused);
+        assert_fixed_port_available().await;
+    }
+
+    #[tokio::test]
+    async fn lifecycle_port_conflict_is_reported_without_a_fallback_listener() {
+        let _port = LIFECYCLE_PORT.lock().await;
+        let occupied =
+            tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, EXTERNAL_MCP_PORT))
+                .await
+                .expect("occupy fixed port");
+        let root = catalog_root();
+        let state = lifecycle_state(&root, Arc::new(MemoryMcpSecretStore::default()));
+        state.set_enabled(true).await.expect("enable endpoint");
+
+        state
+            .pair("Claude Desktop")
+            .await
+            .expect("pair despite bind conflict");
+
+        let status = state.status().await;
+        assert_eq!(status.state, ExternalMcpListenerState::PortConflict);
+        assert_eq!(status.endpoint, EXTERNAL_MCP_ENDPOINT);
+        drop(occupied);
+        state.shutdown().await.expect("shutdown conflicted state");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_emits_starting_before_listening_without_a_token() {
+        let _port = LIFECYCLE_PORT.lock().await;
+        let root = catalog_root();
+        let state = lifecycle_state(&root, Arc::new(MemoryMcpSecretStore::default()));
+        let events = Arc::new(Mutex::new(Vec::<ExternalMcpStatus>::new()));
+        let captured = events.clone();
+        state.set_status_sink(Arc::new(move |status| {
+            captured.lock().expect("record status").push(status);
+        }));
+        state.set_enabled(true).await.expect("enable endpoint");
+
+        let receipt = state.pair("Claude Desktop").await.expect("pair and start");
+
+        let events = events.lock().expect("read statuses");
+        let transitions = events.iter().map(|status| status.state).collect::<Vec<_>>();
+        assert!(transitions.windows(2).any(|states| {
+            states
+                == [
+                    ExternalMcpListenerState::Starting,
+                    ExternalMcpListenerState::Listening,
+                ]
+        }));
+        let serialized = serde_json::to_string(&*events).expect("serialize status events");
+        assert!(!serialized.contains(&receipt.bearer_token));
+        assert!(events
+            .windows(2)
+            .all(|statuses| { statuses[1].revision == statuses[0].revision.saturating_add(1) }));
+        drop(events);
+        state.shutdown().await.expect("drain listener");
+    }
+
+    #[test]
+    fn lifecycle_pairing_receipt_is_the_only_dto_that_serializes_a_token() {
+        let root = catalog_root();
+        let core = opentake_core::AppCore::new();
+        let chat = ChatState::new(
+            core.clone(),
+            root.path().join("no-workflows"),
+            root.path().join("chat-cache"),
+            root.path().join("chat-models"),
+        );
+        let mut catalog = load_catalog(&root, Arc::new(MemoryMcpSecretStore::default()));
+        let receipt = catalog.pair("Cursor").expect("pair client");
+        let state = ExternalMcpState::new(core, chat.external_mcp_components(), catalog);
+        let lifecycle = state.lifecycle.blocking_lock();
+
+        let receipt_json = serde_json::to_string(&receipt).expect("serialize receipt");
+        let status_json = serde_json::to_string(&state.status_for(&lifecycle))
+            .expect("serialize sanitized status");
+
+        assert!(receipt_json.contains(&receipt.bearer_token));
+        assert!(!status_json.contains(&receipt.bearer_token));
+        assert!(!status_json.contains("bearerToken"));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_pair_while_enabled_starts_the_listener() {
+        let _port = LIFECYCLE_PORT.lock().await;
+        let root = catalog_root();
+        let state = lifecycle_state(&root, Arc::new(MemoryMcpSecretStore::default()));
+        state.set_enabled(true).await.expect("enable endpoint");
+
+        let receipt = state.pair("Cursor").await.expect("pair client");
+
+        assert_eq!(receipt.endpoint, EXTERNAL_MCP_ENDPOINT);
+        assert_eq!(
+            state.status().await.state,
+            ExternalMcpListenerState::Listening
+        );
+        state.shutdown().await.expect("drain listener");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_revoking_the_final_client_stops_the_listener() {
+        let _port = LIFECYCLE_PORT.lock().await;
+        let root = catalog_root();
+        let state = lifecycle_state(&root, Arc::new(MemoryMcpSecretStore::default()));
+        state.set_enabled(true).await.expect("enable endpoint");
+        let receipt = state.pair("Cursor").await.expect("pair client");
+
+        let status = state
+            .revoke(&receipt.client.id)
+            .await
+            .expect("revoke client");
+
+        assert_eq!(status.state, ExternalMcpListenerState::Paused);
+        assert_fixed_port_available().await;
+    }
+
+    #[tokio::test]
+    async fn lifecycle_revoke_cancels_the_revoked_rmcp_session() {
+        let _port = LIFECYCLE_PORT.lock().await;
+        let root = catalog_root();
+        let state = lifecycle_state(&root, Arc::new(MemoryMcpSecretStore::default()));
+        state.set_enabled(true).await.expect("enable endpoint");
+        let first = state.pair("Cursor").await.expect("pair first client");
+        let survivor = state.pair("Claude").await.expect("pair survivor");
+        let client = reqwest::Client::new();
+        let revoked_session = initialize_managed_session(
+            &client,
+            EXTERNAL_MCP_ENDPOINT,
+            &first.bearer_token,
+            "revoked-session",
+        )
+        .await;
+
+        state.revoke(&first.client.id).await.expect("revoke client");
+
+        let stale = client
+            .post(EXTERNAL_MCP_ENDPOINT)
+            .bearer_auth(&survivor.bearer_token)
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-session-id", revoked_session)
+            .header("mcp-protocol-version", "2025-06-18")
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {}
+            }))
+            .send()
+            .await
+            .expect("send request with revoked rmcp session");
+        assert!(!stale.status().is_success());
+        let _survivor_session = initialize_managed_session(
+            &client,
+            EXTERNAL_MCP_ENDPOINT,
+            &survivor.bearer_token,
+            "survivor-session",
+        )
+        .await;
+        state.shutdown().await.expect("drain listener");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_regeneration_cancels_the_old_rmcp_session() {
+        let _port = LIFECYCLE_PORT.lock().await;
+        let root = catalog_root();
+        let state = lifecycle_state(&root, Arc::new(MemoryMcpSecretStore::default()));
+        state.set_enabled(true).await.expect("enable endpoint");
+        let first = state.pair("Cursor").await.expect("pair client");
+        let client = reqwest::Client::new();
+        let old_session = initialize_managed_session(
+            &client,
+            EXTERNAL_MCP_ENDPOINT,
+            &first.bearer_token,
+            "old-session",
+        )
+        .await;
+
+        let regenerated = state
+            .regenerate(&first.client.id)
+            .await
+            .expect("regenerate credential");
+
+        let stale = client
+            .post(EXTERNAL_MCP_ENDPOINT)
+            .bearer_auth(&regenerated.bearer_token)
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-session-id", old_session)
+            .header("mcp-protocol-version", "2025-06-18")
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {}
+            }))
+            .send()
+            .await
+            .expect("send request with stale rmcp session");
+        assert!(!stale.status().is_success());
+        let _new_session = initialize_managed_session(
+            &client,
+            EXTERNAL_MCP_ENDPOINT,
+            &regenerated.bearer_token,
+            "new-session",
+        )
+        .await;
+        state.shutdown().await.expect("drain regenerated listener");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_application_shutdown_drains_and_releases_the_port() {
+        let _port = LIFECYCLE_PORT.lock().await;
+        let root = catalog_root();
+        let state = lifecycle_state(&root, Arc::new(MemoryMcpSecretStore::default()));
+        state.set_enabled(true).await.expect("enable endpoint");
+        state.pair("Cursor").await.expect("pair client");
+
+        state.shutdown().await.expect("application exit drain");
+
+        assert_fixed_port_available().await;
+    }
+
+    #[tokio::test]
+    async fn lifecycle_last_used_updates_are_persisted_once_per_coalescing_window() {
+        let _port = LIFECYCLE_PORT.lock().await;
+        let root = catalog_root();
+        let secrets = Arc::new(MemoryMcpSecretStore::default());
+        let state = lifecycle_state(&root, secrets.clone());
+        state.set_enabled(true).await.expect("enable endpoint");
+        let receipt = state.pair("Cursor").await.expect("pair client");
+        let writes_before = state.catalog_publish_count_for_test();
+        let client = reqwest::Client::new();
+
+        for name in ["first", "second", "third"] {
+            let _session = initialize_managed_session(
+                &client,
+                EXTERNAL_MCP_ENDPOINT,
+                &receipt.bearer_token,
+                name,
+            )
+            .await;
+        }
+
+        assert!(state.status().await.clients[0].last_used_at.is_some());
+        assert_eq!(state.catalog_publish_count_for_test(), writes_before + 1);
+        let reloaded = load_catalog(&root, secrets);
+        let persisted = reloaded.clients()[0]
+            .last_used_at
+            .expect("last-used timestamp persisted");
+        let in_memory = state.status().await.clients[0]
+            .last_used_at
+            .expect("last-used timestamp visible");
+        assert!(in_memory >= persisted);
+        state.shutdown().await.expect("drain listener");
     }
 
     async fn initialize_managed_session(
