@@ -156,6 +156,29 @@ impl ChatState {
         }
     }
 
+    fn project_turn_gate(
+        &self,
+        project: &ChatProjectContext,
+        session_key: &SessionKey,
+        cancel: Arc<TurnCancel>,
+    ) -> Arc<dyn ChatTurnGate> {
+        Arc::new(ProjectTurnGate {
+            state: self.clone(),
+            project: project.clone(),
+            cancel,
+            undo_scope: agent_undo_scope(session_key),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn project_turn_gate_for_test(&self, session_id: &str) -> Arc<dyn ChatTurnGate> {
+        let project = self.project_context().expect("saved test project");
+        self.put_project_session(&project, ChatSession::new(session_id))
+            .expect("persist test chat session");
+        let session_key = project.key(session_id);
+        self.project_turn_gate(&project, &session_key, Arc::new(TurnCancel::new()))
+    }
+
     #[cfg(test)]
     pub fn new(
         core: AppCore,
@@ -697,7 +720,6 @@ pub async fn chat_send(
 ) -> Result<(), String> {
     let project = state.project_context_for(expected_project_epoch, &expected_project_path)?;
     let session_key = project.key(&session_id);
-    let undo_scope = agent_undo_scope(&session_key);
     let turn_cancel = Arc::new(TurnCancel::new());
     let turn_admission = state.reserve_turn(session_key.clone(), turn_cancel.clone())?;
     let cancel = turn_cancel.requested.clone();
@@ -726,12 +748,7 @@ pub async fn chat_send(
             project: project.clone(),
         };
         let turn_owner = turn_cancel.clone();
-        let gate: Arc<dyn ChatTurnGate> = Arc::new(ProjectTurnGate {
-            state: state_clone.clone(),
-            project: project.clone(),
-            cancel: turn_cancel,
-            undo_scope,
-        });
+        let gate = state_clone.project_turn_gate(&project, &session_key, turn_cancel);
         let is_codex = chat_provider == "codex";
         let mut codex_final: Option<(String, ChatMessage)> = None;
         let result = if is_codex {

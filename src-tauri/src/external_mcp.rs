@@ -746,22 +746,65 @@ mod tests {
         (chat, external)
     }
 
-    fn shared_dispatch(
-        state: &ExternalMcpState,
-        scope: &str,
-        tool: &str,
-        args: serde_json::Value,
-    ) -> opentake_agent::tools::result::ToolResult {
-        state
-            .gate
-            .dispatch_cancellable_scoped(
-                &state.components.dispatcher,
-                tool,
-                args,
-                scope,
-                &opentake_media::MediaCancelToken::new(),
-            )
-            .expect("saved live project accepts the dispatch")
+    async fn initialize_managed_session(
+        client: &reqwest::Client,
+        url: &str,
+        token: &str,
+        name: &str,
+    ) -> reqwest::header::HeaderValue {
+        let response = client
+            .post(url)
+            .bearer_auth(token)
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": { "name": name, "version": "0" }
+                }
+            }))
+            .send()
+            .await
+            .expect("initialize managed MCP session");
+        assert!(response.status().is_success());
+        response
+            .headers()
+            .get("mcp-session-id")
+            .expect("managed rmcp session id")
+            .clone()
+    }
+
+    async fn call_managed_tool(
+        client: &reqwest::Client,
+        url: &str,
+        token: &str,
+        session: &reqwest::header::HeaderValue,
+        id: u64,
+        name: &str,
+        arguments: serde_json::Value,
+    ) -> String {
+        let response = client
+            .post(url)
+            .bearer_auth(token)
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-session-id", session.clone())
+            .header("mcp-protocol-version", "2025-06-18")
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": { "name": name, "arguments": arguments }
+            }))
+            .send()
+            .await
+            .expect("call managed MCP tool");
+        assert!(response.status().is_success());
+        response.text().await.expect("read managed MCP result")
     }
 
     #[test]
@@ -846,61 +889,160 @@ mod tests {
         );
     }
 
-    #[test]
-    fn shared_dispatcher_isolates_two_mcp_sessions_and_in_app_chat_undo() {
+    #[tokio::test]
+    async fn shared_transport_scopes_isolate_two_rmcp_sessions_and_in_app_chat_undo() {
         let root = catalog_root();
         let core = opentake_core::AppCore::new();
         core.save_project(Some(root.path().join("Shared.opentake")))
             .expect("save shared project");
-        let (_chat, external) = shared_state(&root, core.clone());
-        let mcp_a = "opentake:mcp:test:a";
-        let mcp_b = "opentake:mcp:test:b";
-        let chat = "opentake:chat:test";
+        let chat = ChatState::new(
+            core.clone(),
+            root.path().join("no-workflows"),
+            root.path().join("chat-cache"),
+            root.path().join("chat-models"),
+        );
+        let chat_gate = chat.project_turn_gate_for_test("chat-session");
+        let mut catalog = load_catalog(&root, Arc::new(MemoryMcpSecretStore::default()));
+        let paired = catalog.pair("Claude Desktop").expect("pair test client");
+        let external = ExternalMcpState::new(core.clone(), chat.external_mcp_components(), catalog);
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind managed MCP test listener");
+        let endpoint = opentake_agent::mcp::server::bind_managed_gated_on(
+            listener,
+            external.components.dispatcher.clone(),
+            external.components.registry.clone(),
+            external.gate.clone(),
+            external.authorizer.clone(),
+        )
+        .await
+        .expect("start managed MCP endpoint");
+        let client = reqwest::Client::new();
+        let url = format!("http://{}/mcp", endpoint.addr());
+        let session_a =
+            initialize_managed_session(&client, &url, &paired.bearer_token, "rmcp-session-a").await;
+        let session_b =
+            initialize_managed_session(&client, &url, &paired.bearer_token, "rmcp-session-b").await;
 
-        let created = shared_dispatch(
-            &external,
-            mcp_a,
+        let created = call_managed_tool(
+            &client,
+            &url,
+            &paired.bearer_token,
+            &session_a,
+            2,
             "create_folder",
             serde_json::json!({ "name": "MCP A" }),
-        );
-        assert!(!created.is_error, "{}", created.text_joined());
-        for foreign_scope in [mcp_b, chat] {
-            let refused = shared_dispatch(&external, foreign_scope, "undo", serde_json::json!({}));
-            assert!(refused.is_error, "foreign scope consumed MCP A's edit");
-        }
-        let undone = shared_dispatch(&external, mcp_a, "undo", serde_json::json!({}));
-        assert!(!undone.is_error, "{}", undone.text_joined());
+        )
+        .await;
+        assert!(!created.contains("\"isError\":true"), "{created}");
+        let foreign = call_managed_tool(
+            &client,
+            &url,
+            &paired.bearer_token,
+            &session_b,
+            3,
+            "undo",
+            serde_json::json!({}),
+        )
+        .await;
+        assert!(foreign.contains("\"isError\":true"), "{foreign}");
+        let chat_undo = chat_gate
+            .dispatch(
+                &external.components.dispatcher,
+                "undo",
+                serde_json::json!({}),
+            )
+            .expect("current chat gate remains live");
+        assert!(chat_undo.is_error, "chat consumed MCP A's edit");
+        let owner = call_managed_tool(
+            &client,
+            &url,
+            &paired.bearer_token,
+            &session_a,
+            4,
+            "undo",
+            serde_json::json!({}),
+        )
+        .await;
+        assert!(!owner.contains("\"isError\":true"), "{owner}");
         assert!(core.media().folders.is_empty());
 
-        let created = shared_dispatch(
-            &external,
-            chat,
-            "create_folder",
-            serde_json::json!({ "name": "Chat" }),
-        );
-        assert!(!created.is_error, "{}", created.text_joined());
-        for foreign_scope in [mcp_a, mcp_b] {
-            let refused = shared_dispatch(&external, foreign_scope, "undo", serde_json::json!({}));
-            assert!(refused.is_error, "external scope consumed chat's edit");
-        }
-        let undone = shared_dispatch(&external, chat, "undo", serde_json::json!({}));
-        assert!(!undone.is_error, "{}", undone.text_joined());
-        assert!(core.media().folders.is_empty());
-
-        let created = shared_dispatch(
-            &external,
-            mcp_b,
+        let created = call_managed_tool(
+            &client,
+            &url,
+            &paired.bearer_token,
+            &session_b,
+            5,
             "create_folder",
             serde_json::json!({ "name": "MCP B" }),
-        );
-        assert!(!created.is_error, "{}", created.text_joined());
-        for foreign_scope in [mcp_a, chat] {
-            let refused = shared_dispatch(&external, foreign_scope, "undo", serde_json::json!({}));
-            assert!(refused.is_error, "foreign scope consumed MCP B's edit");
-        }
-        let undone = shared_dispatch(&external, mcp_b, "undo", serde_json::json!({}));
-        assert!(!undone.is_error, "{}", undone.text_joined());
+        )
+        .await;
+        assert!(!created.contains("\"isError\":true"), "{created}");
+        let foreign = call_managed_tool(
+            &client,
+            &url,
+            &paired.bearer_token,
+            &session_a,
+            6,
+            "undo",
+            serde_json::json!({}),
+        )
+        .await;
+        assert!(foreign.contains("\"isError\":true"), "{foreign}");
+        let chat_undo = chat_gate
+            .dispatch(
+                &external.components.dispatcher,
+                "undo",
+                serde_json::json!({}),
+            )
+            .expect("current chat gate remains live");
+        assert!(chat_undo.is_error, "chat consumed MCP B's edit");
+        let owner = call_managed_tool(
+            &client,
+            &url,
+            &paired.bearer_token,
+            &session_b,
+            7,
+            "undo",
+            serde_json::json!({}),
+        )
+        .await;
+        assert!(!owner.contains("\"isError\":true"), "{owner}");
         assert!(core.media().folders.is_empty());
+
+        let created = chat_gate
+            .dispatch(
+                &external.components.dispatcher,
+                "create_folder",
+                serde_json::json!({ "name": "Chat" }),
+            )
+            .expect("current chat gate accepts mutation");
+        assert!(!created.is_error, "{}", created.text_joined());
+        for (session, id) in [(&session_a, 8), (&session_b, 9)] {
+            let foreign = call_managed_tool(
+                &client,
+                &url,
+                &paired.bearer_token,
+                session,
+                id,
+                "undo",
+                serde_json::json!({}),
+            )
+            .await;
+            assert!(foreign.contains("\"isError\":true"), "{foreign}");
+        }
+        let chat_undo = chat_gate
+            .dispatch(
+                &external.components.dispatcher,
+                "undo",
+                serde_json::json!({}),
+            )
+            .expect("current chat gate accepts undo");
+        assert!(!chat_undo.is_error, "{}", chat_undo.text_joined());
+        assert!(core.media().folders.is_empty());
+
+        endpoint.shutdown();
+        endpoint.wait().await.expect("stop managed MCP endpoint");
     }
 
     #[test]
