@@ -73,3 +73,29 @@ wait for a later Home filesystem probe.
 ### Commit
 
 `fix(home): use truthful project preview metadata`
+
+## Review fix round 2 — require complete preview metadata
+
+The follow-up Rust review found that serde's default for an absent `tracks`
+field incorrectly looked like an authoritative empty track list. The partial
+wire model now keeps `tracks` optional and emits a Home preview only when
+`width`, `height`, and `tracks` were all explicit and valid. An explicit
+`tracks: []` remains a truthful zero-track project.
+
+### RED
+
+- `cargo test -p opentake-tauri filesystem_probe_omits_preview_when_tracks_are_not_explicit --lib` — failed because a `{ width, height }` project still serialized `preview`.
+
+### GREEN
+
+- `cargo test -p opentake-tauri filesystem_probe_omits_preview_when_tracks_are_not_explicit --lib` — 1 passed, covering both omitted tracks and explicit empty tracks.
+- `cargo test -p opentake-tauri home::tests --lib` — 17 passed.
+- `pnpm -C web test --run src/components/home/HomeView.test.tsx src/components/home/HomeView.interaction.test.tsx src/store/recentStore.test.ts` — 3 files / 32 tests passed.
+- `cargo fmt --check` — passed.
+- `cargo clippy -p opentake-tauri --lib -- -D warnings` — passed (existing `block 0.1.6` future-incompatibility notice only).
+- `pnpm -C web build` — TypeScript and Vite production build passed (existing dynamic-import and chunk-size warnings only).
+- `git diff --check` — no whitespace errors.
+
+### Commit
+
+`fix(home): require complete preview metadata`

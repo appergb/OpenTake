@@ -101,9 +101,9 @@ struct HomeProjectPreviewWire {
     #[serde(
         default,
         rename = "tracks",
-        deserialize_with = "deserialize_home_track_kinds"
+        deserialize_with = "deserialize_optional_home_track_kinds"
     )]
-    track_kinds: Vec<opentake_domain::ClipType>,
+    track_kinds: Option<Vec<opentake_domain::ClipType>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -112,9 +112,9 @@ struct HomeTrackPreviewWire {
     kind: opentake_domain::ClipType,
 }
 
-fn deserialize_home_track_kinds<'de, D>(
+fn deserialize_optional_home_track_kinds<'de, D>(
     deserializer: D,
-) -> Result<Vec<opentake_domain::ClipType>, D::Error>
+) -> Result<Option<Vec<opentake_domain::ClipType>>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -152,7 +152,7 @@ where
         }
     }
 
-    deserializer.deserialize_seq(TrackKindsVisitor)
+    deserializer.deserialize_seq(TrackKindsVisitor).map(Some)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -404,7 +404,9 @@ fn read_project_preview(bundle: &Path) -> Option<HomeProjectPreview> {
     }
     let wire: HomeProjectPreviewWire =
         serde_json::from_reader(file.take(MAX_PROJECT_PREVIEW_BYTES + 1)).ok()?;
-    let (Some(canvas_width), Some(canvas_height)) = (wire.width, wire.height) else {
+    let (Some(canvas_width), Some(canvas_height), Some(track_kinds)) =
+        (wire.width, wire.height, wire.track_kinds)
+    else {
         return None;
     };
     if canvas_width <= 0 || canvas_height <= 0 {
@@ -413,7 +415,7 @@ fn read_project_preview(bundle: &Path) -> Option<HomeProjectPreview> {
     Some(HomeProjectPreview {
         canvas_width,
         canvas_height,
-        track_kinds: wire.track_kinds,
+        track_kinds,
     })
 }
 
@@ -1540,6 +1542,43 @@ mod tests {
         assert_eq!(
             json["preview"]["trackKinds"],
             serde_json::json!(["video", "audio"])
+        );
+    }
+
+    #[test]
+    fn filesystem_probe_omits_preview_when_tracks_are_not_explicit() {
+        let directory = tempfile::tempdir().unwrap();
+        let ledger = directory.path().join("project-registry.json");
+        let project = directory.path().join("Incomplete.opentake");
+        fs::create_dir(&project).unwrap();
+        fs::write(
+            project.join("project.json"),
+            br#"{ "width": 1080, "height": 1920 }"#,
+        )
+        .unwrap();
+
+        let mut registry = ProjectRegistry::load(ledger).unwrap();
+        registry.register_at(project, 10, None).unwrap();
+        let entry = probe_project_entries_with(registry.entries_snapshot(), |_| false)
+            .pop()
+            .unwrap();
+
+        assert!(serde_json::to_value(entry)
+            .unwrap()
+            .get("preview")
+            .is_none());
+
+        fs::write(
+            directory.path().join("Incomplete.opentake/project.json"),
+            br#"{ "width": 1080, "height": 1920, "tracks": [] }"#,
+        )
+        .unwrap();
+        let entry = probe_project_entries_with(registry.entries_snapshot(), |_| false)
+            .pop()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(entry).unwrap()["preview"]["trackKinds"],
+            serde_json::json!([])
         );
     }
 
