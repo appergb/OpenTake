@@ -9,6 +9,7 @@ const projectLauncherSource = homeSource.slice(
 const projectGridCardSource = homeSource.slice(homeSource.indexOf("function ProjectGridCard"));
 const tokenSource = readFileSync(new URL("../../styles/tokens.css", import.meta.url), "utf8");
 const globalSource = readFileSync(new URL("../../styles/global.css", import.meta.url), "utf8");
+const componentSource = readFileSync(new URL("../../styles/components.css", import.meta.url), "utf8");
 
 describe("HomeView Vercel embedded visual direction", () => {
   it("uses homepage-specific Vercel tokens without replacing editor tokens", () => {
@@ -66,9 +67,9 @@ describe("HomeView Vercel embedded visual direction", () => {
     expect(homeSource).toContain("textAlign: \"left\"");
   });
 
-  it("places project-mode content near the top-left and shows projects in four columns", () => {
+  it("places project-mode content near the top-left in responsive project columns", () => {
     expect(homeSource).toContain("padding: \"var(--titlebar-safe-top) var(--space-xl-xxl) var(--space-xl-xxl)\"");
-    expect(homeSource).toContain("gridTemplateColumns: \"repeat(4, minmax(0, 1fr))\"");
+    expect(homeSource).toContain("gridTemplateColumns: \"repeat(auto-fit, minmax(min(100%, 220px), 1fr))\"");
     expect(homeSource).toContain("ProjectGridCard");
     expect(homeSource).not.toContain("width: \"min(720px, 100%)\"");
   });
@@ -79,6 +80,21 @@ describe("HomeView Vercel embedded visual direction", () => {
     expect(projectGridCardSource).toContain("minWidth: 0");
     expect(projectGridCardSource).toContain("textOverflow: \"ellipsis\"");
     expect(projectGridCardSource).toContain("whiteSpace: \"nowrap\"");
+  });
+
+  it("uses a semantic 16:9 figure preview with covered thumbnails", () => {
+    expect(projectGridCardSource).toContain("<figure");
+    expect(projectGridCardSource).toContain("home-project-preview");
+    expect(projectGridCardSource).toContain('className="home-project-preview__image"');
+    expect(componentSource).toContain(".home-project-preview {");
+    expect(componentSource).toContain("aspect-ratio: 16 / 9");
+    expect(componentSource).toContain(".home-project-preview__image {");
+    expect(componentSource).toContain("object-fit: cover");
+  });
+
+  it("removes the Home generation activity region", () => {
+    expect(homeSource).not.toContain("GenerationActivity");
+    expect(homeSource).not.toContain("home-generation-heading");
   });
 
   it("enlarges the sidebar logo to a prominent size", () => {

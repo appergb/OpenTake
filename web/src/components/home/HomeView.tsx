@@ -8,13 +8,10 @@ import {
   Library,
   MoreHorizontal,
   Sparkles,
-  Cpu,
 } from "lucide-react";
 import { Icon } from "../ui/Icon";
 import { useT, type TFunction } from "../../i18n";
 import { assetUrl } from "../../lib/asset";
-import * as api from "../../lib/api";
-import type { GenerationLog } from "../../lib/types";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useRecentStore, type RecentProject } from "../../store/recentStore";
 import {
@@ -43,147 +40,6 @@ export function formatProjectRelativeTime(
   if (days < 7) return t("home.relative.daysAgo", { count: days });
   if (days < 35) return t("home.relative.weeksAgo", { count: Math.floor(days / 7) });
   return t("home.relative.monthsAgo", { count: Math.max(1, Math.floor(days / 30)) });
-}
-
-/** `createdAt` rows are Apple-reference-date seconds (upstream Swift `Date`
- *  encoding) — the 2001-01-01 epoch. Convert to Unix ms for display. */
-export function appleReferenceSecondsToMs(seconds: number): number {
-  return (seconds + 978_307_200) * 1000;
-}
-
-type GenerationActivityState =
-  | { status: "loading" }
-  | { status: "error" }
-  | { status: "ready"; log: GenerationLog };
-
-/** Read-only AI generation audit for the current session: newest rows first
- *  (timestamp · model · credits) plus total spend. Mirrors `generation_log`;
- *  the UI never mutates the log — the core's generation lifecycle is the only
- *  writer. Loads whenever Home becomes active; outside Tauri it resolves to the
- *  honest empty log. */
-function GenerationActivity({ active }: { active: boolean }) {
-  const t = useT();
-  const [state, setState] = useState<GenerationActivityState>({ status: "loading" });
-
-  useEffect(() => {
-    if (!active) return;
-    let disposed = false;
-    setState({ status: "loading" });
-    api
-      .generationLog()
-      .then((log) => {
-        if (!disposed) setState({ status: "ready", log });
-      })
-      .catch(() => {
-        if (!disposed) setState({ status: "error" });
-      });
-    return () => {
-      disposed = true;
-    };
-  }, [active]);
-
-  const totalCredits =
-    state.status === "ready"
-      ? state.log.entries.reduce((sum, entry) => sum + (entry.costCredits ?? 0), 0)
-      : 0;
-
-  return (
-    <section
-      aria-labelledby="home-generation-heading"
-      style={{
-        padding: "var(--space-md) var(--space-xl-xxl) var(--space-xl-xxl)",
-        borderTop: "1px solid var(--home-border)",
-        color: "var(--home-muted-foreground)",
-        fontSize: "var(--fs-xs)",
-      }}
-    >
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: "var(--space-md)",
-          marginBottom: "var(--space-sm)",
-        }}
-      >
-        <h2
-          id="home-generation-heading"
-          style={{
-            margin: 0,
-            display: "inline-flex",
-            alignItems: "center",
-            gap: "var(--space-xs)",
-            fontSize: "var(--fs-xs)",
-            fontWeight: 500,
-          }}
-        >
-          <Icon icon={Cpu} size={13} />
-          {t("home.generationActivity")}
-        </h2>
-        {state.status === "ready" && state.log.entries.length > 0 && (
-          <span className="tabular">
-            {t("home.generationActivityTotal", {
-              count: state.log.entries.length,
-              credits: totalCredits,
-            })}
-          </span>
-        )}
-      </div>
-      {state.status === "loading" && <div role="status">{t("home.generationActivityLoading")}</div>}
-      {state.status === "error" && (
-        <div role="alert">{t("home.generationActivityFailed")}</div>
-      )}
-      {state.status === "ready" && state.log.entries.length === 0 && (
-        <div>{t("home.generationActivityEmpty")}</div>
-      )}
-      {state.status === "ready" && state.log.entries.length > 0 && (
-        <ul
-          style={{
-            listStyle: "none",
-            margin: 0,
-            padding: 0,
-            maxHeight: 132,
-            overflowY: "auto",
-            display: "grid",
-            gap: "var(--space-xxs)",
-          }}
-        >
-          {[...state.log.entries].reverse().map((entry) => {
-            const when = entry.createdAt
-              ? formatProjectRelativeTime(t, appleReferenceSecondsToMs(entry.createdAt))
-              : undefined;
-            return (
-              <li
-                key={entry.id}
-                title={
-                  entry.createdAt
-                    ? new Date(appleReferenceSecondsToMs(entry.createdAt)).toLocaleString()
-                    : undefined
-                }
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "var(--space-sm)",
-                  minWidth: 0,
-                }}
-              >
-                <span style={{ flex: "0 0 auto" }}>{when ?? "—"}</span>
-                <span style={{ flex: "0 0 auto", color: "var(--home-foreground)" }}>
-                  {entry.model}
-                </span>
-                <span style={{ flex: 1, minWidth: 0 }} />
-                <span className="tabular" style={{ flex: "0 0 auto" }}>
-                  {entry.costCredits !== undefined
-                    ? `${entry.costCredits} ${t("home.generationActivityCreditsUnit")}`
-                    : t("home.generationActivityCostUnknown")}
-                </span>
-              </li>
-            );
-          })}
-        </ul>
-      )}
-    </section>
-  );
 }
 
 const homeShellStyle: CSSProperties = {
@@ -345,7 +201,6 @@ export function HomeView() {
               }
             />
           )}
-          <GenerationActivity active={active} />
         </section>
       </main>
       {homeNotice && (
@@ -800,7 +655,7 @@ function ProjectLauncher({
         style={{
           width: "100%",
           display: "grid",
-          gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+          gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 220px), 1fr))",
           gap: "var(--space-sm)",
           minHeight: 0,
           minWidth: 0,
@@ -1017,7 +872,7 @@ function ProjectGridCard({
         className="home-project-card"
         style={{
           width: "100%",
-          minHeight: 96,
+          minHeight: 0,
           padding: "var(--space-md)",
           borderRadius: "var(--radius-md)",
           background: selected ? "var(--home-selected)" : "rgba(255,255,255,0.018)",
@@ -1039,29 +894,30 @@ function ProjectGridCard({
             width: "100%",
           }}
         >
-          <div
-            style={{
-              width: "100%",
-              height: 48,
-              flex: "0 0 auto",
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-              borderRadius: "var(--radius-md)",
-              background: "var(--home-muted)",
-              color: "var(--home-muted-foreground)",
-              overflow: "hidden",
-            }}
+          <figure
+            className={`home-project-preview${coverUrl ? "" : " home-project-preview--fallback"}`}
           >
             {coverUrl ? (
               <img
                 src={coverUrl}
                 alt=""
                 onError={() => setThumbnailFailed(true)}
-                style={{ width: "100%", height: "100%", objectFit: "cover" }}
+                className="home-project-preview__image"
               />
-            ) : <Icon icon={Film} size={16} />}
-          </div>
+            ) : (
+              <div className="home-project-preview__fallback" aria-label={entry.name}>
+                <div className="home-project-preview__fallback-header">
+                  <span className="home-project-preview__fallback-name">{entry.name}</span>
+                  <span className="home-project-preview__aspect">16:9</span>
+                </div>
+                <div className="home-project-preview__track-stack" aria-hidden="true">
+                  <span className="home-project-preview__track" />
+                  <span className="home-project-preview__track home-project-preview__track--short" />
+                  <span className="home-project-preview__track home-project-preview__track--tiny" />
+                </div>
+              </div>
+            )}
+          </figure>
           <div style={{ minWidth: 0, width: "100%" }}>
             <div
               style={{

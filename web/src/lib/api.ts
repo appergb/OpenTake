@@ -22,7 +22,6 @@ import type {
   ExternalMcpPairingReceipt,
   ExternalMcpStatus,
   GenerateCaptionsResult,
-  GenerationLog,
   MediaList,
   MattingModelStatus,
   MotionTrackingRegion,
@@ -239,17 +238,6 @@ export async function getTimeline(): Promise<RuntimeTimelineSnapshot> {
     compatibilityReadOnly: false,
     compatibilityBlockers: [],
   };
-}
-
-/** The current session's append-only AI generation audit log (rows + credits
- *  math, persisted as `generation-log.json`). Read-only: the UI never mutates
- *  the log; only the core's generation lifecycle appends. Infallible — a
- *  session with no project yields the empty log. Outside Tauri it resolves to
- *  the honest empty log (no fake data). */
-export async function generationLog(): Promise<GenerationLog> {
-  await ensureTauri();
-  if (invokeImpl) return invokeImpl<GenerationLog>("generation_log");
-  return { version: 1, entries: [] };
 }
 
 function editIdentityArgs(expected: ProjectEditIdentity): Record<string, unknown> {

@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  generationLog: vi.fn(async () => ({ version: 1, entries: [] })),
   newProjectAndEnter: vi.fn(),
   openProjectPath: vi.fn(),
   openProjectViaDialog: vi.fn(),
@@ -17,7 +18,7 @@ const i18nMocks = vi.hoisted(() => ({
 vi.mock("../../i18n", () => ({ useT: () => i18nMocks.t }));
 vi.mock("../../lib/api", () => ({
   isTauri: false,
-  generationLog: async () => ({ version: 1, entries: [] }),
+  generationLog: mocks.generationLog,
 }));
 vi.mock("../../lib/asset", () => ({ assetUrl: (path: string | null) => path }));
 vi.mock("../../store/projectActions", () => mocks);
@@ -42,6 +43,7 @@ let container: HTMLDivElement;
 beforeEach(() => {
   vi.clearAllMocks();
   for (const mock of Object.values(mocks)) mock.mockResolvedValue(undefined);
+  mocks.generationLog.mockResolvedValue({ version: 1, entries: [] });
   localStorage.clear();
   localStorage.setItem(HOME_NOTICE_STORAGE_KEY, HOME_NOTICE_VERSION);
   useRecentStore.setState({
@@ -108,7 +110,14 @@ it("new_open_sample_register_only_after_success_and_route_tutorial", async () =>
   expect(useRecentStore.getState().recents.map(({ name }) => name)).toEqual(["Existing"]);
 });
 
-it("project_card_renders_thumbnail_relative_time_and_missing_state", async () => {
+it("does not request or render generation activity on Home", async () => {
+  await act(async () => root.render(<HomeView />));
+
+  expect(mocks.generationLog).not.toHaveBeenCalled();
+  expect(container.querySelector('[aria-labelledby="home-generation-heading"]')).toBeNull();
+});
+
+it("project_card_renders_a_16_by_9_thumbnail_preview_and_relative_time", async () => {
   useRecentStore.setState({
     recents: [{
       path: "/tmp/Metadata.opentake",
@@ -117,11 +126,14 @@ it("project_card_renders_thumbnail_relative_time_and_missing_state", async () =>
       modifiedAt: Date.now(),
       thumbnailPath: "/tmp/Metadata.opentake/thumbnail.jpg",
       missing: false,
-    }],
+  }],
   });
   await act(async () => root.render(<HomeView />));
 
-  expect(container.querySelector<HTMLImageElement>("img")?.src).toContain("thumbnail.jpg");
+  const preview = container.querySelector<HTMLElement>("figure.home-project-preview");
+  expect(preview?.tagName).toBe("FIGURE");
+  expect(preview?.querySelector<HTMLImageElement>("img.home-project-preview__image")?.src)
+    .toContain("thumbnail.jpg");
   expect(container.textContent).toContain("home.relative.today");
 
   act(() => useRecentStore.setState({
@@ -136,6 +148,27 @@ it("project_card_renders_thumbnail_relative_time_and_missing_state", async () =>
   }));
   await vi.waitFor(() => expect(container.textContent).toContain("home.fileMissing"));
   expect(container.querySelector("img")).toBeNull();
+});
+
+it("project_card_uses_a_named_structured_fallback_when_no_thumbnail_is_available", async () => {
+  useRecentStore.setState({
+    recents: [{
+      path: "/tmp/No Preview.opentake",
+      name: "No Preview",
+      openedAt: 1,
+      thumbnailPath: null,
+      missing: false,
+      offline: false,
+    }],
+  });
+  await act(async () => root.render(<HomeView />));
+
+  const fallback = container.querySelector<HTMLElement>("figure.home-project-preview--fallback");
+  expect(fallback?.querySelector(".home-project-preview__fallback-name")?.textContent)
+    .toBe("No Preview");
+  expect(fallback?.querySelector(".home-project-preview__aspect")?.textContent).toBe("16:9");
+  expect(fallback?.querySelectorAll(".home-project-preview__track").length).toBeGreaterThan(0);
+  expect(fallback?.querySelector("svg")).toBeNull();
 });
 
 it("never_mounts_a_cached_thumbnail_before_native_path_validation", async () => {
