@@ -1,5 +1,7 @@
 // @vitest-environment happy-dom
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import React from "react";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -24,6 +26,7 @@ import {
 
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
+let componentStyles: HTMLStyleElement | null = null;
 
 const originalActions = {
   importToProject: useLibraryStore.getState().importToProject,
@@ -44,8 +47,10 @@ const originalLocale = useI18nStore.getState().locale;
 afterEach(async () => {
   if (root) await act(async () => root?.unmount());
   container?.remove();
+  componentStyles?.remove();
   root = null;
   container = null;
+  componentStyles = null;
   stopLibrarySync();
   useLibraryStore.setState(originalLibraryViewState);
   useEditorUiStore.setState({ view: originalView });
@@ -155,6 +160,28 @@ describe("LibraryEntryCard keyboard actions", () => {
 });
 
 describe("Library navigation", () => {
+  it("resolves the rail top padding to the shared titlebar safe area", async () => {
+    componentStyles = document.createElement("style");
+    componentStyles.textContent = `
+      :root {
+        --titlebar-safe-top: 44px;
+        --space-sm: 8px;
+        --space-xl: 24px;
+      }
+      ${readFileSync(resolve(process.cwd(), "src/styles/components.css"), "utf8")}
+    `;
+    document.head.append(componentStyles);
+
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => root?.render(<LibraryView />));
+
+    const rail = container.querySelector<HTMLElement>(".library-category-rail");
+    expect(rail).not.toBeNull();
+    expect(getComputedStyle(rail!).paddingTop).toBe("44px");
+  });
+
   it("keeps one Home action first in the rail and preserves the selected category on re-entry", async () => {
     useI18nStore.getState().setLocale("en");
     useLibraryStore.setState({

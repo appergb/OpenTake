@@ -186,7 +186,7 @@ function CategoryTree({
         display: "flex",
         flexDirection: "column",
         gap: "var(--space-xxs)",
-        padding: "0 var(--space-sm) var(--space-xl)",
+        padding: "var(--titlebar-safe-top) var(--space-sm) var(--space-xl)",
         background: "var(--bg-raised)",
         borderRight: "var(--bw-thin) solid var(--border-primary)",
         overflowY: "auto",

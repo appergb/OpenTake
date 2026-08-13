@@ -51,3 +51,38 @@ The full `pnpm -C web test` suite was also run after concurrent MCP files appear
 ## Commit
 
 `fix(library): place Home navigation in the global rail`
+
+## Review fix round 1
+
+### Finding addressed
+
+- The rail's inline `padding: 0 ...` shorthand overrode the class-level safe-area padding in the rendered cascade. The inline shorthand now uses `var(--titlebar-safe-top)` directly, so its highest-precedence declaration preserves the title-bar clearance.
+- Added a rendered CSS regression test that loads the real component stylesheet, assigns a concrete 44px safe-area token, and asserts the rail's computed `padding-top` is 44px.
+
+### TDD evidence
+
+RED command:
+
+```text
+pnpm -C web exec vitest run src/components/media/LibraryView.test.tsx --reporter=verbose
+```
+
+Observed result: exit 1; the new computed-style test received `0px` instead of `44px`.
+
+GREEN commands:
+
+```text
+pnpm -C web exec vitest run src/components/media/LibraryView.test.tsx --reporter=verbose
+pnpm -C web build
+git diff --check
+```
+
+Observed results:
+
+- Focused Library suite: 1 file, 8 tests passed.
+- Production TypeScript/Vite build: exit 0; existing dynamic-import and bundle-size warnings remain.
+- Diff check: exit 0, no whitespace errors.
+
+### Review fix commit
+
+`fix(library): preserve titlebar safe area`
