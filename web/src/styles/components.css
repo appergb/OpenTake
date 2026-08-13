@@ -19,6 +19,30 @@
   min-block-size: 0;
 }
 
+.storage-category-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.storage-category-row__main {
+  min-block-size: 28px;
+}
+
+.storage-model-confirmation {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  align-items: flex-end;
+  padding-block-start: var(--space-xs);
+}
+
+.storage-model-confirmation__actions {
+  display: inline-flex;
+  gap: var(--space-xs);
+  align-items: center;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .reveal {
     transition: none;

@@ -54,6 +54,8 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
 });
 
 const render = async () => {
@@ -62,6 +64,17 @@ const render = async () => {
 
 const clearButton = (category: string) =>
   container.querySelector<HTMLButtonElement>(`[data-category="${category}"][data-action="clear"]`)!;
+
+const modelRow = () => container.querySelector<HTMLElement>('[data-storage-row="models"]')!;
+
+const reveal = () => modelRow().querySelector<HTMLElement>(".reveal");
+
+const confirmationButton = (action: "confirm-remove" | "confirm-cancel") =>
+  container.querySelector<HTMLButtonElement>(`[data-category="models"][data-action="${action}"]`)!;
+
+const openModelConfirmation = async () => {
+  await act(async () => clearButton("models").click());
+};
 
 it("shows a loading state while the usage report is in flight", async () => {
   api.usage.mockReturnValue(new Promise(() => undefined));
@@ -103,32 +116,124 @@ it("clears a non-model category immediately and adopts the fresh snapshot", asyn
   expect(clearButton("thumbnails").disabled).toBe(true);
 });
 
+it("reveals one model confirmation inside its row so sibling layout follows the disclosure", async () => {
+  api.usage.mockResolvedValue(usageFixture());
+  await render();
+  await act(async () => undefined);
+
+  const siblingRow = modelRow().nextElementSibling;
+  await openModelConfirmation();
+
+  expect(api.clear).not.toHaveBeenCalled();
+  expect(reveal()?.textContent).toContain(t("storage.clearConfirmTitle"));
+  expect(reveal()?.textContent).toContain(t("storage.clearConfirmBody"));
+  expect(modelRow().contains(reveal())).toBe(true);
+  expect(modelRow().nextElementSibling).toBe(siblingRow);
+  expect(siblingRow?.getAttribute("data-storage-row")).toBe("other");
+
+  await act(async () => clearButton("models").click());
+  expect(modelRow().querySelectorAll('[data-action="confirm-remove"]')).toHaveLength(1);
+});
+
+it("keeps confirmation copy mounted through the cancel exit and restores focus to clear", async () => {
+  vi.useFakeTimers();
+  api.usage.mockResolvedValue(usageFixture());
+  await render();
+  await act(async () => undefined);
+
+  await openModelConfirmation();
+  const cancel = confirmationButton("confirm-cancel");
+  cancel.focus();
+  await act(async () => cancel.click());
+
+  expect(document.activeElement).toBe(clearButton("models"));
+  expect(reveal()?.dataset.state).toBe("closed");
+  expect(reveal()?.textContent).toContain(t("storage.clearConfirmBody"));
+
+  await act(async () => vi.advanceTimersByTimeAsync(179));
+  expect(reveal()).not.toBeNull();
+  await act(async () => vi.advanceTimersByTimeAsync(1));
+  expect(reveal()).toBeNull();
+});
+
+it("closes after successful model deletion and moves focus to the next available clear action", async () => {
+  vi.useFakeTimers();
+  api.usage.mockResolvedValue(usageFixture());
+  let resolveClear: (usage: UsageFixture) => void;
+  api.clear.mockReturnValue(new Promise<UsageFixture>((resolve) => {
+    resolveClear = resolve;
+  }));
+  await render();
+  await act(async () => undefined);
+
+  await openModelConfirmation();
+  await act(async () => confirmationButton("confirm-remove").click());
+  expect(confirmationButton("confirm-remove").disabled).toBe(true);
+
+  await act(async () => {
+    resolveClear({
+      ...usageFixture(),
+      categories: usageFixture().categories.map((category) =>
+        category.id === "models" ? { ...category, bytes: 0 } : category,
+      ),
+      totalBytes: 460,
+    });
+  });
+
+  expect(api.clear).toHaveBeenCalledWith(["models"], true);
+  expect(reveal()?.dataset.state).toBe("closed");
+  expect(document.activeElement).toBe(clearButton("other"));
+  await act(async () => vi.advanceTimersByTimeAsync(180));
+  expect(reveal()).toBeNull();
+});
+
+it("keeps a model-clear backend failure visible in the open confirmation", async () => {
+  api.usage.mockResolvedValue(usageFixture());
+  api.clear.mockRejectedValue("model removal failed");
+  await render();
+  await act(async () => undefined);
+
+  await openModelConfirmation();
+  await act(async () => confirmationButton("confirm-remove").click());
+
+  expect(reveal()?.dataset.state).toBe("open");
+  expect(reveal()?.querySelector('[role="alert"]')?.textContent).toContain("model removal failed");
+});
+
+it("removes the confirmation synchronously when reduced motion is requested", async () => {
+  vi.stubGlobal(
+    "matchMedia",
+    vi.fn().mockImplementation(() => ({ matches: true })),
+  );
+  api.usage.mockResolvedValue(usageFixture());
+  await render();
+  await act(async () => undefined);
+
+  await openModelConfirmation();
+  expect(reveal()?.dataset.state).toBe("open");
+  await act(async () => confirmationButton("confirm-cancel").click());
+  expect(reveal()).toBeNull();
+});
+
 it("requires an explicit confirm step before clearing models", async () => {
   api.usage.mockResolvedValue(usageFixture());
   api.clear.mockResolvedValue({ ...usageFixture(), totalBytes: 460 });
   await render();
   await act(async () => undefined);
 
-  await act(async () => clearButton("models").click());
+  await openModelConfirmation();
   expect(api.clear).not.toHaveBeenCalled();
-  expect(container.textContent).toContain(t("storage.clearConfirmTitle"));
-  expect(container.textContent).toContain(t("storage.clearConfirmBody"));
 
   // Cancelling leaves the models untouched.
   await act(async () => {
-    container
-      .querySelector<HTMLButtonElement>('[data-category="models"][data-action="confirm-cancel"]')!
-      .click();
+    confirmationButton("confirm-cancel").click();
   });
   expect(api.clear).not.toHaveBeenCalled();
-  expect(container.textContent).not.toContain(t("storage.clearConfirmTitle"));
 
   // Confirming removes them with the gate flag set.
-  await act(async () => clearButton("models").click());
+  await openModelConfirmation();
   await act(async () => {
-    container
-      .querySelector<HTMLButtonElement>('[data-category="models"][data-action="confirm-remove"]')!
-      .click();
+    confirmationButton("confirm-remove").click();
   });
   expect(api.clear).toHaveBeenCalledWith(["models"], true);
 });
