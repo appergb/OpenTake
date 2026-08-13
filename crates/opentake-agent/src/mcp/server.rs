@@ -612,44 +612,93 @@ async fn localhost_guard(
     }
 }
 
-fn bearer_token_matches(headers: &axum::http::HeaderMap, expected: &str) -> bool {
-    let mut values = headers.get_all(axum::http::header::AUTHORIZATION).iter();
-    let Some(value) = values.next() else {
-        return false;
-    };
-    if values.next().is_some() {
-        return false;
-    }
-    let Ok(value) = value.to_str() else {
-        return false;
-    };
-    let Some((scheme, supplied)) = value.split_once(' ') else {
-        return false;
-    };
-    scheme.eq_ignore_ascii_case("bearer")
-        && supplied.len() == expected.len()
-        && bool::from(supplied.as_bytes().ct_eq(expected.as_bytes()))
+/// The external client authenticated for an MCP HTTP request. Credential
+/// generations distinguish a freshly regenerated long-lived credential from a
+/// prior credential for the same client identity.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuthenticatedMcpClient {
+    pub client_id: Arc<str>,
+    pub credential_generation: u64,
 }
 
-/// Authenticate every route on a per-turn endpoint before any MCP session is
-/// created. The fixed-size token is compared in constant time after its public
-/// length and scheme have been validated.
-async fn ephemeral_bearer_guard(
-    axum::extract::State(expected): axum::extract::State<Arc<str>>,
-    request: axum::extract::Request,
-    next: axum::middleware::Next,
-) -> axum::response::Response {
+/// Resolves a syntactically valid bearer candidate without retaining or
+/// reporting its secret value. Implementations are responsible for comparing
+/// their active credentials in constant time and returning the matching client.
+pub trait BearerAuthorizer: Send + Sync {
+    fn authorize(&self, token: &str) -> Option<AuthenticatedMcpClient>;
+}
+
+struct SingleBearerAuthorizer {
+    token: Arc<str>,
+    client: AuthenticatedMcpClient,
+}
+
+impl SingleBearerAuthorizer {
+    fn new(token: Arc<str>) -> Self {
+        Self {
+            token,
+            client: AuthenticatedMcpClient {
+                client_id: Arc::from("ephemeral"),
+                credential_generation: 0,
+            },
+        }
+    }
+}
+
+impl BearerAuthorizer for SingleBearerAuthorizer {
+    fn authorize(&self, candidate: &str) -> Option<AuthenticatedMcpClient> {
+        (candidate.len() == self.token.len()
+            && bool::from(candidate.as_bytes().ct_eq(self.token.as_bytes())))
+        .then(|| self.client.clone())
+    }
+}
+
+fn bearer_candidate(headers: &axum::http::HeaderMap) -> Option<&str> {
+    let mut values = headers.get_all(axum::http::header::AUTHORIZATION).iter();
+    let Some(value) = values.next() else {
+        return None;
+    };
+    if values.next().is_some() {
+        return None;
+    }
+    let Ok(value) = value.to_str() else {
+        return None;
+    };
+    let Some((scheme, supplied)) = value.split_once(' ') else {
+        return None;
+    };
+    (scheme.eq_ignore_ascii_case("bearer")
+        && !supplied.is_empty()
+        && !supplied.chars().any(char::is_whitespace))
+    .then_some(supplied)
+}
+
+fn authentication_required() -> axum::response::Response {
     use axum::response::IntoResponse;
 
-    if bearer_token_matches(request.headers(), &expected) {
+    (
+        axum::http::StatusCode::UNAUTHORIZED,
+        [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
+        "OpenTake MCP authentication required",
+    )
+        .into_response()
+}
+
+/// Authenticate every route before any MCP session is created. This boundary
+/// parses the bearer syntax once, delegates credential matching, and adds only
+/// the authenticated public identity to the request extensions.
+async fn bearer_authorization_guard(
+    axum::extract::State(authorizer): axum::extract::State<Arc<dyn BearerAuthorizer>>,
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if let Some(client) =
+        bearer_candidate(request.headers()).and_then(|token| authorizer.authorize(token))
+    {
+        request.extensions_mut().insert(client);
         next.run(request).await
     } else {
-        (
-            axum::http::StatusCode::UNAUTHORIZED,
-            [(axum::http::header::WWW_AUTHENTICATE, "Bearer")],
-            "OpenTake MCP authentication required",
-        )
-            .into_response()
+        authentication_required()
     }
 }
 
@@ -934,7 +983,7 @@ fn build_gated_router_for_port(
     activity: Arc<DispatchActivity>,
     shutdown: CancellationToken,
     expected_port: u16,
-    bearer_token: Option<Arc<str>>,
+    authorizer: Option<Arc<dyn BearerAuthorizer>>,
 ) -> axum::Router {
     use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
     use rmcp::transport::streamable_http_server::{
@@ -976,10 +1025,10 @@ fn build_gated_router_for_port(
             expected_port,
             localhost_guard,
         ));
-    match bearer_token {
-        Some(token) => router.layer(axum::middleware::from_fn_with_state(
-            token,
-            ephemeral_bearer_guard,
+    match authorizer {
+        Some(authorizer) => router.layer(axum::middleware::from_fn_with_state(
+            authorizer,
+            bearer_authorization_guard,
         )),
         None => router,
     }
@@ -1084,6 +1133,130 @@ impl Drop for EphemeralMcpEndpoint {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ManagedMcpError {
+    #[error("could not use the managed OpenTake MCP listener")]
+    Bind(#[source] std::io::Error),
+    #[error("the managed OpenTake MCP endpoint failed")]
+    Serve(#[source] std::io::Error),
+    #[error("the managed OpenTake MCP endpoint task failed")]
+    Join,
+}
+
+/// A long-lived, externally authorized MCP endpoint. The authorizer is queried
+/// for every request, so credential revocation and regeneration take effect
+/// without restarting the listener.
+#[must_use = "the endpoint must be shut down and awaited before release"]
+pub struct ManagedMcpEndpoint {
+    addr: SocketAddr,
+    shutdown: CancellationToken,
+    activity: Arc<DispatchActivity>,
+    cancel_gate: Arc<dyn ChatTurnGate>,
+    join: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
+    closed: bool,
+}
+
+impl ManagedMcpEndpoint {
+    pub fn addr(&self) -> SocketAddr {
+        self.addr
+    }
+
+    /// Stop admission and transport sessions. Call [`Self::wait`] afterwards to
+    /// wait for admitted blocking work and the listener task to finish.
+    pub fn shutdown(&self) {
+        self.activity.stop_accepting();
+        self.cancel_gate.request_cancel();
+        self.shutdown.cancel();
+    }
+
+    /// Complete shutdown safely after [`Self::shutdown`] has stopped admission.
+    pub async fn wait(mut self) -> Result<(), ManagedMcpError> {
+        self.shutdown();
+        self.activity.wait_zero().await;
+        let result = match self.join.as_mut() {
+            Some(join) => match join.await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => Err(ManagedMcpError::Serve(error)),
+                Err(error) => {
+                    tracing::error!(
+                        target: "opentake::mcp::private",
+                        task_cancelled = error.is_cancelled(),
+                        task_panic = error.is_panic(),
+                        "managed MCP listener task failed"
+                    );
+                    Err(ManagedMcpError::Join)
+                }
+            },
+            None => Err(ManagedMcpError::Join),
+        };
+        self.join.take();
+        self.closed = true;
+        result
+    }
+}
+
+impl Drop for ManagedMcpEndpoint {
+    fn drop(&mut self) {
+        if self.closed {
+            return;
+        }
+        self.shutdown();
+        if let Some(join) = self.join.take() {
+            join.abort();
+        }
+    }
+}
+
+/// Serve a long-lived externally authorized MCP endpoint on a caller-bound
+/// loopback listener. Passing the listener directly makes bind behavior
+/// deterministic for integration tests and lets the Tauri shell own port
+/// selection without duplicating transport setup.
+pub async fn bind_managed_gated_on(
+    listener: tokio::net::TcpListener,
+    dispatcher: Arc<Dispatcher>,
+    registry: Arc<RwLock<PluginRegistry>>,
+    gate: Arc<dyn ChatTurnGate>,
+    authorizer: Arc<dyn BearerAuthorizer>,
+) -> Result<ManagedMcpEndpoint, ManagedMcpError> {
+    let bound_addr = listener.local_addr().map_err(ManagedMcpError::Bind)?;
+    if !bound_addr.ip().is_loopback() {
+        return Err(ManagedMcpError::Bind(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "managed MCP endpoint requires a loopback address",
+        )));
+    }
+    let instructions = registry
+        .read()
+        .map(|registry| assemble_system_prompt(&registry, "default"))
+        .unwrap_or_default();
+    let activity = DispatchActivity::new();
+    let shutdown = CancellationToken::new();
+    let cancel_gate = gate.clone();
+    let router = build_gated_router_for_port(
+        dispatcher,
+        instructions,
+        gate,
+        activity.clone(),
+        shutdown.clone(),
+        bound_addr.port(),
+        Some(authorizer),
+    );
+    let listener_shutdown = shutdown.clone();
+    let join = tokio::spawn(async move {
+        axum::serve(listener, router)
+            .with_graceful_shutdown(listener_shutdown.cancelled_owned())
+            .await
+    });
+    Ok(ManagedMcpEndpoint {
+        addr: bound_addr,
+        shutdown,
+        activity,
+        cancel_gate,
+        join: Some(join),
+        closed: false,
+    })
+}
+
 /// Bind a per-turn project-authorized MCP server on a fresh IPv4 loopback port.
 pub async fn bind_ephemeral_gated(
     dispatcher: Arc<Dispatcher>,
@@ -1137,7 +1310,7 @@ async fn bind_ephemeral_gated_on(
         activity.clone(),
         shutdown.clone(),
         bound_addr.port(),
-        Some(bearer_token.clone()),
+        Some(Arc::new(SingleBearerAuthorizer::new(bearer_token.clone()))),
     );
     let listener_shutdown = shutdown.clone();
     let listener_stopped = stopped.clone();
@@ -1509,6 +1682,151 @@ mod tests {
         admission: DispatchAdmission,
     ) -> McpServer {
         McpServer::from_gated_dispatcher(dispatcher, String::new(), gate, activity, admission)
+    }
+
+    struct TestBearerAuthorizer {
+        credentials: RwLock<Vec<(String, AuthenticatedMcpClient)>>,
+    }
+
+    impl TestBearerAuthorizer {
+        fn with_credential(token: &str, client_id: &str, credential_generation: u64) -> Self {
+            Self {
+                credentials: RwLock::new(vec![(
+                    (token).to_owned(),
+                    AuthenticatedMcpClient {
+                        client_id: Arc::from(client_id),
+                        credential_generation,
+                    },
+                )]),
+            }
+        }
+
+        fn replace_credential(&self, token: &str, client_id: &str, credential_generation: u64) {
+            *self
+                .credentials
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = vec![(
+                token.to_owned(),
+                AuthenticatedMcpClient {
+                    client_id: Arc::from(client_id),
+                    credential_generation,
+                },
+            )];
+        }
+
+        fn revoke_all(&self) {
+            self.credentials
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clear();
+        }
+    }
+
+    impl BearerAuthorizer for TestBearerAuthorizer {
+        fn authorize(&self, candidate: &str) -> Option<AuthenticatedMcpClient> {
+            self.credentials
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .find_map(|(token, client)| {
+                    (token.len() == candidate.len()
+                        && bool::from(token.as_bytes().ct_eq(candidate.as_bytes())))
+                    .then(|| client.clone())
+                })
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturingSubscriber {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl tracing::Subscriber for CapturingSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Visitor<'a>(&'a mut String);
+
+            impl tracing::field::Visit for Visitor<'_> {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    let _ = write!(self.0, " {}={value:?}", field.name());
+                }
+            }
+
+            let mut recorded = event.metadata().name().to_owned();
+            event.record(&mut Visitor(&mut recorded));
+            self.events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(recorded);
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+
+        fn register_callsite(
+            &self,
+            _metadata: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            tracing::subscriber::Interest::always()
+        }
+
+        fn max_level_hint(&self) -> Option<tracing::level_filters::LevelFilter> {
+            Some(tracing::level_filters::LevelFilter::TRACE)
+        }
+    }
+
+    fn managed_fixture() -> (
+        Arc<Dispatcher>,
+        Arc<RwLock<PluginRegistry>>,
+        Arc<CountingGate>,
+    ) {
+        let registry = Arc::new(RwLock::new(PluginRegistry::with_builtins()));
+        let dispatcher = Arc::new(Dispatcher::new(
+            Arc::new(TestHandle::new()),
+            registry.clone(),
+        ));
+        (dispatcher, registry, Arc::new(CountingGate::new(true)))
+    }
+
+    fn initialize_body() -> Value {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": { "name": "managed-test", "version": "0" }
+            }
+        })
+    }
+
+    async fn bind_managed_test_endpoint(
+        authorizer: Arc<dyn BearerAuthorizer>,
+    ) -> ManagedMcpEndpoint {
+        let (dispatcher, registry, gate) = managed_fixture();
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind managed test listener");
+        bind_managed_gated_on(listener, dispatcher, registry, gate, authorizer)
+            .await
+            .expect("bind managed endpoint")
     }
 
     #[test]
@@ -2051,6 +2369,327 @@ mod tests {
             .expect("send expired credential");
         assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
         second.close().await.expect("close second endpoint");
+    }
+
+    #[tokio::test]
+    async fn managed_authentication_failures_have_one_redacted_public_shape() {
+        let valid = "managed-valid-credential";
+        let wrong = "managed-wrong-credential";
+        let authorizer = Arc::new(TestBearerAuthorizer::with_credential(valid, "external", 7));
+        let endpoint = bind_managed_test_endpoint(authorizer.clone()).await;
+        let client = reqwest::Client::new();
+
+        let missing = client
+            .post(format!("http://{}/mcp", endpoint.addr()))
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .json(&initialize_body())
+            .send()
+            .await
+            .expect("send missing credential");
+        let wrong = client
+            .post(format!("http://{}/mcp", endpoint.addr()))
+            .bearer_auth(wrong)
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .json(&initialize_body())
+            .send()
+            .await
+            .expect("send wrong credential");
+        let malformed = client
+            .post(format!("http://{}/mcp", endpoint.addr()))
+            .header("authorization", format!("Bearer {valid} extra"))
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .json(&initialize_body())
+            .send()
+            .await
+            .expect("send malformed credential");
+        authorizer.revoke_all();
+        let revoked = client
+            .post(format!("http://{}/mcp", endpoint.addr()))
+            .bearer_auth(valid)
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .json(&initialize_body())
+            .send()
+            .await
+            .expect("send revoked credential");
+
+        let mut shapes = Vec::new();
+        for response in [missing, wrong, malformed, revoked] {
+            let status = response.status();
+            let www_authenticate = response.headers().get("www-authenticate").cloned();
+            let body = response.text().await.expect("read authentication response");
+            assert!(
+                !body.contains(valid),
+                "authentication response leaked valid credential"
+            );
+            assert!(
+                !body.contains("managed-wrong-credential"),
+                "authentication response leaked candidate credential"
+            );
+            shapes.push((status, www_authenticate, body));
+        }
+        assert!(shapes.iter().all(|shape| shape == &shapes[0]));
+        assert_eq!(shapes[0].0, reqwest::StatusCode::UNAUTHORIZED);
+
+        endpoint.shutdown();
+        endpoint.wait().await.expect("stop managed endpoint");
+    }
+
+    #[tokio::test]
+    async fn managed_authorizer_observes_regeneration_before_new_initialize() {
+        let old_token = "managed-generation-one";
+        let new_token = "managed-generation-two";
+        let authorizer = Arc::new(TestBearerAuthorizer::with_credential(
+            old_token, "external", 1,
+        ));
+        let endpoint = bind_managed_test_endpoint(authorizer.clone()).await;
+        let client = reqwest::Client::new();
+        authorizer.replace_credential(new_token, "external", 2);
+
+        let old = client
+            .post(format!("http://{}/mcp", endpoint.addr()))
+            .bearer_auth(old_token)
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .json(&initialize_body())
+            .send()
+            .await
+            .expect("send old credential");
+        assert_eq!(old.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        let regenerated = client
+            .post(format!("http://{}/mcp", endpoint.addr()))
+            .bearer_auth(new_token)
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .json(&initialize_body())
+            .send()
+            .await
+            .expect("send regenerated credential");
+        assert!(regenerated.status().is_success());
+
+        endpoint.shutdown();
+        endpoint.wait().await.expect("stop managed endpoint");
+    }
+
+    #[tokio::test]
+    async fn managed_endpoint_keeps_loopback_origin_and_host_guards() {
+        let token = "managed-loopback-credential";
+        let endpoint = bind_managed_test_endpoint(Arc::new(TestBearerAuthorizer::with_credential(
+            token, "external", 1,
+        )))
+        .await;
+        let client = reqwest::Client::new();
+        let url = format!("http://{}/mcp", endpoint.addr());
+
+        let remote_host = client
+            .post(&url)
+            .bearer_auth(token)
+            .header(
+                "host",
+                format!("attacker.example:{}", endpoint.addr().port()),
+            )
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .json(&initialize_body())
+            .send()
+            .await
+            .expect("send remote host");
+        assert_eq!(remote_host.status(), reqwest::StatusCode::FORBIDDEN);
+
+        let remote_origin = client
+            .post(&url)
+            .bearer_auth(token)
+            .header(
+                "origin",
+                format!("http://attacker.example:{}", endpoint.addr().port()),
+            )
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .json(&initialize_body())
+            .send()
+            .await
+            .expect("send remote origin");
+        assert_eq!(remote_origin.status(), reqwest::StatusCode::FORBIDDEN);
+
+        let loopback_origin = client
+            .post(&url)
+            .bearer_auth(token)
+            .header(
+                "origin",
+                format!("http://127.0.0.1:{}", endpoint.addr().port()),
+            )
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .json(&initialize_body())
+            .send()
+            .await
+            .expect("send loopback origin");
+        assert!(loopback_origin.status().is_success());
+
+        endpoint.shutdown();
+        endpoint.wait().await.expect("stop managed endpoint");
+    }
+
+    #[tokio::test]
+    async fn managed_shutdown_stops_listener_admission_and_workers() {
+        let token = "managed-shutdown-credential";
+        let registry = Arc::new(RwLock::new(PluginRegistry::with_builtins()));
+        let dispatcher = Arc::new(Dispatcher::new(
+            Arc::new(TestHandle::new()),
+            registry.clone(),
+        ));
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        let gate = Arc::new(BlockingGate::new(entered_tx, cancel_tx));
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind managed shutdown listener");
+        let endpoint = bind_managed_gated_on(
+            listener,
+            dispatcher,
+            registry,
+            gate.clone(),
+            Arc::new(TestBearerAuthorizer::with_credential(token, "external", 1)),
+        )
+        .await
+        .expect("bind managed endpoint");
+        let addr = endpoint.addr();
+        let client = reqwest::Client::new();
+        let url = format!("http://{addr}/mcp");
+        let initialized = client
+            .post(&url)
+            .bearer_auth(token)
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .json(&initialize_body())
+            .send()
+            .await
+            .expect("initialize managed session");
+        let session = initialized
+            .headers()
+            .get("mcp-session-id")
+            .expect("stateful managed session")
+            .clone();
+        let call_client = client.clone();
+        let call_url = url.clone();
+        let call = tokio::spawn(async move {
+            call_client
+                .post(call_url)
+                .bearer_auth(token)
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .header("mcp-session-id", session)
+                .header("mcp-protocol-version", "2025-06-18")
+                .json(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": { "name": "get_timeline", "arguments": {} }
+                }))
+                .send()
+                .await
+        });
+        entered_rx
+            .await
+            .expect("blocking managed worker entered gate");
+        endpoint.shutdown();
+        cancel_rx
+            .await
+            .expect("managed shutdown requested gate cancellation");
+        let mut stopped = tokio::spawn(async move { endpoint.wait().await });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut stopped)
+                .await
+                .is_err(),
+            "managed shutdown returned before its admitted worker finished"
+        );
+        gate.release();
+        let _ = call.await.expect("managed call joined");
+        stopped
+            .await
+            .expect("managed endpoint task joined")
+            .expect("stop managed endpoint");
+        assert!(tokio::net::TcpStream::connect(addr).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn managed_authorization_attaches_client_identity_to_request_extensions() {
+        use axum::extract::Extension;
+        use tower::ServiceExt as _;
+
+        async fn identity(Extension(client): Extension<AuthenticatedMcpClient>) -> String {
+            format!("{}:{}", client.client_id, client.credential_generation)
+        }
+
+        let router = axum::Router::new()
+            .route("/identity", axum::routing::get(identity))
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::new(TestBearerAuthorizer::with_credential(
+                    "extension-token",
+                    "external",
+                    9,
+                )) as Arc<dyn BearerAuthorizer>,
+                bearer_authorization_guard,
+            ));
+        let response = router
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/identity")
+                    .header("authorization", "Bearer extension-token")
+                    .body(axum::body::Body::empty())
+                    .expect("identity request"),
+            )
+            .await
+            .expect("identity response");
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .expect("read identity response");
+        assert_eq!(&body[..], b"external:9");
+    }
+
+    #[test]
+    fn bearer_authorization_never_records_candidate_tokens() {
+        use tower::ServiceExt as _;
+
+        let router = axum::Router::new()
+            .route("/", axum::routing::get(|| async { "authorized" }))
+            .layer(axum::middleware::from_fn_with_state(
+                Arc::new(TestBearerAuthorizer::with_credential(
+                    "active-token",
+                    "external",
+                    1,
+                )) as Arc<dyn BearerAuthorizer>,
+                bearer_authorization_guard,
+            ));
+        let subscriber = CapturingSubscriber::default();
+        let events = subscriber.events.clone();
+        let dispatch = tracing::Dispatch::new(subscriber);
+        tracing::dispatcher::with_default(&dispatch, || {
+            for candidate in ["wrong-candidate-a", "wrong-candidate-b"] {
+                let response = futures::executor::block_on(
+                    router.clone().oneshot(
+                        axum::http::Request::builder()
+                            .uri("/")
+                            .header("authorization", format!("Bearer {candidate}"))
+                            .body(axum::body::Body::empty())
+                            .expect("authorization request"),
+                    ),
+                )
+                .expect("authorization response");
+                assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
+            }
+        });
+        let captured = events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .join("\n");
+        assert!(!captured.contains("wrong-candidate-a"));
+        assert!(!captured.contains("wrong-candidate-b"));
     }
 
     #[test]

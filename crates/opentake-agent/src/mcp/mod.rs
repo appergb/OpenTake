@@ -20,3 +20,5 @@ mod media_catalog;
 pub mod motion;
 pub mod server;
 pub mod vision;
+
+pub use server::{AuthenticatedMcpClient, BearerAuthorizer, ManagedMcpEndpoint, ManagedMcpError};
