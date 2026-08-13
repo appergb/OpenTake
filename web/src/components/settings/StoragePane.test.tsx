@@ -43,16 +43,18 @@ function usageFixture(): UsageFixture {
 
 let container: HTMLDivElement;
 let root: Root;
+let rootMounted: boolean;
 
 beforeEach(() => {
   vi.clearAllMocks();
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
+  rootMounted = true;
 });
 
 afterEach(async () => {
-  await act(async () => root.unmount());
+  if (rootMounted) await act(async () => root.unmount());
   container.remove();
   vi.useRealTimers();
   vi.unstubAllGlobals();
@@ -74,6 +76,16 @@ const confirmationButton = (action: "confirm-remove" | "confirm-cancel") =>
 
 const openModelConfirmation = async () => {
   await act(async () => clearButton("models").click());
+};
+
+const deferred = <T,>() => {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 };
 
 it("shows a loading state while the usage report is in flight", async () => {
@@ -186,6 +198,84 @@ it("closes after successful model deletion and moves focus to the next available
   await act(async () => vi.advanceTimersByTimeAsync(180));
   expect(reveal()).toBeNull();
 });
+
+it("falls back to the previous enabled clear action when no later model sibling is available", async () => {
+  vi.useFakeTimers();
+  const initial = usageFixture();
+  initial.categories = initial.categories.map((category) =>
+    category.id === "other" ? { ...category, bytes: 0 } : category,
+  );
+  initial.totalBytes = 750;
+  api.usage.mockResolvedValue(initial);
+  api.clear.mockResolvedValue({
+    ...initial,
+    categories: initial.categories.map((category) =>
+      category.id === "models" ? { ...category, bytes: 0 } : category,
+    ),
+    totalBytes: 250,
+  });
+  await render();
+  await act(async () => undefined);
+
+  await openModelConfirmation();
+  await act(async () => confirmationButton("confirm-remove").click());
+
+  expect(document.activeElement).toBe(clearButton("waveforms"));
+});
+
+it("focuses the pane when model deletion leaves no enabled clear action", async () => {
+  vi.useFakeTimers();
+  const initial = usageFixture();
+  initial.categories = initial.categories.map((category) => ({
+    ...category,
+    bytes: category.id === "models" ? 500 : 0,
+  }));
+  initial.totalBytes = 500;
+  api.usage.mockResolvedValue(initial);
+  api.clear.mockResolvedValue({
+    ...initial,
+    categories: initial.categories.map((category) => ({ ...category, bytes: 0 })),
+    totalBytes: 0,
+  });
+  await render();
+  await act(async () => undefined);
+
+  const pane = container.querySelector("section");
+  await openModelConfirmation();
+  await act(async () => confirmationButton("confirm-remove").click());
+
+  expect(document.activeElement).toBe(pane);
+});
+
+it.each(["resolve", "reject"] as const)(
+  "ignores a model clear %s after the pane unmounts",
+  async (outcome) => {
+    const operation = deferred<UsageFixture>();
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    api.usage.mockResolvedValue(usageFixture());
+    api.clear.mockReturnValue(operation.promise);
+    await render();
+    await act(async () => undefined);
+
+    await openModelConfirmation();
+    await act(async () => confirmationButton("confirm-remove").click());
+    await act(async () => root.unmount());
+    rootMounted = false;
+
+    const outside = document.createElement("button");
+    document.body.append(outside);
+    outside.focus();
+    await act(async () => {
+      if (outcome === "resolve") operation.resolve(usageFixture());
+      else operation.reject(new Error("late failure"));
+    });
+
+    expect(container.childElementCount).toBe(0);
+    expect(document.activeElement).toBe(outside);
+    expect(consoleError).not.toHaveBeenCalled();
+    outside.remove();
+  },
+);
 
 it("keeps a model-clear backend failure visible in the open confirmation", async () => {
   api.usage.mockResolvedValue(usageFixture());

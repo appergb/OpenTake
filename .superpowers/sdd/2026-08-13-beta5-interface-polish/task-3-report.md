@@ -55,4 +55,50 @@ Observed result: exit 0, no whitespace errors.
 
 ## Commit
 
-`b4268fa fix(settings): animate model removal confirmation`
+`a1d5100 fix(settings): animate model removal confirmation`
+
+## Review fix round 1
+
+### Findings addressed
+
+- Added a mounted flag and monotonically increasing operation epoch. Resolve, reject, and `finally` paths now discard late results before any state or focus intent is written.
+- Replaced the one-way post-model focus lookup with a stable order: later enabled clear actions, then earlier enabled clear actions in reverse proximity, then the programmatically focusable Storage pane.
+- Preserved the existing `Reveal` enter/exit and reduced-motion behavior.
+
+### TDD evidence
+
+RED command:
+
+```text
+pnpm -C web exec vitest run src/components/settings/StoragePane.test.tsx
+```
+
+Observed result: exit 1; 2 focus-fallback tests failed because focus fell to `body` when the `other` clear action was disabled. Unmount-before-resolve and unmount-before-reject lifecycle cases were also added to cover late completion without DOM/focus changes or React errors.
+
+GREEN command:
+
+```text
+pnpm -C web exec vitest run src/components/settings/StoragePane.test.tsx src/components/ui/Reveal.test.tsx
+```
+
+Observed result: exit 0; 2 files and 24 tests passed.
+
+Build command:
+
+```text
+pnpm -C web build
+```
+
+Observed result: exit 0. Existing dynamic-import and bundle-size warnings remain unchanged.
+
+Diff command:
+
+```text
+git diff --check
+```
+
+Observed result: exit 0, no whitespace errors.
+
+### Review fix commit
+
+`fix(settings): stabilize model clear lifecycle`

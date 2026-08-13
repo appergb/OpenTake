@@ -35,9 +35,17 @@ const sectionStyle: CSSProperties = {
   gap: "var(--space-lg)",
 };
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({
+  title,
+  children,
+  sectionRef,
+}: {
+  title: string;
+  children: React.ReactNode;
+  sectionRef?: React.Ref<HTMLElement>;
+}) {
   return (
-    <section>
+    <section ref={sectionRef} tabIndex={sectionRef ? -1 : undefined}>
       <h2
         style={{
           margin: "0 0 var(--space-md)",
@@ -76,11 +84,15 @@ export function StoragePane() {
   const [error, setError] = useState<string | null>(null);
   const [clearing, setClearing] = useState<StorageCategoryId | null>(null);
   const [confirming, setConfirming] = useState<StorageCategoryId | null>(null);
-  const [focusTarget, setFocusTarget] = useState<"model" | "next" | null>(null);
+  const [focusTarget, setFocusTarget] = useState<"model" | "afterModel" | null>(null);
+  const mountedRef = useRef(false);
+  const operationEpochRef = useRef(0);
+  const paneRef = useRef<HTMLElement>(null);
   const clearButtonRefs = useRef<Partial<Record<StorageCategoryId, HTMLButtonElement | null>>>({});
 
   useEffect(() => {
     let alive = true;
+    mountedRef.current = true;
     setError(null);
     storageUsage().then(
       (next) => {
@@ -92,6 +104,8 @@ export function StoragePane() {
     );
     return () => {
       alive = false;
+      mountedRef.current = false;
+      operationEpochRef.current += 1;
     };
   }, []);
 
@@ -99,13 +113,17 @@ export function StoragePane() {
     if (!focusTarget) return;
 
     if (focusTarget === "model") {
-      clearButtonRefs.current.models?.focus();
+      (clearButtonRefs.current.models ?? paneRef.current)?.focus();
     } else {
       const modelIndex = CATEGORY_ORDER.indexOf("models");
-      const next = CATEGORY_ORDER.slice(modelIndex + 1)
+      const stableFocusOrder = [
+        ...CATEGORY_ORDER.slice(modelIndex + 1),
+        ...CATEGORY_ORDER.slice(0, modelIndex).reverse(),
+      ];
+      const next = stableFocusOrder
         .map((id) => clearButtonRefs.current[id])
         .find((button): button is HTMLButtonElement => Boolean(button && !button.disabled));
-      next?.focus();
+      (next ?? paneRef.current)?.focus();
     }
 
     setFocusTarget(null);
@@ -114,19 +132,26 @@ export function StoragePane() {
   const runClear = async (categories: StorageCategoryId[], modelsConfirmed: boolean) => {
     if (clearing) return;
     const inFlight = categories[0]!;
+    const operationEpoch = ++operationEpochRef.current;
+    const isCurrentOperation = () =>
+      mountedRef.current && operationEpochRef.current === operationEpoch;
     let succeeded = false;
     setClearing(inFlight);
     setError(null);
     try {
       const next = await storageClear(categories, modelsConfirmed);
+      if (!isCurrentOperation()) return;
       setUsage(next);
       succeeded = true;
-      if (inFlight === "models") setFocusTarget("next");
+      if (inFlight === "models") setFocusTarget("afterModel");
     } catch (reason) {
+      if (!isCurrentOperation()) return;
       setError(t("storage.error", { error: errorMessage(reason) }));
     } finally {
-      setClearing(null);
-      if (succeeded || inFlight !== "models") setConfirming(null);
+      if (isCurrentOperation()) {
+        setClearing(null);
+        if (succeeded || inFlight !== "models") setConfirming(null);
+      }
     }
   };
 
@@ -184,7 +209,7 @@ export function StoragePane() {
   const totalZero = usage.totalBytes === 0;
 
   return (
-    <Section title={t("settings.section.storage")}>
+    <Section title={t("settings.section.storage")} sectionRef={paneRef}>
       <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-xs)" }}>
         <div style={{ fontSize: "var(--fs-sm-md)", color: "var(--text-tertiary)" }}>
           {t("storage.desc")}
