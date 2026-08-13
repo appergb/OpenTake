@@ -43,6 +43,14 @@ function client(name = "Cursor") {
   };
 }
 
+function secondClient(name = "Claude") {
+  return {
+    ...client(name),
+    id: "client-2",
+    tokenDigest: "def456abc123",
+  };
+}
+
 function status(overrides: Partial<ExternalMcpStatus> = {}): ExternalMcpStatus {
   return {
     revision: 1,
@@ -68,6 +76,16 @@ let emitStatus: ((next: ExternalMcpStatus) => void) | null = null;
 let oneTimeToken = "";
 let container: HTMLDivElement;
 let root: Root;
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
 
 function button(label: string) {
   return [...container.querySelectorAll<HTMLButtonElement>("button")].find(
@@ -196,15 +214,67 @@ describe("ExternalMcpPane", () => {
   });
 
   it("copies the streamable endpoint and Authorization header from the one-time receipt", async () => {
+    api.pair.mockResolvedValueOnce(receipt("Claude Desktop"));
     await render();
     await setClientName("Claude Desktop");
     await act(async () => button(t("mcp.pair")).click());
     await act(async () => button(t("mcp.copyConfig")).click());
 
-    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(expect.stringContaining(endpoint));
-    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(
-      expect.stringContaining(`"Authorization": "Bearer ${oneTimeToken}"`),
-    );
+    const payload = (navigator.clipboard.writeText as ReturnType<typeof vi.fn>).mock.calls[0]![0];
+    expect(JSON.parse(payload)).toEqual({
+      mcpServers: {
+        "Claude Desktop": {
+          type: "http",
+          url: endpoint,
+          headers: { Authorization: `Bearer ${oneTimeToken}` },
+        },
+      },
+    });
+  });
+
+  it("serializes receipt mutation while a config copy is pending and resets copied state for B", async () => {
+    const copy = deferred<void>();
+    (navigator.clipboard.writeText as ReturnType<typeof vi.fn>).mockReturnValueOnce(copy.promise);
+    await render(status({ enabled: true, state: "listening", clients: [client()] }));
+    await setClientName("Client A");
+    await act(async () => button(t("mcp.pair")).click());
+    await act(async () => button(t("mcp.copyConfig")).click());
+
+    expect(button(t("mcp.tokenDismiss")).disabled).toBe(true);
+    expect(button(t("mcp.pair")).disabled).toBe(true);
+    expect(button(t("mcp.regenerate")).disabled).toBe(true);
+
+    await act(async () => copy.resolve());
+    await act(async () => button(t("mcp.tokenDismiss")).click());
+    const tokenB = `test-bearer-b-${crypto.randomUUID()}`;
+    api.pair.mockResolvedValueOnce(receipt("Client B", tokenB));
+    await setClientName("Client B");
+    await act(async () => button(t("mcp.pair")).click());
+
+    expect(container.textContent).toContain(tokenB);
+    expect(button(t("mcp.copyConfig"))).toBeDefined();
+    expect(container.textContent).not.toContain(t("mcp.configCopied"));
+  });
+
+  it("does not let copy A completion mark receipt B after navigation", async () => {
+    const copyA = deferred<void>();
+    (navigator.clipboard.writeText as ReturnType<typeof vi.fn>).mockReturnValueOnce(copyA.promise);
+    await render();
+    await setClientName("Client A");
+    await act(async () => button(t("mcp.pair")).click());
+    await act(async () => button(t("mcp.copyConfig")).click());
+
+    await act(async () => root.render(<></>));
+    const tokenB = `test-bearer-b-${crypto.randomUUID()}`;
+    api.pair.mockResolvedValueOnce(receipt("Client B", tokenB));
+    await render();
+    await setClientName("Client B");
+    await act(async () => button(t("mcp.pair")).click());
+    expect(container.textContent).toContain(tokenB);
+
+    await act(async () => copyA.resolve());
+    expect(container.textContent).toContain(tokenB);
+    expect(container.textContent).not.toContain(t("mcp.configCopied"));
   });
 
   it("reports clipboard failures without hiding the one-time receipt", async () => {
@@ -267,6 +337,48 @@ describe("ExternalMcpPane", () => {
     await act(async () => button(t("mcp.cancel")).click());
 
     expect(document.activeElement).toBe(revoke);
+  });
+
+  it("restores focus to regenerate after a successful credential replacement", async () => {
+    await render(status({ enabled: true, state: "listening", clients: [client()] }));
+    const regenerate = button(t("mcp.regenerate"));
+    await act(async () => regenerate.click());
+    await act(async () => button(t("mcp.confirmRegenerate")).click());
+
+    expect(document.activeElement).toBe(regenerate);
+  });
+
+  it("moves focus to the next client after a successful revoke", async () => {
+    const next = secondClient();
+    api.revoke.mockResolvedValueOnce(status({
+      revision: 2,
+      enabled: true,
+      state: "listening",
+      clients: [next],
+    }));
+    await render(status({
+      enabled: true,
+      state: "listening",
+      clients: [client(), next],
+    }));
+    await act(async () => button(t("mcp.revoke")).click());
+    await act(async () => button(t("mcp.confirmRevoke")).click());
+
+    const nextRow = container.querySelector<HTMLElement>("[data-external-mcp-client='client-2']")!;
+    expect(document.activeElement).toBe(
+      [...nextRow.querySelectorAll<HTMLButtonElement>("button")].find(
+        (candidate) => candidate.textContent?.trim() === t("mcp.regenerate"),
+      ),
+    );
+  });
+
+  it("focuses the pane when revoking the final active client", async () => {
+    api.revoke.mockResolvedValueOnce(status({ revision: 2 }));
+    await render(status({ enabled: true, state: "listening", clients: [client()] }));
+    await act(async () => button(t("mcp.revoke")).click());
+    await act(async () => button(t("mcp.confirmRevoke")).click());
+
+    expect(document.activeElement).toBe(container.querySelector(".external-mcp-pane"));
   });
 
   it("drops a bearer from the DOM on navigation and does not persist it in browser storage", async () => {

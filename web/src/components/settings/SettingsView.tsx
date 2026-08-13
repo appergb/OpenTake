@@ -8,7 +8,7 @@
  * persisted state.
  */
 
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   Bot,
   Copy,
@@ -111,7 +111,13 @@ export function SettingsView() {
   const setSettingsOpen = useEditorUiStore((s) => s.setSettingsOpen);
   const activePane = useEditorUiStore((s) => s.settingsPane);
   const setActivePane = useEditorUiStore((s) => s.setSettingsPane);
+  const [mcpReceiptOperationPending, setMcpReceiptOperationPending] = useState(false);
+  const mcpReceiptOperationPendingRef = useRef(false);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const handleMcpReceiptOperationPendingChange = useCallback((pending: boolean) => {
+    mcpReceiptOperationPendingRef.current = pending;
+    setMcpReceiptOperationPending(pending);
+  }, []);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -126,6 +132,7 @@ export function SettingsView() {
       if (event.defaultPrevented) return;
       if (event.key === "Escape") {
         event.preventDefault();
+        if (mcpReceiptOperationPendingRef.current) return;
         setSettingsOpen(false);
         return;
       }
@@ -209,6 +216,7 @@ export function SettingsView() {
           <div style={{ display: "flex", alignItems: "center", gap: "var(--space-md)" }}>
             <button
               type="button"
+              disabled={mcpReceiptOperationPending}
               onClick={() => setSettingsOpen(false)}
               className="hover-area"
               style={{
@@ -227,6 +235,7 @@ export function SettingsView() {
               type="button"
               title="Close"
               aria-label="Close"
+              disabled={mcpReceiptOperationPending}
               onClick={() => setSettingsOpen(false)}
               className="hover-area"
               style={{
@@ -245,7 +254,11 @@ export function SettingsView() {
         </header>
 
         <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
-          <SettingsSidebar activePane={activePane} onSelect={setActivePane} />
+          <SettingsSidebar
+            activePane={activePane}
+            disabled={mcpReceiptOperationPending}
+            onSelect={setActivePane}
+          />
           <div
             style={{
               flex: 1,
@@ -254,7 +267,7 @@ export function SettingsView() {
               padding: "var(--space-lg) var(--space-xl) var(--space-xl)",
             }}
           >
-            {renderActivePane(activePane)}
+            {renderActivePane(activePane, handleMcpReceiptOperationPendingChange)}
           </div>
         </div>
       </div>
@@ -264,9 +277,11 @@ export function SettingsView() {
 
 function SettingsSidebar({
   activePane,
+  disabled,
   onSelect,
 }: {
   activePane: SettingsPaneId;
+  disabled: boolean;
   onSelect: (pane: SettingsPaneId) => void;
 }) {
   const t = useT();
@@ -280,6 +295,7 @@ function SettingsSidebar({
             <button
               key={pane.id}
               type="button"
+              disabled={disabled}
               onClick={() => onSelect(pane.id)}
               className="hover-area"
               style={{
@@ -307,7 +323,10 @@ function SettingsSidebar({
   );
 }
 
-function renderActivePane(activePane: SettingsPaneId) {
+function renderActivePane(
+  activePane: SettingsPaneId,
+  onMcpReceiptOperationPendingChange: (pending: boolean) => void,
+) {
   switch (activePane) {
     case "general":
       return <GeneralPane />;
@@ -318,7 +337,11 @@ function renderActivePane(activePane: SettingsPaneId) {
     case "ai":
       return <AiPane />;
     case "mcp":
-      return <ExternalMcpPane />;
+      return (
+        <ExternalMcpPane
+          onReceiptOperationPendingChange={onMcpReceiptOperationPendingChange}
+        />
+      );
     case "shortcuts":
       return <ShortcutsPane />;
     case "account":

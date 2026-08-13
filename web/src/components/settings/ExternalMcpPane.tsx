@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Check, Copy, Plug, RefreshCw, ShieldAlert, Trash2 } from "lucide-react";
 import { useT } from "../../i18n";
 import {
@@ -32,7 +32,7 @@ function clientConfig(receipt: ExternalMcpPairingReceipt): string {
   return JSON.stringify({
     mcpServers: {
       [receipt.client.name]: {
-        type: "streamableHttp",
+        type: "http",
         url: receipt.endpoint,
         headers: {
           Authorization: `Bearer ${receipt.bearerToken}`,
@@ -46,19 +46,30 @@ function listenerStatusKey(status: ExternalMcpStatus | null): string {
   return status?.state ?? "loading";
 }
 
-export function ExternalMcpPane() {
+export function ExternalMcpPane({
+  onReceiptOperationPendingChange,
+}: {
+  onReceiptOperationPendingChange?: (pending: boolean) => void;
+}) {
   const t = useT();
   const [status, setStatus] = useState<ExternalMcpStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [clientName, setClientName] = useState("");
   const [receipt, setReceipt] = useState<ExternalMcpPairingReceipt | null>(null);
   const [copied, setCopied] = useState(false);
+  const [copyPending, setCopyPending] = useState(false);
   const [pending, setPending] = useState<"enable" | "pair" | "regenerate" | "revoke" | null>(null);
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
+  const [receiptOperationSettlement, setReceiptOperationSettlement] = useState(0);
+  const [focusTarget, setFocusTarget] = useState<
+    { kind: "regenerate"; clientId: string } | { kind: "client"; clientId: string | null } | null
+  >(null);
   const paneRef = useRef<HTMLElement>(null);
   const latestRevisionRef = useRef(-1);
   const mountedRef = useRef(false);
   const operationEpochRef = useRef(0);
+  const receiptEpochRef = useRef(0);
+  const receiptOperationLockedRef = useRef(false);
   const actionTriggerRef = useRef<HTMLButtonElement | null>(null);
   const receiptDismissRef = useRef<HTMLButtonElement | null>(null);
 
@@ -98,9 +109,33 @@ export function ExternalMcpPane() {
       alive = false;
       mountedRef.current = false;
       operationEpochRef.current += 1;
+      receiptEpochRef.current += 1;
       unlisten();
     };
   }, [applyStatus, t]);
+
+  useEffect(() => {
+    if (!receiptOperationLockedRef.current) return;
+    receiptOperationLockedRef.current = false;
+    onReceiptOperationPendingChange?.(false);
+  }, [onReceiptOperationPendingChange, receiptOperationSettlement]);
+
+  useEffect(() => () => {
+    onReceiptOperationPendingChange?.(false);
+  }, [onReceiptOperationPendingChange]);
+
+  useLayoutEffect(() => {
+    if (!focusTarget) return;
+    const clientId = focusTarget.clientId;
+    const clientRow = [...(paneRef.current?.querySelectorAll<HTMLElement>(
+      "[data-external-mcp-client]",
+    ) ?? [])].find((row) => row.dataset.externalMcpClient === clientId);
+    const target = clientRow?.querySelector<HTMLButtonElement>(
+      '[data-external-mcp-action="regenerate"]',
+    ) ?? paneRef.current;
+    target?.focus({ preventScroll: true });
+    setFocusTarget(null);
+  }, [focusTarget]);
 
   const focusConfirmation = useCallback((button: HTMLButtonElement | null) => {
     button?.focus({ preventScroll: true });
@@ -120,8 +155,25 @@ export function ExternalMcpPane() {
     });
   };
 
+  const clearReceipt = () => {
+    receiptEpochRef.current += 1;
+    setReceipt(null);
+    setCopied(false);
+  };
+
+  const showReceipt = (next: ExternalMcpPairingReceipt) => {
+    receiptEpochRef.current += 1;
+    setReceipt(next);
+    setCopied(false);
+  };
+
+  const beginReceiptOperation = () => {
+    receiptOperationLockedRef.current = true;
+    onReceiptOperationPendingChange?.(true);
+  };
+
   const runEnabledChange = async () => {
-    if (!status || pending) return;
+    if (!status || pending || copyPending) return;
     const epoch = ++operationEpochRef.current;
     setPending("enable");
     setError(null);
@@ -143,53 +195,72 @@ export function ExternalMcpPane() {
   };
 
   const runPair = async () => {
-    if (pending) return;
+    if (pending || copyPending) return;
     const name = clientName.trim();
     if (!name) {
       setError(t("mcp.error.clientName"));
       return;
     }
     const epoch = ++operationEpochRef.current;
+    beginReceiptOperation();
     setPending("pair");
     setError(null);
-    setCopied(false);
-    setReceipt(null);
+    clearReceipt();
     try {
       const next = await externalMcpPair(name);
       if (!isCurrentOperation(epoch)) return;
-      setReceipt(next);
+      showReceipt(next);
       setClientName("");
       refreshAfterMutation(epoch);
     } catch (reason) {
       if (isCurrentOperation(epoch)) setError(t("mcp.error.command", { error: errorMessage(reason) }));
     } finally {
-      if (isCurrentOperation(epoch)) setPending(null);
+      if (isCurrentOperation(epoch)) {
+        setPending(null);
+        setReceiptOperationSettlement((settlement) => settlement + 1);
+      }
     }
   };
 
   const runConfirmation = async () => {
-    if (!confirmation || pending) return;
+    if (!confirmation || pending || copyPending) return;
     const currentConfirmation = confirmation;
+    const activeClients = status?.clients.filter((client) => client.revokedAt === null) ?? [];
+    const revokedIndex = activeClients.findIndex((client) => client.id === currentConfirmation.client.id);
     const epoch = ++operationEpochRef.current;
+    if (currentConfirmation.action === "regenerate") {
+      beginReceiptOperation();
+    }
     setPending(currentConfirmation.action);
     setError(null);
-    setCopied(false);
-    setReceipt(null);
+    clearReceipt();
     try {
       if (currentConfirmation.action === "regenerate") {
         const next = await externalMcpRegenerate(currentConfirmation.client.id);
         if (!isCurrentOperation(epoch)) return;
-        setReceipt(next);
+        showReceipt(next);
         refreshAfterMutation(epoch);
+        setFocusTarget({ kind: "regenerate", clientId: currentConfirmation.client.id });
       } else {
         const next = await externalMcpRevoke(currentConfirmation.client.id);
-        if (isCurrentOperation(epoch)) applyStatus(next);
+        if (isCurrentOperation(epoch)) {
+          applyStatus(next);
+          const remainingClients = next.clients.filter((client) => client.revokedAt === null);
+          const focusIndex = Math.min(Math.max(0, revokedIndex), remainingClients.length - 1);
+          const nextClientId = remainingClients[focusIndex]?.id ?? null;
+          setFocusTarget({ kind: "client", clientId: nextClientId });
+        }
       }
       if (isCurrentOperation(epoch)) setConfirmation(null);
     } catch (reason) {
       if (isCurrentOperation(epoch)) setError(t("mcp.error.command", { error: errorMessage(reason) }));
     } finally {
-      if (isCurrentOperation(epoch)) setPending(null);
+      if (isCurrentOperation(epoch)) {
+        setPending(null);
+        if (currentConfirmation.action === "regenerate") {
+          setReceiptOperationSettlement((settlement) => settlement + 1);
+        }
+      }
     }
   };
 
@@ -200,27 +271,33 @@ export function ExternalMcpPane() {
   };
 
   const dismissReceipt = () => {
+    if (copyPending) return;
     // Receipt tokens are intentionally component-local. Clearing the state
     // before closing the disclosure removes the bearer from the DOM at once.
-    setReceipt(null);
-    setCopied(false);
+    clearReceipt();
     receiptDismissRef.current?.blur();
   };
 
   const copyConfig = async () => {
-    if (!receipt) return;
+    if (!receipt || copyPending) return;
+    const receiptEpoch = receiptEpochRef.current;
+    setCopyPending(true);
     setError(null);
     try {
       if (!navigator.clipboard?.writeText) throw new Error(t("mcp.error.clipboardUnavailable"));
       await navigator.clipboard.writeText(clientConfig(receipt));
-      if (mountedRef.current) setCopied(true);
+      if (mountedRef.current && receiptEpochRef.current === receiptEpoch) setCopied(true);
     } catch (reason) {
-      if (mountedRef.current) setError(t("mcp.error.clipboard", { error: errorMessage(reason) }));
+      if (mountedRef.current && receiptEpochRef.current === receiptEpoch) {
+        setError(t("mcp.error.clipboard", { error: errorMessage(reason) }));
+      }
+    } finally {
+      if (mountedRef.current && receiptEpochRef.current === receiptEpoch) setCopyPending(false);
     }
   };
 
   const isListening = status?.state === "listening";
-  const controlsDisabled = status === null || pending !== null;
+  const controlsDisabled = status === null || pending !== null || copyPending;
   const state = listenerStatusKey(status);
   const statusTitle = status ? t(`mcp.status.${status.state}`) : t("mcp.status.loading");
 
@@ -297,7 +374,12 @@ export function ExternalMcpPane() {
             </div>
             <code className="external-mcp-receipt__token">{receipt.bearerToken}</code>
             <div className="external-mcp-receipt__actions">
-              <button type="button" className="hover-area" onClick={() => void copyConfig()}>
+              <button
+                type="button"
+                className="hover-area"
+                disabled={copyPending}
+                onClick={() => void copyConfig()}
+              >
                 <Icon icon={copied ? Check : Copy} size={13} />
                 {copied ? t("mcp.configCopied") : t("mcp.copyConfig")}
               </button>
@@ -305,6 +387,7 @@ export function ExternalMcpPane() {
                 ref={receiptDismissRef}
                 type="button"
                 className="hover-area"
+                disabled={copyPending}
                 onClick={dismissReceipt}
               >
                 {t("mcp.tokenDismiss")}
@@ -337,7 +420,8 @@ export function ExternalMcpPane() {
                         className="hover-area"
                         aria-expanded={isConfirming && confirmation.action === "regenerate"}
                         aria-controls={`external-mcp-confirm-${client.id}`}
-                        disabled={pending !== null}
+                        data-external-mcp-action="regenerate"
+                        disabled={pending !== null || copyPending}
                         onClick={(event) => {
                           actionTriggerRef.current = event.currentTarget;
                           setError(null);
@@ -352,7 +436,7 @@ export function ExternalMcpPane() {
                         className="hover-area external-mcp-client__revoke"
                         aria-expanded={isConfirming && confirmation.action === "revoke"}
                         aria-controls={`external-mcp-confirm-${client.id}`}
-                        disabled={pending !== null}
+                        disabled={pending !== null || copyPending}
                         onClick={(event) => {
                           actionTriggerRef.current = event.currentTarget;
                           setError(null);
@@ -385,7 +469,7 @@ export function ExternalMcpPane() {
                             className={confirmation.action === "revoke"
                               ? "hover-area external-mcp-confirmation__destructive"
                               : "hover-area"}
-                            disabled={pending !== null}
+                            disabled={pending !== null || copyPending}
                             onClick={() => void runConfirmation()}
                           >
                             {t(confirmation.action === "regenerate" ? "mcp.confirmRegenerate" : "mcp.confirmRevoke")}
@@ -393,7 +477,7 @@ export function ExternalMcpPane() {
                           <button
                             type="button"
                             className="hover-area"
-                            disabled={pending !== null}
+                            disabled={pending !== null || copyPending}
                             onClick={cancelConfirmation}
                           >
                             {t("mcp.cancel")}
