@@ -3884,6 +3884,7 @@ dependencies = [
  "crossbeam-channel",
  "futures",
  "futures-util",
+ "getrandom 0.3.4",
  "glob",
  "http-range",
  "image",
