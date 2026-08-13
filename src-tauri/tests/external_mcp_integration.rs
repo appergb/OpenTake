@@ -309,10 +309,13 @@ async fn real_keychain_restart_and_security_matrix() {
     )
     .await;
     assert_ne!(created.is_error, Some(true));
+    assert_eq!(first.core().media().folders.len(), 1);
     let foreign_undo = call_tool(&session_b, "undo", serde_json::Map::new()).await;
     assert_eq!(foreign_undo.is_error, Some(true));
+    assert_eq!(first.core().media().folders.len(), 1);
     let owner_undo = call_tool(&session_a, "undo", serde_json::Map::new()).await;
     assert_ne!(owner_undo.is_error, Some(true));
+    assert!(first.core().media().folders.is_empty());
     matrix_log.push("cross-session undo isolation: pass".to_string());
     close_rmcp(&mut session_a).await;
     close_rmcp(&mut session_b).await;

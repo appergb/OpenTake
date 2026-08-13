@@ -10,7 +10,7 @@
 
 External MCP 的真实 loopback Streamable HTTP 边界通过了跨进程状态重建与安全矩阵。测试使用正式 `rmcp` 客户端、临时 catalog、每次运行唯一的 macOS Keychain service，以及仅由本次 pairing receipt 推导出的精确 account 清单。测试不会输出 bearer；结束和 panic 清理都只删除这些精确 accounts，正常结束还会逐项回读并确认不存在。
 
-测试必须显式设置 `OPENTAKE_RUN_REAL_KEYCHAIN_MCP=1`。未设置时，测试二进制仍会编译和运行，但会安全跳过真实 Keychain 矩阵，以避免 CI Keychain UI/会话差异导致非产品失败。本机已显式 opt in 并实际执行通过。
+测试目标只在显式启用 `external-mcp-integration` feature 时编译；普通、`--no-default-features` 和发布构建中 `external_mcp` 模块保持私有，且不包含 public harness。进入该测试后仍必须显式设置 `OPENTAKE_RUN_REAL_KEYCHAIN_MCP=1` 才会访问真实 Keychain；未设置时安全跳过真实矩阵。本机已显式 opt in 并实际执行通过。
 
 ## 真实矩阵
 
@@ -20,7 +20,7 @@ External MCP 的真实 loopback Streamable HTTP 边界通过了跨进程状态�
 | 撤销 | 保留第二个有效客户端和正在监听的 endpoint；撤销第一个客户端；旧 bearer 无法重新建立 `rmcp` 会话，第二个 bearer 仍可列出工具 | 通过 |
 | Host / Origin | 对真实 endpoint 发送携带有效 bearer 的边界探针；非 loopback `Host` 与远端 `Origin` 分别返回 HTTP 403 | 通过 |
 | 项目切换取消 | 正式 `rmcp` 会话发起阻塞的 `import_media`；并发打开另一个已保存项目；请求被取消且新项目 media 保持为空 | 通过 |
-| undo 会话隔离 | 会话 A 创建 folder；会话 B 的 `undo` 被拒绝；会话 A 的 `undo` 成功 | 通过 |
+| undo 会话隔离 | 会话 A 创建 folder 后直接确认 folder 存在；会话 B 的 `undo` 被拒绝后 folder 仍存在；会话 A `undo` 后直接确认 folder 消失 | 通过 |
 | 固定端口冲突 | 先占用 `127.0.0.1:19789` 再启用 endpoint；状态为 `portConflict`，未选择替代端口；释放后恢复监听 | 通过 |
 | disable 关闭 socket | disable 返回后立即在 `127.0.0.1:19789` 重绑 | 通过 |
 | 进程退出关闭 socket | 子测试进程在 listener 存活时直接 `process::exit(0)`；父进程等待退出后立即重绑固定端口 | 通过 |
@@ -46,18 +46,27 @@ RED 阶段先创建 integration test；`cargo test -p opentake-tauri --test exte
 
 ## API 暴露审查
 
-为了让 crate 外 integration test 组装真实生产 lifecycle，`external_mcp` 模块和 `ExternalMcpListenerState` 改为公开；另新增 `#[doc(hidden)]` 的 `ExternalMcpIntegrationHarness` 与 receipt。harness 只允许指定 app-data 目录和 Keychain service、调用既有 lifecycle 操作、读取 core/listener 状态，并注入一个取消感知的 media bridge。它不是 Tauri command，不绕过 bearer、Host/Origin 或 live-project gate，也不直接暴露 catalog/store。产品 status、client summary、pairing DTO 与 command surface 仍为 crate-private。
+为了让 crate 外 integration test 组装真实生产 lifecycle，新增了专用 `external-mcp-integration` feature 和带 `required-features` 的测试目标。只有显式启用该 feature 时，`external_mcp` 模块、`ExternalMcpListenerState`、`ExternalMcpIntegrationHarness` 与 receipt 才对 crate 外可见；普通产品构建不编译 harness 或取消 probe。harness 不是 Tauri command，不绕过 bearer、Host/Origin 或 live-project gate，也不直接暴露 catalog/store。
 
-该 seam 进入普通 library build，这是 Rust integration test 跨 crate 边界的必要代价；后续若建立专用 integration feature，可将它进一步 feature-gate。当前 public surface 已限制为本矩阵所需的最小集合。
+取消 probe 的事件边沿使用 `Notify::notify_one()` 保留 permit，避免 waiter 在读取 atomic flag 与注册 `notified()` 之间丢失通知。一个 2,048 轮并发 signal/wait 回归专门锁定该边界。
 
 ## 验证记录
 
 ```text
-OPENTAKE_RUN_REAL_KEYCHAIN_MCP=1 cargo test -p opentake-tauri --test external_mcp_integration -- --nocapture
+OPENTAKE_RUN_REAL_KEYCHAIN_MCP=1 cargo test -p opentake-tauri --features external-mcp-integration --test external_mcp_integration -- --nocapture
 PASS — 2 passed；真实矩阵全部通过；完整 bearer 扫描零匹配
 
-cargo test -p opentake-tauri --test external_mcp_integration -- --nocapture
+cargo test -p opentake-tauri --features external-mcp-integration --test external_mcp_integration -- --nocapture
 PASS — 2 passed；未 opt in 时真实 Keychain 矩阵安全跳过
+
+cargo test -p opentake-tauri --features external-mcp-integration external_mcp::tests::integration_cancel_probe_never_loses_a_concurrent_entry_signal --lib
+PASS — 1 passed；2,048 轮并发 signal/wait
+
+cargo test -p opentake-tauri --test external_mcp_integration --no-run
+EXPECTED REFUSAL — 目标要求 `external-mcp-integration`
+
+cargo test -p opentake-tauri --no-default-features --test external_mcp_integration --no-run
+EXPECTED REFUSAL — 目标要求 `external-mcp-integration`
 
 cargo test -p opentake-tauri external_mcp::tests --lib
 PASS — 40 passed
@@ -66,6 +75,16 @@ cargo test -p opentake-agent mcp::server::tests -- --nocapture
 PASS — 30 passed
 ```
 
+此外，已分别构建默认与 `--no-default-features` library，并用 `nm`
+检查产物；两者均不含 `ExternalMcpIntegrationHarness` 或
+`IntegrationCancelProbe` 符号。
+
+本轮 review fix 对 3 个 Task 6 所有的 Rust 文件执行了定向
+`rustfmt --check`，结果通过。严格定向 Clippy 仅被同时编辑中的
+`src-tauri/src/render.rs` 阻断：默认构建为 `dead_code`，no-default
+构建另有 `too_many_arguments`。仅放行这两个与 Task 6 无关的 lint 后，
+两个 Task 6 Clippy 目标均通过；父任务会在 composite 收敛后重跑无放行的统一门禁。
+
 严格 Clippy、fmt 与 diff 检查结果见同任务报告。
 
 ## 限制
@@ -73,4 +92,4 @@ PASS — 30 passed
 - 测试独占固定端口 `19789`，不能与运行中的 OpenTake External MCP listener 或同一测试的并行实例同时执行。
 - 项目切换取消使用 doc-hidden harness 注入的阻塞 media bridge，以确定性观察 request-local cancellation；传输、dispatcher、live-project gate 和取消路径均为真实实现，但不会启动真实解码器或媒体网络读取。
 - 进程退出场景证明 listener 存活时 OS 进程终止会释放 socket；它不启动完整 Tauri GUI event loop。`RunEvent::Exit` 主动 shutdown 路径由 lifecycle 单元测试覆盖。
-- 独立 reviewer 因本次父任务的 agent thread 槽位已满而未能在本任务内启动；提交前已执行本地 security/API/diff 审查，父任务集成仍应补做独立审查。
+- 独立 security review 已完成；其发现的 public harness 面、取消通知丢失窗口和 live undo 状态证据缺口均已在本轮修复。

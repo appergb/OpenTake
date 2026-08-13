@@ -16,6 +16,9 @@ mod commands;
 // drive the export orchestrator (`export::run_export`) against the library
 // target. The Tauri command itself is registered below like the other modules.
 pub mod export;
+#[cfg(not(feature = "external-mcp-integration"))]
+mod external_mcp;
+#[cfg(feature = "external-mcp-integration")]
 pub mod external_mcp;
 pub mod feedback;
 mod fs_availability;

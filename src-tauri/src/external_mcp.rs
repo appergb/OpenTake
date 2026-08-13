@@ -8,10 +8,13 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(feature = "external-mcp-integration")]
 use opentake_agent::mcp::{
     core_handle::AppCoreHandle,
     dispatch::Dispatcher,
     media_bridge::{BridgeError, ImportOutcome, ImportSource, MediaBridge},
+};
+use opentake_agent::mcp::{
     server::{bind_managed_gated_on, ManagedMcpEndpoint},
     AuthenticatedMcpClient, BearerAuthorizer,
 };
@@ -308,6 +311,7 @@ pub(crate) struct ExternalMcpState {
 /// service and a cancellation-aware media bridge, while all network admission
 /// still passes through the normal bearer, Host/Origin, and live-project gates.
 #[doc(hidden)]
+#[cfg(feature = "external-mcp-integration")]
 pub struct ExternalMcpIntegrationHarness {
     state: ExternalMcpState,
     core: AppCore,
@@ -315,18 +319,36 @@ pub struct ExternalMcpIntegrationHarness {
 }
 
 #[doc(hidden)]
+#[cfg(feature = "external-mcp-integration")]
 pub struct ExternalMcpIntegrationReceipt {
     pub client_id: String,
     pub bearer_token: String,
 }
 
 #[derive(Default)]
+#[cfg(feature = "external-mcp-integration")]
 struct IntegrationCancelProbe {
     entered: std::sync::atomic::AtomicBool,
     cancelled: std::sync::atomic::AtomicBool,
     entered_changed: tokio::sync::Notify,
 }
 
+#[cfg(feature = "external-mcp-integration")]
+impl IntegrationCancelProbe {
+    fn mark_entered(&self) {
+        self.entered
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.entered_changed.notify_one();
+    }
+
+    async fn wait_entered(&self) {
+        while !self.entered.load(std::sync::atomic::Ordering::Acquire) {
+            self.entered_changed.notified().await;
+        }
+    }
+}
+
+#[cfg(feature = "external-mcp-integration")]
 impl MediaBridge for IntegrationCancelProbe {
     fn import_media_cancellable(
         &self,
@@ -335,9 +357,7 @@ impl MediaBridge for IntegrationCancelProbe {
         _folder_id: Option<String>,
         cancel: &opentake_media::MediaCancelToken,
     ) -> Result<ImportOutcome, BridgeError> {
-        self.entered
-            .store(true, std::sync::atomic::Ordering::Release);
-        self.entered_changed.notify_waiters();
+        self.mark_entered();
         while !cancel.is_cancelled() {
             std::thread::park_timeout(Duration::from_millis(5));
         }
@@ -347,6 +367,7 @@ impl MediaBridge for IntegrationCancelProbe {
     }
 }
 
+#[cfg(feature = "external-mcp-integration")]
 impl ExternalMcpIntegrationHarness {
     /// Build against a caller-owned application-data directory and unique OS
     /// keychain service. The caller remains responsible for deleting only the
@@ -417,13 +438,7 @@ impl ExternalMcpIntegrationHarness {
     }
 
     pub async fn wait_for_cancel_probe(&self) {
-        while !self
-            .cancel_probe
-            .entered
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
-            self.cancel_probe.entered_changed.notified().await;
-        }
+        self.cancel_probe.wait_entered().await;
     }
 
     pub fn cancel_probe_observed(&self) -> bool {
@@ -1943,6 +1958,33 @@ mod tests {
     use opentake_agent::chat::ChatTurnGate;
 
     static LIFECYCLE_PORT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[cfg(feature = "external-mcp-integration")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn integration_cancel_probe_never_loses_a_concurrent_entry_signal() {
+        for _ in 0..2_048 {
+            let probe = Arc::new(IntegrationCancelProbe::default());
+            let start = Arc::new(tokio::sync::Barrier::new(3));
+            let waiter_probe = probe.clone();
+            let waiter_start = start.clone();
+            let waiter = tokio::spawn(async move {
+                waiter_start.wait().await;
+                waiter_probe.wait_entered().await;
+            });
+            let signal_probe = probe.clone();
+            let signal_start = start.clone();
+            let signal = tokio::spawn(async move {
+                signal_start.wait().await;
+                signal_probe.mark_entered();
+            });
+            start.wait().await;
+            tokio::time::timeout(Duration::from_secs(1), waiter)
+                .await
+                .expect("concurrent integration probe signal was not retained")
+                .expect("join integration probe waiter");
+            signal.await.expect("join integration probe signaler");
+        }
+    }
 
     struct TwoClientBlockingGate {
         entered: tokio::sync::mpsc::UnboundedSender<String>,
