@@ -13,6 +13,7 @@
 //! - [`serve`] binds the loopback listener and runs the server.
 
 use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -84,11 +85,12 @@ impl DispatchAuthority {
     fn try_enter(
         &self,
         request_cancel: opentake_media::MediaCancelToken,
+        client: Option<AuthenticatedMcpClient>,
     ) -> Result<Option<DispatchPermit>, McpError> {
         match self {
             Self::Direct => Ok(None),
             Self::Gated { activity, .. } => activity
-                .try_enter(request_cancel)
+                .try_enter(request_cancel, client)
                 .map(Some)
                 .ok_or_else(turn_inactive_error),
         }
@@ -126,7 +128,13 @@ struct DispatchActivity {
 struct DispatchActivityState {
     accepting: bool,
     active: usize,
-    request_cancellations: Vec<opentake_media::MediaCancelToken>,
+    invalidated: HashSet<AuthenticatedMcpClient>,
+    requests: Vec<ActiveDispatch>,
+}
+
+struct ActiveDispatch {
+    client: Option<AuthenticatedMcpClient>,
+    cancel: opentake_media::MediaCancelToken,
 }
 
 impl DispatchActivity {
@@ -135,7 +143,8 @@ impl DispatchActivity {
             state: Mutex::new(DispatchActivityState {
                 accepting: true,
                 active: 0,
-                request_cancellations: Vec::new(),
+                invalidated: HashSet::new(),
+                requests: Vec::new(),
             }),
             changed: tokio::sync::Notify::new(),
         })
@@ -144,16 +153,24 @@ impl DispatchActivity {
     fn try_enter(
         self: &Arc<Self>,
         request_cancel: opentake_media::MediaCancelToken,
+        client: Option<AuthenticatedMcpClient>,
     ) -> Option<DispatchPermit> {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !state.accepting {
+        if !state.accepting
+            || client
+                .as_ref()
+                .is_some_and(|client| state.invalidated.contains(client))
+        {
             return None;
         }
         state.active = state.active.saturating_add(1);
-        state.request_cancellations.push(request_cancel.clone());
+        state.requests.push(ActiveDispatch {
+            client,
+            cancel: request_cancel.clone(),
+        });
         Some(DispatchPermit {
             activity: self.clone(),
             request_cancel,
@@ -181,8 +198,8 @@ impl DispatchActivity {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.accepting = false;
-        for request_cancel in &state.request_cancellations {
-            request_cancel.cancel();
+        for request in &state.requests {
+            request.cancel.cancel();
         }
         if state.active == 0 {
             self.changed.notify_one();
@@ -198,6 +215,51 @@ impl DispatchActivity {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .active;
             if active == 0 {
+                return;
+            }
+            changed.await;
+        }
+    }
+
+    fn invalidate_client(&self, client: &AuthenticatedMcpClient) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.invalidated.insert(client.clone());
+        for request in &state.requests {
+            if request.client.as_ref() == Some(client) {
+                request.cancel.cancel();
+            }
+        }
+        if !state
+            .requests
+            .iter()
+            .any(|request| request.client.as_ref() == Some(client))
+        {
+            self.changed.notify_waiters();
+        }
+    }
+
+    fn restore_client(&self, client: &AuthenticatedMcpClient) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .invalidated
+            .remove(client);
+    }
+
+    async fn wait_client_zero(&self, client: &AuthenticatedMcpClient) {
+        loop {
+            let changed = self.changed.notified();
+            let active = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .requests
+                .iter()
+                .any(|request| request.client.as_ref() == Some(client));
+            if !active {
                 return;
             }
             changed.await;
@@ -227,15 +289,13 @@ impl Drop for DispatchPermit {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.active = state.active.saturating_sub(1);
         if let Some(index) = state
-            .request_cancellations
+            .requests
             .iter()
-            .position(|tracked| tracked.same_instance(&self.request_cancel))
+            .position(|tracked| tracked.cancel.same_instance(&self.request_cancel))
         {
-            state.request_cancellations.swap_remove(index);
+            state.requests.swap_remove(index);
         }
-        if state.active == 0 {
-            self.activity.changed.notify_one();
-        }
+        self.activity.changed.notify_waiters();
     }
 }
 
@@ -459,6 +519,7 @@ impl McpServer {
         name: String,
         args: Value,
         request_cancelled: CancellationToken,
+        client: Option<AuthenticatedMcpClient>,
     ) -> Result<CallToolResult, McpError> {
         if request_cancelled.is_cancelled()
             && matches!(&self.authority, DispatchAuthority::Gated { .. })
@@ -470,7 +531,7 @@ impl McpServer {
             .admission
             .try_enter(dispatch_admission_class(&name, &args))?;
         let cancel = opentake_media::MediaCancelToken::new();
-        let permit = self.authority.try_enter(cancel.clone())?;
+        let permit = self.authority.try_enter(cancel.clone(), client)?;
         let dispatcher = self.dispatcher.clone();
         let authority = self.authority.clone();
         let worker_cancel = cancel.clone();
@@ -534,7 +595,12 @@ impl ServerHandler for McpServer {
         // rmcp cancels `context.ct` for the protocol's explicit
         // `notifications/cancelled`. This does not claim raw TCP disconnect
         // detection; it is the MCP cancellation semantic exposed by rmcp.
-        self.dispatch_tool(name, args, context.ct).await
+        let client = context
+            .extensions
+            .get::<http::request::Parts>()
+            .and_then(|parts| parts.extensions.get::<AuthenticatedMcpClient>())
+            .cloned();
+        self.dispatch_tool(name, args, context.ct, client).await
     }
 }
 
@@ -651,7 +717,7 @@ async fn localhost_guard(
 /// The external client authenticated for an MCP HTTP request. Credential
 /// generations distinguish a freshly regenerated long-lived credential from a
 /// prior credential for the same client identity.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct AuthenticatedMcpClient {
     pub client_id: Arc<str>,
     pub credential_generation: u64,
@@ -723,17 +789,154 @@ fn authentication_required() -> axum::response::Response {
 /// Authenticate every route before any MCP session is created. This boundary
 /// parses the bearer syntax once, delegates credential matching, and adds only
 /// the authenticated public identity to the request extensions.
+#[derive(Clone)]
+struct ManagedAuthorizationState {
+    authorizer: Arc<dyn BearerAuthorizer>,
+    sessions: Option<Arc<ManagedClientSessions>>,
+}
+
+struct ManagedClientSessions {
+    state: Mutex<ManagedClientSessionsState>,
+    manager: Arc<rmcp::transport::streamable_http_server::session::local::LocalSessionManager>,
+}
+
+#[derive(Default)]
+struct ManagedClientSessionsState {
+    owners: HashMap<Arc<str>, AuthenticatedMcpClient>,
+    invalidated: HashSet<AuthenticatedMcpClient>,
+}
+
+impl ManagedClientSessions {
+    fn new(
+        manager: Arc<rmcp::transport::streamable_http_server::session::local::LocalSessionManager>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(ManagedClientSessionsState::default()),
+            manager,
+        })
+    }
+
+    fn permits(&self, session_id: &str, client: &AuthenticatedMcpClient) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        !state.invalidated.contains(client)
+            && state
+                .owners
+                .get(session_id)
+                .is_some_and(|owner| owner == client)
+    }
+
+    fn bind(&self, session_id: Arc<str>, client: AuthenticatedMcpClient) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.invalidated.contains(&client) {
+            return false;
+        }
+        state.owners.insert(session_id, client);
+        true
+    }
+
+    fn remove(&self, session_id: &str) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .owners
+            .remove(session_id);
+    }
+
+    fn invalidate(&self, client: &AuthenticatedMcpClient) -> Vec<Arc<str>> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.invalidated.insert(client.clone());
+        let sessions = state
+            .owners
+            .iter()
+            .filter_map(|(session, owner)| (owner == client).then(|| session.clone()))
+            .collect::<Vec<_>>();
+        for session in &sessions {
+            state.owners.remove(session);
+        }
+        sessions
+    }
+
+    fn restore(&self, client: &AuthenticatedMcpClient) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .invalidated
+            .remove(client);
+    }
+
+    async fn close(&self, session_id: &Arc<str>) -> Result<(), String> {
+        use rmcp::transport::streamable_http_server::session::SessionManager as _;
+        self.manager
+            .close_session(session_id)
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
+fn unknown_managed_session() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        "Not Found: Session not found",
+    )
+        .into_response()
+}
+
 async fn bearer_authorization_guard(
-    axum::extract::State(authorizer): axum::extract::State<Arc<dyn BearerAuthorizer>>,
+    axum::extract::State(state): axum::extract::State<ManagedAuthorizationState>,
     mut request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    if let Some(client) =
-        bearer_candidate(request.headers()).and_then(|token| authorizer.authorize(token))
-    {
-        request.extensions_mut().insert(client);
-        next.run(request).await
+    let Some(client) =
+        bearer_candidate(request.headers()).and_then(|token| state.authorizer.authorize(token))
+    else {
+        return authentication_required();
+    };
+    let session_id = request
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|value| value.to_str().ok())
+        .map(Arc::<str>::from);
+    if let (Some(sessions), Some(session_id)) = (&state.sessions, &session_id) {
+        if !sessions.permits(session_id, &client) {
+            return unknown_managed_session();
+        }
+    }
+    let deleting = request.method() == axum::http::Method::DELETE;
+    request.extensions_mut().insert(client.clone());
+    let response = next.run(request).await;
+    let Some(sessions) = state.sessions else {
+        return response;
+    };
+    if let Some(session_id) = session_id {
+        if (deleting && response.status().is_success())
+            || response.status() == axum::http::StatusCode::NOT_FOUND
+        {
+            sessions.remove(&session_id);
+        }
+        return response;
+    }
+    let Some(session_id) = response
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|value| value.to_str().ok())
+        .map(Arc::<str>::from)
+    else {
+        return response;
+    };
+    if sessions.bind(session_id.clone(), client) {
+        response
     } else {
+        let _ = sessions.close(&session_id).await;
         authentication_required()
     }
 }
@@ -1020,6 +1223,7 @@ fn build_gated_router_for_port(
     shutdown: CancellationToken,
     expected_port: u16,
     authorizer: Option<Arc<dyn BearerAuthorizer>>,
+    managed_sessions: Option<Arc<ManagedClientSessions>>,
 ) -> axum::Router {
     use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
     use rmcp::transport::streamable_http_server::{
@@ -1031,6 +1235,10 @@ fn build_gated_router_for_port(
     let mut config = StreamableHttpServerConfig::default();
     config.cancellation_token = shutdown;
     let admission = DispatchAdmission::new();
+    let session_manager = managed_sessions.as_ref().map_or_else(
+        || Arc::new(LocalSessionManager::default()),
+        |sessions| sessions.manager.clone(),
+    );
     let service = StreamableHttpService::new(
         move || {
             Ok(McpServer::from_gated_dispatcher(
@@ -1041,7 +1249,7 @@ fn build_gated_router_for_port(
                 admission.clone(),
             ))
         },
-        Arc::new(LocalSessionManager::default()),
+        session_manager,
         config,
     );
     let service = ServiceBuilder::new()
@@ -1063,7 +1271,10 @@ fn build_gated_router_for_port(
         ));
     match authorizer {
         Some(authorizer) => router.layer(axum::middleware::from_fn_with_state(
-            authorizer,
+            ManagedAuthorizationState {
+                authorizer,
+                sessions: managed_sessions,
+            },
             bearer_authorization_guard,
         )),
         None => router,
@@ -1188,6 +1399,7 @@ pub struct ManagedMcpEndpoint {
     shutdown: CancellationToken,
     activity: Arc<DispatchActivity>,
     cancel_gate: Arc<dyn ChatTurnGate>,
+    client_sessions: Arc<ManagedClientSessions>,
     join: Option<tokio::task::JoinHandle<std::io::Result<()>>>,
     closed: bool,
 }
@@ -1203,6 +1415,32 @@ impl ManagedMcpEndpoint {
         self.activity.stop_and_cancel();
         self.cancel_gate.request_cancel();
         self.shutdown.cancel();
+    }
+
+    /// Invalidate one exact credential generation, terminate only its rmcp
+    /// sessions, cancel only its admitted dispatch workers, and await their
+    /// drain without interrupting unrelated clients or listener admission.
+    pub async fn cancel_client(
+        &self,
+        client: &AuthenticatedMcpClient,
+    ) -> Result<(), ManagedMcpError> {
+        self.activity.invalidate_client(client);
+        let sessions = self.client_sessions.invalidate(client);
+        self.activity.wait_client_zero(client).await;
+        for session in sessions {
+            self.client_sessions
+                .close(&session)
+                .await
+                .map_err(|error| ManagedMcpError::Serve(std::io::Error::other(error)))?;
+        }
+        Ok(())
+    }
+
+    /// Re-admit a generation when durable credential mutation failed before
+    /// publication. Its prior sessions remain terminated; fresh ones may start.
+    pub fn restore_client(&self, client: &AuthenticatedMcpClient) {
+        self.client_sessions.restore(client);
+        self.activity.restore_client(client);
     }
 
     /// Complete shutdown safely after [`Self::shutdown`] has stopped admission.
@@ -1319,6 +1557,10 @@ pub async fn bind_managed_gated_on(
         .unwrap_or_default();
     let activity = DispatchActivity::new();
     let shutdown = CancellationToken::new();
+    let session_manager = Arc::new(
+        rmcp::transport::streamable_http_server::session::local::LocalSessionManager::default(),
+    );
+    let client_sessions = ManagedClientSessions::new(session_manager);
     let cancel_gate = gate.clone();
     let router = build_gated_router_for_port(
         dispatcher,
@@ -1328,6 +1570,7 @@ pub async fn bind_managed_gated_on(
         shutdown.clone(),
         bound_addr.port(),
         Some(authorizer),
+        Some(client_sessions.clone()),
     );
     let listener_shutdown = shutdown.clone();
     let join = tokio::spawn(async move {
@@ -1340,6 +1583,7 @@ pub async fn bind_managed_gated_on(
         shutdown,
         activity,
         cancel_gate,
+        client_sessions,
         join: Some(join),
         closed: false,
     })
@@ -1399,6 +1643,7 @@ async fn bind_ephemeral_gated_on(
         shutdown.clone(),
         bound_addr.port(),
         Some(Arc::new(SingleBearerAuthorizer::new(bearer_token.clone()))),
+        None,
     );
     let listener_shutdown = shutdown.clone();
     let listener_stopped = stopped.clone();
@@ -1450,6 +1695,7 @@ pub async fn serve_gated_dispatcher(
         DispatchActivity::new(),
         CancellationToken::new(),
         bound_addr.port(),
+        None,
         None,
     );
     tracing::info!("MCP server listening on http://{bound_addr}/mcp");
@@ -2069,6 +2315,7 @@ mod tests {
                 "get_timeline".into(),
                 serde_json::json!({}),
                 CancellationToken::new(),
+                None,
             )
             .await
             .expect("authorized gate result");
@@ -2081,6 +2328,7 @@ mod tests {
                 "get_timeline".into(),
                 serde_json::json!({}),
                 CancellationToken::new(),
+                None,
             )
             .await
             .expect_err("stale gate must fail closed");
@@ -2101,7 +2349,12 @@ mod tests {
         let worker_cancel = request_cancel.clone();
         let task = tokio::spawn(async move {
             worker_server
-                .dispatch_tool("get_timeline".into(), serde_json::json!({}), worker_cancel)
+                .dispatch_tool(
+                    "get_timeline".into(),
+                    serde_json::json!({}),
+                    worker_cancel,
+                    None,
+                )
                 .await
         });
 
@@ -2123,12 +2376,12 @@ mod tests {
     async fn stopping_admission_rejects_new_calls_and_waits_for_active_permit() {
         let activity = DispatchActivity::new();
         let permit = activity
-            .try_enter(opentake_media::MediaCancelToken::new())
+            .try_enter(opentake_media::MediaCancelToken::new(), None)
             .expect("first dispatch admitted");
         activity.stop_accepting();
         assert!(
             activity
-                .try_enter(opentake_media::MediaCancelToken::new())
+                .try_enter(opentake_media::MediaCancelToken::new(), None)
                 .is_none(),
             "new dispatch must be rejected"
         );
@@ -2183,6 +2436,7 @@ mod tests {
                     "get_timeline".into(),
                     serde_json::json!({}),
                     CancellationToken::new(),
+                    None,
                 )
                 .await
         });
@@ -2192,6 +2446,7 @@ mod tests {
                     "get_media".into(),
                     serde_json::json!({}),
                     CancellationToken::new(),
+                    None,
                 )
                 .await
         });
@@ -2208,6 +2463,7 @@ mod tests {
                 "list_folders".into(),
                 serde_json::json!({}),
                 CancellationToken::new(),
+                None,
             ),
         )
         .await
@@ -2263,6 +2519,7 @@ mod tests {
                     "add_clips".into(),
                     serde_json::json!({}),
                     CancellationToken::new(),
+                    None,
                 )
                 .await
         });
@@ -2277,6 +2534,7 @@ mod tests {
                 "remove_clips".into(),
                 serde_json::json!({}),
                 CancellationToken::new(),
+                None,
             )
             .await
             .expect_err("a second mutation must fail busy");
@@ -2289,6 +2547,7 @@ mod tests {
                 "get_timeline".into(),
                 serde_json::json!({}),
                 CancellationToken::new(),
+                None,
             )
             .await
             .expect("read admitted beside mutation");
@@ -2616,6 +2875,162 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn managed_session_is_owned_by_the_authenticated_client_generation() {
+        let authorizer = Arc::new(TestBearerAuthorizer {
+            credentials: RwLock::new(vec![
+                (
+                    "client-a-token".to_owned(),
+                    AuthenticatedMcpClient {
+                        client_id: Arc::from("client-a"),
+                        credential_generation: 1,
+                    },
+                ),
+                (
+                    "client-b-token".to_owned(),
+                    AuthenticatedMcpClient {
+                        client_id: Arc::from("client-b"),
+                        credential_generation: 1,
+                    },
+                ),
+            ]),
+        });
+        let endpoint = bind_managed_test_endpoint(authorizer).await;
+        let client = reqwest::Client::new();
+        let url = format!("http://{}/mcp", endpoint.addr());
+        let initialized = client
+            .post(&url)
+            .bearer_auth("client-a-token")
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .json(&initialize_body())
+            .send()
+            .await
+            .expect("initialize client A session");
+        let session = initialized
+            .headers()
+            .get("mcp-session-id")
+            .expect("client A session id")
+            .clone();
+
+        let foreign = client
+            .post(&url)
+            .bearer_auth("client-b-token")
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-session-id", session.clone())
+            .header("mcp-protocol-version", "2025-06-18")
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {}
+            }))
+            .send()
+            .await
+            .expect("attempt foreign session reuse");
+        assert_eq!(foreign.status(), reqwest::StatusCode::NOT_FOUND);
+
+        let owner = client
+            .post(&url)
+            .bearer_auth("client-a-token")
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .header("mcp-session-id", session)
+            .header("mcp-protocol-version", "2025-06-18")
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/list",
+                "params": {}
+            }))
+            .send()
+            .await
+            .expect("use owned session");
+        assert!(owner.status().is_success());
+
+        endpoint.shutdown();
+        endpoint.wait().await.expect("stop managed endpoint");
+    }
+
+    #[tokio::test]
+    async fn managed_cancel_client_terminates_only_target_sessions() {
+        let authorizer = Arc::new(TestBearerAuthorizer {
+            credentials: RwLock::new(vec![
+                (
+                    "target-token".to_owned(),
+                    AuthenticatedMcpClient {
+                        client_id: Arc::from("target"),
+                        credential_generation: 1,
+                    },
+                ),
+                (
+                    "survivor-token".to_owned(),
+                    AuthenticatedMcpClient {
+                        client_id: Arc::from("survivor"),
+                        credential_generation: 1,
+                    },
+                ),
+            ]),
+        });
+        let endpoint = bind_managed_test_endpoint(authorizer).await;
+        let client = reqwest::Client::new();
+        let url = format!("http://{}/mcp", endpoint.addr());
+        let mut sessions = Vec::new();
+        for token in ["target-token", "survivor-token"] {
+            let response = client
+                .post(&url)
+                .bearer_auth(token)
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .json(&initialize_body())
+                .send()
+                .await
+                .expect("initialize managed session");
+            sessions.push(
+                response
+                    .headers()
+                    .get("mcp-session-id")
+                    .expect("managed session id")
+                    .clone(),
+            );
+        }
+
+        endpoint
+            .cancel_client(&AuthenticatedMcpClient {
+                client_id: Arc::from("target"),
+                credential_generation: 1,
+            })
+            .await
+            .expect("cancel target client");
+
+        for (token, session, expected) in [
+            ("target-token", &sessions[0], reqwest::StatusCode::NOT_FOUND),
+            ("survivor-token", &sessions[1], reqwest::StatusCode::OK),
+        ] {
+            let response = client
+                .post(&url)
+                .bearer_auth(token)
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .header("mcp-session-id", session.clone())
+                .header("mcp-protocol-version", "2025-06-18")
+                .json(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/list",
+                    "params": {}
+                }))
+                .send()
+                .await
+                .expect("use managed session after selective cancellation");
+            assert_eq!(response.status(), expected);
+        }
+
+        endpoint.shutdown();
+        endpoint.wait().await.expect("stop managed endpoint");
+    }
+
+    #[tokio::test]
     async fn managed_endpoint_keeps_loopback_origin_and_host_guards() {
         let token = "managed-loopback-credential";
         let endpoint = bind_managed_test_endpoint(Arc::new(TestBearerAuthorizer::with_credential(
@@ -2861,11 +3276,14 @@ mod tests {
         let router = axum::Router::new()
             .route("/identity", axum::routing::get(identity))
             .layer(axum::middleware::from_fn_with_state(
-                Arc::new(TestBearerAuthorizer::with_credential(
-                    "extension-token",
-                    "external",
-                    9,
-                )) as Arc<dyn BearerAuthorizer>,
+                ManagedAuthorizationState {
+                    authorizer: Arc::new(TestBearerAuthorizer::with_credential(
+                        "extension-token",
+                        "external",
+                        9,
+                    )),
+                    sessions: None,
+                },
                 bearer_authorization_guard,
             ));
         let response = router
@@ -2892,11 +3310,14 @@ mod tests {
         let router = axum::Router::new()
             .route("/", axum::routing::get(|| async { "authorized" }))
             .layer(axum::middleware::from_fn_with_state(
-                Arc::new(TestBearerAuthorizer::with_credential(
-                    "active-token",
-                    "external",
-                    1,
-                )) as Arc<dyn BearerAuthorizer>,
+                ManagedAuthorizationState {
+                    authorizer: Arc::new(TestBearerAuthorizer::with_credential(
+                        "active-token",
+                        "external",
+                        1,
+                    )),
+                    sessions: None,
+                },
                 bearer_authorization_guard,
             ));
         let subscriber = CapturingSubscriber::default();
