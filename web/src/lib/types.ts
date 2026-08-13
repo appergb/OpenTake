@@ -1167,6 +1167,11 @@ export type ChatRole = "system" | "user" | "assistant" | "tool";
 export const MAX_CHAT_STREAM_ID_LENGTH = 512;
 export const MAX_CHAT_BLOCK_INDEX = 511;
 export const MAX_CHAT_DELTA_CHARS = 32_768;
+export const MAX_CHAT_EVENT_SEQUENCE = 1_000_000;
+export const MAX_CHAT_MESSAGE_CHARS = 1_048_576;
+export const MAX_CHAT_IMAGE_BASE64_CHARS = 16_777_216;
+export const MAX_CHAT_JSON_DEPTH = 24;
+export const MAX_CHAT_JSON_NODES = 8_192;
 
 export interface ChatToolCall {
   id: string;
@@ -1215,6 +1220,122 @@ export interface ChatSession {
   isOpen: boolean;
   provider?: string;
   model?: string;
+}
+
+function hasOwn(value: object, property: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, property);
+}
+
+export function isBoundedChatId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_CHAT_STREAM_ID_LENGTH;
+}
+
+export function isBoundedChatJson(value: unknown): boolean {
+  let remaining = MAX_CHAT_JSON_NODES;
+  const visit = (candidate: unknown, depth: number): boolean => {
+    remaining -= 1;
+    if (remaining < 0 || depth > MAX_CHAT_JSON_DEPTH) return false;
+    if (candidate === null || typeof candidate === "boolean") return true;
+    if (typeof candidate === "string") return candidate.length <= MAX_CHAT_MESSAGE_CHARS;
+    if (typeof candidate === "number") return Number.isFinite(candidate);
+    if (Array.isArray(candidate)) {
+      return candidate.length <= MAX_CHAT_JSON_NODES && candidate.every((item) => visit(item, depth + 1));
+    }
+    if (typeof candidate !== "object") return false;
+    const entries = Object.entries(candidate as Record<string, unknown>);
+    return entries.length <= MAX_CHAT_JSON_NODES && entries.every(
+      ([key, item]) => key.length <= MAX_CHAT_STREAM_ID_LENGTH && visit(item, depth + 1),
+    );
+  };
+  return visit(value, 0);
+}
+
+export function isBoundedChatToolCall(value: unknown): value is ChatToolCall {
+  if (typeof value !== "object" || value === null) return false;
+  const toolCall = value as Record<string, unknown>;
+  return isBoundedChatId(toolCall.id) &&
+    isBoundedChatId(toolCall.name) &&
+    hasOwn(toolCall, "args") &&
+    isBoundedChatJson(toolCall.args) &&
+    (toolCall.result === undefined || isBoundedChatJson(toolCall.result)) &&
+    (toolCall.isError === undefined || typeof toolCall.isError === "boolean");
+}
+
+export function isBoundedAgentContentBlock(value: unknown): value is AgentContentBlock {
+  if (typeof value !== "object" || value === null) return false;
+  const block = value as Record<string, unknown>;
+  if (block.type === "text") {
+    return typeof block.text === "string" && block.text.length <= MAX_CHAT_MESSAGE_CHARS;
+  }
+  if (block.type === "toolUse") {
+    return isBoundedChatId(block.id) &&
+      isBoundedChatId(block.name) &&
+      hasOwn(block, "input") &&
+      isBoundedChatJson(block.input) &&
+      (block.result === undefined || isBoundedChatJson(block.result)) &&
+      (block.isError === undefined || typeof block.isError === "boolean");
+  }
+  if (
+    block.type !== "toolResult" ||
+    !isBoundedChatId(block.toolUseId) ||
+    !Array.isArray(block.content) ||
+    block.content.length > 64 ||
+    (block.isError !== undefined && typeof block.isError !== "boolean")
+  ) {
+    return false;
+  }
+  return block.content.every((content) => {
+    if (typeof content !== "object" || content === null) return false;
+    const item = content as Record<string, unknown>;
+    return (item.kind === "text" &&
+      typeof item.text === "string" &&
+      item.text.length <= MAX_CHAT_MESSAGE_CHARS) ||
+      (item.kind === "image" &&
+        typeof item.base64 === "string" &&
+        item.base64.length <= MAX_CHAT_IMAGE_BASE64_CHARS &&
+        typeof item.mediaType === "string" &&
+        item.mediaType.length > 0 &&
+        item.mediaType.length <= 128);
+  });
+}
+
+export function isBoundedAssistantChatMessage(
+  value: unknown,
+  expectedId: string,
+): value is ChatMessage {
+  if (typeof value !== "object" || value === null) return false;
+  const message = value as Record<string, unknown>;
+  if (
+    message.id !== expectedId ||
+    !isBoundedChatId(message.id) ||
+    message.role !== "assistant" ||
+    typeof message.content !== "string" ||
+    message.content.length > MAX_CHAT_MESSAGE_CHARS ||
+    !Array.isArray(message.toolCalls) ||
+    message.toolCalls.length > MAX_CHAT_BLOCK_INDEX + 1 ||
+    !message.toolCalls.every(isBoundedChatToolCall) ||
+    !Array.isArray(message.blocks) ||
+    message.blocks.length > MAX_CHAT_BLOCK_INDEX + 1 ||
+    !message.blocks.every(isBoundedAgentContentBlock) ||
+    typeof message.createdAt !== "number" ||
+    !Number.isSafeInteger(message.createdAt) ||
+    message.createdAt < 0 ||
+    (message.toolCallId !== undefined && !isBoundedChatId(message.toolCallId)) ||
+    (message.toolIsError !== undefined && typeof message.toolIsError !== "boolean")
+  ) {
+    return false;
+  }
+  const blocks = message.blocks as AgentContentBlock[];
+  const content = blocks.flatMap((block) => block.type === "text" ? [block.text] : []).join("");
+  const toolBlocks = blocks.filter(
+    (block): block is Extract<AgentContentBlock, { type: "toolUse" }> => block.type === "toolUse",
+  );
+  const toolCalls = message.toolCalls as ChatToolCall[];
+  return message.content === content &&
+    toolBlocks.length === toolCalls.length &&
+    toolBlocks.every((block, index) =>
+      block.id === toolCalls[index].id && block.name === toolCalls[index].name,
+    );
 }
 
 // MARK: - AI generation audit log (mirror of opentake_project::gen_log,

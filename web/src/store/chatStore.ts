@@ -1,27 +1,41 @@
 /**
  * Chat store. Rust remains the persisted authority. This store only holds
- * addressable in-flight drafts so event delivery cannot merge nearby turns.
+ * addressable, sequenced drafts so one malformed message cannot corrupt a
+ * sibling stream or a different session.
  */
 
 import { create } from "zustand";
 import {
   MAX_CHAT_BLOCK_INDEX as BLOCK_INDEX_LIMIT,
   MAX_CHAT_DELTA_CHARS,
-  MAX_CHAT_STREAM_ID_LENGTH,
+  MAX_CHAT_EVENT_SEQUENCE,
+  isBoundedAgentContentBlock,
+  isBoundedAssistantChatMessage,
+  isBoundedChatId,
   type AgentContentBlock,
   type ChatMessage,
   type ChatToolCall,
 } from "../lib/types";
 
 export const MAX_CHAT_BLOCK_INDEX = BLOCK_INDEX_LIMIT;
+export const MAX_CHAT_RETAINED_SESSIONS = 32;
+export const MAX_CHAT_DRAFTS = 64;
+export const MAX_CHAT_DELETED_SESSIONS = 128;
+const MAX_CHAT_BLOCKED_MESSAGES = 128;
+const MAX_CHAT_RESYNC_SESSIONS = 32;
 
 export type ChatHistoryResyncReason =
   | "block_gap"
+  | "block_identity_mismatch"
   | "invalid_block"
   | "invalid_block_index"
   | "invalid_identity"
+  | "invalid_message"
+  | "invalid_sequence"
   | "missing_draft"
-  | "message_identity_mismatch";
+  | "message_identity_mismatch"
+  | "sequence_gap"
+  | "sequence_out_of_order";
 
 export interface ChatHistoryResyncRequest {
   sessionId: string;
@@ -32,8 +46,8 @@ export interface ChatHistoryResyncRequest {
 interface ChatDraft {
   sessionId: string;
   messageId: string;
-  /** Fingerprints make transport retries idempotent without changing order. */
-  seenDeltas: Record<string, string[]>;
+  nextSequence: number;
+  finalized: boolean;
 }
 
 interface ChatStoreState {
@@ -43,24 +57,36 @@ interface ChatStoreState {
   streaming: boolean;
   streamingId: string | null;
   sessionMessages: Record<string, ChatMessage[]>;
+  sessionOrder: string[];
   drafts: Record<string, ChatDraft>;
+  draftOrder: string[];
   blockedMessageKeys: Record<string, true>;
+  blockedMessageOrder: string[];
   historyResyncRequests: Record<string, ChatHistoryResyncRequest>;
   resyncingSessionIds: Record<string, true>;
+  resyncSessionOrder: string[];
   deletedSessionIds: Record<string, true>;
+  deletedSessionOrder: string[];
   composerDraft: string | null;
   setComposerDraft: (draft: string | null) => void;
   pushUser: (text: string) => void;
   beginMessage: (sessionId: string, messageId: string) => void;
-  appendBlockDelta: (sessionId: string, messageId: string, blockIndex: number, delta: string) => void;
+  appendBlockDelta: (
+    sessionId: string,
+    messageId: string,
+    sequence: number,
+    blockIndex: number,
+    delta: string,
+  ) => void;
   upsertBlock: (
     sessionId: string,
     messageId: string,
+    sequence: number,
     blockIndex: number,
     block: AgentContentBlock,
   ) => void;
   finalize: {
-    (sessionId: string, messageId: string, message: ChatMessage): void;
+    (sessionId: string, messageId: string, sequence: number, message: ChatMessage): void;
     /** Beta 4 compatibility for an already-open window. New callers use IDs. */
     (message: ChatMessage): void;
   };
@@ -88,36 +114,16 @@ function draftKey(sessionId: string, messageId: string): string {
   return `${sessionId}\u0000${messageId}`;
 }
 
-function isId(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= MAX_CHAT_STREAM_ID_LENGTH;
-}
-
 function isBlockIndex(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= MAX_CHAT_BLOCK_INDEX;
 }
 
-function hasOwn(value: object, property: string): boolean {
-  return Object.prototype.hasOwnProperty.call(value, property);
+function isSequence(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= MAX_CHAT_EVENT_SEQUENCE;
 }
 
-function isBlock(block: unknown): block is AgentContentBlock {
-  if (typeof block !== "object" || block === null || !hasOwn(block, "type")) return false;
-  const value = block as Record<string, unknown>;
-  if (value.type === "text") return typeof value.text === "string";
-  if (value.type === "toolUse") {
-    return isId(value.id) && isId(value.name) && hasOwn(value, "input") &&
-      (value.result === undefined || hasOwn(value, "result")) &&
-      (value.isError === undefined || typeof value.isError === "boolean");
-  }
-  if (value.type !== "toolResult" || !isId(value.toolUseId) || !Array.isArray(value.content)) {
-    return false;
-  }
-  return value.content.every((item) => {
-    if (typeof item !== "object" || item === null) return false;
-    const content = item as Record<string, unknown>;
-    return (content.kind === "text" && typeof content.text === "string") ||
-      (content.kind === "image" && typeof content.base64 === "string" && typeof content.mediaType === "string");
-  }) && (value.isError === undefined || typeof value.isError === "boolean");
+function touch(order: string[], value: string): string[] {
+  return [...order.filter((candidate) => candidate !== value), value];
 }
 
 function deriveAssistantFields(message: ChatMessage, blocks: AgentContentBlock[]): ChatMessage {
@@ -136,37 +142,138 @@ function deriveAssistantFields(message: ChatMessage, blocks: AgentContentBlock[]
   };
 }
 
-function activeDraft(state: Pick<ChatStoreState, "drafts" | "blockedMessageKeys">, sessionId: string): ChatDraft | undefined {
-  return Object.values(state.drafts).find(
-    (draft) => draft.sessionId === sessionId && !state.blockedMessageKeys[draftKey(sessionId, draft.messageId)],
-  );
+function sameBlockIdentity(left: AgentContentBlock, right: AgentContentBlock): boolean {
+  if (left.type !== right.type) return false;
+  if (left.type === "text" && right.type === "text") return true;
+  if (left.type === "toolUse" && right.type === "toolUse") {
+    return left.id === right.id && left.name === right.name;
+  }
+  return left.type === "toolResult" && right.type === "toolResult" && left.toolUseId === right.toolUseId;
 }
 
-function selectedView(
-  state: Pick<ChatStoreState, "sessionMessages" | "drafts" | "blockedMessageKeys">,
-  sessionId: string,
-) {
-  const draft = activeDraft(state, sessionId);
+function activeDraft(state: ChatStoreState, sessionId: string): ChatDraft | undefined {
+  for (let index = state.draftOrder.length - 1; index >= 0; index -= 1) {
+    const key = state.draftOrder[index];
+    const draft = state.drafts[key];
+    if (
+      draft?.sessionId === sessionId &&
+      !draft.finalized &&
+      !state.blockedMessageKeys[key]
+    ) {
+      return draft;
+    }
+  }
+  return undefined;
+}
+
+function selectedView(state: ChatStoreState) {
+  const draft = activeDraft(state, state.sessionId);
   return {
-    messages: state.sessionMessages[sessionId] ?? [],
+    messages: state.sessionMessages[state.sessionId] ?? [],
     streaming: draft !== undefined,
     streamingId: draft?.messageId ?? null,
   };
 }
 
-function withSessionMessages(
-  state: ChatStoreState,
-  sessionId: string,
-  messages: ChatMessage[],
-  extras: Partial<ChatStoreState> = {},
-): Partial<ChatStoreState> {
-  const sessionMessages = { ...state.sessionMessages, [sessionId]: messages };
-  const next = { ...state, ...extras, sessionMessages };
-  return {
-    ...extras,
-    sessionMessages,
-    ...(state.sessionId === sessionId ? selectedView(next, sessionId) : {}),
+function removeSessionState(state: ChatStoreState, sessionId: string): void {
+  delete state.sessionMessages[sessionId];
+  delete state.historyResyncRequests[sessionId];
+  delete state.resyncingSessionIds[sessionId];
+  state.sessionOrder = state.sessionOrder.filter((candidate) => candidate !== sessionId);
+  state.resyncSessionOrder = state.resyncSessionOrder.filter((candidate) => candidate !== sessionId);
+  for (const [key, draft] of Object.entries(state.drafts)) {
+    if (draft.sessionId === sessionId) delete state.drafts[key];
+  }
+  state.draftOrder = state.draftOrder.filter((key) => state.drafts[key] !== undefined);
+  for (const key of Object.keys(state.blockedMessageKeys)) {
+    if (key.startsWith(`${sessionId}\u0000`)) delete state.blockedMessageKeys[key];
+  }
+  state.blockedMessageOrder = state.blockedMessageOrder.filter(
+    (key) => state.blockedMessageKeys[key] !== undefined,
+  );
+}
+
+/** Clone mutable collections, enforce all retention limits, then recompute the selected view. */
+function reconcile(input: ChatStoreState): ChatStoreState {
+  const state: ChatStoreState = {
+    ...input,
+    sessionMessages: { ...input.sessionMessages },
+    sessionOrder: [...input.sessionOrder],
+    drafts: { ...input.drafts },
+    draftOrder: [...input.draftOrder],
+    blockedMessageKeys: { ...input.blockedMessageKeys },
+    blockedMessageOrder: [...input.blockedMessageOrder],
+    historyResyncRequests: { ...input.historyResyncRequests },
+    resyncingSessionIds: { ...input.resyncingSessionIds },
+    resyncSessionOrder: [...input.resyncSessionOrder],
+    deletedSessionIds: { ...input.deletedSessionIds },
+    deletedSessionOrder: [...input.deletedSessionOrder],
   };
+
+  state.sessionOrder = state.sessionOrder.filter(
+    (sessionId, index, order) => state.sessionMessages[sessionId] !== undefined && order.indexOf(sessionId) === index,
+  );
+  for (const sessionId of Object.keys(state.sessionMessages)) {
+    if (!state.sessionOrder.includes(sessionId)) state.sessionOrder.push(sessionId);
+  }
+  while (Object.keys(state.sessionMessages).length > MAX_CHAT_RETAINED_SESSIONS) {
+    const victim = state.sessionOrder.find((sessionId) => sessionId !== state.sessionId);
+    if (!victim) break;
+    removeSessionState(state, victim);
+  }
+
+  state.draftOrder = state.draftOrder.filter(
+    (key, index, order) => state.drafts[key] !== undefined && order.indexOf(key) === index,
+  );
+  for (const key of Object.keys(state.drafts)) {
+    if (!state.draftOrder.includes(key)) state.draftOrder.push(key);
+  }
+  while (Object.keys(state.drafts).length > MAX_CHAT_DRAFTS) {
+    const key = state.draftOrder.shift();
+    if (!key) break;
+    const draft = state.drafts[key];
+    delete state.drafts[key];
+    delete state.blockedMessageKeys[key];
+    state.blockedMessageOrder = state.blockedMessageOrder.filter((candidate) => candidate !== key);
+    if (draft && !draft.finalized) {
+      const messages = state.sessionMessages[draft.sessionId];
+      if (messages) {
+        state.sessionMessages[draft.sessionId] = messages.filter((message) => message.id !== draft.messageId);
+      }
+    }
+  }
+
+  state.blockedMessageOrder = state.blockedMessageOrder.filter(
+    (key, index, order) => state.blockedMessageKeys[key] !== undefined && order.indexOf(key) === index,
+  );
+  while (Object.keys(state.blockedMessageKeys).length > MAX_CHAT_BLOCKED_MESSAGES) {
+    const key = state.blockedMessageOrder.shift();
+    if (!key) break;
+    delete state.blockedMessageKeys[key];
+    delete state.drafts[key];
+    state.draftOrder = state.draftOrder.filter((candidate) => candidate !== key);
+  }
+
+  state.deletedSessionOrder = state.deletedSessionOrder.filter(
+    (sessionId, index, order) => state.deletedSessionIds[sessionId] !== undefined && order.indexOf(sessionId) === index,
+  );
+  while (Object.keys(state.deletedSessionIds).length > MAX_CHAT_DELETED_SESSIONS) {
+    const sessionId = state.deletedSessionOrder.shift();
+    if (!sessionId) break;
+    delete state.deletedSessionIds[sessionId];
+  }
+
+  state.resyncSessionOrder = state.resyncSessionOrder.filter(
+    (sessionId, index, order) => state.resyncingSessionIds[sessionId] !== undefined && order.indexOf(sessionId) === index,
+  );
+  while (Object.keys(state.resyncingSessionIds).length > MAX_CHAT_RESYNC_SESSIONS) {
+    const sessionId = state.resyncSessionOrder.shift();
+    if (!sessionId) break;
+    delete state.resyncingSessionIds[sessionId];
+    delete state.historyResyncRequests[sessionId];
+  }
+
+  return { ...state, ...selectedView(state) };
 }
 
 function stopMessage(
@@ -174,29 +281,68 @@ function stopMessage(
   sessionId: string,
   messageId: string | undefined,
   reason: ChatHistoryResyncReason,
-): Partial<ChatStoreState> {
-  if (!isId(sessionId) || state.deletedSessionIds[sessionId]) return {};
-  const key = messageId && isId(messageId) ? draftKey(sessionId, messageId) : undefined;
-  if (key && state.blockedMessageKeys[key]) return {};
+): ChatStoreState {
+  if (!isBoundedChatId(sessionId) || state.deletedSessionIds[sessionId]) return state;
+  const key = messageId && isBoundedChatId(messageId) ? draftKey(sessionId, messageId) : undefined;
+  if (key && state.blockedMessageKeys[key]) return state;
+
   const blockedMessageKeys = key
     ? { ...state.blockedMessageKeys, [key]: true as const }
     : state.blockedMessageKeys;
-  const resyncingSessionIds = state.resyncingSessionIds[sessionId]
-    ? state.resyncingSessionIds
-    : { ...state.resyncingSessionIds, [sessionId]: true as const };
-  const historyResyncRequests = state.resyncingSessionIds[sessionId]
-    ? state.historyResyncRequests
-    : {
-        ...state.historyResyncRequests,
-        [sessionId]: { sessionId, ...(messageId ? { messageId } : {}), reason },
-      };
-  const next = { ...state, blockedMessageKeys, resyncingSessionIds };
-  return {
+  const blockedMessageOrder = key ? touch(state.blockedMessageOrder, key) : state.blockedMessageOrder;
+  const firstResyncForSession = !state.resyncingSessionIds[sessionId];
+  return reconcile({
+    ...state,
     blockedMessageKeys,
-    resyncingSessionIds,
-    historyResyncRequests,
-    ...(state.sessionId === sessionId ? selectedView(next, sessionId) : {}),
-  };
+    blockedMessageOrder,
+    resyncingSessionIds: firstResyncForSession
+      ? { ...state.resyncingSessionIds, [sessionId]: true as const }
+      : state.resyncingSessionIds,
+    resyncSessionOrder: firstResyncForSession
+      ? touch(state.resyncSessionOrder, sessionId)
+      : state.resyncSessionOrder,
+    historyResyncRequests: firstResyncForSession
+      ? {
+          ...state.historyResyncRequests,
+          [sessionId]: { sessionId, ...(messageId ? { messageId } : {}), reason },
+        }
+      : state.historyResyncRequests,
+  });
+}
+
+type SequenceDecision = "apply" | "retry" | ChatHistoryResyncReason;
+
+function sequenceDecision(draft: ChatDraft, sequence: number): SequenceDecision {
+  if (draft.finalized) {
+    return draft.nextSequence > 0 && sequence === draft.nextSequence - 1
+      ? "retry"
+      : "sequence_out_of_order";
+  }
+  if (sequence === draft.nextSequence) return "apply";
+  if (draft.nextSequence > 0 && sequence === draft.nextSequence - 1) return "retry";
+  return sequence > draft.nextSequence ? "sequence_gap" : "sequence_out_of_order";
+}
+
+function withUpdatedMessage(
+  state: ChatStoreState,
+  sessionId: string,
+  messageId: string,
+  replacement: ChatMessage,
+  draft: ChatDraft,
+): ChatStoreState {
+  const messages = state.sessionMessages[sessionId];
+  const index = messages?.findIndex((message) => message.id === messageId) ?? -1;
+  if (!messages || index < 0) return stopMessage(state, sessionId, messageId, "missing_draft");
+  const nextMessages = messages.slice();
+  nextMessages[index] = replacement;
+  const key = draftKey(sessionId, messageId);
+  return reconcile({
+    ...state,
+    sessionMessages: { ...state.sessionMessages, [sessionId]: nextMessages },
+    sessionOrder: touch(state.sessionOrder, sessionId),
+    drafts: { ...state.drafts, [key]: draft },
+    draftOrder: touch(state.draftOrder, key),
+  });
 }
 
 export const useChatStore = create<ChatStoreState>((set, get) => ({
@@ -205,11 +351,16 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
   streaming: false,
   streamingId: null,
   sessionMessages: {},
+  sessionOrder: [],
   drafts: {},
+  draftOrder: [],
   blockedMessageKeys: {},
+  blockedMessageOrder: [],
   historyResyncRequests: {},
   resyncingSessionIds: {},
+  resyncSessionOrder: [],
   deletedSessionIds: {},
+  deletedSessionOrder: [],
   composerDraft: null,
   setComposerDraft: (composerDraft) => set({ composerDraft }),
 
@@ -222,12 +373,21 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       toolCalls: [],
       createdAt: Date.now(),
     };
-    return withSessionMessages(state, state.sessionId, [...(state.sessionMessages[state.sessionId] ?? []), message]);
+    return reconcile({
+      ...state,
+      sessionMessages: {
+        ...state.sessionMessages,
+        [state.sessionId]: [...(state.sessionMessages[state.sessionId] ?? []), message],
+      },
+      sessionOrder: touch(state.sessionOrder, state.sessionId),
+    });
   }),
 
   beginMessage: (sessionId, messageId) => set((state) => {
-    if (!isId(sessionId) || !isId(messageId)) return stopMessage(state, sessionId, messageId, "invalid_identity");
-    if (state.deletedSessionIds[sessionId] || state.resyncingSessionIds[sessionId]) return state;
+    if (!isBoundedChatId(sessionId) || !isBoundedChatId(messageId)) {
+      return stopMessage(state, sessionId, isBoundedChatId(messageId) ? messageId : undefined, "invalid_identity");
+    }
+    if (state.deletedSessionIds[sessionId]) return state;
     const key = draftKey(sessionId, messageId);
     if (state.drafts[key] || state.blockedMessageKeys[key]) return state;
     const messages = state.sessionMessages[sessionId] ?? [];
@@ -240,110 +400,161 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       blocks: [],
       createdAt: Date.now(),
     };
-    return withSessionMessages(state, sessionId, [...messages, message], {
-      drafts: { ...state.drafts, [key]: { sessionId, messageId, seenDeltas: {} } },
+    return reconcile({
+      ...state,
+      sessionMessages: { ...state.sessionMessages, [sessionId]: [...messages, message] },
+      sessionOrder: touch(state.sessionOrder, sessionId),
+      drafts: {
+        ...state.drafts,
+        [key]: { sessionId, messageId, nextSequence: 0, finalized: false },
+      },
+      draftOrder: touch(state.draftOrder, key),
     });
   }),
 
-  appendBlockDelta: (sessionId, messageId, blockIndex, delta) => set((state) => {
-    if (!isId(sessionId) || !isId(messageId)) return stopMessage(state, sessionId, messageId, "invalid_identity");
+  appendBlockDelta: (sessionId, messageId, sequence, blockIndex, delta) => set((state) => {
+    if (!isBoundedChatId(sessionId) || !isBoundedChatId(messageId)) {
+      return stopMessage(state, sessionId, isBoundedChatId(messageId) ? messageId : undefined, "invalid_identity");
+    }
+    if (!isSequence(sequence)) return stopMessage(state, sessionId, messageId, "invalid_sequence");
     if (!isBlockIndex(blockIndex)) return stopMessage(state, sessionId, messageId, "invalid_block_index");
     if (typeof delta !== "string" || delta.length > MAX_CHAT_DELTA_CHARS) {
       return stopMessage(state, sessionId, messageId, "invalid_block");
     }
     const key = draftKey(sessionId, messageId);
-    if (state.deletedSessionIds[sessionId] || state.blockedMessageKeys[key] || state.resyncingSessionIds[sessionId]) return state;
+    if (state.deletedSessionIds[sessionId] || state.blockedMessageKeys[key]) return state;
     const draft = state.drafts[key];
+    if (!draft) return stopMessage(state, sessionId, messageId, "missing_draft");
+    const decision = sequenceDecision(draft, sequence);
+    if (decision === "retry") return state;
+    if (decision !== "apply") return stopMessage(state, sessionId, messageId, decision);
     const messages = state.sessionMessages[sessionId];
     const index = messages?.findIndex((message) => message.id === messageId) ?? -1;
-    if (!draft || !messages || index < 0) return stopMessage(state, sessionId, messageId, "missing_draft");
+    if (!messages || index < 0) return stopMessage(state, sessionId, messageId, "missing_draft");
     const message = messages[index];
     const blocks = [...(message.blocks ?? [])];
     if (blockIndex > blocks.length) return stopMessage(state, sessionId, messageId, "block_gap");
-    const seen = draft.seenDeltas[String(blockIndex)] ?? [];
-    if (seen.includes(delta)) return state;
     if (blockIndex === blocks.length) {
       blocks.push({ type: "text", text: delta });
     } else if (blocks[blockIndex].type === "text") {
       blocks[blockIndex] = { type: "text", text: blocks[blockIndex].text + delta };
     } else {
-      return stopMessage(state, sessionId, messageId, "invalid_block");
+      return stopMessage(state, sessionId, messageId, "block_identity_mismatch");
     }
-    const nextMessages = messages.slice();
-    nextMessages[index] = deriveAssistantFields(message, blocks);
-    return withSessionMessages(state, sessionId, nextMessages, {
-      drafts: {
-        ...state.drafts,
-        [key]: {
-          ...draft,
-          seenDeltas: { ...draft.seenDeltas, [blockIndex]: [...seen, delta].slice(-128) },
-        },
-      },
-    });
+    return withUpdatedMessage(
+      state,
+      sessionId,
+      messageId,
+      deriveAssistantFields(message, blocks),
+      { ...draft, nextSequence: sequence + 1 },
+    );
   }),
 
-  upsertBlock: (sessionId, messageId, blockIndex, block) => set((state) => {
-    if (!isId(sessionId) || !isId(messageId)) return stopMessage(state, sessionId, messageId, "invalid_identity");
+  upsertBlock: (sessionId, messageId, sequence, blockIndex, block) => set((state) => {
+    if (!isBoundedChatId(sessionId) || !isBoundedChatId(messageId)) {
+      return stopMessage(state, sessionId, isBoundedChatId(messageId) ? messageId : undefined, "invalid_identity");
+    }
+    if (!isSequence(sequence)) return stopMessage(state, sessionId, messageId, "invalid_sequence");
     if (!isBlockIndex(blockIndex)) return stopMessage(state, sessionId, messageId, "invalid_block_index");
-    if (!isBlock(block)) return stopMessage(state, sessionId, messageId, "invalid_block");
+    if (!isBoundedAgentContentBlock(block)) return stopMessage(state, sessionId, messageId, "invalid_block");
     const key = draftKey(sessionId, messageId);
-    if (state.deletedSessionIds[sessionId] || state.blockedMessageKeys[key] || state.resyncingSessionIds[sessionId]) return state;
+    if (state.deletedSessionIds[sessionId] || state.blockedMessageKeys[key]) return state;
     const draft = state.drafts[key];
+    if (!draft) return stopMessage(state, sessionId, messageId, "missing_draft");
+    const decision = sequenceDecision(draft, sequence);
+    if (decision === "retry") return state;
+    if (decision !== "apply") return stopMessage(state, sessionId, messageId, decision);
     const messages = state.sessionMessages[sessionId];
     const index = messages?.findIndex((message) => message.id === messageId) ?? -1;
-    if (!draft || !messages || index < 0) return stopMessage(state, sessionId, messageId, "missing_draft");
+    if (!messages || index < 0) return stopMessage(state, sessionId, messageId, "missing_draft");
     const message = messages[index];
     const blocks = [...(message.blocks ?? [])];
     if (blockIndex > blocks.length) return stopMessage(state, sessionId, messageId, "block_gap");
-    if (blockIndex === blocks.length) blocks.push(block);
-    else blocks[blockIndex] = block;
-    const nextMessages = messages.slice();
-    nextMessages[index] = deriveAssistantFields(message, blocks);
-    return withSessionMessages(state, sessionId, nextMessages);
+    if (blockIndex === blocks.length) {
+      blocks.push(block);
+    } else if (!sameBlockIdentity(blocks[blockIndex], block)) {
+      return stopMessage(state, sessionId, messageId, "block_identity_mismatch");
+    } else {
+      blocks[blockIndex] = block;
+    }
+    return withUpdatedMessage(
+      state,
+      sessionId,
+      messageId,
+      deriveAssistantFields(message, blocks),
+      { ...draft, nextSequence: sequence + 1 },
+    );
   }),
 
-  finalize: ((first: string | ChatMessage, second?: string, third?: ChatMessage) => {
+  finalize: ((first: string | ChatMessage, second?: string, third?: number, fourth?: ChatMessage) => {
     if (typeof first !== "string") {
-      const state = get();
-      const messageId = state.streamingId;
-      if (!messageId) {
-        set((current) => withSessionMessages(
-          current,
-          current.sessionId,
-          [...(current.sessionMessages[current.sessionId] ?? []), first],
-        ));
-        return;
-      }
-      set((current) => {
-        const messages = current.sessionMessages[current.sessionId] ?? [];
-        const index = messages.findIndex((message) => message.id === messageId);
-        if (index < 0) return current;
-        const key = draftKey(current.sessionId, messageId);
+      set((state) => {
+        const messageId = state.streamingId;
+        if (!messageId || first.id !== messageId) {
+          return messageId
+            ? stopMessage(state, state.sessionId, messageId, "message_identity_mismatch")
+            : state;
+        }
+        const key = draftKey(state.sessionId, messageId);
+        const draft = state.drafts[key];
+        if (!draft || !isBoundedAssistantChatMessage(first, messageId)) {
+          return stopMessage(state, state.sessionId, messageId, draft ? "invalid_message" : "missing_draft");
+        }
+        const messages = state.sessionMessages[state.sessionId];
+        const index = messages?.findIndex((message) => message.id === messageId) ?? -1;
+        if (!messages || index < 0) return stopMessage(state, state.sessionId, messageId, "missing_draft");
         const nextMessages = messages.slice();
         nextMessages[index] = first;
-        const drafts = { ...current.drafts };
-        delete drafts[key];
-        return withSessionMessages(current, current.sessionId, nextMessages, { drafts });
+        return reconcile({
+          ...state,
+          sessionMessages: { ...state.sessionMessages, [state.sessionId]: nextMessages },
+          sessionOrder: touch(state.sessionOrder, state.sessionId),
+          drafts: {
+            ...state.drafts,
+            [key]: { ...draft, nextSequence: draft.nextSequence + 1, finalized: true },
+          },
+          draftOrder: touch(state.draftOrder, key),
+        });
       });
       return;
     }
     const sessionId = first;
     const messageId = second;
-    const message = third;
+    const sequence = third;
+    const message = fourth;
     set((state) => {
-      if (!isId(sessionId) || !isId(messageId) || !message || message.id !== messageId) {
+      if (!isBoundedChatId(sessionId) || !isBoundedChatId(messageId)) {
+        return stopMessage(state, sessionId, isBoundedChatId(messageId) ? messageId : undefined, "invalid_identity");
+      }
+      if (!message || message.id !== messageId) {
         return stopMessage(state, sessionId, messageId, "message_identity_mismatch");
       }
+      if (!isSequence(sequence)) return stopMessage(state, sessionId, messageId, "invalid_sequence");
+      if (!isBoundedAssistantChatMessage(message, messageId)) {
+        return stopMessage(state, sessionId, messageId, "invalid_message");
+      }
       const key = draftKey(sessionId, messageId);
-      if (state.deletedSessionIds[sessionId] || state.blockedMessageKeys[key] || state.resyncingSessionIds[sessionId]) return state;
+      if (state.deletedSessionIds[sessionId] || state.blockedMessageKeys[key]) return state;
+      const draft = state.drafts[key];
+      if (!draft) return stopMessage(state, sessionId, messageId, "missing_draft");
+      const decision = sequenceDecision(draft, sequence);
+      if (decision === "retry") return state;
+      if (decision !== "apply") return stopMessage(state, sessionId, messageId, decision);
       const messages = state.sessionMessages[sessionId];
       const index = messages?.findIndex((candidate) => candidate.id === messageId) ?? -1;
-      if (!state.drafts[key] || !messages || index < 0) return stopMessage(state, sessionId, messageId, "missing_draft");
+      if (!messages || index < 0) return stopMessage(state, sessionId, messageId, "missing_draft");
       const nextMessages = messages.slice();
       nextMessages[index] = message;
-      const drafts = { ...state.drafts };
-      delete drafts[key];
-      return withSessionMessages(state, sessionId, nextMessages, { drafts });
+      return reconcile({
+        ...state,
+        sessionMessages: { ...state.sessionMessages, [sessionId]: nextMessages },
+        sessionOrder: touch(state.sessionOrder, sessionId),
+        drafts: {
+          ...state.drafts,
+          [key]: { ...draft, nextSequence: sequence + 1, finalized: true },
+        },
+        draftOrder: touch(state.draftOrder, key),
+      });
     });
   }) as ChatStoreState["finalize"],
 
@@ -353,12 +564,15 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 
   takeHistoryResyncRequest: () => {
     const state = get();
-    const [sessionId, request] = Object.entries(state.historyResyncRequests)[0] ?? [];
-    if (!sessionId || !request) return null;
-    set(({ historyResyncRequests }) => {
-      const next = { ...historyResyncRequests };
-      delete next[sessionId];
-      return { historyResyncRequests: next };
+    const sessionId = state.resyncSessionOrder.find(
+      (candidate) => state.historyResyncRequests[candidate] !== undefined,
+    );
+    if (!sessionId) return null;
+    const request = state.historyResyncRequests[sessionId];
+    set((current) => {
+      const historyResyncRequests = { ...current.historyResyncRequests };
+      delete historyResyncRequests[sessionId];
+      return { historyResyncRequests };
     });
     return request;
   },
@@ -366,70 +580,73 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
   setMessages: (messages) => get().setMessagesForSession(get().sessionId, messages),
 
   setMessagesForSession: (sessionId, messages) => set((state) => {
-    if (!isId(sessionId) || state.deletedSessionIds[sessionId]) return state;
+    if (!isBoundedChatId(sessionId) || state.deletedSessionIds[sessionId]) return state;
     const drafts = Object.fromEntries(
       Object.entries(state.drafts).filter(([, draft]) => draft.sessionId !== sessionId),
     );
-    const resyncingSessionIds = { ...state.resyncingSessionIds };
-    delete resyncingSessionIds[sessionId];
-    const historyResyncRequests = { ...state.historyResyncRequests };
-    delete historyResyncRequests[sessionId];
-    return withSessionMessages(state, sessionId, messages, { drafts, resyncingSessionIds, historyResyncRequests });
-  }),
-
-  deleteSession: (sessionId) => set((state) => {
-    if (!isId(sessionId)) return state;
-    const sessionMessages = { ...state.sessionMessages };
-    delete sessionMessages[sessionId];
-    const drafts = Object.fromEntries(
-      Object.entries(state.drafts).filter(([, draft]) => draft.sessionId !== sessionId),
-    );
+    const draftOrder = state.draftOrder.filter((key) => drafts[key] !== undefined);
     const blockedMessageKeys = Object.fromEntries(
       Object.entries(state.blockedMessageKeys).filter(([key]) => !key.startsWith(`${sessionId}\u0000`)),
     ) as Record<string, true>;
-    const historyResyncRequests = { ...state.historyResyncRequests };
-    delete historyResyncRequests[sessionId];
+    const blockedMessageOrder = state.blockedMessageOrder.filter(
+      (key) => blockedMessageKeys[key] !== undefined,
+    );
     const resyncingSessionIds = { ...state.resyncingSessionIds };
     delete resyncingSessionIds[sessionId];
-    const next = {
+    const historyResyncRequests = { ...state.historyResyncRequests };
+    delete historyResyncRequests[sessionId];
+    const deletedSessionIds = { ...state.deletedSessionIds };
+    delete deletedSessionIds[sessionId];
+    return reconcile({
       ...state,
-      sessionMessages,
+      sessionMessages: { ...state.sessionMessages, [sessionId]: messages },
+      sessionOrder: touch(state.sessionOrder, sessionId),
       drafts,
+      draftOrder,
       blockedMessageKeys,
-      historyResyncRequests,
+      blockedMessageOrder,
       resyncingSessionIds,
+      resyncSessionOrder: state.resyncSessionOrder.filter((candidate) => candidate !== sessionId),
+      historyResyncRequests,
+      deletedSessionIds,
+      deletedSessionOrder: state.deletedSessionOrder.filter((candidate) => candidate !== sessionId),
+    });
+  }),
+
+  deleteSession: (sessionId) => set((state) => {
+    if (!isBoundedChatId(sessionId)) return state;
+    const next = reconcile({
+      ...state,
       deletedSessionIds: { ...state.deletedSessionIds, [sessionId]: true as const },
-    };
-    return {
-      sessionMessages,
-      drafts,
-      blockedMessageKeys,
-      historyResyncRequests,
-      resyncingSessionIds,
-      deletedSessionIds: next.deletedSessionIds,
-      ...(state.sessionId === sessionId ? { messages: [], streaming: false, streamingId: null } : {}),
-    };
+      deletedSessionOrder: touch(state.deletedSessionOrder, sessionId),
+    });
+    removeSessionState(next, sessionId);
+    return reconcile(next);
   }),
 
   reset: (sessionId) => set((state) => {
-    const next = { ...state, sessionId };
-    return { sessionId, ...selectedView(next, sessionId) };
+    if (!isBoundedChatId(sessionId)) return state;
+    return reconcile({ ...state, sessionId });
   }),
 
   beginStream: (id) => get().beginMessage(get().sessionId, id),
   appendDelta: (delta) => {
     const state = get();
-    if (state.streamingId) state.appendBlockDelta(state.sessionId, state.streamingId, 0, delta);
+    if (!state.streamingId) return;
+    const draft = state.drafts[draftKey(state.sessionId, state.streamingId)];
+    if (draft) state.appendBlockDelta(state.sessionId, state.streamingId, draft.nextSequence, 0, delta);
   },
   upsertToolCall: (toolCall) => {
     const state = get();
     if (!state.streamingId) return;
+    const draft = state.drafts[draftKey(state.sessionId, state.streamingId)];
+    if (!draft) return;
     const message = state.messages.find((candidate) => candidate.id === state.streamingId);
     const existing = message?.blocks?.findIndex(
       (block) => block.type === "toolUse" && block.id === toolCall.id,
     ) ?? -1;
     const blockIndex = existing >= 0 ? existing : (message?.blocks?.length ?? 0);
-    state.upsertBlock(state.sessionId, state.streamingId, blockIndex, {
+    state.upsertBlock(state.sessionId, state.streamingId, draft.nextSequence, blockIndex, {
       type: "toolUse",
       id: toolCall.id,
       name: toolCall.name,

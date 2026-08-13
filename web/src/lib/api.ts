@@ -11,7 +11,10 @@
 import {
   MAX_CHAT_BLOCK_INDEX,
   MAX_CHAT_DELTA_CHARS,
-  MAX_CHAT_STREAM_ID_LENGTH,
+  MAX_CHAT_EVENT_SEQUENCE,
+  isBoundedAgentContentBlock,
+  isBoundedAssistantChatMessage,
+  isBoundedChatId,
 } from "./types";
 import type {
   AccountInfo,
@@ -1929,6 +1932,7 @@ export interface ChatStreamIdentity {
   projectPath: string;
   sessionId: string;
   messageId: string;
+  sequence: number;
 }
 
 export interface ChatDelta extends ChatStreamIdentity {
@@ -1956,7 +1960,12 @@ export type ChatStreamEventName = "chat_delta" | "chat_tool_call" | "chat_done";
 
 export interface ChatStreamDecodeFailure {
   eventName: ChatStreamEventName;
-  reason: "invalid_identity" | "invalid_block_index" | "invalid_block" | "invalid_message";
+  reason:
+    | "invalid_identity"
+    | "invalid_sequence"
+    | "invalid_block_index"
+    | "invalid_block"
+    | "invalid_message";
   sessionId?: string;
   messageId?: string;
 }
@@ -1967,45 +1976,8 @@ export type ChatStreamDecodeResult =
 
 export type ChatStreamMalformedHandler = (failure: ChatStreamDecodeFailure) => void;
 
-function boundedId(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= MAX_CHAT_STREAM_ID_LENGTH;
-}
-
 function boundedBlockIndex(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= MAX_CHAT_BLOCK_INDEX;
-}
-
-function hasOwn(value: object, key: string): boolean {
-  return Object.prototype.hasOwnProperty.call(value, key);
-}
-
-function isAgentContentBlock(value: unknown): value is AgentContentBlock {
-  if (typeof value !== "object" || value === null) return false;
-  const block = value as Record<string, unknown>;
-  if (block.type === "text") return typeof block.text === "string";
-  if (block.type === "toolUse") {
-    return boundedId(block.id) && boundedId(block.name) && hasOwn(block, "input") &&
-      (block.isError === undefined || typeof block.isError === "boolean");
-  }
-  if (block.type !== "toolResult" || !boundedId(block.toolUseId) || !Array.isArray(block.content)) {
-    return false;
-  }
-  return block.content.every((content) => {
-    if (typeof content !== "object" || content === null) return false;
-    const item = content as Record<string, unknown>;
-    return (item.kind === "text" && typeof item.text === "string") ||
-      (item.kind === "image" && typeof item.base64 === "string" && typeof item.mediaType === "string");
-  }) && (block.isError === undefined || typeof block.isError === "boolean");
-}
-
-function isChatMessage(value: unknown, expectedId: string): value is ChatMessage {
-  if (typeof value !== "object" || value === null) return false;
-  const message = value as Record<string, unknown>;
-  return message.id === expectedId &&
-    (message.role === "system" || message.role === "user" || message.role === "assistant" || message.role === "tool") &&
-    typeof message.content === "string" && Array.isArray(message.toolCalls) &&
-    Number.isFinite(message.createdAt) &&
-    (message.blocks === undefined || (Array.isArray(message.blocks) && message.blocks.every(isAgentContentBlock)));
 }
 
 function compatibilityToolCall(block: AgentContentBlock): ChatToolCall {
@@ -2040,20 +2012,29 @@ export function decodeChatStreamEvent(
   payload: unknown,
 ): ChatStreamDecodeResult {
   const raw = typeof payload === "object" && payload !== null ? payload as Record<string, unknown> : {};
-  const sessionId = boundedId(raw.sessionId) ? raw.sessionId : undefined;
-  const messageId = boundedId(raw.messageId) ? raw.messageId : undefined;
+  const sessionId = isBoundedChatId(raw.sessionId) ? raw.sessionId : undefined;
+  const messageId = isBoundedChatId(raw.messageId) ? raw.messageId : undefined;
   if (
     !Number.isSafeInteger(raw.projectEpoch) || (raw.projectEpoch as number) < 0 ||
-    typeof raw.projectPath !== "string" || raw.projectPath.length === 0 ||
+    typeof raw.projectPath !== "string" || raw.projectPath.length === 0 || raw.projectPath.length > 4096 ||
     !sessionId || !messageId
   ) {
     return { ok: false, failure: { eventName, reason: "invalid_identity", sessionId, messageId } };
+  }
+  if (
+    typeof raw.sequence !== "number" ||
+    !Number.isSafeInteger(raw.sequence) ||
+    raw.sequence < 0 ||
+    raw.sequence > MAX_CHAT_EVENT_SEQUENCE
+  ) {
+    return { ok: false, failure: { eventName, reason: "invalid_sequence", sessionId, messageId } };
   }
   const identity = {
     projectEpoch: raw.projectEpoch as number,
     projectPath: raw.projectPath,
     sessionId,
     messageId,
+    sequence: raw.sequence,
   };
   if (eventName === "chat_delta") {
     if (!boundedBlockIndex(raw.blockIndex)) {
@@ -2068,12 +2049,12 @@ export function decodeChatStreamEvent(
     if (!boundedBlockIndex(raw.blockIndex)) {
       return { ok: false, failure: { eventName, reason: "invalid_block_index", sessionId, messageId } };
     }
-    if (!isAgentContentBlock(raw.block)) {
+    if (!isBoundedAgentContentBlock(raw.block)) {
       return { ok: false, failure: { eventName, reason: "invalid_block", sessionId, messageId } };
     }
     return { ok: true, event: { type: "blockUpsert", ...identity, blockIndex: raw.blockIndex, block: raw.block } };
   }
-  if (!isChatMessage(raw.message, messageId)) {
+  if (!isBoundedAssistantChatMessage(raw.message, messageId)) {
     return { ok: false, failure: { eventName, reason: "invalid_message", sessionId, messageId } };
   }
   return { ok: true, event: { type: "done", ...identity, message: raw.message } };

@@ -27,16 +27,41 @@ Branch: `release/v1.0.0-beta.5`
   bounded indices, authoritative final replacement, inactive/deleted/late
   session isolation, explicit no-nearest-assistant merge, and decoder validity.
 
+## Review fix — ordered event sequences (`931edb9` protocol)
+
+- Mirrored Rust's per-message `sequence` on every decoded stream event. The
+  reducer now accepts only the exact next sequence, ignores only an immediate
+  previous-sequence retry, and poisons only the addressed message on a gap or
+  stale out-of-order event. Payload content is not used for de-duplication, so
+  two identical deltas at consecutive valid sequences are both preserved.
+- Separated per-message poison from per-session history re-sync de-duplication.
+  A bad message cannot stop a sibling message in the same session, while at
+  most one history reload request remains pending until authoritative history
+  is installed.
+- Made block discriminants and tool identities immutable at an occupied block
+  index (`toolUse.id/name`, `toolResult.toolUseId`). Final assistant messages
+  are deeply validated, bounded, exact-ID replacements.
+- Bounded retained inactive histories, draft/final sequence records, deleted
+  session tombstones, blocked keys, and pending re-sync state. Authoritative
+  history clears all poison and sequence state for its session.
+
 ## TDD and verification
 
-RED was observed with the requested focused command after adding the reducer
-tests: 8 tests failed because `beginMessage`, the block reducers, the deleted
-session isolation API, and `decodeChatStreamEvent` did not exist.
+The initial Task 2 RED was 8 failing reducer/decoder tests. For the sequence
+review fix, the expanded 18-case suite was run against the pre-fix production
+code and produced 15 failures / 3 passes. Failures covered all newly requested
+sequence, identity, deep-validation, and retention behaviors.
 
 GREEN verification on the final tree:
 
-- `pnpm -C web test -- src/store/chatStore.test.ts src/components/agent/AgentPanel.persistence.test.tsx`
-  — 144 files, 1269 tests passed.
+- `pnpm -C web exec vitest run src/store/chatStore.test.ts --reporter=verbose`
+  — 18/18 focused tests passed.
+- `pnpm -C web test -- src/store/chatStore.test.ts`
+  — 1277/1278 tests passed. The sole integration failure is the expected Task 3
+  migration point: `AgentPanel.persistence.test.tsx` still expects legacy
+  `finalize(message)` to append an unaddressed Done event. The reviewed store
+  now deliberately fails that overload closed unless it exactly matches an
+  active message ID; Task 3 owns listener/reducer migration and the test update.
 - `pnpm -C web build` — passed (`tsc -b` and Vite production build).
 - `git diff --check` — passed.
 
