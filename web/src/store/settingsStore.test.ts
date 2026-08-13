@@ -71,7 +71,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-it("removes legacy and versioned theme preferences while retaining the dark token root", async () => {
+it("removes legacy and versioned theme preferences without a document theme marker", async () => {
   localStorage.setItem("theme", "light");
   localStorage.setItem("theme:v1", "dark");
   localStorage.setItem("opentake.theme.v2", "light");
@@ -83,7 +83,7 @@ it("removes legacy and versioned theme preferences while retaining the dark toke
   expect(localStorage.getItem("theme:v1")).toBeNull();
   expect(localStorage.getItem("opentake.theme.v2")).toBeNull();
   expect(useSettingsStore.getState()).not.toHaveProperty("theme");
-  expect(document.documentElement.dataset.theme).toBe("dark");
+  expect(document.documentElement.dataset.theme).toBeUndefined();
 });
 
 it("awaits a native resize before persisting the selected dark compact layout", async () => {

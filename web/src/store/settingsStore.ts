@@ -41,7 +41,7 @@ export function migrateLegacyThemePreferences(): void {
     legacyKeys.forEach((key) => localStorage.removeItem(key));
   }
   if (typeof document !== "undefined") {
-    document.documentElement.dataset.theme = "dark";
+    delete document.documentElement.dataset.theme;
   }
 }
 function loadString(key: string): string | null {

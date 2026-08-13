@@ -171,7 +171,7 @@ describe("App lifecycle listeners", () => {
     expect(srv.stopMediaSync).toHaveBeenCalledOnce();
   });
 
-  it("initializes persisted dark-window preferences without a theme initializer", async () => {
+  it("initializes persisted window preferences without a theme initializer", async () => {
     await act(async () => root?.render(<App />));
 
     expect(settings.initWindowSize).toHaveBeenCalledOnce();
