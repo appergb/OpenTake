@@ -757,18 +757,14 @@ impl BearerAuthorizer for SingleBearerAuthorizer {
 
 fn bearer_candidate(headers: &axum::http::HeaderMap) -> Option<&str> {
     let mut values = headers.get_all(axum::http::header::AUTHORIZATION).iter();
-    let Some(value) = values.next() else {
-        return None;
-    };
+    let value = values.next()?;
     if values.next().is_some() {
         return None;
     }
     let Ok(value) = value.to_str() else {
         return None;
     };
-    let Some((scheme, supplied)) = value.split_once(' ') else {
-        return None;
-    };
+    let (scheme, supplied) = value.split_once(' ')?;
     (scheme.eq_ignore_ascii_case("bearer")
         && !supplied.is_empty()
         && !supplied.chars().any(char::is_whitespace))
@@ -857,7 +853,8 @@ impl ManagedClientSessions {
         let sessions = state
             .owners
             .iter()
-            .filter_map(|(session, owner)| (owner == client).then(|| session.clone()))
+            .filter(|(_, owner)| *owner == client)
+            .map(|(session, _)| session.clone())
             .collect::<Vec<_>>();
         for session in &sessions {
             state.owners.remove(session);
@@ -1215,15 +1212,18 @@ pub fn build_router_with_all_capability_bridges_for_port(
         ))
 }
 
+struct GatedRouterTransport {
+    shutdown: CancellationToken,
+    expected_port: u16,
+    authorization: Option<ManagedAuthorizationState>,
+}
+
 fn build_gated_router_for_port(
     dispatcher: Arc<Dispatcher>,
     instructions: String,
     gate: Arc<dyn ChatTurnGate>,
     activity: Arc<DispatchActivity>,
-    shutdown: CancellationToken,
-    expected_port: u16,
-    authorizer: Option<Arc<dyn BearerAuthorizer>>,
-    managed_sessions: Option<Arc<ManagedClientSessions>>,
+    transport: GatedRouterTransport,
 ) -> axum::Router {
     use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
     use rmcp::transport::streamable_http_server::{
@@ -1233,11 +1233,16 @@ fn build_gated_router_for_port(
     use tower_http::limit::RequestBodyLimitLayer;
 
     let mut config = StreamableHttpServerConfig::default();
-    config.cancellation_token = shutdown;
+    config.cancellation_token = transport.shutdown;
     let admission = DispatchAdmission::new();
-    let session_manager = managed_sessions.as_ref().map_or_else(
+    let session_manager = transport.authorization.as_ref().map_or_else(
         || Arc::new(LocalSessionManager::default()),
-        |sessions| sessions.manager.clone(),
+        |authorization| {
+            authorization.sessions.as_ref().map_or_else(
+                || Arc::new(LocalSessionManager::default()),
+                |sessions| sessions.manager.clone(),
+            )
+        },
     );
     let service = StreamableHttpService::new(
         move || {
@@ -1266,15 +1271,12 @@ fn build_gated_router_for_port(
         .layer(axum::middleware::from_fn(content_type_guard))
         .layer(axum::middleware::from_fn(protocol_version_guard))
         .layer(axum::middleware::from_fn_with_state(
-            expected_port,
+            transport.expected_port,
             localhost_guard,
         ));
-    match authorizer {
-        Some(authorizer) => router.layer(axum::middleware::from_fn_with_state(
-            ManagedAuthorizationState {
-                authorizer,
-                sessions: managed_sessions,
-            },
+    match transport.authorization {
+        Some(authorization) => router.layer(axum::middleware::from_fn_with_state(
+            authorization,
             bearer_authorization_guard,
         )),
         None => router,
@@ -1567,10 +1569,14 @@ pub async fn bind_managed_gated_on(
         instructions,
         gate,
         activity.clone(),
-        shutdown.clone(),
-        bound_addr.port(),
-        Some(authorizer),
-        Some(client_sessions.clone()),
+        GatedRouterTransport {
+            shutdown: shutdown.clone(),
+            expected_port: bound_addr.port(),
+            authorization: Some(ManagedAuthorizationState {
+                authorizer,
+                sessions: Some(client_sessions.clone()),
+            }),
+        },
     );
     let listener_shutdown = shutdown.clone();
     let join = tokio::spawn(async move {
@@ -1640,10 +1646,14 @@ async fn bind_ephemeral_gated_on(
         instructions,
         gate,
         activity.clone(),
-        shutdown.clone(),
-        bound_addr.port(),
-        Some(Arc::new(SingleBearerAuthorizer::new(bearer_token.clone()))),
-        None,
+        GatedRouterTransport {
+            shutdown: shutdown.clone(),
+            expected_port: bound_addr.port(),
+            authorization: Some(ManagedAuthorizationState {
+                authorizer: Arc::new(SingleBearerAuthorizer::new(bearer_token.clone())),
+                sessions: None,
+            }),
+        },
     );
     let listener_shutdown = shutdown.clone();
     let listener_stopped = stopped.clone();
@@ -1693,10 +1703,11 @@ pub async fn serve_gated_dispatcher(
         instructions,
         gate,
         DispatchActivity::new(),
-        CancellationToken::new(),
-        bound_addr.port(),
-        None,
-        None,
+        GatedRouterTransport {
+            shutdown: CancellationToken::new(),
+            expected_port: bound_addr.port(),
+            authorization: None,
+        },
     );
     tracing::info!("MCP server listening on http://{bound_addr}/mcp");
     axum::serve(listener, router).await

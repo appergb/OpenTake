@@ -5,7 +5,7 @@ use std::{
     net::Ipv4Addr,
     path::{Path, PathBuf},
     sync::{atomic::AtomicU64, Arc, RwLock},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use opentake_agent::mcp::{
@@ -57,7 +57,7 @@ pub(crate) struct ExternalMcpStatus {
     pub(crate) error: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub(crate) struct ExternalMcpClientSummary {
     pub(crate) id: String,
@@ -66,19 +66,6 @@ pub(crate) struct ExternalMcpClientSummary {
     pub(crate) created_at: i64,
     pub(crate) last_used_at: Option<i64>,
     pub(crate) revoked_at: Option<i64>,
-}
-
-impl Default for ExternalMcpClientSummary {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            name: String::new(),
-            token_digest: String::new(),
-            created_at: 0,
-            last_used_at: None,
-            revoked_at: None,
-        }
-    }
 }
 
 #[derive(Clone, Serialize)]
@@ -177,7 +164,7 @@ struct LastUseTracker {
 struct LastUseEntry {
     latest: i64,
     dirty: bool,
-    last_flushed: Option<Instant>,
+    last_flushed: Option<tokio::time::Instant>,
 }
 
 struct LastUseWorker {
@@ -222,25 +209,40 @@ impl LastUseTracker {
     }
 
     fn due(&self, force: bool) -> HashMap<String, i64> {
-        let now = Instant::now();
+        let now = tokio::time::Instant::now();
         self.entries
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .filter_map(|(client_id, entry)| {
-                (entry.dirty
+            .filter(|(_, entry)| {
+                entry.dirty
                     && (force
                         || entry.last_flushed.is_none_or(|flushed| {
                             now.duration_since(flushed)
                                 >= Duration::from_secs(LAST_USED_WRITE_INTERVAL_SECS as u64)
-                        })))
-                .then(|| (client_id.clone(), entry.latest))
+                        }))
             })
+            .map(|(client_id, entry)| (client_id.clone(), entry.latest))
             .collect()
     }
 
+    fn next_deadline(&self) -> Option<tokio::time::Instant> {
+        let now = tokio::time::Instant::now();
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter(|entry| entry.dirty)
+            .map(|entry| {
+                entry.last_flushed.map_or(now, |flushed| {
+                    flushed + Duration::from_secs(LAST_USED_WRITE_INTERVAL_SECS as u64)
+                })
+            })
+            .min()
+    }
+
     fn mark_flushed(&self, persisted: &HashMap<String, i64>) {
-        let now = Instant::now();
+        let now = tokio::time::Instant::now();
         let mut entries = self
             .entries
             .lock()
@@ -288,10 +290,10 @@ impl ExternalMcpStatusBroadcaster {
 pub(crate) struct ExternalMcpState {
     components: ExternalMcpComponents,
     catalog: Arc<RwLock<ExternalMcpCatalog>>,
-    gate: Arc<LiveProjectMcpGate>,
+    gate: Arc<dyn opentake_agent::chat::ChatTurnGate>,
     authorizer: Arc<ExternalMcpCatalogAuthorizer>,
     last_use_worker: tokio::sync::Mutex<Option<LastUseWorker>>,
-    lifecycle: tokio::sync::Mutex<ExternalMcpLifecycle>,
+    lifecycle: Arc<tokio::sync::Mutex<ExternalMcpLifecycle>>,
     status: Arc<ExternalMcpStatusBroadcaster>,
     preference_parent_sync_on_call: std::sync::atomic::AtomicUsize,
 }
@@ -299,11 +301,19 @@ pub(crate) struct ExternalMcpState {
 type ExternalMcpStatusSink = Arc<dyn Fn(ExternalMcpStatus) + Send + Sync>;
 
 struct ExternalMcpLifecycle {
+    admission: ExternalMcpAdmission,
     enabled: bool,
     state: ExternalMcpListenerState,
     error: Option<String>,
     auth_failure: Option<String>,
     endpoint: Option<ManagedMcpEndpoint>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExternalMcpAdmission {
+    Running,
+    ShuttingDown,
+    Stopped,
 }
 
 impl ExternalMcpState {
@@ -326,13 +336,14 @@ impl ExternalMcpState {
             gate,
             authorizer,
             last_use_worker: tokio::sync::Mutex::new(None),
-            lifecycle: tokio::sync::Mutex::new(ExternalMcpLifecycle {
+            lifecycle: Arc::new(tokio::sync::Mutex::new(ExternalMcpLifecycle {
+                admission: ExternalMcpAdmission::Running,
                 enabled: false,
                 state: ExternalMcpListenerState::Disabled,
                 error: None,
                 auth_failure: None,
                 endpoint: None,
-            }),
+            })),
             status: ExternalMcpStatusBroadcaster::new(),
             preference_parent_sync_on_call: std::sync::atomic::AtomicUsize::new(0),
         }
@@ -355,7 +366,8 @@ impl ExternalMcpState {
             Ok(catalog) if preferences.is_ok() => {
                 let preferences = preferences.expect("checked external MCP preferences");
                 let mut state = Self::new(core, components, catalog);
-                state.lifecycle = tokio::sync::Mutex::new(ExternalMcpLifecycle {
+                state.lifecycle = Arc::new(tokio::sync::Mutex::new(ExternalMcpLifecycle {
+                    admission: ExternalMcpAdmission::Running,
                     enabled: preferences.enabled,
                     state: if preferences.enabled {
                         ExternalMcpListenerState::Paused
@@ -365,7 +377,7 @@ impl ExternalMcpState {
                     error: None,
                     auth_failure: None,
                     endpoint: None,
-                });
+                }));
                 state
             }
             catalog => {
@@ -376,13 +388,14 @@ impl ExternalMcpState {
                 };
                 let catalog = ExternalMcpCatalog::unavailable(app_data_dir, secrets);
                 let mut state = Self::new(core, components, catalog);
-                state.lifecycle = tokio::sync::Mutex::new(ExternalMcpLifecycle {
+                state.lifecycle = Arc::new(tokio::sync::Mutex::new(ExternalMcpLifecycle {
+                    admission: ExternalMcpAdmission::Running,
                     enabled,
                     state: ExternalMcpListenerState::AuthFailure,
                     error: Some(sanitize_auth_failure(&error)),
                     auth_failure: Some(error),
                     endpoint: None,
-                });
+                }));
                 state
             }
         }
@@ -397,19 +410,23 @@ impl ExternalMcpState {
         let catalog =
             ExternalMcpCatalog::unavailable(&root, Arc::new(opentake_gen::KeyringStore::new()));
         let mut state = Self::new(core, components, catalog);
-        state.lifecycle = tokio::sync::Mutex::new(ExternalMcpLifecycle {
+        state.lifecycle = Arc::new(tokio::sync::Mutex::new(ExternalMcpLifecycle {
+            admission: ExternalMcpAdmission::Running,
             enabled: false,
             state: ExternalMcpListenerState::AuthFailure,
             error: Some(sanitize_auth_failure(&error)),
             auth_failure: Some(error),
             endpoint: None,
-        });
+        }));
         state
     }
 
     pub(crate) async fn initialize(&self) {
-        self.ensure_last_use_worker().await;
         let mut lifecycle = self.lifecycle.lock().await;
+        if lifecycle.admission != ExternalMcpAdmission::Running {
+            return;
+        }
+        self.ensure_last_use_worker().await;
         self.reconcile_listener(&mut lifecycle).await;
     }
 
@@ -419,8 +436,9 @@ impl ExternalMcpState {
     }
 
     pub(crate) async fn set_enabled(&self, enabled: bool) -> Result<ExternalMcpStatus, String> {
-        self.ensure_last_use_worker().await;
         let mut lifecycle = self.lifecycle.lock().await;
+        self.ensure_running(&lifecycle)?;
+        self.ensure_last_use_worker().await;
         if enabled {
             self.ensure_auth_ready(&lifecycle)?;
         }
@@ -443,6 +461,7 @@ impl ExternalMcpState {
 
     pub(crate) async fn pair(&self, name: &str) -> Result<ExternalMcpPairingReceipt, String> {
         let mut lifecycle = self.lifecycle.lock().await;
+        self.ensure_running(&lifecycle)?;
         self.ensure_auth_ready(&lifecycle)?;
         let receipt = match self.with_catalog_write(|catalog| catalog.pair(name)) {
             Ok(receipt) => receipt,
@@ -465,6 +484,7 @@ impl ExternalMcpState {
         client_id: &str,
     ) -> Result<ExternalMcpPairingReceipt, String> {
         let mut lifecycle = self.lifecycle.lock().await;
+        self.ensure_running(&lifecycle)?;
         self.ensure_auth_ready(&lifecycle)?;
         let previous = self.active_client(client_id)?;
         if let Some(endpoint) = lifecycle.endpoint.as_ref() {
@@ -492,6 +512,7 @@ impl ExternalMcpState {
 
     pub(crate) async fn revoke(&self, client_id: &str) -> Result<ExternalMcpStatus, String> {
         let mut lifecycle = self.lifecycle.lock().await;
+        self.ensure_running(&lifecycle)?;
         self.ensure_auth_ready(&lifecycle)?;
         let previous = self.active_client(client_id)?;
         if let Some(endpoint) = lifecycle.endpoint.as_ref() {
@@ -516,21 +537,21 @@ impl ExternalMcpState {
 
     pub(crate) async fn shutdown(&self) -> Result<(), String> {
         let mut lifecycle = self.lifecycle.lock().await;
-        self.stop_listener(&mut lifecycle).await?;
-        drop(lifecycle);
-        self.stop_last_use_worker().await?;
-        let mut lifecycle = self.lifecycle.lock().await;
-        if lifecycle.auth_failure.is_some() {
-            lifecycle.state = ExternalMcpListenerState::AuthFailure;
-        } else if lifecycle.enabled {
-            lifecycle.state = ExternalMcpListenerState::Paused;
-            lifecycle.error = None;
-        } else {
-            lifecycle.state = ExternalMcpListenerState::Disabled;
-            lifecycle.error = None;
+        if lifecycle.admission == ExternalMcpAdmission::Stopped {
+            return Ok(());
         }
+        if lifecycle.admission == ExternalMcpAdmission::ShuttingDown {
+            return Err("external MCP shutdown is already in progress".to_string());
+        }
+        lifecycle.admission = ExternalMcpAdmission::ShuttingDown;
+        let listener_result = self.stop_listener(&mut lifecycle).await;
+        self.set_terminal_listener_state(&mut lifecycle, listener_result.is_ok());
+        drop(lifecycle);
+        let worker_result = self.stop_last_use_worker().await;
+        let mut lifecycle = self.lifecycle.lock().await;
+        lifecycle.admission = ExternalMcpAdmission::Stopped;
         self.emit_status(&lifecycle);
-        Ok(())
+        listener_result.and(worker_result)
     }
 
     async fn reconcile_listener(&self, lifecycle: &mut ExternalMcpLifecycle) {
@@ -634,17 +655,7 @@ impl ExternalMcpState {
             .read()
             .map(|catalog| catalog.clients().to_vec())
             .unwrap_or_default();
-        ExternalMcpStatus {
-            revision: self
-                .status
-                .revision
-                .load(std::sync::atomic::Ordering::Acquire),
-            enabled: lifecycle.enabled,
-            state: lifecycle.state,
-            endpoint: EXTERNAL_MCP_ENDPOINT.to_string(),
-            clients,
-            error: lifecycle.error.clone(),
-        }
+        status_from_parts(lifecycle, clients, &self.status)
     }
 
     fn emit_status(&self, lifecycle: &ExternalMcpLifecycle) {
@@ -655,6 +666,29 @@ impl ExternalMcpState {
         lifecycle.auth_failure.as_ref().map_or(Ok(()), |_| {
             Err("external MCP authentication is unavailable".to_string())
         })
+    }
+
+    fn ensure_running(&self, lifecycle: &ExternalMcpLifecycle) -> Result<(), String> {
+        (lifecycle.admission == ExternalMcpAdmission::Running)
+            .then_some(())
+            .ok_or_else(|| "external MCP lifecycle has stopped".to_string())
+    }
+
+    fn set_terminal_listener_state(
+        &self,
+        lifecycle: &mut ExternalMcpLifecycle,
+        listener_stopped_cleanly: bool,
+    ) {
+        if lifecycle.auth_failure.is_some() {
+            lifecycle.state = ExternalMcpListenerState::AuthFailure;
+        } else if lifecycle.enabled {
+            lifecycle.state = ExternalMcpListenerState::Paused;
+        } else {
+            lifecycle.state = ExternalMcpListenerState::Disabled;
+        }
+        if listener_stopped_cleanly {
+            lifecycle.error = None;
+        }
     }
 
     fn with_catalog_write<T>(
@@ -719,6 +753,7 @@ impl ExternalMcpState {
         let join = spawn_last_use_worker(
             self.catalog.clone(),
             self.authorizer.last_use.clone(),
+            self.lifecycle.clone(),
             self.status.clone(),
             shutdown_rx,
         );
@@ -741,6 +776,7 @@ impl ExternalMcpState {
         flush_last_use_blocking(
             self.catalog.clone(),
             self.authorizer.last_use.clone(),
+            self.lifecycle.clone(),
             self.status.clone(),
             force,
         )
@@ -778,27 +814,58 @@ impl ExternalMcpState {
     }
 }
 
+fn status_from_parts(
+    lifecycle: &ExternalMcpLifecycle,
+    clients: Vec<ExternalMcpClientSummary>,
+    status: &ExternalMcpStatusBroadcaster,
+) -> ExternalMcpStatus {
+    ExternalMcpStatus {
+        revision: status.revision.load(std::sync::atomic::Ordering::Acquire),
+        enabled: lifecycle.enabled,
+        state: lifecycle.state,
+        endpoint: EXTERNAL_MCP_ENDPOINT.to_string(),
+        clients,
+        error: lifecycle.error.clone(),
+    }
+}
+
 fn spawn_last_use_worker(
     catalog: Arc<RwLock<ExternalMcpCatalog>>,
     tracker: Arc<LastUseTracker>,
+    lifecycle: Arc<tokio::sync::Mutex<ExternalMcpLifecycle>>,
     status: Arc<ExternalMcpStatusBroadcaster>,
     mut shutdown: tokio::sync::oneshot::Receiver<()>,
 ) -> tokio::task::JoinHandle<Result<(), String>> {
     tokio::spawn(async move {
-        let mut interval =
-            tokio::time::interval(Duration::from_secs(LAST_USED_WRITE_INTERVAL_SECS as u64));
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        interval.tick().await;
         loop {
-            tokio::select! {
-                _ = &mut shutdown => {
-                    return flush_last_use_blocking(catalog, tracker, status, true).await;
-                }
-                () = tracker.changed.notified() => {}
-                _ = interval.tick() => {}
+            let deadline = tracker.next_deadline();
+            match deadline {
+                Some(deadline) => tokio::select! {
+                    _ = &mut shutdown => {
+                        return flush_last_use_blocking(
+                            catalog, tracker, lifecycle, status, true
+                        ).await;
+                    }
+                    () = tracker.changed.notified() => {}
+                    _ = tokio::time::sleep_until(deadline) => {}
+                },
+                None => tokio::select! {
+                    _ = &mut shutdown => {
+                        return flush_last_use_blocking(
+                            catalog, tracker, lifecycle, status, true
+                        ).await;
+                    }
+                    () = tracker.changed.notified() => {}
+                },
             }
-            flush_last_use_blocking(catalog.clone(), tracker.clone(), status.clone(), false)
-                .await?;
+            flush_last_use_blocking(
+                catalog.clone(),
+                tracker.clone(),
+                lifecycle.clone(),
+                status.clone(),
+                false,
+            )
+            .await?;
         }
     })
 }
@@ -806,6 +873,7 @@ fn spawn_last_use_worker(
 async fn flush_last_use_blocking(
     catalog: Arc<RwLock<ExternalMcpCatalog>>,
     tracker: Arc<LastUseTracker>,
+    lifecycle: Arc<tokio::sync::Mutex<ExternalMcpLifecycle>>,
     status: Arc<ExternalMcpStatusBroadcaster>,
     force: bool,
 ) -> Result<(), String> {
@@ -814,25 +882,24 @@ async fn flush_last_use_blocking(
         return Ok(());
     }
     let persisted = due.clone();
-    let clients = tokio::task::spawn_blocking(move || {
-        let mut catalog = catalog
+    let catalog_for_write = catalog.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut catalog = catalog_for_write
             .write()
             .map_err(|_| "external MCP catalog lock is unavailable".to_string())?;
         catalog.persist_last_used(&due)?;
-        Ok::<_, String>(catalog.clients().to_vec())
+        Ok::<_, String>(())
     })
     .await
     .map_err(|error| format!("join external MCP last-use publication: {error}"))??;
     tracker.mark_flushed(&persisted);
-    let latest = status
-        .latest
+    let lifecycle = lifecycle.lock().await;
+    let clients = catalog
         .read()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone();
-    if let Some(mut latest) = latest {
-        latest.clients = clients;
-        status.publish(latest);
-    }
+        .map_err(|_| "external MCP catalog lock is unavailable".to_string())?
+        .clients()
+        .to_vec();
+    status.publish(status_from_parts(&lifecycle, clients, &status));
     Ok(())
 }
 
@@ -1290,7 +1357,7 @@ impl ExternalMcpCatalog {
         {
             return Err("publish external MCP catalog: injected rename failure".to_string());
         }
-        fs::rename(temp, destination)
+        replace_file_atomically(temp, destination)
             .map_err(|error| format!("publish external MCP catalog: {error}"))
     }
 
@@ -1309,6 +1376,44 @@ impl ExternalMcpCatalog {
             }
         }
         sync_parent_directory(&self.root)
+    }
+}
+
+#[cfg(not(windows))]
+fn replace_file_atomically(staging: &Path, destination: &Path) -> std::io::Result<()> {
+    fs::rename(staging, destination)
+}
+
+#[cfg(windows)]
+fn replace_file_atomically(staging: &Path, destination: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let staging = staging
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // SAFETY: both buffers are owned, NUL-terminated UTF-16 paths and remain
+    // alive for the duration of this synchronous Win32 call.
+    let replaced = unsafe {
+        MoveFileExW(
+            staging.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if replaced == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
     }
 }
 
@@ -1406,9 +1511,11 @@ fn persist_preferences(
                 error: format!("write external MCP preferences staging file: {error}"),
                 published: false,
             })?;
-        fs::rename(&staging, root.join(PREFERENCES_FILE)).map_err(|error| PublishError {
-            error: format!("publish external MCP preferences: {error}"),
-            published: false,
+        replace_file_atomically(&staging, &root.join(PREFERENCES_FILE)).map_err(|error| {
+            PublishError {
+                error: format!("publish external MCP preferences: {error}"),
+                published: false,
+            }
         })?;
         sync_preference_parent(root, fail_parent_sync_on_call).map_err(|error| PublishError {
             error: format!("sync external MCP preferences directory: {error}"),
@@ -1452,7 +1559,7 @@ fn write_preference_file(
                 error: format!("write external MCP preferences staging file: {error}"),
                 published,
             })?;
-        fs::rename(&staging, destination).map_err(|error| PublishError {
+        replace_file_atomically(&staging, destination).map_err(|error| PublishError {
             error: format!("publish external MCP preferences: {error}"),
             published,
         })?;
@@ -1702,6 +1809,68 @@ mod tests {
 
     static LIFECYCLE_PORT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+    struct TwoClientBlockingGate {
+        entered: tokio::sync::mpsc::UnboundedSender<String>,
+        release_survivor: AtomicBool,
+        survivor_cancelled: AtomicBool,
+    }
+
+    impl TwoClientBlockingGate {
+        fn new(entered: tokio::sync::mpsc::UnboundedSender<String>) -> Self {
+            Self {
+                entered,
+                release_survivor: AtomicBool::new(false),
+                survivor_cancelled: AtomicBool::new(false),
+            }
+        }
+
+        fn release_survivor(&self) {
+            self.release_survivor.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl ChatTurnGate for TwoClientBlockingGate {
+        fn timeline(
+            &self,
+            dispatcher: &opentake_agent::mcp::dispatch::Dispatcher,
+        ) -> Option<opentake_domain::Timeline> {
+            Some(dispatcher.timeline())
+        }
+
+        fn dispatch(
+            &self,
+            _dispatcher: &opentake_agent::mcp::dispatch::Dispatcher,
+            _name: &str,
+            _args: serde_json::Value,
+        ) -> Option<opentake_agent::tools::result::ToolResult> {
+            panic!("managed blocking test must use request-local cancellation")
+        }
+
+        fn dispatch_cancellable(
+            &self,
+            _dispatcher: &opentake_agent::mcp::dispatch::Dispatcher,
+            name: &str,
+            _args: serde_json::Value,
+            request_cancel: &opentake_media::MediaCancelToken,
+        ) -> Option<opentake_agent::tools::result::ToolResult> {
+            let _ = self.entered.send(name.to_owned());
+            if name == "get_media" {
+                while !self.release_survivor.load(Ordering::SeqCst)
+                    && !request_cancel.is_cancelled()
+                {
+                    std::thread::yield_now();
+                }
+                self.survivor_cancelled
+                    .store(request_cancel.is_cancelled(), Ordering::SeqCst);
+            } else {
+                while !request_cancel.is_cancelled() {
+                    std::thread::yield_now();
+                }
+            }
+            Some(opentake_agent::tools::result::ToolResult::ok("released"))
+        }
+    }
+
     #[derive(Default)]
     struct InstrumentedSecretStore {
         values: Mutex<HashMap<String, String>>,
@@ -1793,6 +1962,26 @@ mod tests {
             root.path().join("chat-models"),
         );
         ExternalMcpState::load(core, chat.external_mcp_components(), root.path(), secrets)
+    }
+
+    fn lifecycle_state_with_gate(
+        root: &tempfile::TempDir,
+        secrets: Arc<dyn McpSecretStore>,
+        gate: Arc<dyn ChatTurnGate>,
+    ) -> ExternalMcpState {
+        let mut state = lifecycle_state(root, secrets);
+        state.gate = gate;
+        state
+    }
+
+    async fn wait_for_publish_count(state: &ExternalMcpState, expected: usize) {
+        for _ in 0..100 {
+            if state.catalog_publish_count_for_test() >= expected {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(state.catalog_publish_count_for_test(), expected);
     }
 
     async fn assert_fixed_port_available() {
@@ -2010,21 +2199,22 @@ mod tests {
 
         let receipt = state.pair("Claude Desktop").await.expect("pair and start");
 
-        let events = events.lock().expect("read statuses");
-        let transitions = events.iter().map(|status| status.state).collect::<Vec<_>>();
-        assert!(transitions.windows(2).any(|states| {
-            states
-                == [
-                    ExternalMcpListenerState::Starting,
-                    ExternalMcpListenerState::Listening,
-                ]
-        }));
-        let serialized = serde_json::to_string(&*events).expect("serialize status events");
-        assert!(!serialized.contains(&receipt.bearer_token));
-        assert!(events
-            .windows(2)
-            .all(|statuses| { statuses[1].revision == statuses[0].revision.saturating_add(1) }));
-        drop(events);
+        {
+            let events = events.lock().expect("read statuses");
+            let transitions = events.iter().map(|status| status.state).collect::<Vec<_>>();
+            assert!(transitions.windows(2).any(|states| {
+                states
+                    == [
+                        ExternalMcpListenerState::Starting,
+                        ExternalMcpListenerState::Listening,
+                    ]
+            }));
+            let serialized = serde_json::to_string(&*events).expect("serialize status events");
+            assert!(!serialized.contains(&receipt.bearer_token));
+            assert!(events.windows(2).all(|statuses| {
+                statuses[1].revision == statuses[0].revision.saturating_add(1)
+            }));
+        }
         state.shutdown().await.expect("drain listener");
     }
 
@@ -2203,6 +2393,144 @@ mod tests {
         state.shutdown().await.expect("drain regenerated listener");
     }
 
+    async fn exercise_two_active_request_mutation(regenerate: bool) {
+        let _port = LIFECYCLE_PORT.lock().await;
+        let root = catalog_root();
+        let (entered_tx, mut entered_rx) = tokio::sync::mpsc::unbounded_channel();
+        let gate = Arc::new(TwoClientBlockingGate::new(entered_tx));
+        let state = lifecycle_state_with_gate(
+            &root,
+            Arc::new(MemoryMcpSecretStore::default()),
+            gate.clone(),
+        );
+        state.set_enabled(true).await.expect("enable endpoint");
+        let target = state.pair("target").await.expect("pair target");
+        let survivor = state.pair("survivor").await.expect("pair survivor");
+        let client = reqwest::Client::new();
+        let target_session = initialize_managed_session(
+            &client,
+            EXTERNAL_MCP_ENDPOINT,
+            &target.bearer_token,
+            "target-session",
+        )
+        .await;
+        let survivor_session = initialize_managed_session(
+            &client,
+            EXTERNAL_MCP_ENDPOINT,
+            &survivor.bearer_token,
+            "survivor-session",
+        )
+        .await;
+
+        let spawn_call =
+            |token: String, session: reqwest::header::HeaderValue, name: &'static str, id: u64| {
+                let client = client.clone();
+                tokio::spawn(async move {
+                    let response = client
+                        .post(EXTERNAL_MCP_ENDPOINT)
+                        .bearer_auth(token)
+                        .header("content-type", "application/json")
+                        .header("accept", "application/json, text/event-stream")
+                        .header("mcp-session-id", session)
+                        .header("mcp-protocol-version", "2025-06-18")
+                        .json(&serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "method": "tools/call",
+                            "params": { "name": name, "arguments": {} }
+                        }))
+                        .send()
+                        .await
+                        .expect("send blocking tool request");
+                    let status = response.status();
+                    let body = response.text().await.expect("consume blocking SSE body");
+                    (status, body)
+                })
+            };
+        let target_call = spawn_call(
+            target.bearer_token.clone(),
+            target_session,
+            "get_timeline",
+            2,
+        );
+        let mut survivor_call = spawn_call(
+            survivor.bearer_token.clone(),
+            survivor_session.clone(),
+            "get_media",
+            3,
+        );
+        let mut entered = vec![
+            tokio::time::timeout(Duration::from_secs(2), entered_rx.recv())
+                .await
+                .expect("first request entry timed out")
+                .expect("first request entered"),
+            tokio::time::timeout(Duration::from_secs(2), entered_rx.recv())
+                .await
+                .expect("second request entry timed out")
+                .expect("second request entered"),
+        ];
+        entered.sort();
+        assert_eq!(entered, ["get_media", "get_timeline"]);
+
+        if regenerate {
+            tokio::time::timeout(Duration::from_secs(2), state.regenerate(&target.client.id))
+                .await
+                .expect("regenerate must not wait for survivor")
+                .expect("regenerate target");
+        } else {
+            tokio::time::timeout(Duration::from_secs(2), state.revoke(&target.client.id))
+                .await
+                .expect("revoke must not wait for survivor")
+                .expect("revoke target");
+        }
+        let (target_status, _) = tokio::time::timeout(Duration::from_secs(2), target_call)
+            .await
+            .expect("target request must terminate")
+            .expect("join target request");
+        assert!(target_status.is_success());
+        assert!(
+            !survivor_call.is_finished(),
+            "survivor request was terminated with target"
+        );
+        assert!(!gate.survivor_cancelled.load(Ordering::SeqCst));
+
+        gate.release_survivor();
+        let (survivor_status, _) = tokio::time::timeout(Duration::from_secs(2), &mut survivor_call)
+            .await
+            .expect("survivor request must finish after release")
+            .expect("join survivor request");
+        assert!(survivor_status.is_success());
+        assert_managed_session_usable(
+            &client,
+            EXTERNAL_MCP_ENDPOINT,
+            &survivor.bearer_token,
+            &survivor_session,
+            4,
+        )
+        .await;
+        state.shutdown().await.expect("stop endpoint");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_regenerate_cancels_target_active_request_and_preserves_survivor_session() {
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            exercise_two_active_request_mutation(true),
+        )
+        .await
+        .expect("regenerate transport regression timed out");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_revoke_cancels_target_active_request_and_preserves_survivor_session() {
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            exercise_two_active_request_mutation(false),
+        )
+        .await
+        .expect("revoke transport regression timed out");
+    }
+
     #[tokio::test]
     async fn lifecycle_application_shutdown_drains_and_releases_the_port() {
         let _port = LIFECYCLE_PORT.lock().await;
@@ -2271,6 +2599,145 @@ mod tests {
 
         let reloaded = load_catalog(&root, secrets);
         assert_eq!(reloaded.clients()[0].last_used_at, Some(t0 + 30));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn lifecycle_dirty_last_used_flushes_at_its_exact_deadline() {
+        let root = catalog_root();
+        let state = lifecycle_state(&root, Arc::new(MemoryMcpSecretStore::default()));
+        let paired = state.pair("Cursor").await.expect("pair client");
+        tokio::time::advance(Duration::from_secs(20)).await;
+        let before = state.catalog_publish_count_for_test();
+
+        state
+            .authorizer
+            .last_use
+            .record(&paired.client.id, 1_800_000_000);
+        state
+            .flush_last_use(false)
+            .await
+            .expect("flush leading value");
+        state
+            .authorizer
+            .last_use
+            .record(&paired.client.id, 1_800_000_030);
+        state.initialize().await;
+
+        tokio::time::advance(Duration::from_secs(59)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(state.catalog_publish_count_for_test(), before + 1);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        wait_for_publish_count(&state, before + 2).await;
+
+        state.shutdown().await.expect("stop last-use worker");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_shutdown_is_terminal_for_initialize_enable_and_pair_races() {
+        let _port = LIFECYCLE_PORT.lock().await;
+        let root = catalog_root();
+        let state = Arc::new(lifecycle_state(
+            &root,
+            Arc::new(MemoryMcpSecretStore::default()),
+        ));
+        state.set_enabled(true).await.expect("enable endpoint");
+        let paired = state.pair("Cursor").await.expect("pair first client");
+        let (held_tx, held_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let catalog = state.catalog.clone();
+        let catalog_barrier = std::thread::spawn(move || {
+            let _catalog = catalog.write().expect("hold catalog publication");
+            held_tx.send(()).expect("signal held catalog");
+            release_rx.recv().expect("release catalog publication");
+        });
+        held_rx.recv().expect("catalog publication is held");
+        state
+            .authorizer
+            .last_use
+            .record(&paired.client.id, 1_800_000_000);
+        let shutting_down = {
+            let state = state.clone();
+            tokio::spawn(async move { state.shutdown().await })
+        };
+        loop {
+            let lifecycle = state.lifecycle.lock().await;
+            let admission = lifecycle.admission;
+            if admission == ExternalMcpAdmission::ShuttingDown {
+                assert_ne!(
+                    lifecycle.state,
+                    ExternalMcpListenerState::Listening,
+                    "shutdown retained listening after the endpoint was drained"
+                );
+                break;
+            }
+            drop(lifecycle);
+            tokio::task::yield_now().await;
+        }
+        let initialize = state.initialize();
+        let enable = state.set_enabled(true);
+        let pair = state.pair("late client");
+        let ((), enable, pair) = tokio::join!(initialize, enable, pair);
+
+        assert!(
+            enable.is_err(),
+            "enable was admitted after terminal shutdown"
+        );
+        assert!(pair.is_err(), "pair was admitted after terminal shutdown");
+        release_tx.send(()).expect("release held catalog");
+        catalog_barrier.join().expect("join catalog barrier");
+        shutting_down
+            .await
+            .expect("join shutdown")
+            .expect("shutdown endpoint");
+        assert_eq!(
+            state.lifecycle.lock().await.admission,
+            ExternalMcpAdmission::Stopped
+        );
+        assert_fixed_port_available().await;
+    }
+
+    #[tokio::test]
+    async fn lifecycle_last_use_status_publish_merges_current_lifecycle_under_barrier() {
+        let root = catalog_root();
+        let state = Arc::new(lifecycle_state(
+            &root,
+            Arc::new(MemoryMcpSecretStore::default()),
+        ));
+        let paired = state.pair("Cursor").await.expect("pair client");
+        state.initialize().await;
+        let before = state.catalog_publish_count_for_test();
+        let mut lifecycle = state.lifecycle.lock().await;
+        lifecycle.enabled = true;
+        lifecycle.state = ExternalMcpListenerState::Paused;
+        state
+            .authorizer
+            .last_use
+            .record(&paired.client.id, 1_800_000_000);
+        let flushing = {
+            let state = state.clone();
+            tokio::spawn(async move { state.flush_last_use(true).await })
+        };
+        wait_for_publish_count(&state, before + 1).await;
+        assert!(
+            !flushing.is_finished(),
+            "last-use status publication bypassed the lifecycle serialization barrier"
+        );
+        drop(lifecycle);
+        flushing
+            .await
+            .expect("join last-use flush")
+            .expect("flush last-use status");
+
+        let latest = state
+            .status
+            .latest
+            .read()
+            .expect("latest status")
+            .clone()
+            .expect("published status");
+        assert!(latest.enabled);
+        assert_eq!(latest.state, ExternalMcpListenerState::Paused);
+        state.shutdown().await.expect("stop lifecycle");
     }
 
     #[test]
@@ -2721,6 +3188,37 @@ mod tests {
     }
 
     #[test]
+    fn atomic_replace_overwrites_existing_catalog_preferences_and_journal_targets() {
+        let root = catalog_root();
+        for name in [CATALOG_FILE, PREFERENCES_FILE, PREFERENCES_PENDING_FILE] {
+            let destination = root.path().join(name);
+            let staging = root.path().join(format!("{name}.staging"));
+            std::fs::write(&destination, b"old").expect("write existing target");
+            std::fs::write(&staging, b"new").expect("write replacement");
+
+            replace_file_atomically(&staging, &destination).expect("replace existing target");
+
+            assert_eq!(std::fs::read(&destination).expect("read target"), b"new");
+            assert!(!staging.exists());
+        }
+    }
+
+    #[test]
+    fn atomic_replace_failure_keeps_existing_target_recoverable() {
+        let root = catalog_root();
+        let destination = root.path().join(CATALOG_FILE);
+        let missing_staging = root.path().join("missing.staging");
+        std::fs::write(&destination, b"old").expect("write existing target");
+
+        assert!(replace_file_atomically(&missing_staging, &destination).is_err());
+
+        assert_eq!(
+            std::fs::read(destination).expect("read retained target"),
+            b"old"
+        );
+    }
+
+    #[test]
     fn catalog_restart_reloads_metadata_and_retrieves_secret_from_fake_store() {
         let root = catalog_root();
         let secrets = Arc::new(MemoryMcpSecretStore::default());
@@ -2729,7 +3227,7 @@ mod tests {
             catalog.pair("Claude Desktop").expect("pair client")
         };
         let catalog = load_catalog(&root, secrets);
-        assert_eq!(catalog.clients(), &[receipt.client.clone()]);
+        assert_eq!(catalog.clients(), std::slice::from_ref(&receipt.client));
         assert_eq!(
             catalog
                 .verify_candidate(&receipt.bearer_token)
