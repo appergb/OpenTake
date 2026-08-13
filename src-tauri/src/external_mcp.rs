@@ -9,6 +9,9 @@ use std::{
 };
 
 use opentake_agent::mcp::{
+    core_handle::AppCoreHandle,
+    dispatch::Dispatcher,
+    media_bridge::{BridgeError, ImportOutcome, ImportSource, MediaBridge},
     server::{bind_managed_gated_on, ManagedMcpEndpoint},
     AuthenticatedMcpClient, BearerAuthorizer,
 };
@@ -37,7 +40,7 @@ const LAST_USED_WRITE_INTERVAL_SECS: i64 = 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) enum ExternalMcpListenerState {
+pub enum ExternalMcpListenerState {
     Disabled,
     Starting,
     Listening,
@@ -296,6 +299,138 @@ pub(crate) struct ExternalMcpState {
     lifecycle: Arc<tokio::sync::Mutex<ExternalMcpLifecycle>>,
     status: Arc<ExternalMcpStatusBroadcaster>,
     preference_parent_sync_on_call: std::sync::atomic::AtomicUsize,
+}
+
+/// Narrow construction seam for the opt-in real-keychain integration test.
+///
+/// This is not a Tauri command and grants no remote capability. It only lets an
+/// external Rust test build the production lifecycle with an isolated keychain
+/// service and a cancellation-aware media bridge, while all network admission
+/// still passes through the normal bearer, Host/Origin, and live-project gates.
+#[doc(hidden)]
+pub struct ExternalMcpIntegrationHarness {
+    state: ExternalMcpState,
+    core: AppCore,
+    cancel_probe: Arc<IntegrationCancelProbe>,
+}
+
+#[doc(hidden)]
+pub struct ExternalMcpIntegrationReceipt {
+    pub client_id: String,
+    pub bearer_token: String,
+}
+
+#[derive(Default)]
+struct IntegrationCancelProbe {
+    entered: std::sync::atomic::AtomicBool,
+    cancelled: std::sync::atomic::AtomicBool,
+    entered_changed: tokio::sync::Notify,
+}
+
+impl MediaBridge for IntegrationCancelProbe {
+    fn import_media_cancellable(
+        &self,
+        _source: ImportSource,
+        _name: Option<String>,
+        _folder_id: Option<String>,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<ImportOutcome, BridgeError> {
+        self.entered
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.entered_changed.notify_waiters();
+        while !cancel.is_cancelled() {
+            std::thread::park_timeout(Duration::from_millis(5));
+        }
+        self.cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
+        Err(BridgeError::new("integration import cancelled"))
+    }
+}
+
+impl ExternalMcpIntegrationHarness {
+    /// Build against a caller-owned application-data directory and unique OS
+    /// keychain service. The caller remains responsible for deleting only the
+    /// exact accounts created by returned pairing receipts.
+    pub fn new(app_data_dir: &Path, keychain_service: &str) -> Result<Self, String> {
+        if keychain_service.trim().is_empty() {
+            return Err("integration keychain service must not be empty".to_string());
+        }
+        let core = AppCore::new();
+        let registry = Arc::new(RwLock::new(crate::mcp::build_registry(
+            &app_data_dir.join("integration-workflows"),
+        )));
+        let cancel_probe = Arc::new(IntegrationCancelProbe::default());
+        let dispatcher = Arc::new(Dispatcher::with_bridge(
+            Arc::new(AppCoreHandle::new(core.clone())),
+            registry.clone(),
+            Some(cancel_probe.clone()),
+        ));
+        let components = ExternalMcpComponents {
+            dispatcher,
+            registry,
+        };
+        let state = ExternalMcpState::load(
+            core.clone(),
+            components,
+            app_data_dir,
+            Arc::new(opentake_gen::KeyringStore::with_service(keychain_service)),
+        );
+        Ok(Self {
+            state,
+            core,
+            cancel_probe,
+        })
+    }
+
+    pub fn core(&self) -> AppCore {
+        self.core.clone()
+    }
+
+    pub async fn initialize(&self) {
+        self.state.initialize().await;
+    }
+
+    pub async fn listener_state(&self) -> ExternalMcpListenerState {
+        self.state.status().await.state
+    }
+
+    pub async fn set_enabled(&self, enabled: bool) -> Result<(), String> {
+        self.state.set_enabled(enabled).await.map(drop)
+    }
+
+    pub async fn pair(&self, name: &str) -> Result<ExternalMcpIntegrationReceipt, String> {
+        self.state
+            .pair(name)
+            .await
+            .map(|receipt| ExternalMcpIntegrationReceipt {
+                client_id: receipt.client.id,
+                bearer_token: receipt.bearer_token,
+            })
+    }
+
+    pub async fn revoke(&self, client_id: &str) -> Result<(), String> {
+        self.state.revoke(client_id).await.map(drop)
+    }
+
+    pub async fn shutdown(&self) -> Result<(), String> {
+        self.state.shutdown().await
+    }
+
+    pub async fn wait_for_cancel_probe(&self) {
+        while !self
+            .cancel_probe
+            .entered
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.cancel_probe.entered_changed.notified().await;
+        }
+    }
+
+    pub fn cancel_probe_observed(&self) -> bool {
+        self.cancel_probe
+            .cancelled
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
 }
 
 type ExternalMcpStatusSink = Arc<dyn Fn(ExternalMcpStatus) + Send + Sync>;

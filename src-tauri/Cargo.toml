@@ -114,6 +114,14 @@ windows-sys = { version = "0.61", features = [
 opentake-media = { workspace = true, features = ["test-faults"] }
 tauri = { version = "2", features = ["protocol-asset", "test"] }
 tokio = { version = "1", features = ["test-util"] }
+rmcp = { version = "2.2.0", features = [
+  "client",
+  "transport-streamable-http-client-reqwest",
+] }
+# rmcp 2.2's reqwest transport calls the compatibility alias added in 0.2.4;
+# 0.2.2/0.2.3 expose only the differently named predecessor.
+sse-stream = "=0.2.4"
+tracing = "0.1"
 
 [features]
 # `default` now includes `playback-engine`: the continuous Rust streaming engine
