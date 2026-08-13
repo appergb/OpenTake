@@ -14,18 +14,21 @@ fn events_are_addressed_by_session_message_and_block() {
         LoopEvent::BlockDelta {
             session_id: "session-1".into(),
             message_id: "assistant-1".into(),
+            sequence: 0,
             block_index: 0,
             delta: "A".into(),
         },
         LoopEvent::BlockUpsert {
             session_id: "session-1".into(),
             message_id: "assistant-1".into(),
+            sequence: 1,
             block_index: 0,
             block,
         },
         LoopEvent::Done {
             session_id: "session-1".into(),
             message_id: "assistant-1".into(),
+            sequence: 2,
             message,
         },
     ];
@@ -35,6 +38,7 @@ fn events_are_addressed_by_session_message_and_block() {
         LoopEvent::BlockDelta {
             session_id,
             message_id,
+            sequence: 0,
             block_index: 0,
             delta,
         } if session_id == "session-1" && message_id == "assistant-1" && delta == "A"
@@ -43,6 +47,7 @@ fn events_are_addressed_by_session_message_and_block() {
         &events[1],
         LoopEvent::BlockUpsert {
             message_id,
+            sequence: 1,
             block_index: 0,
             ..
         } if message_id == "assistant-1"
@@ -51,6 +56,7 @@ fn events_are_addressed_by_session_message_and_block() {
         &events[2],
         LoopEvent::Done {
             message_id,
+            sequence: 2,
             message,
             ..
         } if message_id == &message.id
@@ -86,11 +92,18 @@ fn anthropic_interleaved_sse_preserves_loop_event_and_next_round_body_order() {
     };
     let mut assistant = ChatMessage::assistant_blocks_with_id("assistant-sse", Vec::new());
     let mut decoder = crate::chat::llm::AnthropicStreamDecoder::default();
+    let mut sequence = EventSequence::default();
 
     for chunk in sse.as_bytes().chunks(37) {
         decoder
             .push_chunk(chunk, &mut |event| {
-                apply_stream_event(&mut assistant, "session-sse", &emitter, event)
+                apply_stream_event(
+                    &mut assistant,
+                    "session-sse",
+                    &emitter,
+                    &mut sequence,
+                    event,
+                )
             })
             .unwrap();
     }
@@ -119,6 +132,17 @@ fn anthropic_interleaved_sse_preserves_loop_event_and_next_round_body_order() {
         })
         .collect::<Vec<_>>();
     assert_eq!(addressed, vec![0, 0, 0, 1, 1, 2, 2, 2]);
+    let sequences = events
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|event| match event {
+            LoopEvent::BlockDelta { sequence, .. }
+            | LoopEvent::BlockUpsert { sequence, .. }
+            | LoopEvent::Done { sequence, .. } => *sequence,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(sequences, (0..sequences.len() as u64).collect::<Vec<_>>());
 
     let body = crate::chat::llm::anthropic_body("claude", &[assistant], &[]);
     assert_eq!(
@@ -398,14 +422,17 @@ async fn events_no_key_path_reuses_message_id_from_first_delta_through_done() {
 
 #[test]
 fn events_errors_and_cancellation_retain_the_active_message_id() {
-    let cancelled = LoopError::cancelled("assistant-active");
+    let cancelled = LoopError::cancelled("assistant-active", 4);
     let failed = LoopError::llm(
         LlmError::Provider("provider failed".into()),
         "assistant-active",
+        4,
     );
 
     assert_eq!(cancelled.message_id(), "assistant-active");
     assert_eq!(failed.message_id(), "assistant-active");
+    assert_eq!(cancelled.sequence(), 4);
+    assert_eq!(failed.sequence(), 4);
 }
 
 #[tokio::test]

@@ -536,6 +536,7 @@ struct BlockDeltaPayload {
     project_path: String,
     session_id: String,
     message_id: String,
+    sequence: u64,
     block_index: usize,
     delta: String,
 }
@@ -547,6 +548,7 @@ struct BlockUpsertPayload {
     project_path: String,
     session_id: String,
     message_id: String,
+    sequence: u64,
     block_index: usize,
     block: AgentContentBlock,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -560,7 +562,46 @@ struct DonePayload {
     project_path: String,
     session_id: String,
     message_id: String,
+    sequence: u64,
     message: ChatMessage,
+}
+
+#[derive(Default)]
+struct StreamSequenceGate {
+    next_by_message: HashMap<String, u64>,
+}
+
+impl StreamSequenceGate {
+    fn accept(&mut self, message_id: &str, sequence: u64) -> bool {
+        let expected = self
+            .next_by_message
+            .entry(message_id.to_string())
+            .or_insert(0);
+        if sequence != *expected {
+            return false;
+        }
+        *expected = expected.saturating_add(1);
+        true
+    }
+
+    fn next(&self, message_id: &str) -> u64 {
+        self.next_by_message.get(message_id).copied().unwrap_or(0)
+    }
+}
+
+#[derive(Default)]
+struct MessageEventSequence(u64);
+
+impl MessageEventSequence {
+    fn take(&mut self) -> u64 {
+        let sequence = self.0;
+        self.0 = self.0.saturating_add(1);
+        sequence
+    }
+
+    fn next(&self) -> u64 {
+        self.0
+    }
 }
 
 /// Adapt `AppHandle::emit` to the loop's [`EmitLoop`] trait. Each loop event
@@ -569,6 +610,25 @@ struct AppEmitter {
     app: AppHandle,
     state: ChatState,
     project: ChatProjectContext,
+    sequences: Mutex<StreamSequenceGate>,
+}
+
+impl AppEmitter {
+    fn accept_sequence(&self, message_id: &str, sequence: u64) -> bool {
+        let accepted = self
+            .sequences
+            .lock()
+            .map(|mut gate| gate.accept(message_id, sequence))
+            .unwrap_or(false);
+        accepted
+    }
+
+    fn next_sequence(&self, message_id: &str) -> u64 {
+        self.sequences
+            .lock()
+            .map(|gate| gate.next(message_id))
+            .unwrap_or(0)
+    }
 }
 
 impl EmitLoop for AppEmitter {
@@ -581,9 +641,13 @@ impl EmitLoop for AppEmitter {
             LoopEvent::BlockDelta {
                 session_id,
                 message_id,
+                sequence,
                 block_index,
                 delta,
             } => {
+                if !self.accept_sequence(&message_id, sequence) {
+                    return;
+                }
                 let _ = self.app.emit(
                     "chat_delta",
                     BlockDeltaPayload {
@@ -591,6 +655,7 @@ impl EmitLoop for AppEmitter {
                         project_path: self.project.project_dir.to_string_lossy().into_owned(),
                         session_id,
                         message_id,
+                        sequence,
                         block_index,
                         delta,
                     },
@@ -599,9 +664,13 @@ impl EmitLoop for AppEmitter {
             LoopEvent::BlockUpsert {
                 session_id,
                 message_id,
+                sequence,
                 block_index,
                 block,
             } => {
+                if !self.accept_sequence(&message_id, sequence) {
+                    return;
+                }
                 let _ = self.app.emit(
                     "chat_tool_call",
                     BlockUpsertPayload {
@@ -609,6 +678,7 @@ impl EmitLoop for AppEmitter {
                         project_path: self.project.project_dir.to_string_lossy().into_owned(),
                         session_id,
                         message_id,
+                        sequence,
                         block_index,
                         tool_call: match &block {
                             AgentContentBlock::ToolUse {
@@ -633,8 +703,12 @@ impl EmitLoop for AppEmitter {
             LoopEvent::Done {
                 session_id,
                 message_id,
+                sequence,
                 message,
             } => {
+                if !self.accept_sequence(&message_id, sequence) {
+                    return;
+                }
                 let _ = self.app.emit(
                     "chat_done",
                     DonePayload {
@@ -642,6 +716,7 @@ impl EmitLoop for AppEmitter {
                         project_path: self.project.project_dir.to_string_lossy().into_owned(),
                         session_id,
                         message_id,
+                        sequence,
                         message,
                     },
                 );
@@ -783,11 +858,13 @@ pub async fn chat_send(
             app: app.clone(),
             state: state_clone.clone(),
             project: project.clone(),
+            sequences: Mutex::new(StreamSequenceGate::default()),
         };
         let turn_owner = turn_cancel.clone();
         let gate = state_clone.project_turn_gate(&project, &session_key, turn_cancel);
         let is_codex = chat_provider == "codex";
         let mut codex_final: Option<ChatMessage> = None;
+        let mut codex_sequence = MessageEventSequence::default();
         let result = if is_codex {
             session.provider = Some("codex".into());
             session.model = Some("official-codex-default".into());
@@ -805,6 +882,7 @@ pub async fn chat_send(
                     emitter.emit(LoopEvent::BlockUpsert {
                         session_id: sid.clone(),
                         message_id: first_message_id.clone(),
+                        sequence: codex_sequence.take(),
                         block_index,
                         block,
                     });
@@ -819,6 +897,7 @@ pub async fn chat_send(
                             emitter.emit(LoopEvent::BlockUpsert {
                                 session_id: sid.clone(),
                                 message_id: first_message_id.clone(),
+                                sequence: codex_sequence.take(),
                                 block_index,
                                 block,
                             });
@@ -829,15 +908,17 @@ pub async fn chat_send(
                     emitter.emit(LoopEvent::BlockDelta {
                         session_id: sid.clone(),
                         message_id: first_message_id.clone(),
+                        sequence: codex_sequence.take(),
                         block_index,
                         delta: output.text,
                     });
                     codex_final = Some(draft);
                     Ok(first_message_id.clone())
                 }
-                Err(crate::codex::CodexTurnError::Cancelled) => {
-                    Err(LoopError::cancelled(&first_message_id))
-                }
+                Err(crate::codex::CodexTurnError::Cancelled) => Err(LoopError::cancelled(
+                    &first_message_id,
+                    codex_sequence.next(),
+                )),
                 Err(crate::codex::CodexTurnError::Unavailable) => {
                     let guide = "Official Codex CLI was not found. Install Codex, then return to Settings → AI and choose Official Codex / ChatGPT.".to_string();
                     let message =
@@ -846,6 +927,7 @@ pub async fn chat_send(
                     emitter.emit(LoopEvent::BlockDelta {
                         session_id: sid.clone(),
                         message_id: first_message_id.clone(),
+                        sequence: codex_sequence.take(),
                         block_index: 0,
                         delta: guide,
                     });
@@ -860,6 +942,7 @@ pub async fn chat_send(
                     emitter.emit(LoopEvent::BlockDelta {
                         session_id: sid.clone(),
                         message_id: first_message_id.clone(),
+                        sequence: codex_sequence.take(),
                         block_index: 0,
                         delta: guide,
                     });
@@ -875,6 +958,7 @@ pub async fn chat_send(
                     emitter.emit(LoopEvent::BlockDelta {
                         session_id: sid.clone(),
                         message_id: first_message_id.clone(),
+                        sequence: codex_sequence.take(),
                         block_index: 0,
                         delta: guide,
                     });
@@ -890,6 +974,7 @@ pub async fn chat_send(
                             .into(),
                     ),
                     &first_message_id,
+                    codex_sequence.next(),
                 )),
             }
         } else {
@@ -910,22 +995,30 @@ pub async fn chat_send(
         };
 
         if is_codex {
-            let terminal =
-                match result {
-                    Ok(_) => codex_final,
-                    Err(LoopError::Cancelled { message_id }) => Some(
-                        ChatMessage::assistant_with_id(message_id, String::new(), Vec::new()),
-                    ),
-                    Err(error) => {
-                        let message = ChatMessage::assistant_with_id(
-                            error.message_id(),
-                            format!("⚠️ {error}"),
-                            Vec::new(),
-                        );
-                        session.messages.push(message.clone());
-                        Some(message)
-                    }
-                };
+            let (terminal, terminal_sequence) = match result {
+                Ok(_) => (codex_final, codex_sequence.next()),
+                Err(LoopError::Cancelled {
+                    message_id,
+                    sequence,
+                }) => (
+                    Some(ChatMessage::assistant_with_id(
+                        message_id,
+                        String::new(),
+                        Vec::new(),
+                    )),
+                    sequence,
+                ),
+                Err(error) => {
+                    let sequence = error.sequence();
+                    let message = ChatMessage::assistant_with_id(
+                        error.message_id(),
+                        format!("⚠️ {error}"),
+                        Vec::new(),
+                    );
+                    session.messages.push(message.clone());
+                    (Some(message), sequence)
+                }
+            };
             match state_clone.finalize_project_turn(
                 &project,
                 &session_key,
@@ -937,6 +1030,7 @@ pub async fn chat_send(
                         emitter.emit(LoopEvent::Done {
                             session_id: sid.clone(),
                             message_id: message.id.clone(),
+                            sequence: terminal_sequence,
                             message,
                         });
                     }
@@ -948,6 +1042,7 @@ pub async fn chat_send(
                     emitter.emit(LoopEvent::Done {
                         session_id: sid.clone(),
                         message_id: message.id.clone(),
+                        sequence: terminal_sequence,
                         message,
                     });
                 }
@@ -964,6 +1059,7 @@ pub async fn chat_send(
                     emitter.emit(LoopEvent::Done {
                         session_id: sid.clone(),
                         message_id: message.id.clone(),
+                        sequence: terminal_sequence,
                         message,
                     });
                 }
@@ -972,11 +1068,15 @@ pub async fn chat_send(
         }
 
         match &result {
-            Err(LoopError::Cancelled { message_id }) => {
+            Err(LoopError::Cancelled {
+                message_id,
+                sequence,
+            }) => {
                 let message = ChatMessage::assistant_with_id(message_id, String::new(), Vec::new());
                 emitter.emit(LoopEvent::Done {
                     session_id: sid.clone(),
                     message_id: message.id.clone(),
+                    sequence: *sequence,
                     message,
                 });
             }
@@ -986,6 +1086,7 @@ pub async fn chat_send(
                 emitter.emit(LoopEvent::Done {
                     session_id: sid.clone(),
                     message_id: msg.id.clone(),
+                    sequence: e.sequence(),
                     message: msg.clone(),
                 });
                 session.messages.push(msg);
@@ -1006,6 +1107,7 @@ pub async fn chat_send(
             emitter.emit(LoopEvent::Done {
                 session_id: sid.clone(),
                 message_id: message.id.clone(),
+                sequence: emitter.next_sequence(&message.id),
                 message,
             });
         }
@@ -1270,6 +1372,7 @@ mod tests {
             project_path: "/tmp/A.opentake".into(),
             session_id: "sess-1".into(),
             message_id: "assistant-1".into(),
+            sequence: 0,
             block_index: 2,
             delta: "hi".into(),
         };
@@ -1278,6 +1381,7 @@ mod tests {
         assert_eq!(json["projectPath"], "/tmp/A.opentake");
         assert_eq!(json["sessionId"], "sess-1");
         assert_eq!(json["messageId"], "assistant-1");
+        assert_eq!(json["sequence"], 0);
         assert_eq!(json["blockIndex"], 2);
         assert_eq!(json["delta"], "hi");
 
@@ -1287,13 +1391,26 @@ mod tests {
             project_path: "/tmp/A.opentake".into(),
             session_id: "sess-1".into(),
             message_id: message.id.clone(),
+            sequence: 1,
             message,
         };
         let json = serde_json::to_value(done).unwrap();
         assert_eq!(json["sessionId"], "sess-1");
         assert_eq!(json["messageId"], "assistant-1");
+        assert_eq!(json["sequence"], 1);
         assert_eq!(json["message"]["role"], "assistant");
         assert_eq!(json["message"]["id"], json["messageId"]);
+    }
+
+    #[test]
+    fn stream_sequence_gate_rejects_duplicates_and_gaps_per_message() {
+        let mut gate = StreamSequenceGate::default();
+
+        assert!(gate.accept("message-a", 0));
+        assert!(!gate.accept("message-a", 0));
+        assert!(!gate.accept("message-a", 2));
+        assert!(gate.accept("message-a", 1));
+        assert!(gate.accept("message-b", 0));
     }
 
     #[test]
@@ -1310,6 +1427,7 @@ mod tests {
             project_path: "/tmp/A.opentake".into(),
             session_id: "sess-1".into(),
             message_id: "assistant-1".into(),
+            sequence: 3,
             block_index: 1,
             tool_call: Some(ToolCall {
                 id: "call-1".into(),
@@ -1324,6 +1442,7 @@ mod tests {
         let wire = serde_json::to_value(payload).unwrap();
 
         assert_eq!(wire["messageId"], "assistant-1");
+        assert_eq!(wire["sequence"], 3);
         assert_eq!(wire["blockIndex"], 1);
         assert_eq!(wire["block"], serde_json::to_value(block).unwrap());
         assert_eq!(wire["toolCall"]["id"], "call-1");

@@ -160,6 +160,7 @@ pub enum LoopEvent {
     BlockDelta {
         session_id: String,
         message_id: String,
+        sequence: u64,
         block_index: usize,
         delta: String,
     },
@@ -167,6 +168,7 @@ pub enum LoopEvent {
     BlockUpsert {
         session_id: String,
         message_id: String,
+        sequence: u64,
         block_index: usize,
         block: AgentContentBlock,
     },
@@ -174,14 +176,31 @@ pub enum LoopEvent {
     Done {
         session_id: String,
         message_id: String,
+        sequence: u64,
         message: ChatMessage,
     },
+}
+
+#[derive(Default)]
+struct EventSequence(u64);
+
+impl EventSequence {
+    fn take(&mut self) -> u64 {
+        let sequence = self.0;
+        self.0 = self.0.saturating_add(1);
+        sequence
+    }
+
+    fn next(&self) -> u64 {
+        self.0
+    }
 }
 
 fn apply_stream_event(
     assistant: &mut ChatMessage,
     session_id: &str,
     emitter: &dyn EmitLoop,
+    sequence: &mut EventSequence,
     event: StreamEvent,
 ) {
     match event {
@@ -192,6 +211,7 @@ fn apply_stream_event(
                 emitter.emit(LoopEvent::BlockDelta {
                     session_id: session_id.to_string(),
                     message_id: assistant.id.clone(),
+                    sequence: sequence.take(),
                     block_index,
                     delta,
                 });
@@ -204,6 +224,7 @@ fn apply_stream_event(
                 emitter.emit(LoopEvent::BlockUpsert {
                     session_id: session_id.to_string(),
                     message_id: assistant.id.clone(),
+                    sequence: sequence.take(),
                     block_index,
                     block,
                 });
@@ -221,28 +242,37 @@ pub enum LoopError {
         #[source]
         source: LlmError,
         message_id: String,
+        sequence: u64,
     },
     #[error("cancelled")]
-    Cancelled { message_id: String },
+    Cancelled { message_id: String, sequence: u64 },
 }
 
 impl LoopError {
-    pub fn llm(source: LlmError, message_id: &str) -> Self {
+    pub fn llm(source: LlmError, message_id: &str, sequence: u64) -> Self {
         Self::Llm {
             source,
             message_id: message_id.to_string(),
+            sequence,
         }
     }
 
-    pub fn cancelled(message_id: &str) -> Self {
+    pub fn cancelled(message_id: &str, sequence: u64) -> Self {
         Self::Cancelled {
             message_id: message_id.to_string(),
+            sequence,
         }
     }
 
     pub fn message_id(&self) -> &str {
         match self {
-            Self::Llm { message_id, .. } | Self::Cancelled { message_id } => message_id,
+            Self::Llm { message_id, .. } | Self::Cancelled { message_id, .. } => message_id,
+        }
+    }
+
+    pub fn sequence(&self) -> u64 {
+        match self {
+            Self::Llm { sequence, .. } | Self::Cancelled { sequence, .. } => *sequence,
         }
     }
 }
@@ -431,7 +461,7 @@ impl ChatLoop {
             gate,
         } = turn;
         let provider = provider_from_choice(&provider_choice)
-            .map_err(|error| LoopError::llm(error, &first_message_id))?;
+            .map_err(|error| LoopError::llm(error, &first_message_id, 0))?;
         session.provider = Some(provider_choice);
         session.model = Some(provider.default_model().to_string());
         if !has_trailing_user_message(session, &user_text) {
@@ -442,20 +472,23 @@ impl ChatLoop {
             .store
             .load(provider.key().account())
             .map_err(|e| LlmError::Network(format!("keychain: {e}")))
-            .map_err(|error| LoopError::llm(error, &first_message_id))?
+            .map_err(|error| LoopError::llm(error, &first_message_id, 0))?
             .is_none()
         {
+            let mut sequence = EventSequence::default();
             let guide = no_key_guide(provider);
             let msg = ChatMessage::assistant_with_id(&first_message_id, &guide, Vec::new());
             emitter.emit(LoopEvent::BlockDelta {
                 session_id: session.id.clone(),
                 message_id: first_message_id.clone(),
+                sequence: sequence.take(),
                 block_index: 0,
                 delta: guide,
             });
             emitter.emit(LoopEvent::Done {
                 session_id: session.id.clone(),
                 message_id: first_message_id.clone(),
+                sequence: sequence.take(),
                 message: msg.clone(),
             });
             session.messages.push(msg);
@@ -468,8 +501,9 @@ impl ChatLoop {
 
         const MAX_ROUNDS: usize = 8;
         for _ in 0..MAX_ROUNDS {
+            let mut sequence = EventSequence::default();
             if cancel.load(Ordering::Relaxed) {
-                return Err(LoopError::cancelled(&message_id));
+                return Err(LoopError::cancelled(&message_id, sequence.next()));
             }
 
             let repaired = resolve_orphan_tool_uses(&mut session.messages);
@@ -483,7 +517,7 @@ impl ChatLoop {
 
             let Some(timeline) = gate.timeline(&self.dispatcher) else {
                 cancel.store(true, Ordering::Relaxed);
-                return Err(LoopError::cancelled(&message_id));
+                return Err(LoopError::cancelled(&message_id, sequence.next()));
             };
             let system = self.system_prompt_for_timeline(timeline);
             let mut messages = Vec::with_capacity(session.messages.len() + 1);
@@ -498,17 +532,19 @@ impl ChatLoop {
 
             let mut assistant = ChatMessage::assistant_blocks_with_id(&message_id, Vec::new());
             let turn = match stream_chat(provider, self.store.as_ref(), req, &cancel, |event| {
-                apply_stream_event(&mut assistant, &sid, emitter, event)
+                apply_stream_event(&mut assistant, &sid, emitter, &mut sequence, event)
             })
             .await
             {
                 Ok(turn) => turn,
-                Err(LlmError::Cancelled) => return Err(LoopError::cancelled(&message_id)),
-                Err(error) => return Err(LoopError::llm(error, &message_id)),
+                Err(LlmError::Cancelled) => {
+                    return Err(LoopError::cancelled(&message_id, sequence.next()))
+                }
+                Err(error) => return Err(LoopError::llm(error, &message_id, sequence.next())),
             };
 
             if cancel.load(Ordering::Relaxed) {
-                return Err(LoopError::cancelled(&message_id));
+                return Err(LoopError::cancelled(&message_id, sequence.next()));
             }
 
             debug_assert_eq!(assistant.content, turn.content);
@@ -519,7 +555,7 @@ impl ChatLoop {
             let mut resolved = Vec::with_capacity(turn.tool_calls.len());
             for mut tc in turn.tool_calls {
                 if cancel.load(Ordering::Relaxed) {
-                    return Err(LoopError::cancelled(&message_id));
+                    return Err(LoopError::cancelled(&message_id, sequence.next()));
                 }
                 let dispatcher = self.dispatcher.clone();
                 let gate = gate.clone();
@@ -530,13 +566,13 @@ impl ChatLoop {
                 })
                 .await
                 .map_err(map_dispatch_join_error)
-                .map_err(|error| LoopError::llm(error, &message_id))?;
+                .map_err(|error| LoopError::llm(error, &message_id, sequence.next()))?;
                 let Some(result) = result else {
                     cancel.store(true, Ordering::Relaxed);
-                    return Err(LoopError::cancelled(&message_id));
+                    return Err(LoopError::cancelled(&message_id, sequence.next()));
                 };
                 if cancel.load(Ordering::Relaxed) {
-                    return Err(LoopError::cancelled(&message_id));
+                    return Err(LoopError::cancelled(&message_id, sequence.next()));
                 }
                 let result_json = tool_result_for_model(&result);
                 let tc_id = tc.id.clone();
@@ -548,6 +584,7 @@ impl ChatLoop {
                     emitter.emit(LoopEvent::BlockUpsert {
                         session_id: sid.clone(),
                         message_id: message_id.clone(),
+                        sequence: sequence.take(),
                         block_index,
                         block,
                     });
@@ -557,6 +594,7 @@ impl ChatLoop {
                     emitter.emit(LoopEvent::BlockUpsert {
                         session_id: sid.clone(),
                         message_id: tool_result.id.clone(),
+                        sequence: 0,
                         block_index: 0,
                         block,
                     });
@@ -567,12 +605,13 @@ impl ChatLoop {
 
             if resolved.is_empty() {
                 if cancel.load(Ordering::Relaxed) {
-                    return Err(LoopError::cancelled(&message_id));
+                    return Err(LoopError::cancelled(&message_id, sequence.next()));
                 }
                 let assistant = session.messages[assistant_index].clone();
                 emitter.emit(LoopEvent::Done {
                     session_id: sid.clone(),
                     message_id: message_id.clone(),
+                    sequence: sequence.take(),
                     message: assistant,
                 });
                 return Ok(message_id);
@@ -581,19 +620,22 @@ impl ChatLoop {
         }
 
         if cancel.load(Ordering::Relaxed) {
-            return Err(LoopError::cancelled(&message_id));
+            return Err(LoopError::cancelled(&message_id, 0));
         }
+        let mut sequence = EventSequence::default();
         let text = "Reached the tool-call round limit; stopping.";
         let last = ChatMessage::assistant_with_id(&message_id, text, Vec::new());
         emitter.emit(LoopEvent::BlockDelta {
             session_id: sid.clone(),
             message_id: message_id.clone(),
+            sequence: sequence.take(),
             block_index: 0,
             delta: text.to_string(),
         });
         emitter.emit(LoopEvent::Done {
             session_id: sid,
             message_id: message_id.clone(),
+            sequence: sequence.take(),
             message: last,
         });
         Ok(message_id)

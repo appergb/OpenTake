@@ -78,3 +78,40 @@ Commit target: `fix(agent): preserve provider block order`
 - `crates/opentake-agent/src/chat/loop.rs`
 - `crates/opentake-agent/src/chat/loop/tests.rs`
 - this report
+
+## Review fix round 2
+
+Commit target: `fix(agent): reject incomplete provider streams`
+
+### Result
+
+- Anthropic stream completion is now fail-closed: every opened content block must receive exactly one matching `content_block_stop`, the stream must receive exactly one `message_stop`, and EOF cannot finalize a partial text/tool block. Premature/repeated stops, deltas after block stop, and events after message stop return `LlmError::Stream`.
+- A failed/truncated provider turn never reaches the loop's persistence or tool-dispatch phase; those phases remain after successful decoder finalization.
+- `llm.rs` is now a 228-line façade. Provider production code lives in `chat/llm/openai.rs` (235 lines) and `chat/llm/anthropic.rs` (490 lines); tests live in `chat/llm/tests.rs` (401 lines). Every file is below 800 lines.
+- Every Rust block delta/upsert/done carries a per-message monotonic `sequence: u64`, starting at 0 and increasing in emission order. Provider rounds, tool-result messages, guide/error/cancel terminal messages, save failures, and Official Codex events use the same contract.
+- The Tauri payloads expose `sequence` in camelCase JSON and reject duplicate or gapped sequences per message before emitting to the window.
+
+### RED evidence
+
+- Seven Anthropic lifecycle tests initially accepted invalid partial streams: truncated text/tool blocks, missing `message_stop`, premature `message_stop`, repeated block/message stops, and a delta after block stop all returned partial `TurnResult` values.
+- Sequence tests initially failed to compile because `LoopEvent`, `LoopError`, and the three Tauri payloads had no sequence field; the strict duplicate/gap gate did not exist.
+
+### Fresh verification
+
+- `cargo test -p opentake-agent chat:: -- --nocapture` — 60 passed, 0 failed.
+- `cargo test -p opentake-tauri chat::tests --lib -- --nocapture` — 20 passed, 0 failed.
+- `cargo clippy -p opentake-agent --all-targets -- -D warnings` — passed.
+- `cargo clippy -p opentake-tauri --lib -- -D warnings` — passed (only Cargo's existing future-incompatibility notice for `block v0.1.6`).
+- Direct `rustfmt --check` on the seven owned Rust chat files — passed.
+- Owned-file `git diff --check` — passed.
+
+### Round 2 scope
+
+- `crates/opentake-agent/src/chat/llm.rs`
+- `crates/opentake-agent/src/chat/llm/openai.rs`
+- `crates/opentake-agent/src/chat/llm/anthropic.rs`
+- `crates/opentake-agent/src/chat/llm/tests.rs`
+- `crates/opentake-agent/src/chat/loop.rs`
+- `crates/opentake-agent/src/chat/loop/tests.rs`
+- `src-tauri/src/chat.rs`
+- this report
