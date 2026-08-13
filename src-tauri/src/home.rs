@@ -14,13 +14,18 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cap_fs_ext::{ambient_authority, DirExt};
 use cap_std::fs::Dir;
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::{self, SeqAccess, Visitor},
+    Deserialize, Deserializer, Serialize,
+};
 use tauri::{AppHandle, Manager};
 
 static REGISTRY_LOCK: Mutex<()> = Mutex::new(());
 const MAX_RECENT_PROJECTS: usize = 12;
 const MAX_PROJECT_PATH_BYTES: usize = 32_768;
 const MAX_REGISTRY_BYTES: u64 = 512 * 1024;
+const MAX_PROJECT_PREVIEW_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_PROJECT_PREVIEW_TRACKS: usize = 64;
 const HOME_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -74,8 +79,80 @@ pub struct HomeProjectEntry {
     opened_at: u64,
     modified_at: u64,
     thumbnail_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview: Option<HomeProjectPreview>,
     missing: bool,
     offline: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HomeProjectPreview {
+    canvas_width: i32,
+    canvas_height: i32,
+    track_kinds: Vec<opentake_domain::ClipType>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HomeProjectPreviewWire {
+    width: Option<i32>,
+    height: Option<i32>,
+    #[serde(
+        default,
+        rename = "tracks",
+        deserialize_with = "deserialize_home_track_kinds"
+    )]
+    track_kinds: Vec<opentake_domain::ClipType>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HomeTrackPreviewWire {
+    #[serde(rename = "type")]
+    kind: opentake_domain::ClipType,
+}
+
+fn deserialize_home_track_kinds<'de, D>(
+    deserializer: D,
+) -> Result<Vec<opentake_domain::ClipType>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct TrackKindsVisitor;
+
+    impl<'de> Visitor<'de> for TrackKindsVisitor {
+        type Value = Vec<opentake_domain::ClipType>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                formatter,
+                "at most {MAX_PROJECT_PREVIEW_TRACKS} project tracks"
+            )
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut kinds = Vec::with_capacity(
+                sequence
+                    .size_hint()
+                    .unwrap_or_default()
+                    .min(MAX_PROJECT_PREVIEW_TRACKS),
+            );
+            while let Some(track) = sequence.next_element::<HomeTrackPreviewWire>()? {
+                if kinds.len() == MAX_PROJECT_PREVIEW_TRACKS {
+                    return Err(de::Error::custom(format!(
+                        "project preview exceeds the {MAX_PROJECT_PREVIEW_TRACKS}-track limit"
+                    )));
+                }
+                kinds.push(track.kind);
+            }
+            Ok(kinds)
+        }
+    }
+
+    deserializer.deserialize_seq(TrackKindsVisitor)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -312,9 +389,32 @@ fn home_entry(
         opened_at: entry.last_opened_at,
         modified_at,
         thumbnail_path,
+        preview: None,
         missing,
         offline,
     }
+}
+
+fn read_project_preview(bundle: &Path) -> Option<HomeProjectPreview> {
+    let root = opentake_project::ProjectRoot::open(bundle).ok()?;
+    let file = root.open_asset_file(Path::new("project.json")).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_PROJECT_PREVIEW_BYTES {
+        return None;
+    }
+    let wire: HomeProjectPreviewWire =
+        serde_json::from_reader(file.take(MAX_PROJECT_PREVIEW_BYTES + 1)).ok()?;
+    let (Some(canvas_width), Some(canvas_height)) = (wire.width, wire.height) else {
+        return None;
+    };
+    if canvas_width <= 0 || canvas_height <= 0 {
+        return None;
+    }
+    Some(HomeProjectPreview {
+        canvas_width,
+        canvas_height,
+        track_kinds: wire.track_kinds,
+    })
 }
 
 fn stored_modified_at(entry: &ProjectEntry) -> u64 {
@@ -369,7 +469,9 @@ fn probe_project_entry(
         .unwrap_or_else(|| stored_modified_at(entry));
     let thumbnail = entry.path.join("thumbnail.jpg");
     let thumbnail_path = authorize_thumbnail(&thumbnail).then_some(thumbnail);
-    home_entry(entry, modified_at, thumbnail_path, false, false)
+    let mut result = home_entry(entry, modified_at, thumbnail_path, false, false);
+    result.preview = read_project_preview(&entry.path);
+    result
 }
 
 fn probe_project_entries_with(
@@ -1399,8 +1501,46 @@ mod tests {
 
         assert!(entry.modified_at > 0);
         assert_eq!(entry.thumbnail_path, Some(project.join("thumbnail.jpg")));
+        assert!(serde_json::to_value(&entry)
+            .unwrap()
+            .get("preview")
+            .is_none());
         assert!(!entry.missing);
         assert!(!entry.offline);
+    }
+
+    #[test]
+    fn filesystem_probe_reports_explicit_canvas_and_actual_track_kinds() {
+        let directory = tempfile::tempdir().unwrap();
+        let ledger = directory.path().join("project-registry.json");
+        let project = directory.path().join("Portrait.opentake");
+        fs::create_dir(&project).unwrap();
+        fs::write(
+            project.join("project.json"),
+            br#"{
+                "width": 1080,
+                "height": 1920,
+                "tracks": [
+                    { "type": "video", "clips": [] },
+                    { "type": "audio", "clips": [] }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let mut registry = ProjectRegistry::load(ledger).unwrap();
+        registry.register_at(project, 10, None).unwrap();
+        let entry = probe_project_entries_with(registry.entries_snapshot(), |_| false)
+            .pop()
+            .unwrap();
+        let json = serde_json::to_value(entry).unwrap();
+
+        assert_eq!(json["preview"]["canvasWidth"], 1080);
+        assert_eq!(json["preview"]["canvasHeight"], 1920);
+        assert_eq!(
+            json["preview"]["trackKinds"],
+            serde_json::json!(["video", "audio"])
+        );
     }
 
     #[test]

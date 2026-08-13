@@ -369,8 +369,15 @@ export interface HomeProjectEntry {
   openedAt: number;
   modifiedAt: number;
   thumbnailPath?: string | null;
+  preview?: HomeProjectPreview;
   missing: boolean;
   offline: boolean;
+}
+
+export interface HomeProjectPreview {
+  canvasWidth: number;
+  canvasHeight: number;
+  trackKinds: ClipType[];
 }
 
 export interface LegacyRecentProject {

@@ -365,23 +365,46 @@
 }
 
 .home-project-preview__track-stack {
-  display: grid;
-  gap: 3px;
+  display: flex;
+  min-block-size: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 1px;
 }
 
 .home-project-preview__track {
   display: block;
-  block-size: 5px;
+  min-block-size: 1px;
+  max-block-size: 5px;
+  flex: 1;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.2);
 }
 
-.home-project-preview__track--short {
-  inline-size: 72%;
+.home-project-preview__track--video,
+.home-project-preview__track--image {
+  background: rgba(130, 180, 255, 0.34);
 }
 
-.home-project-preview__track--tiny {
-  inline-size: 42%;
+.home-project-preview__track--audio {
+  background: rgba(132, 218, 172, 0.32);
+}
+
+.home-project-preview__track--text,
+.home-project-preview__track--lottie {
+  background: rgba(210, 166, 255, 0.32);
+}
+
+.home-project-preview__structure {
+  block-size: 22px;
+  border-block: 1px solid rgba(255, 255, 255, 0.09);
+  background: repeating-linear-gradient(
+    90deg,
+    transparent 0,
+    transparent calc(25% - 1px),
+    rgba(255, 255, 255, 0.07) calc(25% - 1px),
+    rgba(255, 255, 255, 0.07) 25%
+  );
 }
 
 @media (prefers-reduced-motion: reduce) {

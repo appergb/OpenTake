@@ -166,9 +166,36 @@ it("project_card_uses_a_named_structured_fallback_when_no_thumbnail_is_available
   const fallback = container.querySelector<HTMLElement>("figure.home-project-preview--fallback");
   expect(fallback?.querySelector(".home-project-preview__fallback-name")?.textContent)
     .toBe("No Preview");
-  expect(fallback?.querySelector(".home-project-preview__aspect")?.textContent).toBe("16:9");
-  expect(fallback?.querySelectorAll(".home-project-preview__track").length).toBeGreaterThan(0);
+  expect(fallback?.querySelector(".home-project-preview__aspect")).toBeNull();
+  expect(fallback?.querySelectorAll(".home-project-preview__track")).toHaveLength(0);
+  expect(fallback?.querySelector(".home-project-preview__structure")).not.toBeNull();
   expect(fallback?.querySelector("svg")).toBeNull();
+});
+
+it("project_card_fallback_uses_the_actual_portrait_aspect_and_two_track_kinds", async () => {
+  useRecentStore.setState({
+    recents: [{
+      path: "/tmp/Portrait.opentake",
+      name: "Portrait",
+      openedAt: 1,
+      thumbnailPath: null,
+      preview: {
+        canvasWidth: 1080,
+        canvasHeight: 1920,
+        trackKinds: ["video", "audio"],
+      },
+      missing: false,
+      offline: false,
+    }],
+  });
+  await act(async () => root.render(<HomeView />));
+
+  const fallback = container.querySelector<HTMLElement>("figure.home-project-preview--fallback");
+  expect(fallback?.querySelector(".home-project-preview__aspect")?.textContent).toBe("9:16");
+  expect(fallback?.querySelectorAll(".home-project-preview__track")).toHaveLength(2);
+  expect(fallback?.querySelectorAll(".home-project-preview__track--video")).toHaveLength(1);
+  expect(fallback?.querySelectorAll(".home-project-preview__track--audio")).toHaveLength(1);
+  expect(fallback?.textContent).not.toContain("16:9");
 });
 
 it("never_mounts_a_cached_thumbnail_before_native_path_validation", async () => {

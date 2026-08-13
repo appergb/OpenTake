@@ -81,6 +81,11 @@ it("autosave_and_home_metadata_have_separate_owners", async () => {
     openedAt: 1_000,
     modifiedAt: 6_000,
     thumbnailPath: "/tmp/Metadata.opentake/thumbnail.jpg",
+    preview: {
+      canvasWidth: 1920,
+      canvasHeight: 1080,
+      trackKinds: [],
+    },
   });
   expect(JSON.parse(localStorage.getItem("recentProjects") ?? "[]")[0]).toMatchObject({
     modifiedAt: 6_000,
@@ -104,6 +109,9 @@ it("bounds_deduplicates_and_sanitizes_the_untrusted_startup_cache", () => {
     thumbnailPath: index === 0
       ? "/dev/zero"
       : projectThumbnailPath(`/tmp/Project ${index}.opentake`),
+    preview: index === 1
+      ? { canvasWidth: 1080, canvasHeight: 1920, trackKinds: ["video", "audio"] }
+      : { canvasWidth: 0, canvasHeight: 1080, trackKinds: ["invented"] },
   }));
   entries.splice(1, 0, { ...entries[0] });
   entries.splice(2, 0, {
@@ -120,7 +128,27 @@ it("bounds_deduplicates_and_sanitizes_the_untrusted_startup_cache", () => {
     name: "Project 0",
     thumbnailPath: null,
   });
+  expect(decoded[0]?.preview).toBeUndefined();
   expect(decoded[1]?.thumbnailPath).toBe("/tmp/Project 1.opentake/thumbnail.jpg");
+  expect(decoded[1]?.preview).toEqual({
+    canvasWidth: 1080,
+    canvasHeight: 1920,
+    trackKinds: ["video", "audio"],
+  });
+});
+
+it("rejects_cached_preview_dimensions_outside_the_native_i32_contract", () => {
+  const [decoded] = decodeRecentProjects(JSON.stringify([{
+    path: "/tmp/Huge.opentake",
+    openedAt: 1,
+    preview: {
+      canvasWidth: Number.MAX_VALUE,
+      canvasHeight: 1080,
+      trackKinds: [],
+    },
+  }]));
+
+  expect(decoded?.preview).toBeUndefined();
 });
 
 it("coalesces_concurrent_recent_validation_into_one_native_sync", async () => {

@@ -42,6 +42,20 @@ export function formatProjectRelativeTime(
   return t("home.relative.monthsAgo", { count: Math.max(1, Math.floor(days / 30)) });
 }
 
+function greatestCommonDivisor(left: number, right: number): number {
+  let a = Math.abs(left);
+  let b = Math.abs(right);
+  while (b !== 0) {
+    [a, b] = [b, a % b];
+  }
+  return a;
+}
+
+export function formatCanvasAspect(width: number, height: number): string {
+  const divisor = greatestCommonDivisor(width, height);
+  return `${width / divisor}:${height / divisor}`;
+}
+
 const homeShellStyle: CSSProperties = {
   display: "flex",
   height: "100%",
@@ -908,13 +922,27 @@ function ProjectGridCard({
               <div className="home-project-preview__fallback" aria-label={entry.name}>
                 <div className="home-project-preview__fallback-header">
                   <span className="home-project-preview__fallback-name">{entry.name}</span>
-                  <span className="home-project-preview__aspect">16:9</span>
+                  {entry.preview && (
+                    <span className="home-project-preview__aspect">
+                      {formatCanvasAspect(
+                        entry.preview.canvasWidth,
+                        entry.preview.canvasHeight,
+                      )}
+                    </span>
+                  )}
                 </div>
-                <div className="home-project-preview__track-stack" aria-hidden="true">
-                  <span className="home-project-preview__track" />
-                  <span className="home-project-preview__track home-project-preview__track--short" />
-                  <span className="home-project-preview__track home-project-preview__track--tiny" />
-                </div>
+                {entry.preview ? (
+                  <div className="home-project-preview__track-stack" aria-hidden="true">
+                    {entry.preview.trackKinds.map((kind, index) => (
+                      <span
+                        key={`${kind}-${index}`}
+                        className={`home-project-preview__track home-project-preview__track--${kind}`}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <div className="home-project-preview__structure" aria-hidden="true" />
+                )}
               </div>
             )}
           </figure>
