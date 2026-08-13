@@ -8,10 +8,16 @@
  * editing truth always lives in Rust when running under Tauri.
  */
 
+import {
+  MAX_CHAT_BLOCK_INDEX,
+  MAX_CHAT_DELTA_CHARS,
+  MAX_CHAT_STREAM_ID_LENGTH,
+} from "./types";
 import type {
   AccountInfo,
   AccountStatus,
   AudioDenoise,
+  AgentContentBlock,
   CaptionRequest,
   ChatMessage,
   ChatSession,
@@ -1918,25 +1924,159 @@ export async function accountGetStatus(): Promise<AccountStatus> {
 
 // MARK: - In-app chat (#HANDOFF-3.3)
 
-export interface ChatDelta {
+export interface ChatStreamIdentity {
   projectEpoch: number;
   projectPath: string;
   sessionId: string;
+  messageId: string;
+}
+
+export interface ChatDelta extends ChatStreamIdentity {
+  type: "blockDelta";
+  blockIndex: number;
   delta: string;
 }
 
-export interface ChatToolCallEvent {
-  projectEpoch: number;
-  projectPath: string;
-  sessionId: string;
-  toolCall: ChatToolCall;
+export interface ChatBlockUpsertEvent extends ChatStreamIdentity {
+  type: "blockUpsert";
+  blockIndex: number;
+  block: AgentContentBlock;
 }
 
-export interface ChatDoneEvent {
-  projectEpoch: number;
-  projectPath: string;
-  sessionId: string;
+export interface ChatDoneEvent extends ChatStreamIdentity {
+  type: "done";
   message: ChatMessage;
+}
+
+/** Temporary Beta 4 display compatibility; `block` remains authoritative. */
+export type ChatToolCallEvent = ChatBlockUpsertEvent & { toolCall: ChatToolCall };
+
+export type ChatStreamEvent = ChatDelta | ChatBlockUpsertEvent | ChatDoneEvent;
+export type ChatStreamEventName = "chat_delta" | "chat_tool_call" | "chat_done";
+
+export interface ChatStreamDecodeFailure {
+  eventName: ChatStreamEventName;
+  reason: "invalid_identity" | "invalid_block_index" | "invalid_block" | "invalid_message";
+  sessionId?: string;
+  messageId?: string;
+}
+
+export type ChatStreamDecodeResult =
+  | { ok: true; event: ChatStreamEvent }
+  | { ok: false; failure: ChatStreamDecodeFailure };
+
+export type ChatStreamMalformedHandler = (failure: ChatStreamDecodeFailure) => void;
+
+function boundedId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= MAX_CHAT_STREAM_ID_LENGTH;
+}
+
+function boundedBlockIndex(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= MAX_CHAT_BLOCK_INDEX;
+}
+
+function hasOwn(value: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function isAgentContentBlock(value: unknown): value is AgentContentBlock {
+  if (typeof value !== "object" || value === null) return false;
+  const block = value as Record<string, unknown>;
+  if (block.type === "text") return typeof block.text === "string";
+  if (block.type === "toolUse") {
+    return boundedId(block.id) && boundedId(block.name) && hasOwn(block, "input") &&
+      (block.isError === undefined || typeof block.isError === "boolean");
+  }
+  if (block.type !== "toolResult" || !boundedId(block.toolUseId) || !Array.isArray(block.content)) {
+    return false;
+  }
+  return block.content.every((content) => {
+    if (typeof content !== "object" || content === null) return false;
+    const item = content as Record<string, unknown>;
+    return (item.kind === "text" && typeof item.text === "string") ||
+      (item.kind === "image" && typeof item.base64 === "string" && typeof item.mediaType === "string");
+  }) && (block.isError === undefined || typeof block.isError === "boolean");
+}
+
+function isChatMessage(value: unknown, expectedId: string): value is ChatMessage {
+  if (typeof value !== "object" || value === null) return false;
+  const message = value as Record<string, unknown>;
+  return message.id === expectedId &&
+    (message.role === "system" || message.role === "user" || message.role === "assistant" || message.role === "tool") &&
+    typeof message.content === "string" && Array.isArray(message.toolCalls) &&
+    Number.isFinite(message.createdAt) &&
+    (message.blocks === undefined || (Array.isArray(message.blocks) && message.blocks.every(isAgentContentBlock)));
+}
+
+function compatibilityToolCall(block: AgentContentBlock): ChatToolCall {
+  if (block.type === "toolUse") {
+    return {
+      id: block.id,
+      name: block.name,
+      args: block.input,
+      result: block.result,
+      isError: block.isError,
+    };
+  }
+  if (block.type === "toolResult") {
+    return {
+      id: block.toolUseId,
+      name: "tool_result",
+      args: {},
+      result: block.content,
+      isError: block.isError,
+    };
+  }
+  return { id: `text-${block.text.length}`, name: "text", args: {} };
+}
+
+/**
+ * Decode the three Rust events as a discriminated union. Consumers may use the
+ * returned failure identity to request one authoritative session history reload;
+ * no partial event is ever guessed or applied.
+ */
+export function decodeChatStreamEvent(
+  eventName: ChatStreamEventName,
+  payload: unknown,
+): ChatStreamDecodeResult {
+  const raw = typeof payload === "object" && payload !== null ? payload as Record<string, unknown> : {};
+  const sessionId = boundedId(raw.sessionId) ? raw.sessionId : undefined;
+  const messageId = boundedId(raw.messageId) ? raw.messageId : undefined;
+  if (
+    !Number.isSafeInteger(raw.projectEpoch) || (raw.projectEpoch as number) < 0 ||
+    typeof raw.projectPath !== "string" || raw.projectPath.length === 0 ||
+    !sessionId || !messageId
+  ) {
+    return { ok: false, failure: { eventName, reason: "invalid_identity", sessionId, messageId } };
+  }
+  const identity = {
+    projectEpoch: raw.projectEpoch as number,
+    projectPath: raw.projectPath,
+    sessionId,
+    messageId,
+  };
+  if (eventName === "chat_delta") {
+    if (!boundedBlockIndex(raw.blockIndex)) {
+      return { ok: false, failure: { eventName, reason: "invalid_block_index", sessionId, messageId } };
+    }
+    if (typeof raw.delta !== "string" || raw.delta.length > MAX_CHAT_DELTA_CHARS) {
+      return { ok: false, failure: { eventName, reason: "invalid_block", sessionId, messageId } };
+    }
+    return { ok: true, event: { type: "blockDelta", ...identity, blockIndex: raw.blockIndex, delta: raw.delta } };
+  }
+  if (eventName === "chat_tool_call") {
+    if (!boundedBlockIndex(raw.blockIndex)) {
+      return { ok: false, failure: { eventName, reason: "invalid_block_index", sessionId, messageId } };
+    }
+    if (!isAgentContentBlock(raw.block)) {
+      return { ok: false, failure: { eventName, reason: "invalid_block", sessionId, messageId } };
+    }
+    return { ok: true, event: { type: "blockUpsert", ...identity, blockIndex: raw.blockIndex, block: raw.block } };
+  }
+  if (!isChatMessage(raw.message, messageId)) {
+    return { ok: false, failure: { eventName, reason: "invalid_message", sessionId, messageId } };
+  }
+  return { ok: true, event: { type: "done", ...identity, message: raw.message } };
 }
 
 export async function chatSend(
@@ -2097,89 +2237,42 @@ export async function onGoHome(handler: () => void): Promise<() => void> {
 
 export async function onChatDelta(
   handler: (event: ChatDelta) => void,
+  onMalformed?: ChatStreamMalformedHandler,
 ): Promise<() => void> {
   await ensureTauri();
   if (!listenImpl) return () => {};
   return listenImpl("chat_delta", (e) => {
-    const payload = e.payload as
-      | { projectEpoch?: number; projectPath?: string; sessionId?: string; delta?: string }
-      | undefined;
-    if (
-      payload &&
-      typeof payload.projectEpoch === "number" &&
-      typeof payload.projectPath === "string" &&
-      typeof payload.sessionId === "string" &&
-      typeof payload.delta === "string"
-    ) {
-      handler({
-        projectEpoch: payload.projectEpoch,
-        projectPath: payload.projectPath,
-        sessionId: payload.sessionId,
-        delta: payload.delta,
-      });
-    }
+    const decoded = decodeChatStreamEvent("chat_delta", e.payload);
+    if (!decoded.ok) onMalformed?.(decoded.failure);
+    else if (decoded.event.type === "blockDelta") handler(decoded.event);
   });
 }
 
 export async function onChatToolCall(
   handler: (event: ChatToolCallEvent) => void,
+  onMalformed?: ChatStreamMalformedHandler,
 ): Promise<() => void> {
   await ensureTauri();
   if (!listenImpl) return () => {};
   return listenImpl("chat_tool_call", (e) => {
-    const payload = e.payload as
-      | {
-          projectEpoch?: number;
-          projectPath?: string;
-          sessionId?: string;
-          toolCall?: ChatToolCall;
-        }
-      | undefined;
-    if (
-      payload &&
-      typeof payload.projectEpoch === "number" &&
-      typeof payload.projectPath === "string" &&
-      typeof payload.sessionId === "string" &&
-      payload.toolCall
-    ) {
-      handler({
-        projectEpoch: payload.projectEpoch,
-        projectPath: payload.projectPath,
-        sessionId: payload.sessionId,
-        toolCall: payload.toolCall,
-      });
+    const decoded = decodeChatStreamEvent("chat_tool_call", e.payload);
+    if (!decoded.ok) onMalformed?.(decoded.failure);
+    else if (decoded.event.type === "blockUpsert") {
+      handler({ ...decoded.event, toolCall: compatibilityToolCall(decoded.event.block) });
     }
   });
 }
 
 export async function onChatDone(
   handler: (event: ChatDoneEvent) => void,
+  onMalformed?: ChatStreamMalformedHandler,
 ): Promise<() => void> {
   await ensureTauri();
   if (!listenImpl) return () => {};
   return listenImpl("chat_done", (e) => {
-    const payload = e.payload as
-      | {
-          projectEpoch?: number;
-          projectPath?: string;
-          sessionId?: string;
-          message?: ChatMessage;
-        }
-      | undefined;
-    if (
-      payload &&
-      typeof payload.projectEpoch === "number" &&
-      typeof payload.projectPath === "string" &&
-      typeof payload.sessionId === "string" &&
-      payload.message
-    ) {
-      handler({
-        projectEpoch: payload.projectEpoch,
-        projectPath: payload.projectPath,
-        sessionId: payload.sessionId,
-        message: payload.message,
-      });
-    }
+    const decoded = decodeChatStreamEvent("chat_done", e.payload);
+    if (!decoded.ok) onMalformed?.(decoded.failure);
+    else if (decoded.event.type === "done") handler(decoded.event);
   });
 }
 

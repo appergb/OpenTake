@@ -1161,6 +1161,13 @@ export type AccountStatus =
 
 export type ChatRole = "system" | "user" | "assistant" | "tool";
 
+/** Stream transport limits. The Rust sender only emits a small ordered block
+ * list; reject oversized or malformed addresses before they can retain an
+ * unbounded browser-side draft. */
+export const MAX_CHAT_STREAM_ID_LENGTH = 512;
+export const MAX_CHAT_BLOCK_INDEX = 511;
+export const MAX_CHAT_DELTA_CHARS = 32_768;
+
 export interface ChatToolCall {
   id: string;
   name: string;

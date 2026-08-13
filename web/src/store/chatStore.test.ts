@@ -1,120 +1,238 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { ChatMessage } from "../lib/types";
-import { useChatStore } from "./chatStore";
+import { decodeChatStreamEvent } from "../lib/api";
+import type { AgentContentBlock, ChatMessage } from "../lib/types";
+import { MAX_CHAT_BLOCK_INDEX, useChatStore } from "./chatStore";
 
-function resetStore() {
-  useChatStore.setState({
-    sessionId: "chat-test",
-    messages: [],
-    streaming: false,
-    streamingId: null,
-  });
+const sessionA = "session-a";
+const sessionB = "session-b";
+
+function tool(id: string, name = "get_timeline"): AgentContentBlock {
+  return { type: "toolUse", id, name, input: { frame: 0 } };
 }
 
-function assistantMessage(overrides: Partial<ChatMessage> = {}): ChatMessage {
+function assistantMessage(
+  id: string,
+  blocks: AgentContentBlock[],
+  overrides: Partial<ChatMessage> = {},
+): ChatMessage {
   return {
-    id: "assistant-final",
+    id,
     role: "assistant",
-    content: "done",
+    content: blocks
+      .filter((block): block is Extract<AgentContentBlock, { type: "text" }> => block.type === "text")
+      .map((block) => block.text)
+      .join(""),
     toolCalls: [],
+    blocks,
     createdAt: 1,
     ...overrides,
   };
 }
 
-describe("chatStore", () => {
-  beforeEach(() => {
-    resetStore();
+function resetStore() {
+  useChatStore.setState({
+    sessionId: sessionA,
+    messages: [],
+    streaming: false,
+    streamingId: null,
+    sessionMessages: {},
+    drafts: {},
+    blockedMessageKeys: {},
+    historyResyncRequests: {},
+    resyncingSessionIds: {},
+    deletedSessionIds: {},
+    composerDraft: null,
+  });
+}
+
+describe("chatStore ordered session streams", () => {
+  beforeEach(resetStore);
+
+  it("keeps text, tool, and following text in authoritative block order", () => {
+    const store = useChatStore.getState();
+    store.beginMessage(sessionA, "message-a");
+    store.appendBlockDelta(sessionA, "message-a", 0, "I will inspect ");
+    store.upsertBlock(sessionA, "message-a", 1, tool("tool-1"));
+    store.appendBlockDelta(sessionA, "message-a", 2, "and then edit.");
+
+    expect(useChatStore.getState().messages[0].blocks).toEqual([
+      { type: "text", text: "I will inspect " },
+      tool("tool-1"),
+      { type: "text", text: "and then edit." },
+    ]);
+    expect(useChatStore.getState().messages[0].content).toBe("I will inspect and then edit.");
   });
 
-  it("merges streaming deltas into the active assistant placeholder", () => {
+  it("keeps multiple tool rounds and duplicate retry events idempotent", () => {
     const store = useChatStore.getState();
-    store.beginStream("assistant-stream");
-    store.appendDelta("hello");
-    store.appendDelta(" world");
+    store.beginMessage(sessionA, "message-a");
+    store.appendBlockDelta(sessionA, "message-a", 0, "first ");
+    store.appendBlockDelta(sessionA, "message-a", 0, "first ");
+    store.upsertBlock(sessionA, "message-a", 1, tool("tool-1"));
+    store.upsertBlock(sessionA, "message-a", 1, tool("tool-1"));
+    store.appendBlockDelta(sessionA, "message-a", 2, "second ");
+    store.upsertBlock(sessionA, "message-a", 3, tool("tool-2", "split_clip"));
+    store.appendBlockDelta(sessionA, "message-a", 4, "complete");
+
+    expect(useChatStore.getState().messages[0].blocks).toEqual([
+      { type: "text", text: "first " },
+      tool("tool-1"),
+      { type: "text", text: "second " },
+      tool("tool-2", "split_clip"),
+      { type: "text", text: "complete" },
+    ]);
+  });
+
+  it("stops a message and requests one authoritative history reload after a block gap", () => {
+    const store = useChatStore.getState();
+    store.beginMessage(sessionA, "message-a");
+    store.upsertBlock(sessionA, "message-a", 2, tool("tool-2"));
+    store.appendBlockDelta(sessionA, "message-a", 0, "must not apply");
+    store.upsertBlock(sessionA, "message-a", 2, tool("tool-2"));
 
     const state = useChatStore.getState();
-    expect(state.streaming).toBe(true);
-    expect(state.messages).toHaveLength(1);
-    expect(state.messages[0].content).toBe("hello world");
+    expect(state.messages[0].blocks).toEqual([]);
+    expect(state.takeHistoryResyncRequest()).toEqual({
+      sessionId: sessionA,
+      messageId: "message-a",
+      reason: "block_gap",
+    });
+    expect(state.takeHistoryResyncRequest()).toBeNull();
   });
 
-  it("upserts tool calls by id instead of duplicating them", () => {
+  it("rejects negative and huge block indices without mutating a draft", () => {
     const store = useChatStore.getState();
-    store.beginStream("assistant-stream");
-    store.upsertToolCall({
-      id: "tool-1",
-      name: "get_timeline",
-      args: { startFrame: 0 },
-    });
-    store.upsertToolCall({
-      id: "tool-1",
-      name: "get_timeline",
-      args: { startFrame: 0 },
-      result: { summary: "ok" },
-      isError: false,
-    });
+    store.beginMessage(sessionA, "message-a");
+    store.appendBlockDelta(sessionA, "message-a", -1, "bad");
+    store.upsertBlock(sessionA, "message-a", MAX_CHAT_BLOCK_INDEX + 1, tool("bad"));
 
-    const toolCalls = useChatStore.getState().messages[0].toolCalls;
-    expect(toolCalls).toHaveLength(1);
-    expect(toolCalls[0].result).toEqual({ summary: "ok" });
-    expect(toolCalls[0].isError).toBe(false);
+    expect(useChatStore.getState().messages[0].blocks).toEqual([]);
+    expect(useChatStore.getState().takeHistoryResyncRequest()).toMatchObject({
+      sessionId: sessionA,
+      messageId: "message-a",
+      reason: "invalid_block_index",
+    });
   });
 
-  it("finalize replaces the placeholder and clears streaming state", () => {
+  it("replaces a streaming draft with the final authoritative message without merging fields", () => {
     const store = useChatStore.getState();
-    store.beginStream("assistant-stream");
-    store.appendDelta("draft");
-    store.finalize(
-      assistantMessage({
-        toolCalls: [
-          {
-            id: "tool-1",
-            name: "tighten_silences",
-            args: {},
-            result: { summary: "trimmed" },
-          },
-        ],
-      }),
-    );
+    store.beginMessage(sessionA, "message-a");
+    store.appendBlockDelta(sessionA, "message-a", 0, "stale draft");
+    const final = assistantMessage("message-a", [
+      { type: "text", text: "final before " },
+      tool("tool-final"),
+      { type: "text", text: "final after" },
+    ]);
+    store.finalize(sessionA, "message-a", final);
 
     const state = useChatStore.getState();
     expect(state.streaming).toBe(false);
     expect(state.streamingId).toBeNull();
-    expect(state.messages).toHaveLength(1);
-    expect(state.messages[0].id).toBe("assistant-final");
-    expect(state.messages[0].content).toBe("done");
-    expect(state.messages[0].toolCalls[0].result).toEqual({ summary: "trimmed" });
+    expect(state.messages).toEqual([final]);
   });
 
-  it("finalize preserves streamed tool cards when final backend message omits toolCalls", () => {
+  it("keeps an inactive session draft isolated until that session is selected", () => {
     const store = useChatStore.getState();
-    store.beginStream("assistant-stream");
-    store.upsertToolCall({
-      id: "tool-1",
-      name: "get_timeline",
-      args: {},
-    });
-    store.upsertToolCall({
-      id: "tool-1",
-      name: "get_timeline",
-      args: {},
-      result: { summary: "ok" },
-      isError: false,
-    });
+    store.beginMessage(sessionA, "message-a");
+    store.appendBlockDelta(sessionA, "message-a", 0, "draft A");
+    store.reset(sessionB);
+    store.setMessages([
+      assistantMessage("persisted-b", [{ type: "text", text: "persisted B" }]),
+    ]);
+    store.appendBlockDelta(sessionA, "message-a", 0, " after switch");
+
+    expect(useChatStore.getState().sessionId).toBe(sessionB);
+    expect(useChatStore.getState().messages.map((message) => message.content)).toEqual([
+      "persisted B",
+    ]);
+    expect(useChatStore.getState().streaming).toBe(false);
+
+    store.reset(sessionA);
+    expect(useChatStore.getState().messages.map((message) => message.content)).toEqual([
+      "draft A after switch",
+    ]);
+    expect(useChatStore.getState().streamingId).toBe("message-a");
+  });
+
+  it("ignores late streams for a deleted session instead of merging into a nearby assistant", () => {
+    const store = useChatStore.getState();
+    store.reset(sessionB);
+    store.setMessages([
+      assistantMessage("unrelated-b", [{ type: "text", text: "unrelated B" }]),
+    ]);
+    store.deleteSession(sessionA);
+    store.beginMessage(sessionA, "message-a");
+    store.upsertBlock(sessionA, "message-a", 0, tool("tool-a"));
     store.finalize(
-      assistantMessage({
-        id: "assistant-final",
-        content: "done without cards",
-        toolCalls: [],
-      }),
+      sessionA,
+      "message-a",
+      assistantMessage("message-a", [tool("tool-a")]),
     );
 
     const state = useChatStore.getState();
-    expect(state.streaming).toBe(false);
     expect(state.messages).toHaveLength(1);
-    expect(state.messages[0].content).toBe("done without cards");
-    expect(state.messages[0].toolCalls).toHaveLength(1);
-    expect(state.messages[0].toolCalls[0].result).toEqual({ summary: "ok" });
+    expect(state.messages[0].id).toBe("unrelated-b");
+    expect(state.messages[0].blocks).toEqual([{ type: "text", text: "unrelated B" }]);
   });
+
+  it("never merges an unaddressed tool call into the nearest assistant message", () => {
+    const store = useChatStore.getState();
+    store.setMessages([
+      assistantMessage("unrelated-a", [{ type: "text", text: "existing reply" }]),
+    ]);
+    store.upsertBlock(sessionA, "missing-message", 0, tool("tool-missing"));
+
+    const state = useChatStore.getState();
+    expect(state.messages).toEqual([
+      assistantMessage("unrelated-a", [{ type: "text", text: "existing reply" }]),
+    ]);
+    expect(state.takeHistoryResyncRequest()).toEqual({
+      sessionId: sessionA,
+      messageId: "missing-message",
+      reason: "missing_draft",
+    });
+  });
+
+  it("strictly decodes typed stream payloads and reports malformed identities for re-sync", () => {
+    expect(
+      decodeChatStreamEvent("chat_delta", {
+        projectEpoch: 7,
+        projectPath: "/tmp/project.opentake",
+        sessionId: sessionA,
+        messageId: "message-a",
+        blockIndex: 0,
+        delta: "hello",
+      }),
+    ).toEqual({
+      ok: true,
+      event: {
+        type: "blockDelta",
+        projectEpoch: 7,
+        projectPath: "/tmp/project.opentake",
+        sessionId: sessionA,
+        messageId: "message-a",
+        blockIndex: 0,
+        delta: "hello",
+      },
+    });
+    expect(
+      decodeChatStreamEvent("chat_tool_call", {
+        projectEpoch: 7,
+        projectPath: "/tmp/project.opentake",
+        sessionId: sessionA,
+        messageId: "message-a",
+        blockIndex: -1,
+        block: tool("tool-a"),
+      }),
+    ).toEqual({
+      ok: false,
+      failure: {
+        eventName: "chat_tool_call",
+        reason: "invalid_block_index",
+        sessionId: sessionA,
+        messageId: "message-a",
+      },
+    });
+  });
+
 });
