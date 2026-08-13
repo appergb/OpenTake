@@ -43,6 +43,23 @@
   align-items: center;
 }
 
+.library-category-rail {
+  padding-block-start: var(--titlebar-safe-top);
+}
+
+.library-category-rail__home {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  inline-size: var(--titlebar-control-size, 26px);
+  block-size: var(--titlebar-control-size, 26px);
+  margin-inline: var(--space-sm);
+  margin-block-end: var(--space-xs);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .reveal {
     transition: none;
