@@ -4,13 +4,17 @@ use std::{
     fs::{self, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use opentake_agent::mcp::{AuthenticatedMcpClient, BearerAuthorizer};
+use opentake_core::AppCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::chat::ExternalMcpComponents;
+use crate::mcp::LiveProjectMcpGate;
 use crate::secret::McpSecretStore;
 
 const CATALOG_VERSION: u32 = 1;
@@ -111,6 +115,50 @@ pub(crate) struct ExternalMcpCatalog {
     fail_next_rename: std::sync::atomic::AtomicBool,
     #[cfg(test)]
     fail_parent_sync_on_call: std::sync::atomic::AtomicUsize,
+}
+
+struct ExternalMcpCatalogAuthorizer {
+    catalog: Arc<RwLock<ExternalMcpCatalog>>,
+}
+
+impl BearerAuthorizer for ExternalMcpCatalogAuthorizer {
+    fn authorize(&self, candidate: &str) -> Option<AuthenticatedMcpClient> {
+        let catalog = self.catalog.read().ok()?;
+        let client_id = catalog.verify_candidate(candidate).ok()??;
+        Some(AuthenticatedMcpClient {
+            client_id: client_id.into(),
+            credential_generation: credential_generation(candidate),
+        })
+    }
+}
+
+pub(crate) struct ExternalMcpState {
+    core: AppCore,
+    components: ExternalMcpComponents,
+    catalog: Arc<RwLock<ExternalMcpCatalog>>,
+    gate: Arc<LiveProjectMcpGate>,
+    authorizer: Arc<dyn BearerAuthorizer>,
+}
+
+impl ExternalMcpState {
+    pub(crate) fn new(
+        core: AppCore,
+        components: ExternalMcpComponents,
+        catalog: ExternalMcpCatalog,
+    ) -> Self {
+        let catalog = Arc::new(RwLock::new(catalog));
+        let authorizer = Arc::new(ExternalMcpCatalogAuthorizer {
+            catalog: catalog.clone(),
+        });
+        let gate = LiveProjectMcpGate::new(core.clone());
+        Self {
+            core,
+            components,
+            catalog,
+            gate,
+            authorizer,
+        }
+    }
 }
 
 impl ExternalMcpCatalog {
@@ -639,6 +687,15 @@ fn token_digest(token: &str) -> String {
         .collect()
 }
 
+fn credential_generation(token: &str) -> u64 {
+    let digest = Sha256::digest(token.as_bytes());
+    u64::from_be_bytes(
+        digest[..std::mem::size_of::<u64>()]
+            .try_into()
+            .expect("SHA-256 contains a u64 credential generation"),
+    )
+}
+
 fn secret_account(client_id: &str) -> String {
     format!("external-mcp:{client_id}")
 }
@@ -658,7 +715,9 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::chat::ChatState;
     use crate::secret::{McpSecretStore, MemoryMcpSecretStore};
+    use opentake_agent::chat::ChatTurnGate;
 
     fn catalog_root() -> tempfile::TempDir {
         tempfile::tempdir().expect("create temporary application data directory")
@@ -670,6 +729,178 @@ mod tests {
     ) -> ExternalMcpCatalog {
         ExternalMcpCatalog::load(root.path(), secrets)
             .expect("load catalog against the in-memory secret store")
+    }
+
+    fn shared_state(
+        root: &tempfile::TempDir,
+        core: opentake_core::AppCore,
+    ) -> (ChatState, ExternalMcpState) {
+        let chat = ChatState::new(
+            core.clone(),
+            root.path().join("no-workflows"),
+            root.path().join("chat-cache"),
+            root.path().join("chat-models"),
+        );
+        let catalog = load_catalog(root, Arc::new(MemoryMcpSecretStore::default()));
+        let external = ExternalMcpState::new(core, chat.external_mcp_components(), catalog);
+        (chat, external)
+    }
+
+    fn shared_dispatch(
+        state: &ExternalMcpState,
+        scope: &str,
+        tool: &str,
+        args: serde_json::Value,
+    ) -> opentake_agent::tools::result::ToolResult {
+        state
+            .gate
+            .dispatch_cancellable_scoped(
+                &state.components.dispatcher,
+                tool,
+                args,
+                scope,
+                &opentake_media::MediaCancelToken::new(),
+            )
+            .expect("saved live project accepts the dispatch")
+    }
+
+    #[test]
+    fn shared_state_reuses_chat_dispatcher_and_registry_arcs() {
+        let root = catalog_root();
+        let core = opentake_core::AppCore::new();
+        let chat = ChatState::new(
+            core.clone(),
+            root.path().join("no-workflows"),
+            root.path().join("chat-cache"),
+            root.path().join("chat-models"),
+        );
+        let expected = chat.external_mcp_components();
+        let catalog = load_catalog(&root, Arc::new(MemoryMcpSecretStore::default()));
+
+        let external = ExternalMcpState::new(core, chat.external_mcp_components(), catalog);
+
+        assert!(Arc::ptr_eq(
+            &external.components.dispatcher,
+            &expected.dispatcher
+        ));
+        assert!(Arc::ptr_eq(
+            &external.components.registry,
+            &expected.registry
+        ));
+    }
+
+    #[test]
+    fn shared_live_gate_refuses_mutation_without_a_saved_project() {
+        let root = catalog_root();
+        let core = opentake_core::AppCore::new();
+        let (_chat, external) = shared_state(&root, core.clone());
+
+        let refused = external.gate.dispatch_cancellable_scoped(
+            &external.components.dispatcher,
+            "create_folder",
+            serde_json::json!({ "name": "must-not-exist" }),
+            "opentake:mcp:unsaved",
+            &opentake_media::MediaCancelToken::new(),
+        );
+
+        assert!(refused.is_none());
+        assert!(core.media().folders.is_empty());
+    }
+
+    #[test]
+    fn shared_catalog_authorizer_tracks_regenerated_credentials_without_exporting_them() {
+        let root = catalog_root();
+        let core = opentake_core::AppCore::new();
+        let chat = ChatState::new(
+            core.clone(),
+            root.path().join("no-workflows"),
+            root.path().join("chat-cache"),
+            root.path().join("chat-models"),
+        );
+        let mut catalog = load_catalog(&root, Arc::new(MemoryMcpSecretStore::default()));
+        let first = catalog.pair("Claude Desktop").expect("pair client");
+        let external = ExternalMcpState::new(core, chat.external_mcp_components(), catalog);
+
+        let first_client = external
+            .authorizer
+            .authorize(&first.bearer_token)
+            .expect("authorize original credential");
+        assert_eq!(first_client.client_id.as_ref(), first.client.id);
+        assert!(external.authorizer.authorize("wrong credential").is_none());
+
+        let regenerated = external
+            .catalog
+            .write()
+            .expect("write catalog")
+            .regenerate(&first.client.id)
+            .expect("regenerate credential");
+        assert!(external.authorizer.authorize(&first.bearer_token).is_none());
+        let regenerated_client = external
+            .authorizer
+            .authorize(&regenerated.bearer_token)
+            .expect("authorize regenerated credential");
+        assert_eq!(regenerated_client.client_id, first_client.client_id);
+        assert_ne!(
+            regenerated_client.credential_generation,
+            first_client.credential_generation
+        );
+    }
+
+    #[test]
+    fn shared_dispatcher_isolates_two_mcp_sessions_and_in_app_chat_undo() {
+        let root = catalog_root();
+        let core = opentake_core::AppCore::new();
+        core.save_project(Some(root.path().join("Shared.opentake")))
+            .expect("save shared project");
+        let (_chat, external) = shared_state(&root, core.clone());
+        let mcp_a = "opentake:mcp:test:a";
+        let mcp_b = "opentake:mcp:test:b";
+        let chat = "opentake:chat:test";
+
+        let created = shared_dispatch(
+            &external,
+            mcp_a,
+            "create_folder",
+            serde_json::json!({ "name": "MCP A" }),
+        );
+        assert!(!created.is_error, "{}", created.text_joined());
+        for foreign_scope in [mcp_b, chat] {
+            let refused = shared_dispatch(&external, foreign_scope, "undo", serde_json::json!({}));
+            assert!(refused.is_error, "foreign scope consumed MCP A's edit");
+        }
+        let undone = shared_dispatch(&external, mcp_a, "undo", serde_json::json!({}));
+        assert!(!undone.is_error, "{}", undone.text_joined());
+        assert!(core.media().folders.is_empty());
+
+        let created = shared_dispatch(
+            &external,
+            chat,
+            "create_folder",
+            serde_json::json!({ "name": "Chat" }),
+        );
+        assert!(!created.is_error, "{}", created.text_joined());
+        for foreign_scope in [mcp_a, mcp_b] {
+            let refused = shared_dispatch(&external, foreign_scope, "undo", serde_json::json!({}));
+            assert!(refused.is_error, "external scope consumed chat's edit");
+        }
+        let undone = shared_dispatch(&external, chat, "undo", serde_json::json!({}));
+        assert!(!undone.is_error, "{}", undone.text_joined());
+        assert!(core.media().folders.is_empty());
+
+        let created = shared_dispatch(
+            &external,
+            mcp_b,
+            "create_folder",
+            serde_json::json!({ "name": "MCP B" }),
+        );
+        assert!(!created.is_error, "{}", created.text_joined());
+        for foreign_scope in [mcp_a, chat] {
+            let refused = shared_dispatch(&external, foreign_scope, "undo", serde_json::json!({}));
+            assert!(refused.is_error, "foreign scope consumed MCP B's edit");
+        }
+        let undone = shared_dispatch(&external, mcp_b, "undo", serde_json::json!({}));
+        assert!(!undone.is_error, "{}", undone.text_joined());
+        assert!(core.media().folders.is_empty());
     }
 
     #[test]

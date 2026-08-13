@@ -22,9 +22,7 @@ use std::io::{Seek, SeekFrom, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-#[cfg(test)]
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-#[cfg(test)]
 use std::sync::Mutex;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -47,7 +45,6 @@ use opentake_agent::mcp::media_bridge::{
 };
 use opentake_agent::mcp::server::{bind_ephemeral_gated, EphemeralMcpEndpoint, EphemeralMcpError};
 use opentake_agent::plugin::registry::PluginRegistry;
-#[cfg(test)]
 use opentake_agent::tools::result::ToolResult;
 use opentake_core::{
     importable_clip_type, AppCore, CoreError, DeferredCoreEvents, ProbedMedia,
@@ -392,8 +389,7 @@ pub(crate) async fn spawn(
     bind_ephemeral_gated(dispatcher, registry, gate).await
 }
 
-#[cfg(test)]
-struct LiveProjectMcpGate {
+pub(crate) struct LiveProjectMcpGate {
     core: AppCore,
     transition_depth: Arc<AtomicUsize>,
     identity_generation: Arc<AtomicU64>,
@@ -401,13 +397,11 @@ struct LiveProjectMcpGate {
     active_dispatches: Arc<Mutex<HashMap<u64, opentake_media::MediaCancelToken>>>,
 }
 
-#[cfg(test)]
 struct LiveDispatchPermit {
     id: u64,
     active_dispatches: Arc<Mutex<HashMap<u64, opentake_media::MediaCancelToken>>>,
 }
 
-#[cfg(test)]
 impl Drop for LiveDispatchPermit {
     fn drop(&mut self) {
         self.active_dispatches
@@ -417,9 +411,8 @@ impl Drop for LiveDispatchPermit {
     }
 }
 
-#[cfg(test)]
 impl LiveProjectMcpGate {
-    fn new(core: AppCore) -> Arc<Self> {
+    pub(crate) fn new(core: AppCore) -> Arc<Self> {
         let transition_depth = Arc::new(AtomicUsize::new(0));
         let identity_generation = Arc::new(AtomicU64::new(0));
         let active_dispatches = Arc::new(Mutex::new(HashMap::<
@@ -497,10 +490,20 @@ impl LiveProjectMcpGate {
         cancel: &opentake_media::MediaCancelToken,
         operation: impl FnOnce() -> T,
     ) -> Option<T> {
-        self.with_live_dispatch_after_admission(cancel, || {}, operation)
+        self.with_live_dispatch_inner(cancel, || {}, operation)
     }
 
+    #[cfg(test)]
     fn with_live_dispatch_after_admission<T>(
+        &self,
+        cancel: &opentake_media::MediaCancelToken,
+        after_admission: impl FnOnce(),
+        operation: impl FnOnce() -> T,
+    ) -> Option<T> {
+        self.with_live_dispatch_inner(cancel, after_admission, operation)
+    }
+
+    fn with_live_dispatch_inner<T>(
         &self,
         cancel: &opentake_media::MediaCancelToken,
         after_admission: impl FnOnce(),
@@ -539,7 +542,6 @@ impl LiveProjectMcpGate {
     }
 }
 
-#[cfg(test)]
 impl ChatTurnGate for LiveProjectMcpGate {
     fn timeline(&self, dispatcher: &Dispatcher) -> Option<opentake_domain::Timeline> {
         self.with_live_project(|| dispatcher.timeline())
@@ -2629,7 +2631,7 @@ mod tests {
     }
 
     #[test]
-    fn persistent_mcp_gate_requires_a_saved_nontransitioning_project() {
+    fn live_project_gate_requires_a_saved_nontransitioning_project() {
         let fixture = tempfile::tempdir().unwrap();
         let core = AppCore::new();
         let gate = LiveProjectMcpGate::new(core.clone());
@@ -2649,7 +2651,25 @@ mod tests {
     }
 
     #[test]
-    fn persistent_mcp_request_admitted_for_old_project_cannot_write_new_project() {
+    fn live_project_gate_refuses_mutating_calls_without_a_saved_project() {
+        let core = AppCore::new();
+        let gate = LiveProjectMcpGate::new(core.clone());
+        let registry = Arc::new(RwLock::new(PluginRegistry::with_builtins()));
+        let handle: Arc<dyn CoreHandle> = Arc::new(AppCoreHandle::new(core.clone()));
+        let dispatcher = Dispatcher::new(handle, registry);
+
+        assert!(gate
+            .dispatch(
+                &dispatcher,
+                "create_folder",
+                serde_json::json!({ "name": "must-not-exist" }),
+            )
+            .is_none());
+        assert!(core.media().folders.is_empty());
+    }
+
+    #[test]
+    fn live_project_request_admitted_for_old_project_cannot_write_new_project() {
         let fixture = tempfile::tempdir().unwrap();
         let core = AppCore::new();
         let project_a = fixture.path().join("A.opentake");
@@ -2701,7 +2721,7 @@ mod tests {
     }
 
     #[test]
-    fn project_transition_cancels_active_persistent_mcp_before_identity_changes() {
+    fn live_project_transition_cancels_active_request_before_identity_changes() {
         let fixture = tempfile::tempdir().unwrap();
         let core = AppCore::new();
         core.save_project(Some(fixture.path().join("A.opentake")))

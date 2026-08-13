@@ -225,9 +225,22 @@ pub fn run() {
                 advanced_bridge.clone(),
                 install_admission.clone(),
             );
-            // The fixed-port external MCP endpoint is disabled for Beta until
-            // the product has an authenticated pairing UX. Official Codex
-            // turns bind their own authenticated per-turn endpoint.
+            let external_mcp_catalog = external_mcp::ExternalMcpCatalog::load(
+                &app.path().app_data_dir().map_err(|error| {
+                    std::io::Error::other(format!(
+                        "could not resolve external MCP application data directory: {error}"
+                    ))
+                })?,
+                Arc::new(opentake_gen::KeyringStore::new()),
+            )
+            .map_err(std::io::Error::other)?;
+            let external_mcp_state = external_mcp::ExternalMcpState::new(
+                core.clone(),
+                chat_state.external_mcp_components(),
+                external_mcp_catalog,
+            );
+            // Task 4 owns the explicit enable/pair listener lifecycle. This
+            // setup only shares the production gate and Agent tool universe.
 
             // A global favorite must never silently become a temporary file.
             // Keep the editor usable if app-data resolution fails, but make all
@@ -271,6 +284,7 @@ pub fn run() {
                     }
                 });
             app.manage(chat_state);
+            app.manage(external_mcp_state);
             app.manage(codex::CodexAuthState::default());
             app.manage(MediaState::new_with_admission(
                 engine,

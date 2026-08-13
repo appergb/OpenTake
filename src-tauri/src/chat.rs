@@ -46,6 +46,15 @@ pub struct ChatState {
     admission: crate::updater::InstallAdmissionGate,
 }
 
+/// Immutable handles for long-lived MCP sessions to enter the exact same
+/// dispatcher and workflow registry used by in-app Agent chat.
+#[derive(Clone)]
+#[allow(dead_code)] // Task 4's listener consumes both handles.
+pub(crate) struct ExternalMcpComponents {
+    pub(crate) dispatcher: Arc<Dispatcher>,
+    pub(crate) registry: Arc<RwLock<PluginRegistry>>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct SessionKey {
     project_epoch: u64,
@@ -140,6 +149,13 @@ impl ChatProjectContext {
 }
 
 impl ChatState {
+    pub(crate) fn external_mcp_components(&self) -> ExternalMcpComponents {
+        ExternalMcpComponents {
+            dispatcher: self.dispatcher.clone(),
+            registry: self.registry.clone(),
+        }
+    }
+
     #[cfg(test)]
     pub fn new(
         core: AppCore,
