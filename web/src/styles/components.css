@@ -43,6 +43,254 @@
   align-items: center;
 }
 
+.external-mcp-pane {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+  padding: 0 var(--space-sm);
+}
+
+.external-mcp-pane__header,
+.external-mcp-pair-form__controls,
+.external-mcp-client__actions,
+.external-mcp-receipt__actions,
+.external-mcp-confirmation > div,
+.external-mcp-clients__heading {
+  display: flex;
+  align-items: center;
+}
+
+.external-mcp-pane__header,
+.external-mcp-clients__heading {
+  justify-content: space-between;
+  gap: var(--space-lg);
+}
+
+.external-mcp-pane h2,
+.external-mcp-pane h3,
+.external-mcp-pane p {
+  margin: 0;
+}
+
+.external-mcp-pane h2,
+.external-mcp-clients h3 {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-semibold);
+  color: var(--text-primary);
+}
+
+.external-mcp-pane__header p,
+.external-mcp-note,
+.external-mcp-clients__empty,
+.external-mcp-client__summary span,
+.external-mcp-status span,
+.external-mcp-confirmation p {
+  margin-top: var(--space-xs);
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
+
+.external-mcp-toggle {
+  position: relative;
+  flex: 0 0 auto;
+  display: inline-flex;
+  inline-size: 28px;
+  block-size: 24px;
+  align-items: center;
+  cursor: pointer;
+}
+
+.external-mcp-toggle input {
+  position: absolute;
+  z-index: 1;
+  inline-size: 100%;
+  block-size: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: inherit;
+}
+
+.external-mcp-toggle__track {
+  position: relative;
+  inline-size: 28px;
+  block-size: 16px;
+  border-radius: 50%;
+  background: var(--border-primary);
+  transition: background var(--anim-hover) var(--ease-in-out);
+}
+
+.external-mcp-toggle__track::after {
+  position: absolute;
+  inset: 2px auto 2px 2px;
+  inline-size: 12px;
+  border-radius: 50%;
+  background: var(--bg-base);
+  content: "";
+  transition: translate var(--anim-hover) var(--ease-in-out);
+}
+
+.external-mcp-toggle input:checked + .external-mcp-toggle__track {
+  background: var(--accent-primary);
+}
+
+.external-mcp-toggle input:checked + .external-mcp-toggle__track::after {
+  translate: 12px 0;
+}
+
+.external-mcp-toggle input:focus-visible + .external-mcp-toggle__track {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
+.external-mcp-toggle input:disabled + .external-mcp-toggle__track {
+  opacity: 0.45;
+}
+
+.external-mcp-status,
+.external-mcp-endpoint,
+.external-mcp-pair-form,
+.external-mcp-clients,
+.external-mcp-receipt,
+.external-mcp-confirmation {
+  border-radius: var(--radius-sm);
+  background: var(--home-hover);
+}
+
+.external-mcp-status {
+  display: flex;
+  gap: var(--space-md);
+  align-items: flex-start;
+  padding: var(--space-md);
+}
+
+.external-mcp-status strong,
+.external-mcp-status span,
+.external-mcp-client__summary strong,
+.external-mcp-client__summary span {
+  display: block;
+}
+
+.external-mcp-status strong,
+.external-mcp-client__summary strong,
+.external-mcp-receipt strong,
+.external-mcp-confirmation strong {
+  font-size: var(--fs-sm-md);
+  color: var(--text-primary);
+}
+
+.external-mcp-status--portConflict,
+.external-mcp-status--authFailure {
+  color: var(--status-error);
+}
+
+.external-mcp-endpoint,
+.external-mcp-pair-form,
+.external-mcp-clients,
+.external-mcp-receipt,
+.external-mcp-confirmation {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+}
+
+.external-mcp-endpoint > span,
+.external-mcp-pair-form > label {
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+}
+
+.external-mcp-endpoint code,
+.external-mcp-receipt__token {
+  overflow-wrap: anywhere;
+  font-size: var(--fs-xs);
+  color: var(--text-primary);
+}
+
+.external-mcp-pair-form__controls {
+  gap: var(--space-sm);
+}
+
+.external-mcp-pair-form input {
+  min-inline-size: 0;
+  flex: 1;
+  block-size: 28px;
+  border: var(--bw-thin) solid var(--border-primary);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  color: var(--text-primary);
+  padding: 0 var(--space-sm);
+}
+
+.external-mcp-pair-form button,
+.external-mcp-client__actions button,
+.external-mcp-receipt__actions button,
+.external-mcp-confirmation button {
+  display: inline-flex;
+  min-block-size: 28px;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-xs);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-md);
+  background: var(--bg-base);
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+}
+
+.external-mcp-client__revoke,
+.external-mcp-confirmation__destructive {
+  color: var(--status-error);
+}
+
+.external-mcp-clients ul {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.external-mcp-client {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  border-top: var(--bw-thin) solid var(--border-primary);
+  padding-top: var(--space-sm);
+}
+
+.external-mcp-client:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.external-mcp-client__summary,
+.external-mcp-client__actions {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-md);
+  align-items: center;
+}
+
+.external-mcp-client__actions,
+.external-mcp-receipt__actions,
+.external-mcp-confirmation > div {
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+}
+
+.external-mcp-receipt__actions,
+.external-mcp-confirmation > div {
+  justify-content: flex-end;
+}
+
+.external-mcp-error {
+  font-size: var(--fs-xs);
+  color: var(--status-error);
+}
+
 .library-category-rail {
   padding-block-start: var(--titlebar-safe-top);
 }
@@ -61,7 +309,9 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .reveal {
+  .reveal,
+  .external-mcp-toggle__track,
+  .external-mcp-toggle__track::after {
     transition: none;
   }
 }

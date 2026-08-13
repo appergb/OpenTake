@@ -46,6 +46,7 @@ import {
 } from "../../lib/api";
 import type { SecretStatus } from "../../lib/types";
 import { AccountPane } from "./AccountPane";
+import { ExternalMcpPane } from "./ExternalMcpPane";
 import { StoragePane } from "./StoragePane";
 import { UpdateSettingsControl } from "./UpdateDialog";
 
@@ -317,7 +318,7 @@ function renderActivePane(activePane: SettingsPaneId) {
     case "ai":
       return <AiPane />;
     case "mcp":
-      return <McpPane />;
+      return <ExternalMcpPane />;
     case "shortcuts":
       return <ShortcutsPane />;
     case "account":
@@ -955,49 +956,5 @@ function Value({ children }: { children: React.ReactNode }) {
     <span className="tabular" style={{ fontSize: "var(--fs-sm-md)", color: "var(--text-secondary)" }}>
       {children}
     </span>
-  );
-}
-
-/**
- * External MCP is fail-closed in this Beta until the app has an explicit,
- * authenticated pairing flow. Official Codex sign-in uses a separate
- * per-turn authenticated endpoint and remains available in the AI pane.
- */
-function McpPane() {
-  const t = useT();
-
-  return (
-    <Section title={t("settings.section.mcp")}>
-      <div style={{ fontSize: "var(--fs-md)", color: "var(--text-primary)", fontWeight: "var(--fw-medium)" }}>
-        {t("mcp.title")}
-      </div>
-      <div style={{ fontSize: "var(--fs-xs)", color: "var(--text-tertiary)", marginTop: -12 }}>
-        {t("mcp.overview")}
-      </div>
-      <div
-        role="status"
-        aria-live="polite"
-        data-external-mcp-status="paused"
-        style={{
-          display: "flex",
-          alignItems: "flex-start",
-          gap: "var(--space-md)",
-          ...settingsControlStyle,
-          borderRadius: "var(--radius-sm)",
-          padding: "var(--space-md)",
-        }}
-      >
-        <Icon icon={Plug} size={16} />
-        <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-xs)" }}>
-          <div style={{ fontSize: "var(--fs-sm-md)", color: "var(--text-primary)", fontWeight: "var(--fw-medium)" }}>
-            {t("mcp.pausedTitle")}
-          </div>
-          <div style={{ fontSize: "var(--fs-xs)", color: "var(--text-tertiary)" }}>
-            {t("mcp.pausedDesc")}
-          </div>
-        </div>
-      </div>
-      <div style={{ fontSize: "var(--fs-xs)", color: "var(--text-tertiary)" }}>{t("mcp.note")}</div>
-    </Section>
   );
 }

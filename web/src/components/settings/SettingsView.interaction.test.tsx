@@ -203,18 +203,19 @@ it("switches dark window layouts with an accessible radio group", async () => {
   expect(document.activeElement).toBe(choices[1]);
 });
 
-it("keeps unauthenticated external MCP fail-closed while preserving official Codex guidance", async () => {
+it("renders external MCP pairing controls fail-closed outside the desktop shell", async () => {
   useEditorUiStore.setState({ settingsPane: "mcp" });
   await act(async () => root.render(<Harness />));
   await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
 
-  const status = container.querySelector<HTMLElement>("[data-external-mcp-status='paused']");
+  const status = container.querySelector<HTMLElement>("[data-external-mcp-status='disabled']");
+  const toggle = container.querySelector<HTMLInputElement>("input[role='switch']");
   expect(status?.getAttribute("role")).toBe("status");
-  expect(status?.textContent).toContain(t("mcp.pausedTitle"));
+  expect(status?.textContent).toContain(t("mcp.status.disabled"));
+  expect(toggle?.checked).toBe(false);
   expect(container.textContent).toContain(t("mcp.note"));
-  expect(container.textContent).not.toContain("127.0.0.1:19789");
-  expect(container.textContent).not.toContain("codex mcp add");
-  expect(container.textContent).not.toContain("claude mcp add");
+  expect(container.textContent).toContain("http://127.0.0.1:19789/mcp");
+  expect(container.querySelector<HTMLInputElement>("input[name='external-mcp-client-name']")).not.toBeNull();
 });
 
 it("drives official Codex ChatGPT login, polling, cancellation, logout, and unavailable states", async () => {
