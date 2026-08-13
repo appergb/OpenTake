@@ -131,28 +131,18 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                // Background-run: don't quit, hide and return to Home.
+                // Background-run: don't quit. The actual hide waits for the
+                // bounded off-thread composite-cover save, so CloseRequested
+                // has parity with explicit Save without blocking the UI event
+                // thread on ffmpeg/GPU/bundle I/O.
                 api.prevent_close();
-                // Flush the open project before hiding so background-run never
-                // loses edits (autosave is debounced; this is the final write).
-                // No-op when no project is open (save_project returns an error we
-                // intentionally ignore). Once an update owns admission, its
-                // own final save is authoritative and no later close event may
-                // write across that barrier.
-                if let Some(core) = window.app_handle().try_state::<AppCore>() {
-                    if let Some(admission) = window
-                        .app_handle()
-                        .try_state::<updater::InstallAdmissionGate>()
-                    {
-                        if let Ok(_activity) = updater::begin_mutating_activity(&admission) {
-                            let _ = core.save_project(None);
-                        }
-                    } else {
-                        let _ = core.save_project(None);
-                    }
-                }
-                let _ = window.hide();
-                let _ = window.app_handle().emit("go_home", ());
+                let window = window.clone();
+                let app = window.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = commands::save_current_project_with_composite_cover(app).await;
+                    let _ = window.hide();
+                    let _ = window.app_handle().emit("go_home", ());
+                });
             }
         })
         .setup(|app| {

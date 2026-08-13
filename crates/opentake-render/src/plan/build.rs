@@ -656,6 +656,100 @@ fn eval_transition_incoming<'a>(
 }
 
 impl RenderPlan {
+    fn transition_at(&self, index: usize, f: i32) -> Option<(&ClipPlan, &Clip, f64)> {
+        let plan = self.clip_plans.get(index)?;
+        let clip = &plan.clip;
+        let transition = clip.transition_out.as_ref()?;
+        let incoming_plan = self.clip_plans.get(index + 1)?;
+        if transition.kind != TransitionKind::CrossDissolve
+            || (!transition.from_clip_id.is_empty() && transition.from_clip_id != plan.clip_id)
+            || incoming_plan.blend_path != plan.blend_path
+            || incoming_plan.clip_id != transition.to_clip_id
+            || incoming_plan.start_frame != plan.end_frame
+        {
+            return None;
+        }
+        let duration = transition
+            .duration_frames
+            .max(1)
+            .min((plan.end_frame - plan.start_frame).max(1))
+            .min((incoming_plan.end_frame - incoming_plan.start_frame).max(1));
+        let start = plan.end_frame - duration;
+        if f < start || f >= plan.end_frame {
+            return None;
+        }
+        let progress = (f - start) as f64 / duration as f64;
+        Some((incoming_plan, &incoming_plan.clip, progress))
+    }
+
+    fn transition_midpoint(&self, index: usize) -> Option<i32> {
+        let plan = self.clip_plans.get(index)?;
+        let transition = plan.clip.transition_out.as_ref()?;
+        let incoming_plan = self.clip_plans.get(index + 1)?;
+        if transition.kind != TransitionKind::CrossDissolve
+            || (!transition.from_clip_id.is_empty() && transition.from_clip_id != plan.clip_id)
+            || incoming_plan.blend_path != plan.blend_path
+            || incoming_plan.clip_id != transition.to_clip_id
+            || incoming_plan.start_frame != plan.end_frame
+        {
+            return None;
+        }
+        let duration = transition
+            .duration_frames
+            .max(1)
+            .min((plan.end_frame - plan.start_frame).max(1))
+            .min((incoming_plan.end_frame - incoming_plan.start_frame).max(1));
+        Some((plan.end_frame - duration + duration / 2).min(plan.end_frame - 1))
+    }
+
+    /// Pick the earliest deterministic frame which the authoritative plan says
+    /// produces a meaningful draw. Candidate order and transition adjacency are
+    /// derived from the flattened plan, not from persisted track/clip ordering.
+    pub fn representative_frame(&self, timeline: &Timeline) -> Option<i32> {
+        let mut candidates = self
+            .clip_plans
+            .iter()
+            .enumerate()
+            .filter(|(_, plan)| plan_has_meaningful_source(plan))
+            .map(|(index, plan)| {
+                let frame = self.transition_midpoint(index).unwrap_or_else(|| {
+                    plan.start_frame + (plan.end_frame - plan.start_frame - 1) / 2
+                });
+                (plan.start_frame, frame)
+            })
+            .chain(
+                self.text_plans
+                    .iter()
+                    .filter(|plan| plan_has_meaningful_source(plan))
+                    .map(|plan| {
+                        (
+                            plan.start_frame,
+                            plan.start_frame + (plan.end_frame - plan.start_frame - 1) / 2,
+                        )
+                    }),
+            )
+            .collect::<Vec<_>>();
+        candidates.sort_unstable();
+        candidates.dedup();
+
+        candidates.into_iter().find_map(|(_, frame)| {
+            self.frame(timeline, frame)
+                .draws
+                .iter()
+                .any(|draw| self.draw_is_meaningful(draw))
+                .then_some(frame)
+        })
+    }
+
+    fn draw_is_meaningful(&self, draw: &LayerDraw<'_>) -> bool {
+        let plan = self
+            .clip_plans
+            .iter()
+            .chain(self.text_plans.iter())
+            .find(|plan| plan.clip_id == draw.clip_id);
+        plan.is_some_and(plan_has_meaningful_source) && draw_has_meaningful_surface(draw)
+    }
+
     /// Evaluate the ordered draw list for frame `f` (SPEC §2.4).
     ///
     /// `timeline` must be the same one the plan was built from (they share clip
@@ -666,30 +760,7 @@ impl RenderPlan {
 
         for (index, plan) in self.clip_plans.iter().enumerate() {
             let clip = &plan.clip;
-            let transition = clip.transition_out.as_ref().and_then(|transition| {
-                let incoming_plan = self.clip_plans.get(index + 1)?;
-                if transition.kind != TransitionKind::CrossDissolve
-                    || (!transition.from_clip_id.is_empty()
-                        && transition.from_clip_id != plan.clip_id)
-                    || incoming_plan.track_index != plan.track_index
-                    || incoming_plan.clip_id != transition.to_clip_id
-                    || incoming_plan.start_frame != plan.end_frame
-                {
-                    return None;
-                }
-                let incoming = &incoming_plan.clip;
-                let duration = transition
-                    .duration_frames
-                    .max(1)
-                    .min(clip.duration_frames.max(1))
-                    .min(incoming.duration_frames.max(1));
-                let start = plan.end_frame - duration;
-                if f < start || f >= plan.end_frame {
-                    return None;
-                }
-                let progress = (f - start) as f64 / duration as f64;
-                Some((incoming_plan, incoming, progress))
-            });
+            let transition = self.transition_at(index, f);
 
             if let Some(d) = eval_layer(plan, clip, f, self.render_size) {
                 if d.opacity > 0.0 {
@@ -716,4 +787,43 @@ impl RenderPlan {
             draws,
         }
     }
+}
+
+fn plan_has_meaningful_source(plan: &ClipPlan) -> bool {
+    let transform = plan.clip.transform;
+    if !transform.width.is_finite()
+        || !transform.height.is_finite()
+        || transform.width <= 0.0
+        || transform.height <= 0.0
+        || plan.end_frame <= plan.start_frame
+    {
+        return false;
+    }
+    match &plan.source {
+        TextureSource::Text { .. } => {
+            plan.clip
+                .text_content
+                .as_deref()
+                .is_some_and(|content| !content.trim().is_empty())
+                && plan.clip.text_style.is_some()
+        }
+        TextureSource::Image { media_ref }
+        | TextureSource::Lottie { media_ref }
+        | TextureSource::Decoded { media_ref } => !media_ref.trim().is_empty(),
+    }
+}
+
+fn draw_has_meaningful_surface(draw: &LayerDraw<'_>) -> bool {
+    let determinant = draw.affine[0] * draw.affine[3] - draw.affine[1] * draw.affine[2];
+    draw.opacity.is_finite()
+        && draw.opacity > 0.0
+        && draw.nat_size.0.is_finite()
+        && draw.nat_size.1.is_finite()
+        && draw.nat_size.0 > 0.0
+        && draw.nat_size.1 > 0.0
+        && draw.affine.iter().all(|value| value.is_finite())
+        && determinant.is_finite()
+        && determinant.abs() > f64::EPSILON
+        && draw.crop_uv.0 < draw.crop_uv.2
+        && draw.crop_uv.1 < draw.crop_uv.3
 }

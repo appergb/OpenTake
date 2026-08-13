@@ -228,8 +228,9 @@ fn clip_is_compositable(
 /// only cover geometry and encoding.
 ///
 /// The output is the largest exact 16:9 raster that fits inside `bounds`.
-/// Center-cropping matches Home's established `object-fit: cover` policy while
-/// preserving the compositor's transforms/layers before the crop.
+/// The project canvas is resized to fit and centered over an opaque black
+/// background. This keeps the bounded Home surface predictable without
+/// cropping authored canvas content or relying on JPEG alpha handling.
 pub fn capture_project_composite_thumbnail(
     snapshot: ProjectCompositeThumbnailSnapshot<'_>,
     manifest: &MediaManifest,
@@ -237,14 +238,27 @@ pub fn capture_project_composite_thumbnail(
     bounds: (u32, u32),
 ) -> Option<Vec<u8>> {
     snapshot.representative_frame(manifest)?;
+    encode_project_composite_thumbnail(frame, bounds)
+}
+
+/// Apply only the bounded cover-surface policy and JPEG encoding to a frame
+/// already selected and produced by the authoritative render plan. This form is
+/// used by strict retained-source capture so media paths are not reopened just
+/// to repeat representative-frame selection.
+pub fn encode_project_composite_thumbnail(
+    frame: &crate::frame::RgbaFrame,
+    bounds: (u32, u32),
+) -> Option<Vec<u8>> {
     let (width, height) = bounded_sixteen_by_nine(bounds)?;
     let rgba = image::RgbaImage::from_raw(frame.width, frame.height, frame.rgba.clone())?;
-    let cover = image::DynamicImage::ImageRgba8(rgba).resize_to_fill(
-        width,
-        height,
-        image::imageops::FilterType::Lanczos3,
-    );
-    encode_dynamic_jpeg(&cover).ok()
+    let contained = image::DynamicImage::ImageRgba8(rgba)
+        .resize(width, height, image::imageops::FilterType::Lanczos3)
+        .to_rgb8();
+    let mut cover = image::RgbImage::from_pixel(width, height, image::Rgb([0, 0, 0]));
+    let x = i64::from(width.saturating_sub(contained.width()) / 2);
+    let y = i64::from(height.saturating_sub(contained.height()) / 2);
+    image::imageops::overlay(&mut cover, &contained, x, y);
+    encode_dynamic_jpeg(&image::DynamicImage::ImageRgb8(cover)).ok()
 }
 
 fn bounded_sixteen_by_nine(bounds: (u32, u32)) -> Option<(u32, u32)> {
@@ -658,6 +672,87 @@ mod tests {
 
         assert_eq!((decoded.width(), decoded.height()), (192, 108));
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn composite_thumbnail_letterboxes_portrait_canvas_without_cropping() {
+        let dir = TmpDir::new("composite-portrait-letterbox");
+        let source = touch_color_png(dir.path(), "portrait.png", [220, 30, 20, 255]);
+        let mut manifest = MediaManifest::new();
+        manifest
+            .entries
+            .push(entry("portrait", ClipType::Image, &source));
+        let mut timeline = Timeline::new();
+        timeline.width = 180;
+        timeline.height = 320;
+        let mut track = Track::new("video", ClipType::Video);
+        track
+            .clips
+            .push(clip("portrait-clip", "portrait", ClipType::Image, 0));
+        timeline.tracks.push(track);
+        let portrait = crate::frame::RgbaFrame::new(180, 320, [220, 30, 20, 255].repeat(180 * 320));
+
+        let bytes = desired_composite_capture(
+            &timeline,
+            &manifest,
+            &portrait,
+            PROJECT_COMPOSITE_COVER_BOUNDS,
+        )
+        .expect("portrait cover");
+        let decoded = image::load_from_memory(&bytes).unwrap().to_rgb8();
+
+        assert_eq!((decoded.width(), decoded.height()), (640, 360));
+        assert!(decoded
+            .get_pixel(0, 180)
+            .0
+            .iter()
+            .all(|channel| *channel < 12));
+        let center = decoded.get_pixel(320, 180).0;
+        assert!(center[0] > 180 && center[1] < 70, "{center:?}");
+        assert!(decoded
+            .get_pixel(639, 180)
+            .0
+            .iter()
+            .all(|channel| *channel < 12));
+    }
+
+    #[test]
+    fn composite_thumbnail_letterboxes_four_by_three_canvas_at_exact_boundaries() {
+        let dir = TmpDir::new("composite-four-three-letterbox");
+        let source = touch_color_png(dir.path(), "four-three.png", [20, 80, 220, 255]);
+        let mut manifest = MediaManifest::new();
+        manifest
+            .entries
+            .push(entry("four-three", ClipType::Image, &source));
+        let mut timeline = Timeline::new();
+        timeline.width = 400;
+        timeline.height = 300;
+        let mut track = Track::new("video", ClipType::Video);
+        track
+            .clips
+            .push(clip("four-three-clip", "four-three", ClipType::Image, 0));
+        timeline.tracks.push(track);
+        let frame = crate::frame::RgbaFrame::new(400, 300, [20, 80, 220, 255].repeat(400 * 300));
+
+        let bytes =
+            desired_composite_capture(&timeline, &manifest, &frame, PROJECT_COMPOSITE_COVER_BOUNDS)
+                .expect("four-by-three cover");
+        let decoded = image::load_from_memory(&bytes).unwrap().to_rgb8();
+
+        assert!(decoded
+            .get_pixel(79, 180)
+            .0
+            .iter()
+            .all(|channel| *channel < 15));
+        let first_content = decoded.get_pixel(82, 180).0;
+        assert!(first_content[2] > 160, "{first_content:?}");
+        let last_content = decoded.get_pixel(557, 180).0;
+        assert!(last_content[2] > 160, "{last_content:?}");
+        assert!(decoded
+            .get_pixel(560, 180)
+            .0
+            .iter()
+            .all(|channel| *channel < 15));
     }
 
     #[test]

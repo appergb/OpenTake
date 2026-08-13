@@ -10,6 +10,7 @@
 //! ffmpeg invocation requires the binary and is covered by ignore-by-default
 //! integration tests.
 
+use std::io::{Seek, SeekFrom};
 use std::path::Path;
 use std::thread;
 use std::time::Duration;
@@ -446,6 +447,25 @@ fn frame_args_with_color(
     args
 }
 
+fn frame_args_for_input(
+    input: &str,
+    req: &FrameRequest,
+    color: Option<&opentake_domain::MediaColorMetadata>,
+) -> Vec<String> {
+    let mut args = frame_args_with_color(Path::new(input), req, color);
+    let seek_index = args
+        .iter()
+        .position(|argument| argument == "-ss")
+        .expect("frame args always contain seek");
+    let seek = args.drain(seek_index..seek_index + 2).collect::<Vec<_>>();
+    let input_index = args
+        .iter()
+        .position(|argument| argument == "-i")
+        .expect("frame args always contain input");
+    args.splice(input_index + 2..input_index + 2, seek);
+    args
+}
+
 /// Decode the frame at/after `req.time_secs`, returning `(actual_secs, frame)`.
 pub fn decode_frame_at(path: &Path, req: &FrameRequest) -> Result<(f64, RgbaFrame)> {
     decode_frame_at_cancellable(path, req, &MediaCancelToken::new())
@@ -545,6 +565,121 @@ pub fn decode_frame_at_cancellable(
                 }
                 return result.ok_or_else(|| {
                     MediaError::Decode(format!("no frame at {:.3}s", req.time_secs))
+                });
+            }
+            Ok(None) => thread::sleep(FRAME_CHILD_POLL_INTERVAL),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                return Err(MediaError::Io(error));
+            }
+        }
+    }
+}
+
+/// Decode from an already-open regular file. The retained handle is cloned,
+/// rewound, and becomes ffmpeg's stdin (`fd:`); no pathname fallback occurs.
+pub fn decode_frame_file_at_cancellable(
+    file: &std::fs::File,
+    req: &FrameRequest,
+    cancel: &MediaCancelToken,
+) -> Result<(f64, RgbaFrame)> {
+    if cancel.is_cancelled() {
+        return Err(MediaError::Cancelled);
+    }
+    let color = crate::probe::probe_file(file)
+        .ok()
+        .and_then(|probe| probe.color);
+    let mut input = file.try_clone()?;
+    input.seek(SeekFrom::Start(0))?;
+    let mut child = ff::ffmpeg()
+        .args(frame_args_for_input("fd:", req, color.as_ref()))
+        .spawn()
+        .map_err(|error| MediaError::Ffmpeg(format!("spawn: {error}")))?;
+    cancel.child_spawned();
+    let mut stdin = child
+        .take_stdin()
+        .ok_or_else(|| MediaError::Ffmpeg("retained frame stdin missing".to_string()))?;
+    let feeder = thread::Builder::new()
+        .name("opentake-retained-frame-input".to_string())
+        .spawn(move || std::io::copy(&mut input, &mut stdin))
+        .map_err(MediaError::Io)?;
+    let result = decode_first_child_frame(&mut child, req.time_secs, cancel);
+    match feeder.join() {
+        Ok(Ok(_)) => result,
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::BrokenPipe => result,
+        Ok(Err(error)) => Err(MediaError::Io(error)),
+        Err(_) => Err(MediaError::Ffmpeg(
+            "retained frame input feeder panicked".to_string(),
+        )),
+    }
+}
+
+fn decode_first_child_frame(
+    child: &mut ffmpeg_sidecar::child::FfmpegChild,
+    requested_time: f64,
+    cancel: &MediaCancelToken,
+) -> Result<(f64, RgbaFrame)> {
+    let iter = match child.iter() {
+        Ok(iter) => iter,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(MediaError::Ffmpeg(format!("iter: {error}")));
+        }
+    };
+    let reader_cancel = cancel.clone();
+    let reader = match thread::Builder::new()
+        .name("opentake-retained-frame-events".to_string())
+        .spawn(move || {
+            reader_cancel.reader_started();
+            let result = iter
+                .filter_map(|event| match event {
+                    FfmpegEvent::OutputFrame(frame) if frame.width > 0 && frame.height > 0 => {
+                        Some((
+                            requested_time.max(frame.timestamp as f64),
+                            RgbaFrame::new(frame.width, frame.height, frame.data),
+                        ))
+                    }
+                    _ => None,
+                })
+                .next();
+            reader_cancel.reader_finished();
+            result
+        }) {
+        Ok(reader) => reader,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(MediaError::Ffmpeg(format!(
+                "spawn frame event reader: {error}"
+            )));
+        }
+    };
+    loop {
+        if cancel.checkpoint() {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            return Err(MediaError::Cancelled);
+        }
+        if reader.is_finished() {
+            let _ = child.kill();
+            let _ = child.wait();
+            let result = reader
+                .join()
+                .map_err(|_| MediaError::Ffmpeg("frame event reader panicked".to_string()))?;
+            return result
+                .ok_or_else(|| MediaError::Decode(format!("no frame at {requested_time:.3}s")));
+        }
+        match child.as_inner_mut().try_wait() {
+            Ok(Some(_)) => {
+                let result = reader
+                    .join()
+                    .map_err(|_| MediaError::Ffmpeg("frame event reader panicked".to_string()))?;
+                return result.ok_or_else(|| {
+                    MediaError::Decode(format!("no frame at {requested_time:.3}s"))
                 });
             }
             Ok(None) => thread::sleep(FRAME_CHILD_POLL_INTERVAL),

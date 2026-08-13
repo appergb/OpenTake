@@ -43,7 +43,7 @@ use opentake_ops::command::{self, EditCommand, EditResult};
 use opentake_ops::{EditorState, IdGen};
 use opentake_project::{
     GenerationLog, GenerationLogEntry, Project, ProjectCompatibility, ProjectRoot,
-    ProjectRootIdentity,
+    ProjectRootIdentity, ThumbnailUpdate,
 };
 use same_file::Handle;
 
@@ -406,6 +406,18 @@ impl EditorSession {
         &mut self,
         path: Option<PathBuf>,
         thumbnail: Option<Vec<u8>>,
+    ) -> Result<PathBuf> {
+        self.save_project_with_thumbnail_update(
+            path,
+            thumbnail.map_or(ThumbnailUpdate::Preserve, ThumbnailUpdate::Replace),
+        )
+    }
+
+    /// Persist with an explicit authoritative cover mutation.
+    pub fn save_project_with_thumbnail_update(
+        &mut self,
+        path: Option<PathBuf>,
+        thumbnail: ThumbnailUpdate,
     ) -> Result<PathBuf> {
         self.ensure_mutable()?;
         // Remember the currently-open bundle before we adopt any new target, so
@@ -1972,6 +1984,24 @@ mod tests {
         // existing thumbnail.jpg (bundle.save only writes it when Some).
         s.save_project_with_thumbnail(None, None).unwrap();
         assert_eq!(std::fs::read(dir.join("thumbnail.jpg")).unwrap(), jpeg);
+    }
+
+    #[test]
+    fn explicit_thumbnail_remove_is_distinct_from_capture_failure_preserve() {
+        let tmp = TmpDir::new("thumb-remove");
+        let dir = tmp.path().join("Remove.opentake");
+        let mut session = EditorSession::new_project();
+        session.state = EditorState::from_timeline(one_video_track());
+        let jpeg = vec![0xFF, 0xD8, 4, 2, 0xFF, 0xD9];
+        session
+            .save_project_with_thumbnail(Some(dir.clone()), Some(jpeg))
+            .unwrap();
+
+        session
+            .save_project_with_thumbnail_update(None, ThumbnailUpdate::Remove)
+            .unwrap();
+
+        assert!(!dir.join("thumbnail.jpg").exists());
     }
 
     #[test]

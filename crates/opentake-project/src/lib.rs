@@ -58,7 +58,7 @@ mod safe_fs;
 pub mod xmlnode;
 
 pub use archive::{archive, ArchiveReport, MissingMedia};
-pub use bundle::{copy_media_dir, Project, ProjectCompatibility};
+pub use bundle::{copy_media_dir, Project, ProjectCompatibility, ThumbnailUpdate};
 pub use edl::export_edl;
 pub use error::{ProjectError, Result};
 pub use fcpxml::{export_xmeml, export_xmeml_with_timecodes};

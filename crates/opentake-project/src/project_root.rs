@@ -500,6 +500,24 @@ impl ProjectRoot {
         Ok(())
     }
 
+    /// Remove one configured optional project component through the retained
+    /// root. The final leaf is opened no-follow and verified as the same regular
+    /// file immediately before unlink, so this never reopens the ambient bundle
+    /// path or follows a substituted symlink.
+    pub(crate) fn remove_optional_component(&self, name: &str) -> Result<()> {
+        validate_leaf(name).map_err(|error| ProjectError::io(self.path.join(name), error))?;
+        if project_component_max_bytes(name).is_none() {
+            return Err(ProjectError::io(
+                self.path.join(name),
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "project component has no configured byte limit",
+                ),
+            ));
+        }
+        remove_file_artifact(&self.dir, &self.path, OsStr::new(name))
+    }
+
     /// Read one no-follow regular file from `chat-sessions/`, bounded before
     /// allocation and while streaming in case the retained file grows.
     pub fn read_chat_session(&self, name: &str, max_bytes: usize) -> Result<Option<Vec<u8>>> {

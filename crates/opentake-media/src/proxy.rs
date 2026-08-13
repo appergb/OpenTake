@@ -48,7 +48,7 @@ pub fn file_sha256(path: &Path) -> Result<String> {
     file_sha256_file_cancellable(&file, &MediaCancelToken::new())
 }
 
-fn file_sha256_file_cancellable(file: &File, cancel: &MediaCancelToken) -> Result<String> {
+pub fn file_sha256_file_cancellable(file: &File, cancel: &MediaCancelToken) -> Result<String> {
     let mut reader = BufReader::new(file.try_clone()?);
     reader.seek(SeekFrom::Start(0))?;
     let mut hasher = Sha256::new();

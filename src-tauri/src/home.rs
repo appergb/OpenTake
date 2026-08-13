@@ -1603,12 +1603,12 @@ mod tests {
         let prior = fs::read(&prior_path).unwrap();
         let replacement = fs::read(&replacement_path).unwrap();
         let mut project = opentake_project::Project::new(&bundle);
-        project.thumbnail = Some(prior.clone());
+        project.thumbnail = opentake_project::ThumbnailUpdate::Replace(prior.clone());
         project.save().unwrap();
         let original_mode = fs::metadata(&bundle).unwrap().permissions().mode();
         fs::set_permissions(&bundle, fs::Permissions::from_mode(0o555)).unwrap();
 
-        project.thumbnail = Some(replacement);
+        project.thumbnail = opentake_project::ThumbnailUpdate::Replace(replacement);
         let result = project.save();
         fs::set_permissions(&bundle, fs::Permissions::from_mode(original_mode)).unwrap();
 

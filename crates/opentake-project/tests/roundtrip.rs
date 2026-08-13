@@ -99,7 +99,8 @@ fn sample_project(bundle: &Path) -> Project {
     project.timeline = timeline;
     project.manifest = manifest;
     project.generation_log = Some(generation_log);
-    project.thumbnail = Some(b"\xff\xd8\xff\xe0JPEGDATA".to_vec());
+    project.thumbnail =
+        opentake_project::ThumbnailUpdate::Replace(b"\xff\xd8\xff\xe0JPEGDATA".to_vec());
     project
 }
 
@@ -123,7 +124,10 @@ fn save_then_open_is_lossless() {
     assert_eq!(reopened.manifest, project.manifest);
     assert_eq!(reopened.generation_log, project.generation_log);
     // Thumbnail is not loaded back into memory by `open` (left on disk).
-    assert!(reopened.thumbnail.is_none());
+    assert!(matches!(
+        reopened.thumbnail,
+        opentake_project::ThumbnailUpdate::Preserve
+    ));
     let thumb = std::fs::read(bundle.join("thumbnail.jpg")).unwrap();
     assert_eq!(thumb, b"\xff\xd8\xff\xe0JPEGDATA");
 }

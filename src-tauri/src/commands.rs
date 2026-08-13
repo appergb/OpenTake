@@ -568,77 +568,225 @@ pub async fn project_open(app: AppHandle, path: String) -> Result<TimelineSnapsh
 /// `None` therefore leaves the last valid cover untouched without introducing a
 /// GPU/session lock cycle.
 #[tauri::command]
-pub fn project_save(
-    core: State<'_, AppCore>,
-    render: State<'_, crate::render::RenderState>,
-    admission: State<'_, crate::updater::InstallAdmissionGate>,
+pub async fn project_save(
+    app: AppHandle,
     path: Option<String>,
     expected_project_epoch: u64,
     expected_project_path: Option<String>,
 ) -> Result<String, CmdError> {
-    let _activity =
-        crate::updater::begin_mutating_activity(&admission).map_err(validation_error)?;
-    save_project_with_composite_cover(
-        &core,
-        &render,
-        path,
-        expected_project_epoch,
-        expected_project_path,
-    )
+    save_project_with_composite_cover(app, path, expected_project_epoch, expected_project_path)
+        .await
 }
 
-pub(crate) fn save_project_with_composite_cover(
+const PROJECT_COVER_SAVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+#[derive(Debug, PartialEq, Eq)]
+enum ProjectCoverCapture {
+    Captured(Vec<u8>),
+    NoVisibleContent,
+    CaptureFailed,
+}
+
+pub(crate) async fn save_project_with_composite_cover<R: tauri::Runtime>(
+    app: AppHandle<R>,
+    path: Option<String>,
+    expected_project_epoch: u64,
+    expected_project_path: Option<String>,
+) -> Result<String, CmdError> {
+    if let Some(target) = path.as_deref().map(std::path::Path::new) {
+        if !crate::safe_asset_protocol::scope_allows_lexical_path(
+            &app.asset_protocol_scope(),
+            target,
+        ) {
+            return Err(validation_error(
+                "project path has not been approved by a native file dialog".to_string(),
+            ));
+        }
+    }
+    let cancel = opentake_media::MediaCancelToken::new();
+    let worker_cancel = cancel.clone();
+    let deadline = std::time::Instant::now() + PROJECT_COVER_SAVE_TIMEOUT;
+    let task = tauri::async_runtime::spawn_blocking(move || {
+        let admission = app.state::<crate::updater::InstallAdmissionGate>();
+        let _activity =
+            crate::updater::begin_mutating_activity(&admission).map_err(validation_error)?;
+        let core = app.state::<AppCore>();
+        let render = app.state::<crate::render::RenderState>();
+        save_project_with_composite_cover_blocking(
+            &app,
+            &core,
+            &render,
+            path,
+            expected_project_epoch,
+            expected_project_path,
+            &worker_cancel,
+            deadline,
+        )
+    });
+    match tokio::time::timeout(PROJECT_COVER_SAVE_TIMEOUT, task).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => Err(internal_error(format!("project save task failed: {error}"))),
+        Err(_) => {
+            cancel.cancel();
+            Err(internal_error(format!(
+                "project save timed out after {PROJECT_COVER_SAVE_TIMEOUT:?}"
+            )))
+        }
+    }
+}
+
+/// CloseRequested parity entry point. It snapshots the current identity once
+/// and delegates to exactly the same bounded authoritative-cover save helper as
+/// the explicit Save command.
+pub(crate) async fn save_current_project_with_composite_cover<R: tauri::Runtime>(
+    app: AppHandle<R>,
+) -> Result<String, CmdError> {
+    let snapshot = app.state::<AppCore>().runtime_snapshot();
+    save_project_with_composite_cover(
+        app,
+        None,
+        snapshot.project_epoch,
+        snapshot
+            .project_dir
+            .map(|path| path.to_string_lossy().into_owned()),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+fn save_project_with_composite_cover_blocking<R: tauri::Runtime>(
+    app: &AppHandle<R>,
     core: &AppCore,
     render: &crate::render::RenderState,
     path: Option<String>,
     expected_project_epoch: u64,
     expected_project_path: Option<String>,
+    cancel: &opentake_media::MediaCancelToken,
+    deadline: std::time::Instant,
 ) -> Result<String, CmdError> {
-    project_save_for_project(
+    project_save_for_project_with_checkpoint(
         core,
         path,
         expected_project_epoch,
         expected_project_path,
-        |snapshot| capture_composite_project_thumbnail(snapshot, render),
+        |snapshot| capture_composite_project_thumbnail(app, core, snapshot, render, cancel),
+        || !cancel.is_cancelled() && std::time::Instant::now() < deadline,
     )
 }
 
-fn capture_composite_project_thumbnail(
+fn capture_composite_project_thumbnail<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    core: &AppCore,
     snapshot: &opentake_core::ProjectRuntimeSnapshot,
     render: &crate::render::RenderState,
-) -> Option<Vec<u8>> {
-    let cover_snapshot = opentake_media::ProjectCompositeThumbnailSnapshot::new(
-        &snapshot.timeline,
-        snapshot.project_dir.as_deref(),
-    );
-    let frame_index = cover_snapshot.representative_frame(&snapshot.media)?;
-    let cancel = opentake_media::MediaCancelToken::new();
+    cancel: &opentake_media::MediaCancelToken,
+) -> ProjectCoverCapture {
     let bounds = opentake_media::PROJECT_COMPOSITE_COVER_BOUNDS;
-    let composite = crate::render::composite_timeline_frame(
+    let frame_index = match crate::render::representative_timeline_frame(
+        &snapshot.timeline,
+        &snapshot.media,
+        bounds.0.max(bounds.1),
+    ) {
+        Ok(Some(frame)) => frame,
+        Ok(None) => return ProjectCoverCapture::NoVisibleContent,
+        Err(_) => return ProjectCoverCapture::CaptureFailed,
+    };
+    let authority = match authorize_composite_sources(app, core, snapshot) {
+        Ok(authority) => authority,
+        Err(_) => return ProjectCoverCapture::CaptureFailed,
+    };
+    let composite = match crate::render::composite_timeline_frame_authorized(
         &snapshot.timeline,
         &snapshot.media,
         &snapshot.project_dir,
         render,
         frame_index,
         bounds.0.max(bounds.1),
-        &cancel,
-    )
-    .ok()?;
+        cancel,
+        &authority,
+    ) {
+        Ok(composite) => composite,
+        Err(error) => {
+            eprintln!("[project-cover] {error}");
+            return ProjectCoverCapture::CaptureFailed;
+        }
+    };
     let frame = opentake_media::RgbaFrame::new(composite.width, composite.height, composite.rgba);
-    opentake_media::capture_project_composite_thumbnail(
-        cover_snapshot,
-        &snapshot.media,
-        &frame,
-        bounds,
+    opentake_media::encode_project_composite_thumbnail(&frame, bounds).map_or(
+        ProjectCoverCapture::CaptureFailed,
+        ProjectCoverCapture::Captured,
     )
 }
 
+fn authorize_composite_sources<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    core: &AppCore,
+    snapshot: &opentake_core::ProjectRuntimeSnapshot,
+) -> Result<crate::render::CompositeSourceAuthority, String> {
+    let project_authority = core.project_asset_authority();
+    let scope = app.asset_protocol_scope();
+    let mut files = std::collections::HashMap::new();
+    for entry in &snapshot.media.entries {
+        let retained = match &entry.source {
+            opentake_domain::MediaSource::External { absolute_path } => {
+                let requested = std::path::Path::new(absolute_path);
+                if !crate::safe_asset_protocol::scope_allows_lexical_path(&scope, requested) {
+                    continue;
+                }
+                let Ok((file, final_path)) =
+                    crate::safe_asset_protocol::open_retained_regular_file(requested)
+                else {
+                    continue;
+                };
+                if !crate::safe_asset_protocol::scope_allows_lexical_path(&scope, &final_path) {
+                    continue;
+                }
+                file
+            }
+            opentake_domain::MediaSource::Project { relative_path } => {
+                let Ok(file) = core.open_project_asset(std::path::Path::new(relative_path)) else {
+                    continue;
+                };
+                file
+            }
+        };
+        files.insert(entry.id.clone(), retained);
+    }
+    if project_authority
+        .as_ref()
+        .is_some_and(|authority| !core.project_asset_authority_matches(authority))
+        || core.project_revision().project_epoch != snapshot.project_epoch
+    {
+        return Err("project source authority changed during cover capture".to_string());
+    }
+    Ok(crate::render::CompositeSourceAuthority::new(files))
+}
+
+#[cfg(test)]
 fn project_save_for_project(
     core: &AppCore,
     path: Option<String>,
     expected_project_epoch: u64,
     expected_project_path: Option<String>,
-    capture_thumbnail: impl FnOnce(&opentake_core::ProjectRuntimeSnapshot) -> Option<Vec<u8>>,
+    capture_thumbnail: impl FnOnce(&opentake_core::ProjectRuntimeSnapshot) -> ProjectCoverCapture,
+) -> Result<String, CmdError> {
+    project_save_for_project_with_checkpoint(
+        core,
+        path,
+        expected_project_epoch,
+        expected_project_path,
+        capture_thumbnail,
+        || true,
+    )
+}
+
+fn project_save_for_project_with_checkpoint(
+    core: &AppCore,
+    path: Option<String>,
+    expected_project_epoch: u64,
+    expected_project_path: Option<String>,
+    capture_thumbnail: impl FnOnce(&opentake_core::ProjectRuntimeSnapshot) -> ProjectCoverCapture,
+    can_commit: impl FnOnce() -> bool,
 ) -> Result<String, CmdError> {
     let snapshot = core.runtime_snapshot();
     if snapshot.project_epoch != expected_project_epoch
@@ -647,14 +795,18 @@ fn project_save_for_project(
     {
         return Err(CmdError::from(opentake_core::CoreError::StaleProject));
     }
-    let thumbnail = capture_thumbnail(&snapshot);
-
+    let thumbnail = match capture_thumbnail(&snapshot) {
+        ProjectCoverCapture::Captured(bytes) => opentake_project::ThumbnailUpdate::Replace(bytes),
+        ProjectCoverCapture::NoVisibleContent => opentake_project::ThumbnailUpdate::Remove,
+        ProjectCoverCapture::CaptureFailed => opentake_project::ThumbnailUpdate::Preserve,
+    };
     let target = path.map(std::path::PathBuf::from);
-    core.save_project_with_thumbnail_for_project(
+    core.save_project_with_thumbnail_update_for_project_if(
         expected_project_epoch,
         expected_project_path.as_deref().map(std::path::Path::new),
         target,
         thumbnail,
+        can_commit,
     )
     .map(|p| p.to_string_lossy().into_owned())
     .map_err(CmdError::from)
@@ -2077,11 +2229,14 @@ impl KeyframeValueDto {
 mod project_open_async_tests {
     use super::{
         capture_composite_project_thumbnail, prepare_saved_project_off_thread,
-        project_save_for_project, run_blocking_with_timeout, ProjectLifecycleCoordinator,
+        project_save_for_project, project_save_for_project_with_checkpoint,
+        run_blocking_with_timeout, save_current_project_with_composite_cover, ProjectCoverCapture,
+        ProjectLifecycleCoordinator,
     };
     use opentake_core::core::PreparedProjectOpen;
     use opentake_core::AppCore;
     use std::time::Duration;
+    use tauri::Manager as _;
 
     fn jpeg_bytes(color: [u8; 3]) -> Vec<u8> {
         let pixels = color.repeat(16 * 9);
@@ -2420,7 +2575,7 @@ mod project_open_async_tests {
                 |_| {
                     capture_started.send(()).expect("announce capture");
                     capture_released.recv().expect("release capture");
-                    Some(b"thumbnail".to_vec())
+                    ProjectCoverCapture::Captured(b"thumbnail".to_vec())
                 },
             )
         });
@@ -2450,7 +2605,7 @@ mod project_open_async_tests {
         let bundle = fixture.path().join("KeepCover.opentake");
         let previous = jpeg_bytes([20, 40, 80]);
         let mut project = opentake_project::Project::new(&bundle);
-        project.thumbnail = Some(previous.clone());
+        project.thumbnail = opentake_project::ThumbnailUpdate::Replace(previous.clone());
         project.save().expect("save prior cover fixture");
         let core = AppCore::new();
         core.open_project(&bundle).expect("open fixture");
@@ -2461,13 +2616,302 @@ mod project_open_async_tests {
             None,
             snapshot.project_epoch,
             Some(bundle.to_string_lossy().into_owned()),
-            |_| None,
+            |_| ProjectCoverCapture::CaptureFailed,
         )
         .expect("project save remains best effort");
 
         assert_eq!(
             std::fs::read(bundle.join("thumbnail.jpg")).expect("read retained cover"),
             previous
+        );
+    }
+
+    #[test]
+    fn thumbnail_no_visible_content_removes_even_an_invalid_prior_cover() {
+        let fixture = tempfile::tempdir().expect("fixture tempdir");
+        let bundle = fixture.path().join("EmptyCover.opentake");
+        let mut project = opentake_project::Project::new(&bundle);
+        project.thumbnail = opentake_project::ThumbnailUpdate::Replace(b"not a jpeg".to_vec());
+        project.save().expect("save invalid prior fixture");
+        let core = AppCore::new();
+        core.open_project(&bundle).expect("open fixture");
+        let snapshot = core.runtime_snapshot();
+
+        project_save_for_project(
+            &core,
+            None,
+            snapshot.project_epoch,
+            Some(bundle.to_string_lossy().into_owned()),
+            |_| ProjectCoverCapture::NoVisibleContent,
+        )
+        .expect("empty project save succeeds");
+
+        assert!(!bundle.join("thumbnail.jpg").exists());
+    }
+
+    #[test]
+    fn cancelled_cover_worker_cannot_commit_a_late_capture() {
+        let fixture = tempfile::tempdir().expect("cancel fixture");
+        let bundle = fixture.path().join("Cancelled.opentake");
+        let previous = jpeg_bytes([11, 22, 33]);
+        let mut project = opentake_project::Project::new(&bundle);
+        project.thumbnail = opentake_project::ThumbnailUpdate::Replace(previous.clone());
+        project.save().expect("save prior cover");
+        let core = AppCore::new();
+        core.open_project(&bundle).expect("open fixture");
+        let snapshot = core.runtime_snapshot();
+
+        let error = project_save_for_project_with_checkpoint(
+            &core,
+            None,
+            snapshot.project_epoch,
+            Some(bundle.to_string_lossy().into_owned()),
+            |_| ProjectCoverCapture::Captured(jpeg_bytes([200, 100, 50])),
+            || false,
+        )
+        .expect_err("cancelled worker must not enter the commit");
+
+        assert_eq!(error.code, "internal");
+        assert_eq!(
+            std::fs::read(bundle.join("thumbnail.jpg")).expect("prior cover remains"),
+            previous
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn close_requested_uses_the_same_authoritative_project_local_cover_save() {
+        use opentake_domain::{Clip, ClipType, MediaManifestEntry, MediaSource, Track};
+
+        if !opentake_media::ffmpeg_status::ffmpeg_available()
+            || opentake_render::RenderDevice::try_new().is_err()
+        {
+            return;
+        }
+        let fixture = tempfile::tempdir().expect("close fixture");
+        let bundle = fixture.path().join("Close.opentake");
+        std::fs::create_dir_all(bundle.join("media")).expect("create retained media");
+        image::RgbaImage::from_pixel(80, 120, image::Rgba([30, 140, 220, 255]))
+            .save(bundle.join("media/inside.png"))
+            .expect("write project-local image");
+        let mut project = opentake_project::Project::new(&bundle);
+        project.timeline.width = 80;
+        project.timeline.height = 120;
+        let mut clip = Clip::new("clip", "local", 0, 30);
+        clip.media_type = ClipType::Image;
+        let mut track = Track::new("video", ClipType::Video);
+        track.clips.push(clip);
+        project.timeline.tracks.push(track);
+        project.manifest.entries.push(MediaManifestEntry {
+            id: "local".into(),
+            name: "local".into(),
+            kind: ClipType::Image,
+            source: MediaSource::Project {
+                relative_path: "media/inside.png".into(),
+            },
+            duration: 1.0,
+            source_width: Some(80),
+            source_height: Some(120),
+            source_fps: None,
+            generation_input: None,
+            has_audio: Some(false),
+            color: None,
+            proxy: None,
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        });
+        project.save().expect("save local project");
+        let core = AppCore::new();
+        core.open_project(&bundle).expect("open local project");
+        let app = tauri::test::mock_builder()
+            .manage(core)
+            .manage(crate::render::RenderState::new())
+            .manage(crate::updater::InstallAdmissionGate::default())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .expect("build managed mock app");
+
+        save_current_project_with_composite_cover(app.handle().clone())
+            .await
+            .expect("close parity save");
+
+        let cover = image::open(bundle.join("thumbnail.jpg"))
+            .expect("close writes cover")
+            .to_rgb8();
+        assert_eq!((cover.width(), cover.height()), (640, 360));
+        let center = cover.get_pixel(320, 180).0;
+        assert!(center[2] > 120 && center[1] > 70, "{center:?}");
+        assert!(cover
+            .get_pixel(20, 180)
+            .0
+            .iter()
+            .all(|channel| *channel < 20));
+    }
+
+    fn capture_corrupt_external(kind: opentake_domain::ClipType) -> ProjectCoverCapture {
+        use opentake_domain::{Clip, MediaManifestEntry, MediaSource, Track};
+        use tauri::Manager as _;
+
+        let fixture = tempfile::tempdir().expect("corrupt fixture");
+        let source = fixture.path().join(match kind {
+            opentake_domain::ClipType::Video => "broken.mp4",
+            _ => "broken.png",
+        });
+        std::fs::write(&source, b"corrupt media bytes").expect("write corrupt source");
+        let bundle = fixture.path().join("Corrupt.opentake");
+        let mut project = opentake_project::Project::new(&bundle);
+        let mut clip = Clip::new("clip", "media", 0, 30);
+        clip.media_type = kind;
+        let mut track = Track::new("video", opentake_domain::ClipType::Video);
+        track.clips.push(clip);
+        project.timeline.tracks.push(track);
+        project.manifest.entries.push(MediaManifestEntry {
+            id: "media".into(),
+            name: "media".into(),
+            kind,
+            source: MediaSource::External {
+                absolute_path: source.to_string_lossy().into_owned(),
+            },
+            duration: 1.0,
+            source_width: Some(64),
+            source_height: Some(64),
+            source_fps: (kind == opentake_domain::ClipType::Video).then_some(30.0),
+            generation_input: None,
+            has_audio: Some(false),
+            color: None,
+            proxy: None,
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        });
+        project.save().expect("save corrupt project");
+        let core = AppCore::new();
+        core.open_project(&bundle).expect("open corrupt project");
+        let app = tauri::test::mock_app();
+        app.handle()
+            .asset_protocol_scope()
+            .allow_file(&source)
+            .expect("authorize corrupt source");
+        capture_composite_project_thumbnail(
+            app.handle(),
+            &core,
+            &core.runtime_snapshot(),
+            &crate::render::RenderState::new(),
+            &opentake_media::MediaCancelToken::new(),
+        )
+    }
+
+    #[test]
+    fn corrupt_planned_image_is_capture_failed() {
+        if !opentake_media::ffmpeg_status::ffmpeg_available()
+            || opentake_render::RenderDevice::try_new().is_err()
+        {
+            return;
+        }
+        assert_eq!(
+            capture_corrupt_external(opentake_domain::ClipType::Image),
+            ProjectCoverCapture::CaptureFailed
+        );
+    }
+
+    #[test]
+    fn corrupt_planned_video_is_capture_failed() {
+        if !opentake_media::ffmpeg_status::ffmpeg_available()
+            || opentake_render::RenderDevice::try_new().is_err()
+        {
+            return;
+        }
+        assert_eq!(
+            capture_corrupt_external(opentake_domain::ClipType::Video),
+            ProjectCoverCapture::CaptureFailed
+        );
+    }
+
+    #[test]
+    fn corrupt_planned_text_is_capture_failed() {
+        use opentake_domain::{Clip, ClipType, TextStyle, Track};
+        let fixture = tempfile::tempdir().expect("text fixture");
+        let bundle = fixture.path().join("Text.opentake");
+        AppCore::new()
+            .save_project(Some(bundle.clone()))
+            .expect("save project");
+        let core = AppCore::new();
+        core.open_project(&bundle).expect("open project");
+        let mut snapshot = core.runtime_snapshot();
+        let mut text = Clip::new("text", "", 0, 30);
+        text.media_type = ClipType::Text;
+        text.text_content = Some("invalid".into());
+        text.text_style = Some(TextStyle {
+            font_size: f64::NAN,
+            ..TextStyle::default()
+        });
+        let mut track = Track::new("text", ClipType::Text);
+        track.clips.push(text);
+        snapshot.timeline.tracks.push(track);
+        let app = tauri::test::mock_app();
+
+        let result = capture_composite_project_thumbnail(
+            app.handle(),
+            &core,
+            &snapshot,
+            &crate::render::RenderState::new(),
+            &opentake_media::MediaCancelToken::new(),
+        );
+
+        assert_eq!(result, ProjectCoverCapture::CaptureFailed);
+    }
+
+    #[test]
+    fn unapproved_external_source_is_capture_failed_without_opening_it() {
+        use opentake_domain::{Clip, ClipType, MediaManifestEntry, MediaSource, Track};
+        let fixture = tempfile::tempdir().expect("scope fixture");
+        let source = fixture.path().join("unapproved.png");
+        image::RgbaImage::from_pixel(32, 32, image::Rgba([10, 20, 30, 255]))
+            .save(&source)
+            .expect("write image");
+        let bundle = fixture.path().join("Scoped.opentake");
+        let mut project = opentake_project::Project::new(&bundle);
+        let mut clip = Clip::new("clip", "media", 0, 30);
+        clip.media_type = ClipType::Image;
+        let mut track = Track::new("video", ClipType::Video);
+        track.clips.push(clip);
+        project.timeline.tracks.push(track);
+        project.manifest.entries.push(MediaManifestEntry {
+            id: "media".into(),
+            name: "media".into(),
+            kind: ClipType::Image,
+            source: MediaSource::External {
+                absolute_path: source.to_string_lossy().into_owned(),
+            },
+            duration: 1.0,
+            source_width: Some(32),
+            source_height: Some(32),
+            source_fps: None,
+            generation_input: None,
+            has_audio: Some(false),
+            color: None,
+            proxy: None,
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        });
+        project.save().expect("save scope project");
+        let core = AppCore::new();
+        core.open_project(&bundle).expect("open scope project");
+        let app = tauri::test::mock_app();
+        app.handle()
+            .asset_protocol_scope()
+            .forbid_file(&source)
+            .expect("forbid unapproved source");
+
+        assert_eq!(
+            capture_composite_project_thumbnail(
+                app.handle(),
+                &core,
+                &core.runtime_snapshot(),
+                &crate::render::RenderState::new(),
+                &opentake_media::MediaCancelToken::new(),
+            ),
+            ProjectCoverCapture::CaptureFailed
         );
     }
 
@@ -2572,12 +3016,26 @@ mod project_open_async_tests {
         let core = AppCore::new();
         core.open_project(&project.bundle_path)
             .expect("open composite fixture");
+        let app = tauri::test::mock_app();
+        use tauri::Manager as _;
+        for path in [&video, &incoming, &overlay] {
+            app.handle()
+                .asset_protocol_scope()
+                .allow_file(path)
+                .expect("authorize composite fixture");
+        }
+        let cancel = opentake_media::MediaCancelToken::new();
 
-        let bytes = capture_composite_project_thumbnail(
+        let capture = capture_composite_project_thumbnail(
+            app.handle(),
+            &core,
             &core.runtime_snapshot(),
             &crate::render::RenderState::new(),
-        )
-        .expect("capture authoritative cover");
+            &cancel,
+        );
+        let ProjectCoverCapture::Captured(bytes) = capture else {
+            panic!("capture authoritative cover: {capture:?}");
+        };
         let cover = image::load_from_memory(&bytes)
             .expect("decode authoritative cover")
             .to_rgb8();

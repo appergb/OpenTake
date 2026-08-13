@@ -20,6 +20,8 @@
 //! (#53) will move this onto a dedicated render thread.
 
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -34,8 +36,8 @@ use tauri::State;
 use opentake_core::{AppCore, EditCommand, ProjectRevision};
 use opentake_domain::{ClipType, LutReference, MediaSource, TextStyle, Timeline};
 use opentake_media::{
-    decode_frame_at_cancellable, interpolate_frame_pair, FrameInterpolationFallback,
-    FrameInterpolationMode, FrameRequest, MediaCancelToken,
+    decode_frame_at_cancellable, decode_frame_file_at_cancellable, interpolate_frame_pair,
+    FrameInterpolationFallback, FrameInterpolationMode, FrameRequest, MediaCancelToken,
 };
 use opentake_ops::command::RenameEntry;
 use opentake_project::ProjectRoot;
@@ -257,9 +259,22 @@ impl PreviewCompositeCoordinator {
 }
 
 /// Resolvable info for one media asset, projected from the manifest.
-struct MediaInfo {
+struct MediaInfo<'a> {
     path: PathBuf,
+    retained: Option<&'a File>,
     source_fps: Option<f64>,
+}
+
+/// Retained, pre-authorized media inputs for strict project-cover capture.
+/// Missing entries fail closed; the renderer never reopens their manifest paths.
+pub(crate) struct CompositeSourceAuthority {
+    files: HashMap<String, File>,
+}
+
+impl CompositeSourceAuthority {
+    pub(crate) fn new(files: HashMap<String, File>) -> Self {
+        Self { files }
+    }
 }
 
 /// A text clip projected from the timeline, keyed by clip id. The box's width /
@@ -269,6 +284,26 @@ struct TextInfo {
     content: String,
     style: TextStyle,
     box_norm: (f64, f64, f64, f64),
+}
+
+fn text_style_is_finite(style: &TextStyle) -> bool {
+    let color_is_finite = |color: opentake_domain::Rgba| {
+        [color.r, color.g, color.b, color.a]
+            .into_iter()
+            .all(f64::is_finite)
+    };
+    style.font_size.is_finite()
+        && style.font_size > 0.0
+        && style.font_scale.is_finite()
+        && style.font_scale > 0.0
+        && color_is_finite(style.color)
+        && color_is_finite(style.shadow.color)
+        && style.shadow.offset_x.is_finite()
+        && style.shadow.offset_y.is_finite()
+        && style.shadow.blur.is_finite()
+        && style.shadow.blur >= 0.0
+        && color_is_finite(style.background.color)
+        && color_is_finite(style.border.color)
 }
 
 /// `SourceMetrics` backed by the media manifest: only intrinsic size is known
@@ -329,6 +364,29 @@ impl LottieMaterializer {
     fn ensure_document(&mut self, path: &std::path::Path) -> Result<(), String> {
         let bytes = std::fs::read(path)
             .map_err(|error| format!("read Lottie document {}: {error}", path.display()))?;
+        self.ensure_document_bytes(path, &bytes)
+    }
+
+    fn ensure_document_file(&mut self, path: &std::path::Path, file: &File) -> Result<(), String> {
+        let mut input = file
+            .try_clone()
+            .map_err(|error| format!("clone retained Lottie document: {error}"))?;
+        input
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| format!("rewind retained Lottie document: {error}"))?;
+        let mut bytes = Vec::new();
+        input
+            .take((MAX_LOTTIE_BYTES + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("read retained Lottie document: {error}"))?;
+        self.ensure_document_bytes(path, &bytes)
+    }
+
+    fn ensure_document_bytes(
+        &mut self,
+        path: &std::path::Path,
+        bytes: &[u8],
+    ) -> Result<(), String> {
         if bytes.is_empty() || bytes.len() > MAX_LOTTIE_BYTES {
             return Err(format!(
                 "Lottie document {} must be 1..={MAX_LOTTIE_BYTES} bytes (got {})",
@@ -336,13 +394,13 @@ impl LottieMaterializer {
                 bytes.len()
             ));
         }
-        let content_hash = format!("{:x}", Sha256::digest(&bytes));
+        let content_hash = format!("{:x}", Sha256::digest(bytes));
         let needs_parse = self
             .documents
             .get(path)
             .is_none_or(|cached| cached.content_hash != content_hash);
         if needs_parse {
-            let composition = std::panic::catch_unwind(|| velato::Composition::from_slice(&bytes))
+            let composition = std::panic::catch_unwind(|| velato::Composition::from_slice(bytes))
                 .map_err(|_| {
                     format!(
                         "Lottie document {} uses an unsupported or malformed feature",
@@ -391,7 +449,52 @@ impl LottieMaterializer {
         label: &str,
     ) -> Result<Rc<GpuTexture>, String> {
         self.ensure_document(path)?;
+        self.resolve_loaded(
+            device,
+            queue,
+            textures,
+            path,
+            source_frame,
+            render_box,
+            label,
+        )
+    }
 
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_file(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        textures: &mut TextureCache,
+        path: &std::path::Path,
+        file: &File,
+        source_frame: i64,
+        render_box: (u32, u32),
+        label: &str,
+    ) -> Result<Rc<GpuTexture>, String> {
+        self.ensure_document_file(path, file)?;
+        self.resolve_loaded(
+            device,
+            queue,
+            textures,
+            path,
+            source_frame,
+            render_box,
+            label,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn resolve_loaded(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        textures: &mut TextureCache,
+        path: &std::path::Path,
+        source_frame: i64,
+        render_box: (u32, u32),
+        label: &str,
+    ) -> Result<Rc<GpuTexture>, String> {
         let cached = self
             .documents
             .get(path)
@@ -544,7 +647,7 @@ struct MediaResolver<'d> {
     queue: &'d wgpu::Queue,
     cache: &'d mut TextureCache,
     lottie: &'d mut LottieMaterializer,
-    media: &'d HashMap<String, MediaInfo>,
+    media: &'d HashMap<String, MediaInfo<'d>>,
     timeline_fps: i32,
     /// Text clips by id (content + style + box) for on-demand rasterization.
     text: &'d HashMap<String, TextInfo>,
@@ -556,9 +659,17 @@ struct MediaResolver<'d> {
     project_root: Option<&'d ProjectRoot>,
     lut_cache: &'d mut HashMap<String, Rc<GpuLutTexture>>,
     materialization_error: Option<String>,
+    strict_materialization: bool,
 }
 
 impl MediaResolver<'_> {
+    fn fail_materialization<T>(&mut self, message: impl Into<String>) -> Option<T> {
+        if self.strict_materialization && self.materialization_error.is_none() {
+            self.materialization_error = Some(message.into());
+        }
+        None
+    }
+
     /// Rasterize a text clip's box to a premultiplied-RGBA texture (composited
     /// last, like upstream's `CATextLayer`). The box texture is uploaded with
     /// `srgb = false` so it blends in the same encoded space as video/image, and
@@ -569,7 +680,12 @@ impl MediaResolver<'_> {
         if let Some(tex) = self.cache.get(&key) {
             return Some(tex);
         }
-        let info = self.text.get(clip_id)?;
+        let Some(info) = self.text.get(clip_id) else {
+            return self.fail_materialization(format!("text clip {clip_id} has no raster input"));
+        };
+        if !text_style_is_finite(&info.style) {
+            return self.fail_materialization(format!("text clip {clip_id} has invalid style"));
+        }
         let req = TextRasterRequest {
             clip_id,
             content: &info.content,
@@ -577,7 +693,19 @@ impl MediaResolver<'_> {
             box_norm: info.box_norm,
             canvas: self.preview_box,
         };
-        let frame = self.text_rasterizer.rasterize(&req)?;
+        let frame = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.text_rasterizer.rasterize(&req)
+        })) {
+            Ok(Some(frame)) => frame,
+            Ok(None) => {
+                return self
+                    .fail_materialization(format!("text clip {clip_id} rasterization failed"));
+            }
+            Err(_) => {
+                return self
+                    .fail_materialization(format!("text clip {clip_id} rasterization panicked"));
+            }
+        };
         let tex = upload_rgba(self.device, self.queue, &frame, false, Some("preview-text"));
         Some(self.cache.insert(key, tex))
     }
@@ -595,10 +723,13 @@ impl MediaResolver<'_> {
         if let Some(tex) = self.cache.get(&key) {
             return Some(tex);
         }
-        let info = self.media.get(media_ref)?;
+        let Some(info) = self.media.get(media_ref) else {
+            return self.fail_materialization(format!("video source {media_ref} is unauthorized"));
+        };
         let source_fps = info.source_fps.unwrap_or(interpolation.source_fps);
         if !source_fps.is_finite() || source_fps <= 0.0 {
-            return None;
+            return self
+                .fail_materialization(format!("video source {media_ref} has invalid frame rate"));
         }
         let timestamp = source_frame.max(0) as f64 / interpolation.target_fps;
         let source_position = timestamp * source_fps;
@@ -606,27 +737,37 @@ impl MediaResolver<'_> {
         let next_index = source_position.ceil().max(0.0) as i64;
         let alpha = source_position - first_index as f64;
         let decode = |index: i64| {
-            decode_frame_at_cancellable(
-                &info.path,
-                &FrameRequest {
-                    time_secs: index as f64 / source_fps,
-                    max_size: self.preview_box,
-                    tolerance_secs: 0.0,
-                    apply_rotation: true,
-                },
-                self.cancel,
-            )
+            let request = FrameRequest {
+                time_secs: index as f64 / source_fps,
+                max_size: self.preview_box,
+                tolerance_secs: 0.0,
+                apply_rotation: true,
+            };
+            match info.retained {
+                Some(file) => decode_frame_file_at_cancellable(file, &request, self.cancel),
+                None => decode_frame_at_cancellable(&info.path, &request, self.cancel),
+            }
             .ok()
             .map(|(_, frame)| frame)
         };
-        let first = decode(first_index)?;
+        let Some(first) = decode(first_index) else {
+            return self.fail_materialization(format!("video source {media_ref} decode failed"));
+        };
         let last = if next_index == first_index {
             first.clone()
         } else {
             // A half-open media duration may not expose the mathematical next
             // frame at the tail. Hold the last decodable endpoint instead of
             // dropping the whole layer to black.
-            decode(next_index).unwrap_or_else(|| first.clone())
+            match decode(next_index) {
+                Some(frame) => frame,
+                None if !self.strict_materialization => first.clone(),
+                None => {
+                    return self.fail_materialization(format!(
+                        "video source {media_ref} interpolation endpoint decode failed"
+                    ));
+                }
+            }
         };
         let requested = match interpolation.mode {
             TextureInterpolationMode::Nearest => FrameInterpolationMode::Nearest,
@@ -638,9 +779,14 @@ impl MediaResolver<'_> {
             TextureInterpolationFallback::Blend => FrameInterpolationFallback::Blend,
             TextureInterpolationFallback::Error => FrameInterpolationFallback::Error,
         };
-        let frame = interpolate_frame_pair(&first, &last, alpha, requested, fallback, true)
-            .ok()?
-            .frame;
+        let frame = match interpolate_frame_pair(&first, &last, alpha, requested, fallback, true) {
+            Ok(result) => result.frame,
+            Err(_) => {
+                return self.fail_materialization(format!(
+                    "video source {media_ref} interpolation failed"
+                ));
+            }
+        };
         let decoded = DecodedFrame::new(frame.width, frame.height, frame.rgba, false);
         let tex = upload_rgba(
             self.device,
@@ -660,16 +806,33 @@ impl TextureResolver for MediaResolver<'_> {
             TextureSource::Image { media_ref } => (media_ref, true),
             TextureSource::Text { clip_id } => return self.resolve_text(clip_id),
             TextureSource::Lottie { media_ref } => {
-                let info = self.media.get(media_ref)?;
-                return match self.lottie.resolve(
-                    self.device,
-                    self.queue,
-                    self.cache,
-                    &info.path,
-                    source_frame,
-                    self.preview_box,
-                    "preview-lottie",
-                ) {
+                let Some(info) = self.media.get(media_ref) else {
+                    return self.fail_materialization(format!(
+                        "Lottie source {media_ref} is unauthorized"
+                    ));
+                };
+                let result = match info.retained {
+                    Some(file) => self.lottie.resolve_file(
+                        self.device,
+                        self.queue,
+                        self.cache,
+                        &info.path,
+                        file,
+                        source_frame,
+                        self.preview_box,
+                        "preview-lottie",
+                    ),
+                    None => self.lottie.resolve(
+                        self.device,
+                        self.queue,
+                        self.cache,
+                        &info.path,
+                        source_frame,
+                        self.preview_box,
+                        "preview-lottie",
+                    ),
+                };
+                return match result {
                     Ok(texture) => Some(texture),
                     Err(error) => {
                         eprintln!("[render] {error}");
@@ -680,9 +843,18 @@ impl TextureResolver for MediaResolver<'_> {
             }
         };
 
-        let info = self.media.get(media_ref)?;
+        let Some(info) = self.media.get(media_ref) else {
+            return self.fail_materialization(format!("media source {media_ref} is unauthorized"));
+        };
         let key = if is_image {
-            let content_hash = opentake_media::file_sha256(&info.path).ok()?;
+            let content_hash = match info.retained {
+                Some(file) => opentake_media::file_sha256_file_cancellable(file, self.cancel),
+                None => opentake_media::file_sha256(&info.path),
+            };
+            let Ok(content_hash) = content_hash else {
+                return self
+                    .fail_materialization(format!("image source {media_ref} hashing failed"));
+            };
             format!("i:{content_hash}")
         } else {
             format!("v:{media_ref}:{source_frame}")
@@ -708,7 +880,13 @@ impl TextureResolver for MediaResolver<'_> {
             tolerance_secs: 0.1,
             apply_rotation: true,
         };
-        let (_actual, frame) = decode_frame_at_cancellable(&info.path, &req, self.cancel).ok()?;
+        let decoded = match info.retained {
+            Some(file) => decode_frame_file_at_cancellable(file, &req, self.cancel),
+            None => decode_frame_at_cancellable(&info.path, &req, self.cancel),
+        };
+        let Ok((_actual, frame)) = decoded else {
+            return self.fail_materialization(format!("media source {media_ref} decode failed"));
+        };
         // ffmpeg emits straight RGBA; the plan's `needs_premultiply` flag (false
         // for image/video here) drives the shader, so the `premultiplied` marker
         // on the upload is informational only.
@@ -779,6 +957,40 @@ fn preview_render_size(canvas_w: i32, canvas_h: i32, cap: u32) -> RenderSize {
     RenderSize::new(even(cw * scale), even(ch * scale))
 }
 
+/// Derive cover candidate ordering from the same authoritative render plan used
+/// by preview/export. Source materialization is deliberately deferred so an
+/// offline or corrupt planned layer becomes `CaptureFailed`, not false
+/// `NoVisibleContent`.
+pub(crate) fn representative_timeline_frame(
+    timeline: &Timeline,
+    manifest: &opentake_domain::MediaManifest,
+    max_size: u32,
+) -> Result<Option<i32>, String> {
+    let mut sizes = HashMap::new();
+    let mut straight_alpha = HashSet::new();
+    for entry in &manifest.entries {
+        if entry.carries_straight_alpha() {
+            straight_alpha.insert(entry.id.clone());
+        }
+        if let (Some(width), Some(height)) = (entry.source_width, entry.source_height) {
+            if width > 0 && height > 0 {
+                sizes.insert(entry.id.clone(), (width as u32, height as u32));
+            }
+        }
+    }
+    let render_size = preview_render_size(timeline.width, timeline.height, max_size);
+    let plan = try_build_render_plan(
+        timeline,
+        render_size,
+        &ManifestMetrics {
+            sizes,
+            straight_alpha,
+        },
+    )
+    .map_err(|error| format!("invalid timeline graph: {error}"))?;
+    Ok(plan.representative_frame(timeline))
+}
+
 /// Encode an RGBA composite as PNG bytes. Shared by the preview data-URL path
 /// and the capture-to-media on-disk path.
 fn encode_png_bytes(frame: &DecodedFrame) -> Result<Vec<u8>, String> {
@@ -815,6 +1027,58 @@ pub fn composite_timeline_frame(
     frame: i32,
     max_size: u32,
     cancel: &MediaCancelToken,
+) -> Result<DecodedFrame, String> {
+    composite_timeline_frame_with_authority(
+        timeline,
+        manifest,
+        project_dir,
+        render,
+        frame,
+        max_size,
+        cancel,
+        None,
+        false,
+    )
+}
+
+/// Strict cover compositor: every planned draw must materialize from a retained
+/// pre-authorized source handle. Missing/failed image, video, text, or Lottie
+/// materialization is an error rather than a silently omitted layer.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn composite_timeline_frame_authorized(
+    timeline: &Timeline,
+    manifest: &opentake_domain::MediaManifest,
+    project_dir: &Option<PathBuf>,
+    render: &RenderState,
+    frame: i32,
+    max_size: u32,
+    cancel: &MediaCancelToken,
+    authority: &CompositeSourceAuthority,
+) -> Result<DecodedFrame, String> {
+    composite_timeline_frame_with_authority(
+        timeline,
+        manifest,
+        project_dir,
+        render,
+        frame,
+        max_size,
+        cancel,
+        Some(authority),
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn composite_timeline_frame_with_authority(
+    timeline: &Timeline,
+    manifest: &opentake_domain::MediaManifest,
+    project_dir: &Option<PathBuf>,
+    render: &RenderState,
+    frame: i32,
+    max_size: u32,
+    cancel: &MediaCancelToken,
+    authority: Option<&CompositeSourceAuthority>,
+    strict_materialization: bool,
 ) -> Result<DecodedFrame, String> {
     // Project text clips (content + style + box) so the resolver can rasterize
     // them on demand. Keyed by clip id, matching `TextureSource::Text { clip_id }`.
@@ -866,10 +1130,15 @@ pub fn composite_timeline_frame(
                 sizes.insert(entry.id.clone(), (w as u32, h as u32));
             }
         }
+        let retained = authority.and_then(|authority| authority.files.get(&entry.id));
+        if strict_materialization && retained.is_none() {
+            continue;
+        }
         media.insert(
             entry.id.clone(),
             MediaInfo {
                 path,
+                retained,
                 source_fps: entry.source_fps,
             },
         );
@@ -884,11 +1153,15 @@ pub fn composite_timeline_frame(
     let plan = try_build_render_plan(timeline, render_size, &metrics)
         .map_err(|error| format!("invalid timeline graph: {error}"))?;
     let frame_plan = plan.frame(timeline, frame);
-    let project_root = project_dir
-        .as_deref()
-        .map(ProjectRoot::open)
-        .transpose()
-        .map_err(|error| format!("open project LUT storage: {error}"))?;
+    let project_root = if strict_materialization {
+        None
+    } else {
+        project_dir
+            .as_deref()
+            .map(ProjectRoot::open)
+            .transpose()
+            .map_err(|error| format!("open project LUT storage: {error}"))?
+    };
 
     // Acquire (or reuse) the GPU context, then composite + read back. The lock is
     // held across the render so the `Rc`-based texture cache never crosses threads.
@@ -929,6 +1202,7 @@ pub fn composite_timeline_frame(
             project_root: project_root.as_ref(),
             lut_cache: &mut lut_cache,
             materialization_error: None,
+            strict_materialization,
         };
         let interpolation = TextureInterpolationConfig::new(
             plan.fps as f64,
@@ -949,7 +1223,7 @@ pub fn composite_timeline_frame(
             )
             .map_err(|e| format!("composite render failed: {e}"));
         match resolver.materialization_error.take() {
-            Some(error) => Err(format!("Lottie materialization failed: {error}")),
+            Some(error) => Err(format!("layer materialization failed: {error}")),
             None => composite,
         }
     };

@@ -37,7 +37,7 @@ use opentake_domain::{
 };
 use opentake_ops::command::{ClipEntry, EditCommand, EditResult};
 use opentake_ops::IdGen;
-use opentake_project::{GenerationLog, ProjectCompatibility, ProjectRootIdentity};
+use opentake_project::{GenerationLog, ProjectCompatibility, ProjectRootIdentity, ThumbnailUpdate};
 use same_file::Handle;
 
 use crate::deps::CoreDeps;
@@ -912,7 +912,13 @@ impl AppCore {
         path: Option<PathBuf>,
         thumbnail: Option<Vec<u8>>,
     ) -> Result<PathBuf> {
-        self.save_project_with_thumbnail_at_identity(None, None, path, thumbnail)
+        self.save_project_with_thumbnail_update_at_identity(
+            None,
+            None,
+            path,
+            thumbnail.map_or(ThumbnailUpdate::Preserve, ThumbnailUpdate::Replace),
+            || true,
+        )
     }
 
     /// Save only if the project session still has the caller's exact identity.
@@ -926,20 +932,59 @@ impl AppCore {
         path: Option<PathBuf>,
         thumbnail: Option<Vec<u8>>,
     ) -> Result<PathBuf> {
-        self.save_project_with_thumbnail_at_identity(
+        self.save_project_with_thumbnail_update_at_identity(
+            Some(expected_project_epoch),
+            expected_project_path,
+            path,
+            thumbnail.map_or(ThumbnailUpdate::Preserve, ThumbnailUpdate::Replace),
+            || true,
+        )
+    }
+
+    /// Save only if the project identity still matches, with an explicit
+    /// authoritative cover mutation.
+    pub fn save_project_with_thumbnail_update_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_path: Option<&Path>,
+        path: Option<PathBuf>,
+        thumbnail: ThumbnailUpdate,
+    ) -> Result<PathBuf> {
+        self.save_project_with_thumbnail_update_at_identity(
             Some(expected_project_epoch),
             expected_project_path,
             path,
             thumbnail,
+            || true,
         )
     }
 
-    fn save_project_with_thumbnail_at_identity(
+    /// Identity-bound explicit cover save whose final caller checkpoint runs
+    /// under the same session lock immediately before persistence begins.
+    pub fn save_project_with_thumbnail_update_for_project_if(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_path: Option<&Path>,
+        path: Option<PathBuf>,
+        thumbnail: ThumbnailUpdate,
+        can_commit: impl FnOnce() -> bool,
+    ) -> Result<PathBuf> {
+        self.save_project_with_thumbnail_update_at_identity(
+            Some(expected_project_epoch),
+            expected_project_path,
+            path,
+            thumbnail,
+            can_commit,
+        )
+    }
+
+    fn save_project_with_thumbnail_update_at_identity(
         &self,
         expected_project_epoch: Option<u64>,
         expected_project_path: Option<&Path>,
         path: Option<PathBuf>,
-        thumbnail: Option<Vec<u8>>,
+        thumbnail: ThumbnailUpdate,
+        can_commit: impl FnOnce() -> bool,
     ) -> Result<PathBuf> {
         let changes_identity = path.is_some();
         if changes_identity {
@@ -956,10 +1001,14 @@ impl AppCore {
                     || session.editor.project_dir() != expected_project_path
             }) {
                 Err(CoreError::StaleProject)
+            } else if !can_commit() {
+                Err(CoreError::Unsupported(
+                    "project cover save was cancelled before commit",
+                ))
             } else {
                 session
                     .editor
-                    .save_project_with_thumbnail(path, thumbnail)
+                    .save_project_with_thumbnail_update(path, thumbnail)
                     .map(|written| (written, session.project_epoch))
             }
         };

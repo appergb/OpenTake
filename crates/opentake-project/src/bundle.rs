@@ -97,6 +97,19 @@ impl ProjectCompatibility {
     }
 }
 
+/// Requested mutation for the optional project cover.
+///
+/// `Preserve` is the compatibility/default behavior for ordinary saves,
+/// `Replace` commits newly captured JPEG bytes, and `Remove` represents the
+/// authoritative result that the project has no visible cover content.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ThumbnailUpdate {
+    #[default]
+    Preserve,
+    Replace(Vec<u8>),
+    Remove,
+}
+
 /// An opened `.opentake` project: the bundle path plus its decoded components.
 ///
 /// Media files referenced by `manifest` live under the bundle's `media/`
@@ -116,9 +129,8 @@ pub struct Project {
     /// The generation log (`generation-log.json`). `None` when the file was
     /// absent or failed to parse; the latter also makes compatibility read-only.
     pub generation_log: Option<GenerationLog>,
-    /// JPEG thumbnail bytes to write on the next `save`. `None` leaves any
-    /// existing `thumbnail.jpg` on disk untouched.
-    pub thumbnail: Option<Vec<u8>>,
+    /// Cover mutation to apply on the next save.
+    pub thumbnail: ThumbnailUpdate,
     compatibility: ProjectCompatibility,
 }
 
@@ -138,7 +150,7 @@ impl Project {
             timeline: Timeline::new(),
             manifest: MediaManifest::new(),
             generation_log: None,
-            thumbnail: None,
+            thumbnail: ThumbnailUpdate::Preserve,
             compatibility,
         }
     }
@@ -281,7 +293,7 @@ impl Project {
             timeline,
             manifest,
             generation_log,
-            thumbnail: None,
+            thumbnail: ThumbnailUpdate::Preserve,
             compatibility,
         })
     }
@@ -352,7 +364,7 @@ impl Project {
         if let Some(source) = media_source {
             source.copy_media_to(publisher.stage())?;
             source.copy_chat_sessions_to(publisher.stage())?;
-            if self.thumbnail.is_none() {
+            if matches!(self.thumbnail, ThumbnailUpdate::Preserve) {
                 source.copy_thumbnail_to(publisher.stage())?;
             }
         }
@@ -377,7 +389,7 @@ impl Project {
         encoded.write_to(publisher.stage())?;
         media_source.copy_media_to(publisher.stage())?;
         media_source.copy_chat_sessions_to(publisher.stage())?;
-        if self.thumbnail.is_none() {
+        if matches!(self.thumbnail, ThumbnailUpdate::Preserve) {
             media_source.copy_thumbnail_to(publisher.stage())?;
         }
         drop(media_source);
@@ -407,7 +419,7 @@ impl Project {
             .stage()
             .write_new_media_leaf(media_leaf, media_byte_size, media)?;
         media_source.copy_chat_sessions_to(publisher.stage())?;
-        if self.thumbnail.is_none() {
+        if matches!(self.thumbnail, ThumbnailUpdate::Preserve) {
             media_source.copy_thumbnail_to(publisher.stage())?;
         }
         drop(media_source);
@@ -429,7 +441,7 @@ struct EncodedProject {
     timeline: Vec<u8>,
     manifest: Vec<u8>,
     generation_log: Option<Vec<u8>>,
-    thumbnail: Option<Vec<u8>>,
+    thumbnail: ThumbnailUpdate,
 }
 
 impl EncodedProject {
@@ -461,8 +473,12 @@ impl EncodedProject {
         if let Some(log) = &self.generation_log {
             root.write_atomic(layout::GENERATION_LOG_FILE, log)?;
         }
-        if let Some(thumbnail) = &self.thumbnail {
-            root.write_atomic(layout::THUMBNAIL_FILE, thumbnail)?;
+        match &self.thumbnail {
+            ThumbnailUpdate::Preserve => {}
+            ThumbnailUpdate::Replace(thumbnail) => {
+                root.write_atomic(layout::THUMBNAIL_FILE, thumbnail)?;
+            }
+            ThumbnailUpdate::Remove => root.remove_optional_component(layout::THUMBNAIL_FILE)?,
         }
         Ok(())
     }
@@ -846,6 +862,24 @@ mod tests {
         );
         assert_eq!(fs::read(target.join("media/clip.bin")).unwrap(), b"media");
         assert_eq!(fs::read(target.join("thumbnail.jpg")).unwrap(), b"cover");
+    }
+
+    #[test]
+    fn explicit_thumbnail_removal_deletes_only_the_retained_optional_component() {
+        let tmp = TmpDir::new("remove-thumbnail");
+        let target = tmp.path().join("Project.opentake");
+        let mut project = Project::new(&target);
+        project.thumbnail = ThumbnailUpdate::Replace(b"cover".to_vec());
+        project.save().unwrap();
+        fs::write(target.join("keep.bin"), b"keep").unwrap();
+
+        project.thumbnail = ThumbnailUpdate::Remove;
+        project.save().expect("thumbnail removal is a valid save");
+
+        assert!(!target.join("thumbnail.jpg").exists());
+        assert_eq!(fs::read(target.join("keep.bin")).unwrap(), b"keep");
+        assert!(target.join("project.json").is_file());
+        assert!(target.join("media.json").is_file());
     }
 
     #[test]

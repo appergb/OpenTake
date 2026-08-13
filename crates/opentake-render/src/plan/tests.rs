@@ -417,6 +417,66 @@ fn clear_color_is_opaque_black() {
     assert!(fp.draws.is_empty());
 }
 
+#[test]
+fn representative_frame_uses_render_plan_order_and_skips_transparent_candidates() {
+    let mut transparent_early = video_clip("transparent-early", 0, 20);
+    transparent_early.opacity = 0.0;
+    let visible_late = video_clip("visible-late", 100, 20);
+    let mut timeline = Timeline::new();
+    let mut track = Track::new("video", ClipType::Video);
+    // Persisted clip order is deliberately not timeline order.
+    track.clips = vec![visible_late, transparent_early];
+    timeline.tracks.push(track);
+
+    let plan = build_render_plan(&timeline, RS, &TestMetrics::default());
+
+    assert_eq!(plan.representative_frame(&timeline), Some(109));
+}
+
+#[test]
+fn representative_frame_uses_render_plan_transition_adjacency_with_other_layers_present() {
+    let mut outgoing = video_clip("outgoing", 0, 30);
+    outgoing.transition_out = Some(Transition {
+        from_clip_id: "outgoing".into(),
+        to_clip_id: "incoming".into(),
+        kind: TransitionKind::CrossDissolve,
+        duration_frames: 10,
+    });
+    let incoming = video_clip("incoming", 30, 30);
+    let mut background = Track::new("background", ClipType::Video);
+    // Deliberately unsorted persisted order: the plan owns adjacency.
+    background.clips = vec![incoming, outgoing];
+    let mut overlay = Track::new("overlay", ClipType::Video);
+    overlay.clips.push(video_clip("overlay", 20, 12));
+    let mut timeline = Timeline::new();
+    timeline.tracks = vec![overlay, background];
+
+    let plan = build_render_plan(&timeline, RS, &TestMetrics::default());
+
+    assert_eq!(plan.representative_frame(&timeline), Some(25));
+    assert_eq!(plan.frame(&timeline, 25).draws.len(), 3);
+}
+
+#[test]
+fn representative_frame_ignores_empty_text_and_degenerate_visual_boxes() {
+    let mut empty_text = Clip::new("empty-text", "", 0, 30);
+    empty_text.media_type = ClipType::Text;
+    empty_text.text_content = Some("   ".into());
+    empty_text.text_style = Some(opentake_domain::TextStyle::default());
+    let mut zero_box = video_clip("zero-box", 0, 30);
+    zero_box.transform.width = 0.0;
+    let mut text_track = Track::new("text", ClipType::Text);
+    text_track.clips.push(empty_text);
+    let mut video_track = Track::new("video", ClipType::Video);
+    video_track.clips.push(zero_box);
+    let mut timeline = Timeline::new();
+    timeline.tracks = vec![text_track, video_track];
+
+    let plan = build_render_plan(&timeline, RS, &TestMetrics::default());
+
+    assert_eq!(plan.representative_frame(&timeline), None);
+}
+
 // --- Source frame index (SPEC §2.5, upstream insertClip L301-343) ---
 
 #[test]
