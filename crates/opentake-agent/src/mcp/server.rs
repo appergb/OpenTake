@@ -81,11 +81,14 @@ enum DispatchAuthority {
 }
 
 impl DispatchAuthority {
-    fn try_enter(&self) -> Result<Option<DispatchPermit>, McpError> {
+    fn try_enter(
+        &self,
+        request_cancel: opentake_media::MediaCancelToken,
+    ) -> Result<Option<DispatchPermit>, McpError> {
         match self {
             Self::Direct => Ok(None),
             Self::Gated { activity, .. } => activity
-                .try_enter()
+                .try_enter(request_cancel)
                 .map(Some)
                 .ok_or_else(turn_inactive_error),
         }
@@ -123,6 +126,7 @@ struct DispatchActivity {
 struct DispatchActivityState {
     accepting: bool,
     active: usize,
+    request_cancellations: Vec<opentake_media::MediaCancelToken>,
 }
 
 impl DispatchActivity {
@@ -131,12 +135,16 @@ impl DispatchActivity {
             state: Mutex::new(DispatchActivityState {
                 accepting: true,
                 active: 0,
+                request_cancellations: Vec::new(),
             }),
             changed: tokio::sync::Notify::new(),
         })
     }
 
-    fn try_enter(self: &Arc<Self>) -> Option<DispatchPermit> {
+    fn try_enter(
+        self: &Arc<Self>,
+        request_cancel: opentake_media::MediaCancelToken,
+    ) -> Option<DispatchPermit> {
         let mut state = self
             .state
             .lock()
@@ -145,8 +153,10 @@ impl DispatchActivity {
             return None;
         }
         state.active = state.active.saturating_add(1);
+        state.request_cancellations.push(request_cancel.clone());
         Some(DispatchPermit {
             activity: self.clone(),
+            request_cancel,
         })
     }
 
@@ -156,6 +166,24 @@ impl DispatchActivity {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.accepting = false;
+        if state.active == 0 {
+            self.changed.notify_one();
+        }
+    }
+
+    /// Stop admission and synchronously cancel every admitted request-local
+    /// worker. This is independent of the host's optional whole-turn
+    /// cancellation hook, so managed endpoints drain even for gates that leave
+    /// that hook at its no-op default.
+    fn stop_and_cancel(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.accepting = false;
+        for request_cancel in &state.request_cancellations {
+            request_cancel.cancel();
+        }
         if state.active == 0 {
             self.changed.notify_one();
         }
@@ -187,6 +215,7 @@ impl DispatchActivity {
 
 struct DispatchPermit {
     activity: Arc<DispatchActivity>,
+    request_cancel: opentake_media::MediaCancelToken,
 }
 
 impl Drop for DispatchPermit {
@@ -197,6 +226,13 @@ impl Drop for DispatchPermit {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.active = state.active.saturating_sub(1);
+        if let Some(index) = state
+            .request_cancellations
+            .iter()
+            .position(|tracked| tracked.same_instance(&self.request_cancel))
+        {
+            state.request_cancellations.swap_remove(index);
+        }
         if state.active == 0 {
             self.activity.changed.notify_one();
         }
@@ -433,10 +469,10 @@ impl McpServer {
         let admission_permit = self
             .admission
             .try_enter(dispatch_admission_class(&name, &args))?;
-        let permit = self.authority.try_enter()?;
+        let cancel = opentake_media::MediaCancelToken::new();
+        let permit = self.authority.try_enter(cancel.clone())?;
         let dispatcher = self.dispatcher.clone();
         let authority = self.authority.clone();
-        let cancel = opentake_media::MediaCancelToken::new();
         let worker_cancel = cancel.clone();
         let worker_authority = authority.clone();
         let mut worker = tokio::task::spawn_blocking(move || {
@@ -1164,7 +1200,7 @@ impl ManagedMcpEndpoint {
     /// Stop admission and transport sessions. Call [`Self::wait`] afterwards to
     /// wait for admitted blocking work and the listener task to finish.
     pub fn shutdown(&self) {
-        self.activity.stop_accepting();
+        self.activity.stop_and_cancel();
         self.cancel_gate.request_cancel();
         self.shutdown.cancel();
     }
@@ -1202,7 +1238,59 @@ impl Drop for ManagedMcpEndpoint {
         }
         self.shutdown();
         if let Some(join) = self.join.take() {
-            join.abort();
+            reap_managed_listener(self.activity.clone(), join);
+        }
+    }
+}
+
+async fn drain_managed_listener(
+    activity: Arc<DispatchActivity>,
+    join: tokio::task::JoinHandle<std::io::Result<()>>,
+) {
+    activity.wait_zero().await;
+    if let Err(error) = join.await {
+        tracing::error!(
+            target: "opentake::mcp::private",
+            task_cancelled = error.is_cancelled(),
+            task_panic = error.is_panic(),
+            "managed MCP listener reaper task failed"
+        );
+    }
+}
+
+/// Preserve the managed drain invariant even when its owner is dropped from a
+/// synchronous context after the originating Tokio runtime has ended.
+fn reap_managed_listener(
+    activity: Arc<DispatchActivity>,
+    join: tokio::task::JoinHandle<std::io::Result<()>>,
+) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            handle.spawn(drain_managed_listener(activity, join));
+        }
+        Err(_) => {
+            let spawn = std::thread::Builder::new()
+                .name("opentake-mcp-reaper".to_owned())
+                .spawn(move || {
+                    match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(runtime) => runtime.block_on(drain_managed_listener(activity, join)),
+                        Err(error) => tracing::error!(
+                            target: "opentake::mcp::private",
+                            %error,
+                            "could not start managed MCP listener reaper runtime"
+                        ),
+                    }
+                });
+            if let Err(error) = spawn {
+                tracing::error!(
+                    target: "opentake::mcp::private",
+                    %error,
+                    "could not start managed MCP listener reaper thread"
+                );
+            }
         }
     }
 }
@@ -1606,6 +1694,54 @@ mod tests {
         }
     }
 
+    struct RequestTokenOnlyGate {
+        entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    }
+
+    impl RequestTokenOnlyGate {
+        fn new(entered: tokio::sync::oneshot::Sender<()>) -> Self {
+            Self {
+                entered: Mutex::new(Some(entered)),
+            }
+        }
+    }
+
+    impl ChatTurnGate for RequestTokenOnlyGate {
+        fn timeline(&self, dispatcher: &Dispatcher) -> Option<Timeline> {
+            Some(dispatcher.timeline())
+        }
+
+        fn dispatch(
+            &self,
+            _dispatcher: &Dispatcher,
+            _name: &str,
+            _args: Value,
+        ) -> Option<ToolResult> {
+            panic!("managed requests must use the request-local cancellation path")
+        }
+
+        fn dispatch_cancellable(
+            &self,
+            _dispatcher: &Dispatcher,
+            _name: &str,
+            _args: Value,
+            request_cancel: &opentake_media::MediaCancelToken,
+        ) -> Option<ToolResult> {
+            if let Some(entered) = self
+                .entered
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
+                let _ = entered.send(());
+            }
+            while !request_cancel.is_cancelled() {
+                std::thread::yield_now();
+            }
+            Some(ToolResult::ok("request cancelled"))
+        }
+    }
+
     struct RecordingBlockingGate {
         blocked_name: Option<&'static str>,
         entered: tokio::sync::mpsc::UnboundedSender<String>,
@@ -1986,10 +2122,14 @@ mod tests {
     #[tokio::test]
     async fn stopping_admission_rejects_new_calls_and_waits_for_active_permit() {
         let activity = DispatchActivity::new();
-        let permit = activity.try_enter().expect("first dispatch admitted");
+        let permit = activity
+            .try_enter(opentake_media::MediaCancelToken::new())
+            .expect("first dispatch admitted");
         activity.stop_accepting();
         assert!(
-            activity.try_enter().is_none(),
+            activity
+                .try_enter(opentake_media::MediaCancelToken::new())
+                .is_none(),
             "new dispatch must be rejected"
         );
 
@@ -2614,6 +2754,99 @@ mod tests {
             .expect("managed endpoint task joined")
             .expect("stop managed endpoint");
         assert!(tokio::net::TcpStream::connect(addr).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn managed_shutdown_cancels_request_local_workers_when_gate_cancel_is_noop() {
+        let token = "managed-request-token-credential";
+        let registry = Arc::new(RwLock::new(PluginRegistry::with_builtins()));
+        let dispatcher = Arc::new(Dispatcher::new(
+            Arc::new(TestHandle::new()),
+            registry.clone(),
+        ));
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let gate = Arc::new(RequestTokenOnlyGate::new(entered_tx));
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind request-token managed listener");
+        let endpoint = bind_managed_gated_on(
+            listener,
+            dispatcher,
+            registry,
+            gate,
+            Arc::new(TestBearerAuthorizer::with_credential(token, "external", 1)),
+        )
+        .await
+        .expect("bind managed endpoint");
+        let client = reqwest::Client::new();
+        let url = format!("http://{}/mcp", endpoint.addr());
+        let initialized = client
+            .post(&url)
+            .bearer_auth(token)
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .json(&initialize_body())
+            .send()
+            .await
+            .expect("initialize request-token session");
+        let session = initialized
+            .headers()
+            .get("mcp-session-id")
+            .expect("stateful request-token session")
+            .clone();
+        let call_client = client.clone();
+        let call_url = url.clone();
+        let call = tokio::spawn(async move {
+            call_client
+                .post(call_url)
+                .bearer_auth(token)
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .header("mcp-session-id", session)
+                .header("mcp-protocol-version", "2025-06-18")
+                .json(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": { "name": "get_timeline", "arguments": {} }
+                }))
+                .send()
+                .await
+        });
+        entered_rx
+            .await
+            .expect("request-local worker entered no-op gate");
+
+        endpoint.shutdown();
+        tokio::time::timeout(std::time::Duration::from_secs(5), endpoint.wait())
+            .await
+            .expect("managed shutdown must not wait for a no-op gate")
+            .expect("managed endpoint stopped");
+        let response = call
+            .await
+            .expect("request-local call joined")
+            .expect("request-local call completed");
+        assert!(response.status().is_success());
+    }
+
+    #[test]
+    fn dropping_managed_endpoint_after_its_runtime_stops_does_not_panic() {
+        let endpoint = {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build endpoint runtime");
+            runtime.block_on(async {
+                bind_managed_test_endpoint(Arc::new(TestBearerAuthorizer::with_credential(
+                    "managed-drop-credential",
+                    "external",
+                    1,
+                )))
+                .await
+            })
+        };
+
+        drop(endpoint);
     }
 
     #[tokio::test]
