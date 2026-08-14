@@ -69,6 +69,29 @@ function backend(): MotionStudioBackend {
       diagnostics: [],
     })),
     cancelPreview: vi.fn(async () => true),
+    publish: vi.fn(async () => ({
+      clipId: "published-clip",
+      assetId: "published-asset",
+      contentHash: "f".repeat(64),
+      actionName: "Add Motion Graphic",
+      sourceDocument: {
+        documentId: documentFixture.summary.id,
+        revisionHash: documentFixture.summary.revisionHash,
+      },
+      output: {
+        renderer: "opentake-motion-studio",
+        rendererVersion: "1.0.0",
+        outputFile: "output.mp4",
+        fps: 30,
+        width: 1920,
+        height: 1080,
+        durationFrames: 90,
+        durationSeconds: 3,
+        contentHash: "f".repeat(64),
+      },
+    })),
+    cancelPublish: vi.fn(async () => true),
+    onProgress: vi.fn(async () => () => {}),
   } as MotionStudioBackend;
 }
 
@@ -78,7 +101,7 @@ describe("Motion Studio authoring workspace", () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
-    useEditorUiStore.setState({ view: "motion" });
+    useEditorUiStore.setState({ view: "motion", selectedClipIds: new Set() });
     useProjectStore.setState({ projectEpoch: 1, projectPath: "/tmp/A.opentake" });
     container = document.createElement("div");
     document.body.append(container);
@@ -245,5 +268,77 @@ describe("Motion Studio authoring workspace", () => {
 
     cancellation.resolve(true);
     await act(async () => vi.waitFor(() => expect(motionBackend.preview).toHaveBeenCalledTimes(2)));
+  });
+
+  it("publishes the exact revision then navigates to and selects the committed clip", async () => {
+    const motionBackend = backend();
+    const store = createMotionStudioStore(motionBackend);
+    await act(async () => root.render(<MotionStudio store={store} />));
+    await act(async () => vi.waitFor(() => expect(store.getState().previewPhase).toBe("ready")));
+
+    const publish = container.querySelector<HTMLButtonElement>('[data-motion-publish="true"]');
+    expect(publish).not.toBeNull();
+    await act(async () => publish!.click());
+    await act(async () => vi.waitFor(() => expect(store.getState().publishPhase).toBe("complete")));
+
+    expect(motionBackend.publish).toHaveBeenCalledOnce();
+    expect(useEditorUiStore.getState().view).toBe("editor");
+    expect(useEditorUiStore.getState().selectedClipIds).toEqual(new Set(["published-clip"]));
+  });
+
+  it("shows exact completed and total render frames while publishing", async () => {
+    const motionBackend = backend();
+    const store = createMotionStudioStore(motionBackend);
+    await act(async () => root.render(<MotionStudio store={store} />));
+    await act(async () => vi.waitFor(() => expect(store.getState().previewPhase).toBe("ready")));
+
+    await act(async () => store.setState({
+      publishPhase: "rendering",
+      publishFrameProgress: { done: 27, total: 90 },
+    }));
+
+    expect(container.textContent).toContain("27");
+    expect(container.textContent).toContain("90");
+  });
+
+  it("keeps a later Home navigation when publishing completes after Motion is hidden", async () => {
+    const completion = deferred<Awaited<ReturnType<MotionStudioBackend["publish"]>>>();
+    const motionBackend = backend();
+    vi.mocked(motionBackend.publish).mockImplementation(() => completion.promise);
+    const store = createMotionStudioStore(motionBackend);
+    await act(async () => root.render(<MotionStudio store={store} />));
+    await act(async () => vi.waitFor(() => expect(store.getState().previewPhase).toBe("ready")));
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[data-motion-publish="true"]')!.click();
+    });
+    await act(async () => vi.waitFor(() => expect(motionBackend.publish).toHaveBeenCalledOnce()));
+    await act(async () => useEditorUiStore.getState().setView("home"));
+    completion.resolve((await backend().publish({} as never)));
+    await act(async () => vi.waitFor(() => expect(store.getState().publishPhase).toBe("complete")));
+
+    expect(useEditorUiStore.getState().view).toBe("home");
+    expect(useEditorUiStore.getState().selectedClipIds).not.toContain("published-clip");
+  });
+
+  it("does not navigate after an unmounted Motion workspace receives a late publish commit", async () => {
+    const completion = deferred<Awaited<ReturnType<MotionStudioBackend["publish"]>>>();
+    const motionBackend = backend();
+    vi.mocked(motionBackend.publish).mockImplementation(() => completion.promise);
+    const store = createMotionStudioStore(motionBackend);
+    await act(async () => root.render(<MotionStudio store={store} />));
+    await act(async () => vi.waitFor(() => expect(store.getState().previewPhase).toBe("ready")));
+
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('[data-motion-publish="true"]')!.click();
+    });
+    await act(async () => vi.waitFor(() => expect(motionBackend.publish).toHaveBeenCalledOnce()));
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    completion.resolve((await backend().publish({} as never)));
+    await act(async () => vi.waitFor(() => expect(store.getState().publishPhase).toBe("complete")));
+
+    expect(useEditorUiStore.getState().view).toBe("motion");
+    expect(useEditorUiStore.getState().selectedClipIds).not.toContain("published-clip");
   });
 });

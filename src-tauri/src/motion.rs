@@ -15,9 +15,11 @@ use std::time::Duration;
 use base64::Engine as _;
 use opentake_agent::mcp::motion::{
     AddMotionRequest, EditMotionRequest, MotionBridge, MotionBridgeError, MotionBridgeErrorKind,
-    MotionCommit, MotionOutputMetadata, MotionSourceRequest,
+    MotionCommit, MotionDocumentReference, MotionOutputMetadata, MotionSourceRequest,
 };
-use opentake_core::{AppCore, MotionPlacement, ProbedMedia, ProjectAssetAuthority};
+use opentake_core::{
+    AppCore, DeferredCoreEvents, MotionPlacement, ProbedMedia, ProjectAssetAuthority,
+};
 use opentake_domain::{GenerationInput, GenerationJobStatus};
 use opentake_motion::{
     limits, read_single_preview_png, HeadlessChromiumRenderer, MotionCache,
@@ -41,10 +43,15 @@ pub struct TauriMotionBridge {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(tag = "phase", rename_all = "camelCase")]
 pub enum MotionProgress {
     Validating,
-    Rendering,
+    Rendering {
+        #[serde(rename = "doneFrames")]
+        done_frames: u32,
+        #[serde(rename = "totalFrames")]
+        total_frames: u32,
+    },
     Encoding,
     Committing,
     Complete,
@@ -192,9 +199,19 @@ pub struct MotionAddCommand {
     #[serde(default)]
     pub template_id: Option<String>,
     #[serde(default)]
+    pub document_id: Option<String>,
+    #[serde(default)]
+    pub revision_hash: Option<String>,
+    #[serde(default)]
     pub params: Map<String, Value>,
     pub start_frame: i32,
     pub duration_frames: i32,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+    #[serde(default)]
+    pub fps: Option<u32>,
     #[serde(default)]
     pub transparent: bool,
     #[serde(default)]
@@ -209,6 +226,49 @@ pub struct MotionEditCommand {
     pub code: Option<String>,
     #[serde(default)]
     pub params: Option<Map<String, Value>>,
+    #[serde(default)]
+    pub document_id: Option<String>,
+    #[serde(default)]
+    pub revision_hash: Option<String>,
+    #[serde(default)]
+    pub duration_frames: Option<i32>,
+    #[serde(default)]
+    pub width: Option<u32>,
+    #[serde(default)]
+    pub height: Option<u32>,
+    #[serde(default)]
+    pub fps: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentMotionSource {
+    pub document_id: String,
+    pub revision_hash: String,
+    pub html: String,
+    pub css: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentMotionAddRequest {
+    pub source: DocumentMotionSource,
+    pub project_authority: ProjectAssetAuthority,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub start_frame: i32,
+    pub duration_frames: i32,
+    pub track_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentMotionEditRequest {
+    pub clip_id: String,
+    pub source: DocumentMotionSource,
+    pub project_authority: ProjectAssetAuthority,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub duration_frames: i32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -286,15 +346,54 @@ pub fn motion_preview_cancel(state: State<'_, MotionCommandState>) -> bool {
 pub async fn motion_add(
     app: AppHandle,
     state: State<'_, MotionCommandState>,
+    documents: State<'_, Arc<crate::motion_documents::MotionDocumentStore>>,
     request: MotionAddCommand,
 ) -> Result<MotionCommit, String> {
-    let source = match (request.code, request.template_id) {
-        (Some(code), None) => MotionSourceRequest::Code(code),
-        (None, Some(template_id)) => MotionSourceRequest::Template {
-            template_id,
-            params: request.params,
-        },
-        _ => return Err("provide exactly one of code or templateId".into()),
+    let document_request = match (request.document_id, request.revision_hash) {
+        (Some(document_id), Some(revision_hash)) => {
+            if request.code.is_some() || request.template_id.is_some() || !request.params.is_empty()
+            {
+                return Err(
+                    "documentId/revisionHash cannot be combined with code, templateId, or params"
+                        .into(),
+                );
+            }
+            if request.transparent {
+                return Err("Motion Studio publishing currently requires opaque MP4 output".into());
+            }
+            Some((
+                documents.capture_authority()?,
+                document_id,
+                revision_hash,
+                request
+                    .width
+                    .ok_or_else(|| "document publish requires width".to_string())?,
+                request
+                    .height
+                    .ok_or_else(|| "document publish requires height".to_string())?,
+                request
+                    .fps
+                    .ok_or_else(|| "document publish requires fps".to_string())?,
+            ))
+        }
+        (None, None) => None,
+        _ => return Err("documentId and revisionHash must be provided together".into()),
+    };
+    let legacy_source = if document_request.is_none() {
+        Some(match (request.code, request.template_id) {
+            (Some(code), None) => MotionSourceRequest::Code(code),
+            (None, Some(template_id)) => MotionSourceRequest::Template {
+                template_id,
+                params: request.params,
+            },
+            _ => {
+                return Err(
+                    "provide exactly one of code, templateId, or documentId/revisionHash".into(),
+                )
+            }
+        })
+    } else {
+        None
     };
     let cancel = state.begin()?;
     let bridge = state
@@ -304,17 +403,41 @@ pub async fn motion_add(
         .with_progress_callback(Arc::new(move |phase| {
             let _ = app.emit("motion_progress", phase);
         }));
+    let documents = Arc::clone(documents.inner());
     let worker = tauri::async_runtime::spawn_blocking(move || {
-        bridge.add(
-            AddMotionRequest {
-                source,
-                start_frame: request.start_frame,
-                duration_frames: request.duration_frames,
-                transparent: request.transparent,
-                track_index: request.track_index,
-            },
-            &cancel,
-        )
+        if let Some((authority, document_id, revision_hash, width, height, fps)) = document_request
+        {
+            let source = resolve_document_motion_source(
+                &documents,
+                authority.clone(),
+                &document_id,
+                &revision_hash,
+            )?;
+            bridge.add_document(
+                DocumentMotionAddRequest {
+                    source,
+                    project_authority: authority,
+                    width,
+                    height,
+                    fps,
+                    start_frame: request.start_frame,
+                    duration_frames: request.duration_frames,
+                    track_index: request.track_index,
+                },
+                &cancel,
+            )
+        } else {
+            bridge.add(
+                AddMotionRequest {
+                    source: legacy_source.expect("legacy source validated before worker"),
+                    start_frame: request.start_frame,
+                    duration_frames: request.duration_frames,
+                    transparent: request.transparent,
+                    track_index: request.track_index,
+                },
+                &cancel,
+            )
+        }
     })
     .await;
     state.finish();
@@ -326,8 +449,37 @@ pub async fn motion_add(
 pub async fn motion_edit(
     app: AppHandle,
     state: State<'_, MotionCommandState>,
+    documents: State<'_, Arc<crate::motion_documents::MotionDocumentStore>>,
     request: MotionEditCommand,
 ) -> Result<MotionCommit, String> {
+    let document_request = match (request.document_id, request.revision_hash) {
+        (Some(document_id), Some(revision_hash)) => {
+            if request.code.is_some() || request.params.is_some() {
+                return Err(
+                    "documentId/revisionHash cannot be combined with code or params".into(),
+                );
+            }
+            Some((
+                documents.capture_authority()?,
+                document_id,
+                revision_hash,
+                request
+                    .width
+                    .ok_or_else(|| "document edit requires width".to_string())?,
+                request
+                    .height
+                    .ok_or_else(|| "document edit requires height".to_string())?,
+                request
+                    .fps
+                    .ok_or_else(|| "document edit requires fps".to_string())?,
+                request
+                    .duration_frames
+                    .ok_or_else(|| "document edit requires durationFrames".to_string())?,
+            ))
+        }
+        (None, None) => None,
+        _ => return Err("documentId and revisionHash must be provided together".into()),
+    };
     let cancel = state.begin()?;
     let bridge = state
         .bridge
@@ -336,15 +488,39 @@ pub async fn motion_edit(
         .with_progress_callback(Arc::new(move |phase| {
             let _ = app.emit("motion_progress", phase);
         }));
+    let documents = Arc::clone(documents.inner());
     let worker = tauri::async_runtime::spawn_blocking(move || {
-        bridge.edit(
-            EditMotionRequest {
-                clip_id: request.clip_id,
-                code: request.code,
-                params: request.params,
-            },
-            &cancel,
-        )
+        if let Some((authority, document_id, revision_hash, width, height, fps, duration_frames)) =
+            document_request
+        {
+            let source = resolve_document_motion_source(
+                &documents,
+                authority.clone(),
+                &document_id,
+                &revision_hash,
+            )?;
+            bridge.edit_document(
+                DocumentMotionEditRequest {
+                    clip_id: request.clip_id,
+                    source,
+                    project_authority: authority,
+                    width,
+                    height,
+                    fps,
+                    duration_frames,
+                },
+                &cancel,
+            )
+        } else {
+            bridge.edit(
+                EditMotionRequest {
+                    clip_id: request.clip_id,
+                    code: request.code,
+                    params: request.params,
+                },
+                &cancel,
+            )
+        }
     })
     .await;
     state.finish();
@@ -455,6 +631,45 @@ fn prepare_document_preview(
     Ok((render_request, document.summary.revision_hash))
 }
 
+fn resolve_document_motion_source(
+    documents: &crate::motion_documents::MotionDocumentStore,
+    authority: ProjectAssetAuthority,
+    document_id: &str,
+    revision_hash: &str,
+) -> Result<DocumentMotionSource, MotionBridgeError> {
+    let document = documents
+        .read_for_authority(authority, document_id)
+        .map_err(|_| {
+            MotionBridgeError::new(
+                MotionBridgeErrorKind::ResourceNotFound,
+                "Motion Studio document could not be read",
+            )
+        })?;
+    if document.summary.revision_hash != revision_hash {
+        return Err(MotionBridgeError::new(
+            MotionBridgeErrorKind::InvalidArguments,
+            "Motion Studio document changed; reload before publishing",
+        ));
+    }
+    MotionDocumentSource::new(document.html.clone(), document.css.clone())
+        .inline_document()
+        .map_err(|diagnostic| {
+            MotionBridgeError::new(
+                MotionBridgeErrorKind::InvalidArguments,
+                format!(
+                    "Motion Studio source is invalid at {}:{}: {}",
+                    diagnostic.line, diagnostic.column, diagnostic.message
+                ),
+            )
+        })?;
+    Ok(DocumentMotionSource {
+        document_id: document.summary.id,
+        revision_hash: document.summary.revision_hash,
+        html: document.html,
+        css: document.css,
+    })
+}
+
 fn preview_source_error(error: MotionSourceDiagnostic) -> MotionPreviewError {
     MotionPreviewError {
         message: "Motion Studio source contains unsupported active content.".to_string(),
@@ -508,6 +723,20 @@ enum StoredMotionSource {
         #[serde(default)]
         params: Map<String, Value>,
     },
+    Document {
+        document_id: String,
+        revision_hash: String,
+    },
+}
+
+struct PreparedMotionCommit {
+    stored_source: StoredMotionSource,
+    document_source: Option<DocumentMotionSource>,
+    expected_authority: Option<ProjectAssetAuthority>,
+    duration_frames: i32,
+    transparent: bool,
+    render_dimensions: Option<(u32, u32, u32)>,
+    placement: MotionPlacement,
 }
 
 impl TauriMotionBridge {
@@ -534,11 +763,135 @@ impl TauriMotionBridge {
         self
     }
 
+    pub fn add_document(
+        &self,
+        request: DocumentMotionAddRequest,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<MotionCommit, MotionBridgeError> {
+        validate_document_source_identity(&request.source)?;
+        validate_document_render_dimensions(request.width, request.height)?;
+        if request.start_frame < 0 {
+            return Err(MotionBridgeError::new(
+                MotionBridgeErrorKind::InvalidArguments,
+                "startFrame must be non-negative",
+            ));
+        }
+        let snapshot = self.core.runtime_snapshot();
+        let timeline_duration_frames =
+            timeline_duration_frames(request.duration_frames, request.fps, snapshot.timeline.fps)?;
+        if let Some(track_index) = request.track_index {
+            let Some(track) = snapshot.timeline.tracks.get(track_index) else {
+                return Err(MotionBridgeError::new(
+                    MotionBridgeErrorKind::InvalidArguments,
+                    "trackIndex is out of range",
+                ));
+            };
+            if track.kind == opentake_domain::ClipType::Audio {
+                return Err(MotionBridgeError::new(
+                    MotionBridgeErrorKind::InvalidArguments,
+                    "motion graphics require a visual track",
+                ));
+            }
+        }
+        let stored = StoredMotionSource::Document {
+            document_id: request.source.document_id.clone(),
+            revision_hash: request.source.revision_hash.clone(),
+        };
+        self.commit(
+            PreparedMotionCommit {
+                stored_source: stored,
+                document_source: Some(request.source),
+                expected_authority: Some(request.project_authority),
+                duration_frames: request.duration_frames,
+                transparent: false,
+                render_dimensions: Some((request.width, request.height, request.fps)),
+                placement: MotionPlacement::Add {
+                    start_frame: request.start_frame,
+                    duration_frames: timeline_duration_frames,
+                    track_index: request.track_index,
+                },
+            },
+            cancel,
+        )
+    }
+
+    pub fn edit_document(
+        &self,
+        request: DocumentMotionEditRequest,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<MotionCommit, MotionBridgeError> {
+        validate_document_source_identity(&request.source)?;
+        validate_document_render_dimensions(request.width, request.height)?;
+        let snapshot = self.core.runtime_snapshot();
+        let clip = snapshot
+            .timeline
+            .tracks
+            .iter()
+            .flat_map(|track| &track.clips)
+            .find(|clip| clip.id == request.clip_id)
+            .ok_or_else(|| {
+                MotionBridgeError::new(
+                    MotionBridgeErrorKind::ResourceNotFound,
+                    "motion clip was not found",
+                )
+            })?;
+        let entry = snapshot
+            .media
+            .entries
+            .iter()
+            .find(|entry| entry.id == clip.media_ref)
+            .ok_or_else(|| {
+                MotionBridgeError::new(
+                    MotionBridgeErrorKind::ResourceNotFound,
+                    "motion media was not found",
+                )
+            })?;
+        let timeline_duration_frames =
+            timeline_duration_frames(request.duration_frames, request.fps, snapshot.timeline.fps)?;
+        if timeline_duration_frames != clip.duration_frames {
+            return Err(MotionBridgeError::new(
+                MotionBridgeErrorKind::InvalidArguments,
+                "Motion Studio replacement duration must match the existing clip",
+            ));
+        }
+        if entry
+            .generation_input
+            .as_ref()
+            .filter(|input| input.provider.as_deref() == Some(MOTION_PROVIDER))
+            .is_none()
+        {
+            return Err(MotionBridgeError::new(
+                MotionBridgeErrorKind::InvalidArguments,
+                "the selected clip is not an OpenTake motion graphic",
+            ));
+        }
+        let stored = StoredMotionSource::Document {
+            document_id: request.source.document_id.clone(),
+            revision_hash: request.source.revision_hash.clone(),
+        };
+        self.commit(
+            PreparedMotionCommit {
+                stored_source: stored,
+                document_source: Some(request.source),
+                expected_authority: Some(request.project_authority),
+                duration_frames: request.duration_frames,
+                transparent: false,
+                render_dimensions: Some((request.width, request.height, request.fps)),
+                placement: MotionPlacement::Replace {
+                    clip_id: request.clip_id,
+                },
+            },
+            cancel,
+        )
+    }
+
     fn render_and_encode(
         &self,
         stored_source: &StoredMotionSource,
+        document_source: Option<&DocumentMotionSource>,
         duration_frames: i32,
         transparent: bool,
+        render_dimensions: Option<(u32, u32, u32)>,
         cancel: &opentake_media::MediaCancelToken,
     ) -> Result<(tempfile::TempDir, std::path::PathBuf, ProbedMedia, String), MotionBridgeError>
     {
@@ -562,29 +915,38 @@ impl TauriMotionBridge {
                 "durationFrames must be at least 1",
             ));
         }
-        let fps = u32::try_from(snapshot.timeline.fps.max(1)).unwrap_or(30);
-        let width = u32::try_from(snapshot.timeline.width.max(2)).map_err(|_| {
-            MotionBridgeError::new(
-                MotionBridgeErrorKind::InvalidArguments,
-                "timeline width is invalid",
+        let (width, height, fps) = render_dimensions.unwrap_or_else(|| {
+            (
+                u32::try_from(snapshot.timeline.width.max(2)).unwrap_or(2),
+                u32::try_from(snapshot.timeline.height.max(2)).unwrap_or(2),
+                u32::try_from(snapshot.timeline.fps.max(1)).unwrap_or(30),
             )
-        })?;
-        let height = u32::try_from(snapshot.timeline.height.max(2)).map_err(|_| {
-            MotionBridgeError::new(
-                MotionBridgeErrorKind::InvalidArguments,
-                "timeline height is invalid",
-            )
-        })?;
+        });
         let frames = u32::try_from(duration_frames).map_err(|_| {
             MotionBridgeError::new(
                 MotionBridgeErrorKind::InvalidArguments,
                 "durationFrames is invalid",
             )
         })?;
-        let html = source_document(stored_source, fps, width, height, frames)?;
+        let html = if let Some(document) = document_source {
+            MotionDocumentSource::new(document.html.clone(), document.css.clone())
+                .inline_document()
+                .map_err(|diagnostic| {
+                    MotionBridgeError::new(
+                        MotionBridgeErrorKind::InvalidArguments,
+                        format!(
+                            "Motion Studio source is invalid at {}:{}: {}",
+                            diagnostic.line, diagnostic.column, diagnostic.message
+                        ),
+                    )
+                })?
+        } else {
+            source_document(stored_source, fps, width, height, frames)?
+        };
         let request =
             MotionRenderRequest::new(MotionSource::code(html), fps, frames, width, height)
                 .with_transparent(false);
+        request.validate().map_err(map_motion_error)?;
         let render_cancel = MotionCancellationToken::new();
         if cancel.is_cancelled() {
             render_cancel.cancel();
@@ -602,10 +964,23 @@ impl TauriMotionBridge {
                 std::thread::sleep(Duration::from_millis(10));
             }
         });
-        (self.progress)(MotionProgress::Rendering);
+        (self.progress)(MotionProgress::Rendering {
+            done_frames: 0,
+            total_frames: frames,
+        });
+        let progress = Arc::clone(&self.progress);
         let rendered = self
             .renderer
-            .render_with_cancellation(&request, &render_cancel)
+            .render_with_cancellation_and_progress(
+                &request,
+                &render_cancel,
+                &move |done_frames, total_frames| {
+                    progress(MotionProgress::Rendering {
+                        done_frames,
+                        total_frames,
+                    });
+                },
+            )
             .map_err(map_motion_error);
         done.store(true, Ordering::Release);
         let _ = monitor.join();
@@ -656,27 +1031,53 @@ impl TauriMotionBridge {
 
     fn commit(
         &self,
-        stored_source: StoredMotionSource,
-        duration_frames: i32,
-        transparent: bool,
-        placement: MotionPlacement,
+        request: PreparedMotionCommit,
         cancel: &opentake_media::MediaCancelToken,
     ) -> Result<MotionCommit, MotionBridgeError> {
+        let PreparedMotionCommit {
+            stored_source,
+            document_source,
+            expected_authority,
+            duration_frames,
+            transparent,
+            render_dimensions,
+            placement,
+        } = request;
         let snapshot = self.core.runtime_snapshot();
+        if expected_authority.as_ref().is_some_and(|authority| {
+            snapshot.project_epoch != authority.project_epoch
+                || snapshot.project_dir.as_ref() != Some(&authority.project_path)
+                || !self.core.project_asset_authority_matches(authority)
+        }) {
+            return Err(MotionBridgeError::new(
+                MotionBridgeErrorKind::RenderFailed,
+                "project changed before Motion Studio publishing began",
+            ));
+        }
         let project_dir = snapshot.project_dir.clone().ok_or_else(|| {
             MotionBridgeError::new(
                 MotionBridgeErrorKind::InvalidArguments,
                 "Save the project before rendering a motion graphic.",
             )
         })?;
-        let (_temporary_output, output, probe, content_hash) =
-            self.render_and_encode(&stored_source, duration_frames, transparent, cancel)?;
+        ensure_motion_active(cancel)?;
+        let (_temporary_output, output, probe, content_hash) = self.render_and_encode(
+            &stored_source,
+            document_source.as_ref(),
+            duration_frames,
+            transparent,
+            render_dimensions,
+            cancel,
+        )?;
         let motion_canvas = matches!(
             &stored_source,
             StoredMotionSource::Template { template_id, .. } if template_id == "title-card"
         );
+        let motion_document = matches!(&stored_source, StoredMotionSource::Document { .. });
         let output_metadata = MotionOutputMetadata {
-            renderer: if motion_canvas {
+            renderer: if motion_document {
+                "opentake-motion-studio".into()
+            } else if motion_canvas {
                 "motion-canvas".into()
             } else {
                 "opentake-html-fallback".into()
@@ -716,6 +1117,48 @@ impl TauriMotionBridge {
             &std::fs::read(&result_path).map_err(io_motion_error)?,
             &output_metadata,
         )?;
+        ensure_motion_active(cancel)?;
+        if expected_authority
+            .as_ref()
+            .is_some_and(|authority| !self.core.project_asset_authority_matches(authority))
+        {
+            return Err(MotionBridgeError::new(
+                MotionBridgeErrorKind::RenderFailed,
+                "project changed before Motion Studio publishing completed",
+            ));
+        }
+        let source_json = serde_json::to_string(&stored_source).map_err(|_| {
+            MotionBridgeError::new(
+                MotionBridgeErrorKind::InvalidArguments,
+                "motion source could not be persisted",
+            )
+        })?;
+        let provenance = GenerationInput {
+            prompt: source_json,
+            model: MOTION_MODEL.into(),
+            duration: duration_frames,
+            aspect_ratio: format!(
+                "{}:{}",
+                probe.width.unwrap_or(snapshot.timeline.width),
+                probe.height.unwrap_or(snapshot.timeline.height)
+            ),
+            provider: Some(MOTION_PROVIDER.into()),
+            status: Some(GenerationJobStatus::Ready),
+            ..GenerationInput::default()
+        };
+        (self.progress)(MotionProgress::Committing);
+        let publication = self.core.lock_project_bundle_publication();
+        let identity = self.core.lock_project_identity_workflow();
+        ensure_motion_active(cancel)?;
+        if expected_authority
+            .as_ref()
+            .is_some_and(|authority| !self.core.project_asset_authority_matches(authority))
+        {
+            return Err(MotionBridgeError::new(
+                MotionBridgeErrorKind::RenderFailed,
+                "project changed before Motion Studio publishing committed",
+            ));
+        }
         let project_media = crate::library::ProjectMediaCapability::open_verified(
             &self.core,
             snapshot.project_epoch,
@@ -740,23 +1183,22 @@ impl TauriMotionBridge {
                 "motion output identity changed before project commit",
             ));
         }
-        let source_json = serde_json::to_string(&stored_source).map_err(|_| {
-            MotionBridgeError::new(
-                MotionBridgeErrorKind::InvalidArguments,
-                "motion source could not be persisted",
-            )
-        })?;
-        let provenance = GenerationInput {
-            prompt: source_json,
-            model: MOTION_MODEL.into(),
-            duration: duration_frames,
-            aspect_ratio: format!("{}:{}", snapshot.timeline.width, snapshot.timeline.height),
-            provider: Some(MOTION_PROVIDER.into()),
-            status: Some(GenerationJobStatus::Ready),
-            ..GenerationInput::default()
-        };
-        (self.progress)(MotionProgress::Committing);
-        let committed = self.core.commit_motion_media_for_project(
+        project_media
+            .sync_media_directory()
+            .map_err(|error| MotionBridgeError::new(MotionBridgeErrorKind::RenderFailed, error))?;
+        ensure_motion_active(cancel)?;
+        if expected_authority
+            .as_ref()
+            .is_some_and(|authority| !self.core.project_asset_authority_matches(authority))
+        {
+            return Err(MotionBridgeError::new(
+                MotionBridgeErrorKind::RenderFailed,
+                "project changed before Motion Studio publishing committed",
+            ));
+        }
+        let mut events = DeferredCoreEvents::default();
+        let committed = self.core.commit_motion_media_for_project_deferred(
+            &publication,
             snapshot.project_epoch,
             snapshot.version,
             &project_dir,
@@ -765,6 +1207,7 @@ impl TauriMotionBridge {
             &probe,
             provenance,
             placement,
+            &mut events,
         );
         let committed = match committed {
             Ok(committed) => committed,
@@ -776,6 +1219,9 @@ impl TauriMotionBridge {
             }
         };
         published.commit();
+        drop(identity);
+        drop(publication);
+        self.core.emit_deferred(events);
         let clip_id = committed
             .edit
             .affected_clip_ids
@@ -794,8 +1240,90 @@ impl TauriMotionBridge {
             content_hash,
             action_name: committed.edit.action_name,
             output: output_metadata,
+            source_document: match stored_source {
+                StoredMotionSource::Document {
+                    document_id,
+                    revision_hash,
+                } => Some(MotionDocumentReference {
+                    document_id,
+                    revision_hash,
+                }),
+                _ => None,
+            },
         })
     }
+}
+
+fn validate_document_source_identity(
+    source: &DocumentMotionSource,
+) -> Result<(), MotionBridgeError> {
+    if source.document_id.is_empty()
+        || source.document_id.len() > 128
+        || !source
+            .document_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err(MotionBridgeError::new(
+            MotionBridgeErrorKind::InvalidArguments,
+            "Motion Studio document id is invalid",
+        ));
+    }
+    if source.revision_hash.len() != 64
+        || !source
+            .revision_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(MotionBridgeError::new(
+            MotionBridgeErrorKind::InvalidArguments,
+            "Motion Studio revision hash is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_document_render_dimensions(width: u32, height: u32) -> Result<(), MotionBridgeError> {
+    if !width.is_multiple_of(2) || !height.is_multiple_of(2) {
+        return Err(MotionBridgeError::new(
+            MotionBridgeErrorKind::InvalidArguments,
+            "Motion Studio MP4 dimensions must be even numbers",
+        ));
+    }
+    Ok(())
+}
+
+fn timeline_duration_frames(
+    source_frames: i32,
+    source_fps: u32,
+    timeline_fps: i32,
+) -> Result<i32, MotionBridgeError> {
+    if source_frames < 1 || source_fps == 0 || timeline_fps < 1 {
+        return Err(MotionBridgeError::new(
+            MotionBridgeErrorKind::InvalidArguments,
+            "Motion Studio duration and frame rates must be positive",
+        ));
+    }
+    let numerator = u64::try_from(source_frames)
+        .ok()
+        .and_then(|frames| frames.checked_mul(u64::try_from(timeline_fps).ok()?))
+        .ok_or_else(|| {
+            MotionBridgeError::new(
+                MotionBridgeErrorKind::InvalidArguments,
+                "Motion Studio timeline duration is out of range",
+            )
+        })?;
+    let rounded = numerator
+        .checked_add(u64::from(source_fps) / 2)
+        .map(|value| value / u64::from(source_fps))
+        .and_then(|frames| i32::try_from(frames.max(1)).ok())
+        .ok_or_else(|| {
+            MotionBridgeError::new(
+                MotionBridgeErrorKind::InvalidArguments,
+                "Motion Studio timeline duration is out of range",
+            )
+        })?;
+    Ok(rounded)
 }
 
 impl MotionBridge for TauriMotionBridge {
@@ -842,13 +1370,18 @@ impl MotionBridge for TauriMotionBridge {
             },
         };
         self.commit(
-            stored_source,
-            request.duration_frames,
-            request.transparent,
-            MotionPlacement::Add {
-                start_frame: request.start_frame,
+            PreparedMotionCommit {
+                stored_source,
+                document_source: None,
+                expected_authority: None,
                 duration_frames: request.duration_frames,
-                track_index: request.track_index,
+                transparent: request.transparent,
+                render_dimensions: None,
+                placement: MotionPlacement::Add {
+                    start_frame: request.start_frame,
+                    duration_frames: request.duration_frames,
+                    track_index: request.track_index,
+                },
             },
             cancel,
         )
@@ -929,13 +1462,24 @@ impl MotionBridge for TauriMotionBridge {
                     "code-authored motion edits do not accept template params",
                 ));
             }
+            (StoredMotionSource::Document { .. }, _, _) => {
+                return Err(MotionBridgeError::new(
+                    MotionBridgeErrorKind::InvalidArguments,
+                    "Motion Studio clips must be edited from an exact document revision",
+                ));
+            }
         }
         self.commit(
-            source,
-            clip.duration_frames,
-            false,
-            MotionPlacement::Replace {
-                clip_id: request.clip_id,
+            PreparedMotionCommit {
+                stored_source: source,
+                document_source: None,
+                expected_authority: None,
+                duration_frames: clip.duration_frames,
+                transparent: false,
+                render_dimensions: None,
+                placement: MotionPlacement::Replace {
+                    clip_id: request.clip_id,
+                },
             },
             cancel,
         )
@@ -970,6 +1514,23 @@ fn source_document(
             template_id,
             params,
         } => template_document(template_id, params, fps, width, height, frames),
+        StoredMotionSource::Document { .. } => Err(MotionBridgeError::new(
+            MotionBridgeErrorKind::InvalidArguments,
+            "Motion Studio document source was not resolved",
+        )),
+    }
+}
+
+fn ensure_motion_active(
+    cancel: &opentake_media::MediaCancelToken,
+) -> Result<(), MotionBridgeError> {
+    if cancel.is_cancelled() {
+        Err(MotionBridgeError::new(
+            MotionBridgeErrorKind::Cancelled,
+            "motion render cancelled",
+        ))
+    } else {
+        Ok(())
     }
 }
 
@@ -1197,6 +1758,7 @@ mod tests {
 
     fn saved_document() -> (
         tempfile::TempDir,
+        AppCore,
         crate::motion_documents::MotionDocumentStore,
         crate::motion_documents::MotionDocument,
     ) {
@@ -1205,13 +1767,13 @@ mod tests {
         let core = AppCore::new();
         core.save_project(Some(project))
             .expect("save preview fixture project");
-        let store = crate::motion_documents::MotionDocumentStore::new(core);
+        let store = crate::motion_documents::MotionDocumentStore::new(core.clone());
         let document = store
             .create(crate::motion_documents::MotionDocumentCreateRequest {
                 title: Some("片头预览".to_string()),
             })
             .expect("create preview fixture document");
-        (temp, store, document)
+        (temp, core, store, document)
     }
 
     fn output_metadata() -> MotionOutputMetadata {
@@ -1282,7 +1844,7 @@ mod tests {
 
     #[test]
     fn preview_preparation_is_bound_to_the_exact_document_revision_and_frame() {
-        let (_temp, store, document) = saved_document();
+        let (_temp, _core, store, document) = saved_document();
         let authority = store
             .capture_authority()
             .expect("capture project authority");
@@ -1318,6 +1880,140 @@ mod tests {
         assert_eq!(error.diagnostics.len(), 1);
         assert_eq!(error.diagnostics[0].line, None);
         assert_eq!(error.diagnostics[0].column, None);
+    }
+
+    #[test]
+    fn publish_source_resolution_rejects_a_stale_document_revision() {
+        let (_temp, _core, store, document) = saved_document();
+        let authority = store.capture_authority().expect("capture authority");
+        let resolved = resolve_document_motion_source(
+            &store,
+            authority.clone(),
+            &document.summary.id,
+            &document.summary.revision_hash,
+        )
+        .expect("resolve exact document revision");
+        assert_eq!(resolved.document_id, document.summary.id);
+        assert_eq!(resolved.revision_hash, document.summary.revision_hash);
+        assert!(resolved.html.contains("让创意动起来"));
+
+        let error = resolve_document_motion_source(
+            &store,
+            authority,
+            &document.summary.id,
+            &"0".repeat(64),
+        )
+        .expect_err("stale revision must never be rendered or committed");
+        assert_eq!(error.kind, MotionBridgeErrorKind::InvalidArguments);
+        assert!(error.message.contains("changed"));
+    }
+
+    #[test]
+    fn document_publish_validates_dimensions_before_starting_the_renderer() {
+        let (temp, core, store, document) = saved_document();
+        let authority = store.capture_authority().expect("capture authority");
+        let source = resolve_document_motion_source(
+            &store,
+            authority,
+            &document.summary.id,
+            &document.summary.revision_hash,
+        )
+        .unwrap();
+        let bridge = TauriMotionBridge::new(core.clone(), temp.path().join("cache"));
+        let before = core.runtime_snapshot();
+        let error = bridge
+            .add_document(
+                DocumentMotionAddRequest {
+                    source,
+                    project_authority: core.project_asset_authority().unwrap(),
+                    width: 3,
+                    height: 360,
+                    fps: 30,
+                    start_frame: 0,
+                    duration_frames: 30,
+                    track_index: None,
+                },
+                &opentake_media::MediaCancelToken::new(),
+            )
+            .expect_err("invalid dimensions must fail without renderer availability");
+        assert_eq!(error.kind, MotionBridgeErrorKind::InvalidArguments);
+        assert_eq!(core.runtime_snapshot().timeline, before.timeline);
+        assert_eq!(core.runtime_snapshot().media, before.media);
+    }
+
+    #[test]
+    fn document_duration_preserves_seconds_across_source_and_timeline_fps() {
+        assert_eq!(timeline_duration_frames(90, 30, 60).unwrap(), 180);
+        assert_eq!(timeline_duration_frames(24, 24, 30).unwrap(), 30);
+        assert_eq!(timeline_duration_frames(1, 24, 30).unwrap(), 1);
+        assert!(timeline_duration_frames(0, 30, 60).is_err());
+        assert!(timeline_duration_frames(30, 0, 60).is_err());
+    }
+
+    #[test]
+    fn document_publish_is_bound_to_the_project_captured_at_command_admission() {
+        let (temp, core, store, document) = saved_document();
+        let authority = store.capture_authority().expect("capture project A");
+        let source = resolve_document_motion_source(
+            &store,
+            authority.clone(),
+            &document.summary.id,
+            &document.summary.revision_hash,
+        )
+        .unwrap();
+        core.new_project();
+        core.save_project(Some(temp.path().join("replacement.opentake")))
+            .unwrap();
+        let replacement = core.runtime_snapshot();
+        let bridge = TauriMotionBridge::new(core.clone(), temp.path().join("cache"));
+
+        let error = bridge
+            .add_document(
+                DocumentMotionAddRequest {
+                    source,
+                    project_authority: authority,
+                    width: 640,
+                    height: 360,
+                    fps: 30,
+                    start_frame: 0,
+                    duration_frames: 30,
+                    track_index: None,
+                },
+                &opentake_media::MediaCancelToken::new(),
+            )
+            .expect_err("queued publish must not cross into a replacement project");
+        assert_eq!(error.kind, MotionBridgeErrorKind::RenderFailed);
+        assert!(error.message.contains("project changed"));
+        assert_eq!(core.runtime_snapshot().timeline, replacement.timeline);
+        assert_eq!(core.runtime_snapshot().media, replacement.media);
+    }
+
+    #[test]
+    fn ffmpeg_failure_does_not_leave_a_publishable_output() {
+        if !opentake_media::ffmpeg_status::ffmpeg_available() {
+            eprintln!("SKIP: FFmpeg unavailable");
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let frame = temp.path().join("frame_00000.png");
+        std::fs::write(&frame, b"not a PNG").unwrap();
+        let rendered = RenderedClip {
+            content_hash: "f".repeat(64),
+            frames: vec![frame],
+            fps: 30,
+            width: 64,
+            height: 36,
+            transparent: false,
+        };
+        let output = temp.path().join("output.mp4");
+        let error = encode_frames(&rendered, &output, &opentake_media::MediaCancelToken::new())
+            .expect_err("invalid renderer frames must make FFmpeg fail closed");
+        assert_eq!(error.kind, MotionBridgeErrorKind::RenderFailed);
+        assert!(error.message.contains("FFmpeg failed"));
+        assert!(
+            !output.exists() || output.metadata().unwrap().len() == 0,
+            "failed encoding must not leave a usable output"
+        );
     }
 
     #[test]
@@ -1370,7 +2066,7 @@ mod tests {
     fn cancelled_preview_cannot_publish_a_completed_png_response() {
         use opentake_motion::{MotionRenderer, StubRenderer};
 
-        let (_temp, store, document) = saved_document();
+        let (_temp, _core, store, document) = saved_document();
         let authority = store.capture_authority().expect("capture authority");
         let request = MotionPreviewRequest {
             document_id: document.summary.id.clone(),

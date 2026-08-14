@@ -42,6 +42,15 @@ pub struct MotionCommit {
     pub content_hash: String,
     pub action_name: String,
     pub output: MotionOutputMetadata,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_document: Option<MotionDocumentReference>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MotionDocumentReference {
+    pub document_id: String,
+    pub revision_hash: String,
 }
 
 #[derive(Debug, Serialize)]

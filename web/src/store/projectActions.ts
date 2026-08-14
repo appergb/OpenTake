@@ -26,6 +26,7 @@ async function flushMotionStudioBeforeProjectBoundary(): Promise<void> {
   if (
     latest.savingFile ||
     latest.conflict ||
+    ["validating", "rendering", "encoding", "committing"].includes(latest.publishPhase) ||
     latest.dirtyFiles["index.html"] ||
     latest.dirtyFiles["styles.css"]
   ) {

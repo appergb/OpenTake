@@ -727,6 +727,24 @@ impl ProjectMediaCapability {
         self.matches_handle(&leaf.name, &leaf.handle)
     }
 
+    /// Make a newly-created media leaf's directory entry durable before any
+    /// project manifest or timeline is allowed to reference it.
+    pub(crate) fn sync_media_directory(&self) -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            self.media
+                .try_clone()
+                .and_then(|directory| directory.into_std_file().sync_all())
+                .map_err(|error| format!("project media directory could not be synced: {error}"))
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows persists the create through the retained file handle;
+            // opening directory handles for FlushFileBuffers is not portable.
+            Ok(())
+        }
+    }
+
     fn absolute_path(&self, name: impl AsRef<Path>) -> PathBuf {
         self.project_dir.join("media").join(name)
     }

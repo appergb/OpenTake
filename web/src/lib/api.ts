@@ -636,12 +636,23 @@ export type MotionProgressPhase =
   | "committing"
   | "complete";
 
+export interface MotionProgressUpdate {
+  phase: MotionProgressPhase;
+  doneFrames?: number;
+  totalFrames?: number;
+}
+
 export interface MotionAddRequest {
   code?: string;
   templateId?: "title-card" | "lower-third.glass";
+  documentId?: string;
+  revisionHash?: string;
   params?: Record<string, string>;
   startFrame: number;
   durationFrames: number;
+  width?: number;
+  height?: number;
+  fps?: number;
   transparent?: boolean;
   trackIndex?: number;
 }
@@ -651,6 +662,10 @@ export interface MotionCommit {
   assetId: string;
   contentHash: string;
   actionName: string;
+  sourceDocument?: {
+    documentId: string;
+    revisionHash: string;
+  };
   output: {
     renderer: string;
     rendererVersion: string;
@@ -806,19 +821,33 @@ export async function cancelMotion(): Promise<boolean> {
 }
 
 export async function onMotionProgress(
-  handler: (phase: MotionProgressPhase) => void,
+  handler: (update: MotionProgressUpdate) => void,
 ): Promise<() => void> {
   await ensureTauri();
   if (!listenImpl) return () => {};
   return listenImpl("motion_progress", (event) => {
+    if (typeof event.payload !== "object" || event.payload === null) return;
+    const payload = event.payload as Record<string, unknown>;
     if (
-      typeof event.payload === "string" &&
-      ["validating", "rendering", "encoding", "committing", "complete"].includes(
-        event.payload,
-      )
-    ) {
-      handler(event.payload as MotionProgressPhase);
+      typeof payload.phase !== "string" ||
+      !["validating", "rendering", "encoding", "committing", "complete"].includes(payload.phase)
+    ) return;
+    if (payload.phase === "rendering") {
+      if (
+        !Number.isSafeInteger(payload.doneFrames) ||
+        !Number.isSafeInteger(payload.totalFrames) ||
+        Number(payload.totalFrames) < 1 ||
+        Number(payload.doneFrames) < 0 ||
+        Number(payload.doneFrames) > Number(payload.totalFrames)
+      ) return;
+      handler({
+        phase: "rendering",
+        doneFrames: Number(payload.doneFrames),
+        totalFrames: Number(payload.totalFrames),
+      });
+      return;
     }
+    handler({ phase: payload.phase as MotionProgressPhase });
   });
 }
 

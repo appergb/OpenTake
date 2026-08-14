@@ -8,6 +8,7 @@ import {
 } from "../../store/motionStudioStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useProjectStore } from "../../store/projectStore";
+import { forceRefresh } from "../../store/sync";
 import { Icon } from "../ui/Icon";
 import { MotionCodeEditor } from "./MotionCodeEditor";
 import { MotionPreview } from "./MotionPreview";
@@ -31,6 +32,8 @@ export function MotionStudio({ store = useMotionStudioStore }: { store?: MotionS
   const diagnostics = store((state) => state.diagnostics);
   const diagnosticFile = store((state) => state.diagnosticFile);
   const previewError = store((state) => state.previewError);
+  const previewPhase = store((state) => state.previewPhase);
+  const lastGoodPreview = store((state) => state.lastGoodPreview);
   const parameters = store((state) => state.parameters);
   const load = store((state) => state.load);
   const suspend = store((state) => state.suspend);
@@ -42,6 +45,11 @@ export function MotionStudio({ store = useMotionStudioStore }: { store?: MotionS
   const reloadConflict = store((state) => state.reloadConflict);
   const reapplyConflict = store((state) => state.reapplyConflict);
   const setParameter = store((state) => state.setParameter);
+  const publishPhase = store((state) => state.publishPhase);
+  const publishFrameProgress = store((state) => state.publishFrameProgress);
+  const publishError = store((state) => state.publishError);
+  const publish = store((state) => state.publish);
+  const cancelPublish = store((state) => state.cancelPublish);
   const htmlTabRef = useRef<HTMLButtonElement>(null);
   const cssTabRef = useRef<HTMLButtonElement>(null);
   const lifecycleGenerationRef = useRef(0);
@@ -51,10 +59,11 @@ export function MotionStudio({ store = useMotionStudioStore }: { store?: MotionS
   const projectIdentityRef = useRef({ projectEpoch, projectPath });
 
   useEffect(() => {
-    const lifecycleGeneration = ++lifecycleGenerationRef.current;
+    ++lifecycleGenerationRef.current;
     return () => {
+      const disposedGeneration = ++lifecycleGenerationRef.current;
       queueMicrotask(() => {
-        if (lifecycleGenerationRef.current === lifecycleGeneration) {
+        if (lifecycleGenerationRef.current === disposedGeneration) {
           void store.getState().dispose();
         }
       });
@@ -96,6 +105,35 @@ export function MotionStudio({ store = useMotionStudioStore }: { store?: MotionS
   };
   const adjacentError = error && (errorFile === null || errorFile === activeFile) ? error : null;
   const adjacentPreviewError = previewError && diagnosticFile === activeFile ? previewError : null;
+  const publishActive = ["validating", "rendering", "encoding", "committing"].includes(publishPhase);
+  const publishDisabled = publishActive || !document || Boolean(
+    savingFile ||
+    conflict ||
+    dirtyFiles["index.html"] ||
+    dirtyFiles["styles.css"] ||
+    previewError ||
+    previewPhase !== "ready" ||
+    lastGoodPreview?.revisionHash !== document?.summary.revisionHash,
+  );
+  const publishDocument = async () => {
+    const lifecycleGeneration = lifecycleGenerationRef.current;
+    const projectIdentity = useProjectStore.getState();
+    await publish();
+    const commit = store.getState().publishCommit;
+    if (!commit) return;
+    await forceRefresh().catch(() => undefined);
+    const currentProject = useProjectStore.getState();
+    const ui = useEditorUiStore.getState();
+    if (
+      lifecycleGenerationRef.current !== lifecycleGeneration ||
+      ui.view !== "motion" ||
+      currentProject.projectEpoch !== projectIdentity.projectEpoch ||
+      currentProject.projectPath !== projectIdentity.projectPath ||
+      store.getState().publishCommit?.clipId !== commit.clipId
+    ) return;
+    ui.selectClips(new Set([commit.clipId]));
+    ui.setView("editor");
+  };
 
   return (
     <main aria-label={t("motionStudio.workspace")} className="motion-studio">
@@ -112,6 +150,7 @@ export function MotionStudio({ store = useMotionStudioStore }: { store?: MotionS
               key={summary.id}
               className="motion-files__item"
               aria-current={document?.summary.id === summary.id ? "page" : undefined}
+              disabled={publishActive}
               onClick={() => void selectDocument(summary.id)}
             >
               <span>{summary.title}</span>
@@ -216,6 +255,7 @@ export function MotionStudio({ store = useMotionStudioStore }: { store?: MotionS
                 name={name}
                 type="number"
                 inputMode="numeric"
+                step={name === "width" || name === "height" ? 2 : 1}
                 value={parameters[name]}
                 min={name === "width" || name === "height" ? 2 : 1}
                 max={name === "fps" ? 240 : name === "durationFrames" ? 3600 : 4096}
@@ -228,6 +268,37 @@ export function MotionStudio({ store = useMotionStudioStore }: { store?: MotionS
           <div><dt>{t("motionStudio.aspect")}</dt><dd>{parameters.width} × {parameters.height}</dd></div>
           <div><dt>{t("motionStudio.duration")}</dt><dd>{(parameters.durationFrames / parameters.fps).toFixed(2)}s</dd></div>
         </dl>
+        <div className="motion-inspector__publish">
+          <button
+            type="button"
+            data-motion-publish="true"
+            disabled={publishDisabled}
+            onClick={() => void publishDocument()}
+          >
+            {publishActive
+              ? t(
+                  `motionStudio.publishPhase.${publishPhase}`,
+                  publishPhase === "rendering" && publishFrameProgress
+                    ? { done: publishFrameProgress.done, total: publishFrameProgress.total }
+                    : undefined,
+                )
+              : t("motionStudio.publish")}
+          </button>
+          {publishActive && (
+            <button type="button" onClick={() => void cancelPublish()}>
+              {t("motionStudio.cancelPublish")}
+            </button>
+          )}
+          {publishPhase === "rendering" && publishFrameProgress && (
+            <p role="status" aria-live="polite">
+              {t("motionStudio.renderProgress", {
+                done: publishFrameProgress.done,
+                total: publishFrameProgress.total,
+              })}
+            </p>
+          )}
+          {publishError && <p role="alert">{publishError}</p>}
+        </div>
       </aside>
 
       <MotionTimeline store={store} />

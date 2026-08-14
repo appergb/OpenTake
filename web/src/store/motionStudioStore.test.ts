@@ -51,6 +51,29 @@ function backend(overrides: Partial<MotionStudioBackend> = {}): MotionStudioBack
       diagnostics: [],
     })),
     cancelPreview: vi.fn(async () => true),
+    publish: vi.fn(async () => ({
+      clipId: "motion-clip",
+      assetId: "motion-asset",
+      contentHash: "f".repeat(64),
+      actionName: "Add Motion Graphic",
+      sourceDocument: {
+        documentId: starter.summary.id,
+        revisionHash: starter.summary.revisionHash,
+      },
+      output: {
+        renderer: "opentake-motion-studio",
+        rendererVersion: "1.0.0",
+        outputFile: "output.mp4",
+        fps: 30,
+        width: 1920,
+        height: 1080,
+        durationFrames: 90,
+        durationSeconds: 3,
+        contentHash: "f".repeat(64),
+      },
+    })),
+    cancelPublish: vi.fn(async () => true),
+    onProgress: vi.fn(async () => () => {}),
     ...overrides,
   } as MotionStudioBackend;
 }
@@ -314,6 +337,8 @@ describe("Motion Studio store", () => {
       fps: 2,
       durationFrames: 3,
     });
+    store.getState().setParameter("width", 101);
+    expect(store.getState().parameters.width).toBe(102);
 
     store.getState().play();
     await vi.advanceTimersByTimeAsync(500);
@@ -536,5 +561,101 @@ describe("Motion Studio store", () => {
     store.getState().play();
     await vi.advanceTimersByTimeAsync(1_000);
     expect(store.getState().playing).toBe(false);
+  });
+
+  it("publishes only the saved previewed revision and exposes progress and cancellation", async () => {
+    let progress: ((update: { phase: "rendering"; doneFrames: number; totalFrames: number }) => void) | undefined;
+    const completion = deferred<Awaited<ReturnType<MotionStudioBackend["publish"]>>>();
+    const committed = await backend().publish({} as never);
+    const motionBackend = backend({
+      publish: vi.fn(() => completion.promise),
+      onProgress: vi.fn(async (handler) => {
+        progress = handler as typeof progress;
+        return () => {};
+      }),
+    });
+    const store = createMotionStudioStore(motionBackend);
+    await store.getState().load();
+    await vi.waitFor(() => expect(store.getState().previewPhase).toBe("ready"));
+
+    const publishing = store.getState().publish();
+    await vi.waitFor(() => expect(progress).toBeDefined());
+    progress?.({ phase: "rendering", doneFrames: 27, totalFrames: 90 });
+    expect(store.getState().publishFrameProgress).toEqual({ done: 27, total: 90 });
+    completion.resolve(committed);
+    await publishing;
+
+    expect(motionBackend.publish).toHaveBeenCalledWith({
+      documentId: starter.summary.id,
+      revisionHash: starter.summary.revisionHash,
+      startFrame: 0,
+      durationFrames: 90,
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      trackIndex: undefined,
+    });
+    expect(store.getState()).toMatchObject({
+      publishPhase: "complete",
+      publishError: null,
+      publishCommit: { clipId: "motion-clip" },
+      publishFrameProgress: { done: 90, total: 90 },
+    });
+
+    await store.getState().cancelPublish();
+    expect(motionBackend.cancelPublish).toHaveBeenCalledOnce();
+  });
+
+  it("refuses to publish dirty, conflicting, or preview-invalid source", async () => {
+    const motionBackend = backend();
+    const store = createMotionStudioStore(motionBackend);
+    await store.getState().load();
+    await vi.waitFor(() => expect(store.getState().previewPhase).toBe("ready"));
+    store.getState().updateSource("<main>not saved yet</main>\n");
+    store.setState({ conflict: { file: "index.html", localSource: "local" } });
+
+    await store.getState().publish();
+
+    expect(motionBackend.publish).not.toHaveBeenCalled();
+    expect(store.getState().publishError).toMatch(/saved|conflict|preview/i);
+  });
+
+  it("does not discard a commit that wins the race with cancellation", async () => {
+    const committed = deferred<Awaited<ReturnType<MotionStudioBackend["publish"]>>>();
+    const motionBackend = backend({ publish: vi.fn(() => committed.promise) });
+    const store = createMotionStudioStore(motionBackend);
+    await store.getState().load();
+    await vi.waitFor(() => expect(store.getState().previewPhase).toBe("ready"));
+
+    const publishing = store.getState().publish();
+    await vi.waitFor(() => expect(motionBackend.publish).toHaveBeenCalledOnce());
+    const cancelling = store.getState().cancelPublish();
+    committed.resolve({
+      clipId: "late-commit",
+      assetId: "asset",
+      contentHash: "f".repeat(64),
+      actionName: "Add Motion Graphic",
+      sourceDocument: {
+        documentId: starter.summary.id,
+        revisionHash: starter.summary.revisionHash,
+      },
+      output: {
+        renderer: "opentake-motion-studio",
+        rendererVersion: "1",
+        outputFile: "output.mp4",
+        fps: 30,
+        width: 1920,
+        height: 1080,
+        durationFrames: 90,
+        durationSeconds: 3,
+        contentHash: "f".repeat(64),
+      },
+    });
+    await Promise.all([publishing, cancelling]);
+
+    expect(store.getState()).toMatchObject({
+      publishPhase: "complete",
+      publishCommit: { clipId: "late-commit" },
+    });
   });
 });

@@ -57,7 +57,26 @@ fn sandbox_progress_cancel_validated_mp4_result() {
         *phases.lock().unwrap(),
         vec![
             MotionProgress::Validating,
-            MotionProgress::Rendering,
+            MotionProgress::Rendering {
+                done_frames: 0,
+                total_frames: 4,
+            },
+            MotionProgress::Rendering {
+                done_frames: 1,
+                total_frames: 4,
+            },
+            MotionProgress::Rendering {
+                done_frames: 2,
+                total_frames: 4,
+            },
+            MotionProgress::Rendering {
+                done_frames: 3,
+                total_frames: 4,
+            },
+            MotionProgress::Rendering {
+                done_frames: 4,
+                total_frames: 4,
+            },
             MotionProgress::Encoding,
             MotionProgress::Committing,
             MotionProgress::Complete,

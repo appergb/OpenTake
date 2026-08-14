@@ -123,6 +123,13 @@ const zh: Dict = {
   "motionStudio.parameter.durationFrames": "总帧数",
   "motionStudio.aspect": "画布",
   "motionStudio.duration": "时长",
+  "motionStudio.publish": "发布到时间线",
+  "motionStudio.cancelPublish": "取消发布",
+  "motionStudio.publishPhase.validating": "正在校验…",
+  "motionStudio.publishPhase.rendering": "正在渲染 {done}/{total} 帧…",
+  "motionStudio.renderProgress": "已完成 {done}/{total} 帧",
+  "motionStudio.publishPhase.encoding": "正在编码…",
+  "motionStudio.publishPhase.committing": "正在提交…",
 
   // Export dialog (#112)
   "export.title": "导出视频",
@@ -1289,6 +1296,13 @@ const en: Dict = {
   "motionStudio.parameter.durationFrames": "Duration frames",
   "motionStudio.aspect": "Canvas",
   "motionStudio.duration": "Duration",
+  "motionStudio.publish": "Publish to timeline",
+  "motionStudio.cancelPublish": "Cancel publish",
+  "motionStudio.publishPhase.validating": "Validating…",
+  "motionStudio.publishPhase.rendering": "Rendering frame {done}/{total}…",
+  "motionStudio.renderProgress": "Rendered {done}/{total} frames",
+  "motionStudio.publishPhase.encoding": "Encoding…",
+  "motionStudio.publishPhase.committing": "Committing…",
 
   "export.title": "Export Video",
   "export.format": "Format",

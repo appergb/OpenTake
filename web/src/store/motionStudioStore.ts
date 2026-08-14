@@ -5,6 +5,9 @@ import {
   motionDocumentList,
   motionDocumentPatch,
   motionDocumentRead,
+  addMotion,
+  cancelMotion,
+  onMotionProgress,
   motionPreview,
   motionPreviewCancel,
 } from "../lib/api";
@@ -20,6 +23,12 @@ import type {
   MotionPreviewResponse,
   MotionPublishParameters,
 } from "../lib/types";
+import type {
+  MotionAddRequest,
+  MotionCommit,
+  MotionProgressPhase,
+  MotionProgressUpdate,
+} from "../lib/api";
 
 export const MOTION_SAVE_DEBOUNCE_MS = 300;
 const DEFAULT_PARAMETERS: MotionPublishParameters = {
@@ -43,6 +52,9 @@ export interface MotionStudioBackend {
   patch: (request: MotionDocumentPatchRequest) => Promise<MotionDocument>;
   preview: (request: MotionPreviewRequest) => Promise<MotionPreviewResponse>;
   cancelPreview: () => Promise<boolean>;
+  publish: (request: MotionAddRequest) => Promise<MotionCommit>;
+  cancelPublish: () => Promise<boolean>;
+  onProgress: (handler: (update: MotionProgressUpdate) => void) => Promise<() => void>;
 }
 
 const nativeBackend: MotionStudioBackend = {
@@ -53,6 +65,9 @@ const nativeBackend: MotionStudioBackend = {
   patch: motionDocumentPatch,
   preview: motionPreview,
   cancelPreview: motionPreviewCancel,
+  publish: (request) => addMotion(request),
+  cancelPublish: () => cancelMotion(),
+  onProgress: (handler) => onMotionProgress(handler),
 };
 
 export interface MotionConflict {
@@ -62,6 +77,7 @@ export interface MotionConflict {
 
 export type MotionStudioPhase = "idle" | "loading" | "ready" | "error";
 export type MotionPreviewPhase = "idle" | "loading" | "ready" | "error";
+export type MotionPublishPhase = "idle" | MotionProgressPhase | "error";
 
 export interface MotionStudioState {
   phase: MotionStudioPhase;
@@ -83,6 +99,10 @@ export interface MotionStudioState {
   lastGoodPreview: MotionPreviewResponse | null;
   diagnostics: MotionPreviewDiagnostic[];
   diagnosticFile: MotionDocumentFile | null;
+  publishPhase: MotionPublishPhase;
+  publishFrameProgress: { done: number; total: number } | null;
+  publishError: string | null;
+  publishCommit: MotionCommit | null;
   load: () => Promise<void>;
   selectDocument: (documentId: string) => Promise<void>;
   setActiveFile: (file: MotionDocumentFile) => void;
@@ -98,6 +118,8 @@ export interface MotionStudioState {
   suspend: () => Promise<void>;
   resume: () => Promise<void>;
   replay: () => void;
+  publish: () => Promise<void>;
+  cancelPublish: () => Promise<void>;
   resetProject: () => void;
   dispose: () => Promise<void>;
 }
@@ -163,6 +185,9 @@ export function createMotionStudioStore(
   let suspended = false;
   let visibilityOperation = 0;
   let previewCancellation: Promise<void> | null = null;
+  let publishOperation = 0;
+  let publishCompletion: Promise<MotionCommit> | null = null;
+  let publishCancellationRequested = false;
   const sourceVersions: Record<MotionDocumentFile, number> = {
     "index.html": 0,
     "styles.css": 0,
@@ -212,6 +237,10 @@ export function createMotionStudioStore(
         previewError: null,
         previewPhase: "idle",
         lastGoodPreview: null,
+        publishPhase: "idle",
+        publishFrameProgress: null,
+        publishError: null,
+        publishCommit: null,
       });
       void get().requestPreview();
     };
@@ -251,6 +280,10 @@ export function createMotionStudioStore(
       lastGoodPreview: null,
       diagnostics: [],
       diagnosticFile: null,
+      publishPhase: "idle",
+      publishFrameProgress: null,
+      publishError: null,
+      publishCommit: null,
 
       load: async () => {
         const generation = ++loadGeneration;
@@ -280,6 +313,10 @@ export function createMotionStudioStore(
 
       selectDocument: async (documentId) => {
         if (get().document?.summary.id === documentId) return;
+        if (["validating", "rendering", "encoding", "committing"].includes(get().publishPhase)) {
+          set({ error: "请等待 Motion Studio 发布完成后再切换文档 / Wait for publishing to finish before switching documents." });
+          return;
+        }
         clearSaveTimer();
         await get().flushSave();
         const pending = get();
@@ -551,7 +588,10 @@ export function createMotionStudioStore(
 
       setParameter: (name, value) => {
         const [min, max] = PARAMETER_BOUNDS[name];
-        const next = clampInteger(value, min, max);
+        let next = clampInteger(value, min, max);
+        if ((name === "width" || name === "height") && next % 2 !== 0) {
+          next = Math.min(max, next + 1);
+        }
         set((state) => {
           const parameters = { ...state.parameters, [name]: next };
           return {
@@ -624,6 +664,128 @@ export function createMotionStudioStore(
         void get().requestPreview();
       },
 
+      publish: async () => {
+        const operation = ++publishOperation;
+        if (
+          !get().document ||
+          ["validating", "rendering", "encoding", "committing"].includes(get().publishPhase)
+        ) {
+          return;
+        }
+        await get().flushSave();
+        if (operation !== publishOperation) return;
+        const state = get();
+        const document = state.document;
+        const previewMatches = Boolean(
+          document &&
+          state.previewPhase === "ready" &&
+          state.lastGoodPreview?.revisionHash === document.summary.revisionHash &&
+          !state.diagnostics.some((diagnostic) => diagnostic.severity === "error"),
+        );
+        if (
+          !document ||
+          state.savingFile ||
+          state.conflict ||
+          state.dirtyFiles["index.html"] ||
+          state.dirtyFiles["styles.css"] ||
+          !previewMatches
+        ) {
+          set({
+            publishPhase: "error",
+            publishFrameProgress: null,
+            publishError: "请先保存文档并解决版本冲突或预览错误 / Save the document and resolve conflicts or preview errors before publishing.",
+            publishCommit: null,
+          });
+          return;
+        }
+        const documentId = document.summary.id;
+        const revisionHash = document.summary.revisionHash;
+        publishCancellationRequested = false;
+        set({
+          publishPhase: "validating",
+          publishFrameProgress: null,
+          publishError: null,
+          publishCommit: null,
+        });
+        let unlisten: (() => void) | null = null;
+        let progressOpen = true;
+        try {
+          unlisten = await backend
+            .onProgress((update) => {
+              if (!progressOpen || operation !== publishOperation) return;
+              set({
+                publishPhase: update.phase,
+                ...(update.phase === "rendering" &&
+                update.doneFrames !== undefined &&
+                update.totalFrames !== undefined
+                  ? { publishFrameProgress: { done: update.doneFrames, total: update.totalFrames } }
+                  : {}),
+              });
+            })
+            .catch(() => null);
+          if (operation !== publishOperation) return;
+          const completion = backend.publish({
+            documentId,
+            revisionHash,
+            ...state.parameters,
+            startFrame: 0,
+            trackIndex: undefined,
+          });
+          publishCompletion = completion;
+          const commit = await completion;
+          if (operation !== publishOperation) return;
+          progressOpen = false;
+          set({
+            publishPhase: "complete",
+            publishFrameProgress: {
+              done: commit.output.durationFrames,
+              total: commit.output.durationFrames,
+            },
+            publishError: null,
+            publishCommit: commit,
+          });
+        } catch (error) {
+          progressOpen = false;
+          if (operation === publishOperation) {
+            set(publishCancellationRequested
+              ? {
+                  publishPhase: "idle",
+                  publishFrameProgress: null,
+                  publishError: null,
+                  publishCommit: null,
+                }
+              : {
+                  publishPhase: "error",
+                  publishFrameProgress: null,
+                  publishError: errorMessage(error),
+                  publishCommit: null,
+                });
+          }
+        } finally {
+          progressOpen = false;
+          publishCompletion = null;
+          publishCancellationRequested = false;
+          unlisten?.();
+        }
+      },
+
+      cancelPublish: async () => {
+        const active = publishCompletion;
+        publishCancellationRequested = true;
+        if (!active) publishOperation += 1;
+        await backend.cancelPublish().catch(() => false);
+        if (active) {
+          await active.catch(() => undefined);
+        } else {
+          set({
+            publishPhase: "idle",
+            publishFrameProgress: null,
+            publishError: null,
+            publishCommit: null,
+          });
+        }
+      },
+
       resetProject: () => {
         clearSaveTimer();
         clearPlaybackTimer();
@@ -631,6 +793,9 @@ export function createMotionStudioStore(
         previewGeneration += 1;
         saveOperation += 1;
         conflictOperation += 1;
+        publishOperation += 1;
+        publishCancellationRequested = true;
+        void backend.cancelPublish().catch(() => false);
         visibilityOperation += 1;
         disposing = false;
         suspended = true;
@@ -652,6 +817,10 @@ export function createMotionStudioStore(
           lastGoodPreview: null,
           diagnostics: [],
           diagnosticFile: null,
+          publishPhase: "idle",
+          publishFrameProgress: null,
+          publishError: null,
+          publishCommit: null,
         });
       },
 

@@ -1465,6 +1465,7 @@ mod tests {
                 duration_seconds: 3.0,
                 content_hash: MOTION_PRIVATE_HASH.into(),
             },
+            source_document: None,
         }
     }
 

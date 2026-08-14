@@ -515,6 +515,17 @@ impl HeadlessChromiumRenderer {
         req: &MotionRenderRequest,
         cancellation: &MotionCancellationToken,
     ) -> MotionResult<RenderedClip> {
+        self.render_with_cancellation_and_progress(req, cancellation, &|_, _| {})
+    }
+
+    /// Render with cooperative cancellation and report each durably written
+    /// frame. Cache hits report the complete frame count in one callback.
+    pub fn render_with_cancellation_and_progress(
+        &self,
+        req: &MotionRenderRequest,
+        cancellation: &MotionCancellationToken,
+        progress: &dyn Fn(u32, u32),
+    ) -> MotionResult<RenderedClip> {
         let validated = (|| {
             req.validate()?;
             if let MotionSource::Code { html_css_js } = &req.source {
@@ -530,11 +541,11 @@ impl HeadlessChromiumRenderer {
 
         #[cfg(feature = "chromium")]
         {
-            chromium_backend::render(self, req, cancellation)
+            chromium_backend::render(self, req, cancellation, progress)
         }
         #[cfg(not(feature = "chromium"))]
         {
-            let _ = (&self.cache, cancellation);
+            let _ = (&self.cache, cancellation, progress);
             Err(MotionError::renderer_unavailable(
                 "headless-Chromium backend is not compiled in; build with the \
                  `chromium` feature, or use StubRenderer for offline/deterministic rendering",
@@ -799,8 +810,9 @@ mod chromium_backend {
         renderer: &HeadlessChromiumRenderer,
         req: &MotionRenderRequest,
         cancellation: &MotionCancellationToken,
+        progress: &dyn Fn(u32, u32),
     ) -> MotionResult<RenderedClip> {
-        let result = render_inner(renderer, req, cancellation);
+        let result = render_inner(renderer, req, cancellation, progress);
         if result.is_err() {
             renderer.browser_pool.invalidate_idle();
         }
@@ -811,6 +823,7 @@ mod chromium_backend {
         renderer: &HeadlessChromiumRenderer,
         req: &MotionRenderRequest,
         cancellation: &MotionCancellationToken,
+        progress: &dyn Fn(u32, u32),
     ) -> MotionResult<RenderedClip> {
         if cancellation.is_cancelled() {
             return Err(MotionError::Cancelled);
@@ -848,6 +861,7 @@ mod chromium_backend {
 
         let hash = content_hash(req);
         if renderer.cache.is_cached(req) {
+            progress(req.duration_frames, req.duration_frames);
             return Ok(clip_from_cache(req, hash, renderer.cache.dir_for(req)));
         }
 
@@ -864,6 +878,7 @@ mod chromium_backend {
         check_abort(cancellation, deadline, renderer.policy.timeout)?;
         if renderer.cache.is_cached(req) {
             browser.commit_reuse();
+            progress(req.duration_frames, req.duration_frames);
             return Ok(clip_from_cache(req, hash, renderer.cache.dir_for(req)));
         }
 
@@ -1049,6 +1064,10 @@ mod chromium_backend {
             let path = MotionCache::frame_file(&dir, index);
             std::fs::write(&path, png)?;
             frames.push(path);
+            progress(
+                u32::try_from(index).unwrap_or(u32::MAX).saturating_add(1),
+                req.duration_frames,
+            );
         }
 
         cdp.close_target(&target_id)?;

@@ -139,6 +139,7 @@ beforeEach(() => {
     dirtyFiles: { "index.html": false, "styles.css": false },
     conflict: null,
     savingFile: null,
+    publishPhase: "idle",
     flushSave: defaultMotionFlushSave,
   });
 });
@@ -299,6 +300,19 @@ describe("openProjectPath", () => {
       dirtyFiles: { "index.html": false, "styles.css": false },
       conflict: null,
     });
+  });
+
+  it("blocks a project boundary while a Motion Studio publish is committing", async () => {
+    useMotionStudioStore.setState({
+      dirtyFiles: { "index.html": false, "styles.css": false },
+      conflict: null,
+      savingFile: null,
+      publishPhase: "committing",
+      flushSave: vi.fn(async () => undefined),
+    });
+
+    await expect(openProjectPath("/tmp/demo.opentake")).rejects.toThrow("Motion Studio");
+    expect(srv.projectOpen).not.toHaveBeenCalled();
   });
 
   it("clears a media error from the previously open project", async () => {

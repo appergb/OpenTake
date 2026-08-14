@@ -52,6 +52,7 @@ impl MotionBridge for DeterministicMotionBridge {
             content_hash: PRIVATE_ADD_HASH.into(),
             action_name: "Add Motion Graphic".into(),
             output: output_metadata(PRIVATE_ADD_HASH),
+            source_document: None,
         })
     }
 
@@ -66,6 +67,7 @@ impl MotionBridge for DeterministicMotionBridge {
             content_hash: PRIVATE_EDIT_HASH.into(),
             action_name: "Edit Motion Graphic".into(),
             output: output_metadata(PRIVATE_EDIT_HASH),
+            source_document: None,
         })
     }
 }
