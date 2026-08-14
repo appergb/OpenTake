@@ -23,6 +23,7 @@ export const MAX_CHAT_DRAFTS = 64;
 export const MAX_CHAT_DELETED_SESSIONS = 128;
 const MAX_CHAT_BLOCKED_MESSAGES = 128;
 const MAX_CHAT_RESYNC_SESSIONS = 32;
+const MAX_CHAT_REPLAY_FINGERPRINTS = 64;
 
 export type ChatHistoryResyncReason =
   | "block_gap"
@@ -34,6 +35,7 @@ export type ChatHistoryResyncReason =
   | "invalid_sequence"
   | "missing_draft"
   | "message_identity_mismatch"
+  | "sequence_conflict"
   | "sequence_gap"
   | "sequence_out_of_order";
 
@@ -48,6 +50,8 @@ interface ChatDraft {
   messageId: string;
   nextSequence: number;
   finalized: boolean;
+  eventFingerprints: Record<string, string>;
+  fingerprintOrder: number[];
 }
 
 interface ChatStoreState {
@@ -120,6 +124,35 @@ function isBlockIndex(value: unknown): value is number {
 
 function isSequence(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= MAX_CHAT_EVENT_SEQUENCE;
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null) return "null";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => item === undefined ? "null" : canonicalJson(item)).join(",")}]`;
+  }
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right));
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(",")}}`;
+  }
+  return "null";
+}
+
+function eventFingerprint(value: unknown): string {
+  const canonical = canonicalJson(value);
+  let first = 0x811c9dc5;
+  let second = 0x9e3779b9;
+  for (let index = 0; index < canonical.length; index += 1) {
+    const code = canonical.charCodeAt(index);
+    first = Math.imul(first ^ code, 0x01000193);
+    second = Math.imul(second ^ code, 0x85ebca6b);
+  }
+  return `${canonical.length}:${(first >>> 0).toString(16)}:${(second >>> 0).toString(16)}`;
 }
 
 function touch(order: string[], value: string): string[] {
@@ -312,15 +345,40 @@ function stopMessage(
 
 type SequenceDecision = "apply" | "retry" | ChatHistoryResyncReason;
 
-function sequenceDecision(draft: ChatDraft, sequence: number): SequenceDecision {
-  if (draft.finalized) {
-    return draft.nextSequence > 0 && sequence === draft.nextSequence - 1
-      ? "retry"
-      : "sequence_out_of_order";
+function sequenceDecision(
+  draft: ChatDraft,
+  sequence: number,
+  fingerprint: string,
+): SequenceDecision {
+  if (!draft.finalized && sequence === draft.nextSequence) return "apply";
+  if (sequence > draft.nextSequence) return "sequence_gap";
+  const previous = draft.eventFingerprints[String(sequence)];
+  if (previous === undefined) return "sequence_out_of_order";
+  return previous === fingerprint ? "retry" : "sequence_conflict";
+}
+
+function advanceDraft(
+  draft: ChatDraft,
+  sequence: number,
+  fingerprint: string,
+  finalized = false,
+): ChatDraft {
+  const eventFingerprints: Record<string, string> = {
+    ...draft.eventFingerprints,
+    [sequence]: fingerprint,
+  };
+  const fingerprintOrder = [...draft.fingerprintOrder.filter((value) => value !== sequence), sequence];
+  while (fingerprintOrder.length > MAX_CHAT_REPLAY_FINGERPRINTS) {
+    const expired = fingerprintOrder.shift();
+    if (expired !== undefined) delete eventFingerprints[String(expired)];
   }
-  if (sequence === draft.nextSequence) return "apply";
-  if (draft.nextSequence > 0 && sequence === draft.nextSequence - 1) return "retry";
-  return sequence > draft.nextSequence ? "sequence_gap" : "sequence_out_of_order";
+  return {
+    ...draft,
+    nextSequence: sequence + 1,
+    finalized,
+    eventFingerprints,
+    fingerprintOrder,
+  };
 }
 
 function withUpdatedMessage(
@@ -406,7 +464,14 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       sessionOrder: touch(state.sessionOrder, sessionId),
       drafts: {
         ...state.drafts,
-        [key]: { sessionId, messageId, nextSequence: 0, finalized: false },
+        [key]: {
+          sessionId,
+          messageId,
+          nextSequence: 0,
+          finalized: false,
+          eventFingerprints: {},
+          fingerprintOrder: [],
+        },
       },
       draftOrder: touch(state.draftOrder, key),
     });
@@ -425,7 +490,14 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     if (state.deletedSessionIds[sessionId] || state.blockedMessageKeys[key]) return state;
     const draft = state.drafts[key];
     if (!draft) return stopMessage(state, sessionId, messageId, "missing_draft");
-    const decision = sequenceDecision(draft, sequence);
+    const fingerprint = eventFingerprint({
+      type: "blockDelta",
+      sessionId,
+      messageId,
+      blockIndex,
+      delta,
+    });
+    const decision = sequenceDecision(draft, sequence, fingerprint);
     if (decision === "retry") return state;
     if (decision !== "apply") return stopMessage(state, sessionId, messageId, decision);
     const messages = state.sessionMessages[sessionId];
@@ -446,7 +518,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       sessionId,
       messageId,
       deriveAssistantFields(message, blocks),
-      { ...draft, nextSequence: sequence + 1 },
+      advanceDraft(draft, sequence, fingerprint),
     );
   }),
 
@@ -461,7 +533,14 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     if (state.deletedSessionIds[sessionId] || state.blockedMessageKeys[key]) return state;
     const draft = state.drafts[key];
     if (!draft) return stopMessage(state, sessionId, messageId, "missing_draft");
-    const decision = sequenceDecision(draft, sequence);
+    const fingerprint = eventFingerprint({
+      type: "blockUpsert",
+      sessionId,
+      messageId,
+      blockIndex,
+      block,
+    });
+    const decision = sequenceDecision(draft, sequence, fingerprint);
     if (decision === "retry") return state;
     if (decision !== "apply") return stopMessage(state, sessionId, messageId, decision);
     const messages = state.sessionMessages[sessionId];
@@ -482,7 +561,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       sessionId,
       messageId,
       deriveAssistantFields(message, blocks),
-      { ...draft, nextSequence: sequence + 1 },
+      advanceDraft(draft, sequence, fingerprint),
     );
   }),
 
@@ -503,6 +582,13 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         const messages = state.sessionMessages[state.sessionId];
         const index = messages?.findIndex((message) => message.id === messageId) ?? -1;
         if (!messages || index < 0) return stopMessage(state, state.sessionId, messageId, "missing_draft");
+        const sequence = draft.nextSequence;
+        const fingerprint = eventFingerprint({
+          type: "done",
+          sessionId: state.sessionId,
+          messageId,
+          message: first,
+        });
         const nextMessages = messages.slice();
         nextMessages[index] = first;
         return reconcile({
@@ -511,7 +597,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
           sessionOrder: touch(state.sessionOrder, state.sessionId),
           drafts: {
             ...state.drafts,
-            [key]: { ...draft, nextSequence: draft.nextSequence + 1, finalized: true },
+            [key]: advanceDraft(draft, sequence, fingerprint, true),
           },
           draftOrder: touch(state.draftOrder, key),
         });
@@ -537,7 +623,8 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       if (state.deletedSessionIds[sessionId] || state.blockedMessageKeys[key]) return state;
       const draft = state.drafts[key];
       if (!draft) return stopMessage(state, sessionId, messageId, "missing_draft");
-      const decision = sequenceDecision(draft, sequence);
+      const fingerprint = eventFingerprint({ type: "done", sessionId, messageId, message });
+      const decision = sequenceDecision(draft, sequence, fingerprint);
       if (decision === "retry") return state;
       if (decision !== "apply") return stopMessage(state, sessionId, messageId, decision);
       const messages = state.sessionMessages[sessionId];
@@ -551,7 +638,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         sessionOrder: touch(state.sessionOrder, sessionId),
         drafts: {
           ...state.drafts,
-          [key]: { ...draft, nextSequence: sequence + 1, finalized: true },
+          [key]: advanceDraft(draft, sequence, fingerprint, true),
         },
         draftOrder: touch(state.draftOrder, key),
       });

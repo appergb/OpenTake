@@ -30,10 +30,10 @@ Branch: `release/v1.0.0-beta.5`
 ## Review fix — ordered event sequences (`931edb9` protocol)
 
 - Mirrored Rust's per-message `sequence` on every decoded stream event. The
-  reducer now accepts only the exact next sequence, ignores only an immediate
-  previous-sequence retry, and poisons only the addressed message on a gap or
-  stale out-of-order event. Payload content is not used for de-duplication, so
-  two identical deltas at consecutive valid sequences are both preserved.
+  reducer accepts only the exact next sequence and poisons only the addressed
+  message on a gap or stale out-of-order event. Two identical deltas at
+  consecutive valid sequences are both preserved; exact retry validation is
+  detailed in review fix round 2 below.
 - Separated per-message poison from per-session history re-sync de-duplication.
   A bad message cannot stop a sibling message in the same session, while at
   most one history reload request remains pending until authoritative history
@@ -45,17 +45,32 @@ Branch: `release/v1.0.0-beta.5`
   session tombstones, blocked keys, and pending re-sync state. Authoritative
   history clears all poison and sequence state for its session.
 
+## Review fix round 2 — exact retry validation
+
+- Retained a bounded 64-event replay fingerprint window on each message draft.
+  Fingerprints cover the event discriminant, session/message address, block
+  index, and canonical payload while storing only fixed-size hashes.
+- Exact delayed retries inside the window are idempotent. Reusing a retained
+  sequence with a different event kind, address, index, or payload poisons only
+  that message with `sequence_conflict`; retries older than the retained window
+  fail closed as `sequence_out_of_order`.
+- Added focused regressions for delayed identical text, cross-kind/index/payload
+  conflicts, and an exact retry outside the bounded replay window.
+
 ## TDD and verification
 
-The initial Task 2 RED was 8 failing reducer/decoder tests. For the sequence
-review fix, the expanded 18-case suite was run against the pre-fix production
-code and produced 15 failures / 3 passes. Failures covered all newly requested
-sequence, identity, deep-validation, and retention behaviors.
+The initial Task 2 RED was 8 failing reducer/decoder tests. For the first
+sequence review fix, the expanded 18-case suite was run against the pre-fix
+production code and produced 15 failures / 3 passes. Failures covered all newly
+requested sequence, identity, deep-validation, and retention behaviors. For
+review fix round 2, the three retry-window regressions were added before the
+production change; the focused suite then produced 2 failures / 18 passes,
+covering delayed exact retry and conflicting sequence reuse.
 
 GREEN verification on the final tree:
 
 - `pnpm -C web exec vitest run src/store/chatStore.test.ts --reporter=verbose`
-  — 18/18 focused tests passed.
+  — 20/20 focused tests passed.
 - `pnpm -C web test -- src/store/chatStore.test.ts`
   — 1277/1278 tests passed. The sole integration failure is the expected Task 3
   migration point: `AgentPanel.persistence.test.tsx` still expects legacy

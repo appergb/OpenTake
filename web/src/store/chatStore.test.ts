@@ -98,16 +98,58 @@ describe("chatStore ordered session streams", () => {
     expect(useChatStore.getState().messages[0].content).toBe("I will inspect and then edit.");
   });
 
-  it("ignores the immediately previous sequence retry but preserves identical later deltas", () => {
+  it("ignores an exact delayed retry while preserving identical later deltas", () => {
     const store = useChatStore.getState();
     store.beginMessage(sessionA, "message-a");
     store.appendBlockDelta(sessionA, "message-a", 0, 0, "same");
-    store.appendBlockDelta(sessionA, "message-a", 0, 0, "retry payload is ignored");
     store.appendBlockDelta(sessionA, "message-a", 1, 0, "same");
+    store.appendBlockDelta(sessionA, "message-a", 0, 0, "same");
+    store.appendBlockDelta(sessionA, "message-a", 2, 0, "later");
 
     expect(useChatStore.getState().messages[0].blocks).toEqual([
-      { type: "text", text: "samesame" },
+      { type: "text", text: "samesamelater" },
     ]);
+    expect(useChatStore.getState().takeHistoryResyncRequest()).toBeNull();
+  });
+
+  it("poisons a reused sequence when its event kind, block index, or payload conflicts", () => {
+    const conflicts: Array<(store: ReturnType<typeof useChatStore.getState>) => void> = [
+      (store) => store.appendBlockDelta(sessionA, "message-a", 0, 0, "changed"),
+      (store) => store.appendBlockDelta(sessionA, "message-a", 0, 1, "original"),
+      (store) => store.upsertBlock(sessionA, "message-a", 0, 0, tool("tool-a")),
+    ];
+
+    conflicts.forEach((conflict) => {
+      resetStore();
+      const store = useChatStore.getState();
+      store.beginMessage(sessionA, "message-a");
+      store.appendBlockDelta(sessionA, "message-a", 0, 0, "original");
+      conflict(useChatStore.getState());
+
+      expect(useChatStore.getState().messages[0].content).toBe("original");
+      expect(useChatStore.getState().takeHistoryResyncRequest()).toMatchObject({
+        sessionId: sessionA,
+        messageId: "message-a",
+        reason: "sequence_conflict",
+      });
+    });
+  });
+
+  it("poisons an exact retry after it falls outside the bounded replay window", () => {
+    const store = useChatStore.getState();
+    store.beginMessage(sessionA, "message-a");
+    store.appendBlockDelta(sessionA, "message-a", 0, 0, "first");
+    for (let sequence = 1; sequence <= 64; sequence += 1) {
+      store.appendBlockDelta(sessionA, "message-a", sequence, 0, "x");
+    }
+    store.appendBlockDelta(sessionA, "message-a", 0, 0, "first");
+
+    expect(useChatStore.getState().messages[0].content).toBe(`first${"x".repeat(64)}`);
+    expect(useChatStore.getState().takeHistoryResyncRequest()).toMatchObject({
+      sessionId: sessionA,
+      messageId: "message-a",
+      reason: "sequence_out_of_order",
+    });
   });
 
   it("keeps multiple tool rounds addressable without duplicate upserts", () => {
@@ -173,7 +215,7 @@ describe("chatStore ordered session streams", () => {
     expect(useChatStore.getState().messages.find((message) => message.id === "message-b")?.content).toBe("safe");
     expect(useChatStore.getState().takeHistoryResyncRequest()).toMatchObject({
       messageId: "message-a",
-      reason: "sequence_out_of_order",
+      reason: "sequence_conflict",
     });
   });
 
