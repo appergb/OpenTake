@@ -29,9 +29,14 @@ WORKFLOW_PATH = Path(
 RELEASE_NOTES_PATH = Path(
     os.environ.get(
         "OPENTAKE_RELEASE_NOTES_PATH",
-        REPOSITORY_ROOT / "docs" / "releases" / "1.0.0-beta.4.md",
+        REPOSITORY_ROOT / "docs" / "releases" / "1.0.0-beta.5.md",
     )
 ).resolve()
+CURRENT_RELEASE_VERSION = "1.0.0-beta.5"
+APPROVED_REPOSITORY_IDENTITIES = {
+    "1.0.0-beta.4": ("1.0.0.4", "Beta 4"),
+    CURRENT_RELEASE_VERSION: ("1.0.0.5", "Beta 5"),
+}
 PINNED_ACTIONS = {
     "actions/checkout": "11d5960a326750d5838078e36cf38b85af677262",
     "actions/setup-node": "49933ea5288caeca8642d1e84afbd3f7d6820020",
@@ -169,14 +174,14 @@ APPROVED_SIMPLE_RUNS = {
 }
 
 APPROVED_COMPLEX_RUN_SHA256 = {
-    ("validate", "Validate tag, source SHA, versions, and notes"): "d451f703d50cd202d583cd42cc631927bfb97ea64aa6988bca5210dc40509379",
+    ("validate", "Validate tag, source SHA, versions, and notes"): "eefb9d97ad80e8090b817178093824af2b897ae339a144b2e16a91de3f9f8334",
     ("validate", "Reassert exact source after validation"): "953657d26d2eda8490c18e7030c66ddb19aba64a5c8b19808da9a853fd1bfdd2",
     ("quality", "Assert exact checked-out SHA"): "ff0b148eecdf8603712586a6c4a05e752df0b36b5c97a366760f6cba10e58ddd",
     ("quality", "Free disk space"): "5848415c4d0e696f46965d62a2e17c8b7a0dd45ae600d28102af0b04108d9bf6",
     ("quality", "Install system deps (ffmpeg + Tauri/GTK)"): "ee466d2d3fff1c3703d50f9dabe4d21e1cee4b399924d064c6d2714dae34d16b",
     ("quality", "Audit Motion Canvas dependencies and licenses"): "a3517fae1a8663e519138196c9f3721d8f4df19ac8f115c49a079c4aaa60c8b3",
     ("quality", "Test and reproduce Motion Canvas runner"): "8bcd55de9b045f9d7be6343163a5422cba0ab545f7844da50ca1a7c8623fe640",
-    ("quality", "Validate Windows and release workflow contracts"): "f70c00caca2a1ea66ce7843bd5e4b6e9702422d2ad0cc7d77d714decdb93b351",
+    ("quality", "Validate Windows and release workflow contracts"): "76d3d0db11222f5121e5b404470296695c8cfea0b4e41f0c3a1d853612331e7d",
     ("quality", "Provisioner unit tests"): "f57d4d7d6df403d573d31bbda02589804109596040c2cefcca60f3e9352e891a",
     ("quality", "Live playback transport integration"): "461f79546009551e5e7adbf50f869abb9449c2ae7666a66a425c7cd3c24acea9",
     ("quality", "Reassert exact source after quality gates"): "953657d26d2eda8490c18e7030c66ddb19aba64a5c8b19808da9a853fd1bfdd2",
@@ -214,8 +219,8 @@ APPROVED_COMPLEX_RUN_SHA256 = {
 }
 
 APPROVED_JOB_SHA256 = {
-    "validate": "eb09b22d3681439d20d6a2e793d81b18aa2901e0d5f646dbcc9b809226954b46",
-    "quality": "a2947370289ebd299042159fbe8fd046f7fedf72b47037d58b4398ed8e85baee",
+    "validate": "ce61e176161ab7ec892d92ed9cf1a3e379c6b5f7b5781bf1addc4f29379a85b2",
+    "quality": "867c5ef99873d9cea9e2cf5500f3d2b5b1759bc20b8a63b771785e1081dd0e35",
     "macos_arm64": "1785d765c96278190c25e312c9e610070619e17b7b2b0d922f0bd234501df525",
     "windows_x64": "63bd70d85e40a3f1177e9059d4674d7f93d4502181fc378f7706e839af953378",
     "publish": "ea3fe6d18a94c0850d3ac7f21c4e23fb8fcf572189f77f659e5b34eab776bd85",
@@ -1468,9 +1473,16 @@ def validate_workflow(workflow: str) -> list[str]:
             'tauri = json.loads(Path("src-tauri/tauri.conf.json").read_text(encoding="utf-8"))',
             'web = json.loads(Path("web/package.json").read_text(encoding="utf-8"))',
             'notes = Path("docs/releases") / f"{version}.md"',
+            'event_name = os.environ["GITHUB_EVENT_NAME"]',
+            'if event_name == "workflow_dispatch":',
+            'expected_version = "1.0.0-beta.4"',
+            'expected_wix_version = "1.0.0.4"',
+            'expected_version = "1.0.0-beta.5"',
+            'expected_wix_version = "1.0.0.5"',
             'if versions != {version}:',
+            'if version != expected_version:',
             'wix_version = tauri["bundle"]["windows"]["wix"]["version"]',
-            'if wix_version != "1.0.0.4":',
+            'if wix_version != expected_wix_version:',
         ),
     ):
         errors.append("Cargo, Tauri, and Web versions match tag")
@@ -1480,7 +1492,7 @@ def validate_workflow(workflow: str) -> list[str]:
             'if "+" in tag:',
             'raise SystemExit("SemVer build metadata is unsupported for updater asset URLs")',
             'if SEMVER_RE.fullmatch(tag) is None:',
-            'if version == "1.0.0-beta.4" and not prerelease:',
+            'if version == "1.0.0-beta.5" and not prerelease:',
             'emit("prerelease", "true")',
         ),
     ):
@@ -1595,6 +1607,8 @@ def validate_workflow(workflow: str) -> list[str]:
         quality_env is not None
         and quality_env.get("RELEASE_TOOLING_SHA")
         == "${{ needs.validate.outputs.tooling_sha }}"
+        and quality_env.get("OPENTAKE_EXPECTED_RELEASE_VERSION")
+        == "${{ needs.validate.outputs.version }}"
         and _has_code_lines(
             quality_release_contract,
             (
@@ -1607,7 +1621,7 @@ def validate_workflow(workflow: str) -> list[str]:
                 'git cat-file blob "$RELEASE_TOOLING_SHA:scripts/provision_ffmpeg_sidecars.py" \\',
                 'git cat-file blob "$RELEASE_TOOLING_SHA:scripts/tests/test_provision_ffmpeg_sidecars.py" \\',
                 'git cat-file blob "$RELEASE_TOOLING_SHA:.github/workflows/release.yml" \\',
-                'git cat-file blob "$RELEASE_TOOLING_SHA:docs/releases/1.0.0-beta.4.md" \\',
+                'git cat-file blob "$RELEASE_TOOLING_SHA:docs/releases/1.0.0-beta.5.md" \\',
                 'OPENTAKE_REPOSITORY_ROOT="$GITHUB_WORKSPACE" \\',
                 'OPENTAKE_RELEASE_WORKFLOW_PATH="$tooling_root/release.yml" \\',
                 'OPENTAKE_RELEASE_NOTES_PATH="$tooling_root/release-notes.md" \\',
@@ -2515,7 +2529,7 @@ def validate_release_notes_contract(notes_path: Path) -> list[str]:
     try:
         notes = notes_path.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
-        return ["Beta 4 release notes document dual-SHA recovery provenance"]
+        return ["Beta 5 release notes document dual-SHA recovery provenance"]
     normalized = " ".join(notes.split())
     required = (
         "正常 tag push",
@@ -2538,12 +2552,22 @@ def validate_release_notes_contract(notes_path: Path) -> list[str]:
         "notes commit",
     )
     if not notes.strip() or any(marker not in normalized for marker in required):
-        return ["Beta 4 release notes document dual-SHA recovery provenance"]
+        return ["Beta 5 release notes document dual-SHA recovery provenance"]
     return []
 
 
-def validate_repository_metadata(repository_root: Path) -> list[str]:
+def validate_repository_metadata(
+    repository_root: Path, *, expected_version: str | None = None
+) -> list[str]:
     errors: list[str] = []
+    if expected_version is None:
+        expected_version = os.environ.get(
+            "OPENTAKE_EXPECTED_RELEASE_VERSION", CURRENT_RELEASE_VERSION
+        )
+    expected_identity = APPROVED_REPOSITORY_IDENTITIES.get(expected_version)
+    if expected_identity is None:
+        return ["approved repository release identity"]
+    expected_wix_version, release_name = expected_identity
     cargo_path = repository_root / "Cargo.toml"
     tauri_path = repository_root / "src-tauri" / "tauri.conf.json"
     web_path = repository_root / "web" / "package.json"
@@ -2566,11 +2590,11 @@ def validate_repository_metadata(repository_root: Path) -> list[str]:
     except (KeyError, OSError, TypeError, UnicodeError, ValueError):
         return ["readable Cargo, Tauri, and Web version metadata"]
 
-    if versions != {"1.0.0-beta.4"}:
-        errors.append("repository metadata is OpenTake 1.0.0-beta.4")
-    if wix_version != "1.0.0.4":
-        errors.append("Windows installer version is 1.0.0.4")
-    notes = repository_root / "docs" / "releases" / "1.0.0-beta.4.md"
+    if versions != {expected_version}:
+        errors.append(f"repository metadata is OpenTake {expected_version}")
+    if wix_version != expected_wix_version:
+        errors.append(f"Windows installer version is {expected_wix_version}")
+    notes = repository_root / "docs" / "releases" / f"{expected_version}.md"
     try:
         notes_missing = not notes.is_file() or not notes.read_text(
             encoding="utf-8"
@@ -2578,7 +2602,7 @@ def validate_repository_metadata(repository_root: Path) -> list[str]:
     except (OSError, UnicodeError):
         notes_missing = True
     if notes_missing:
-        errors.append("Beta 4 release notes exist")
+        errors.append(f"{release_name} release notes exist")
     return errors
 
 

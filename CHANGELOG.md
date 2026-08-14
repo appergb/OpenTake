@@ -2,6 +2,31 @@
 
 本文件记录 OpenTake 的重要改动。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/)。
 
+## [1.0.0-beta.5] — 2026-08-14
+
+### 新增（Added）
+
+- 新增显式配对、钥匙串凭据、重启保留与按客户端撤销/重新生成的外部 MCP 连接；固定回环端点继续执行 Bearer、Host、Origin、请求边界与工程身份校验。
+- 新增独立 Motion Studio 一级入口，支持受限 HTML/CSS 编辑、CodeMirror、确定性 Chromium 逐帧预览、FFmpeg 发布、工程内文档持久化、发布进度和 Agent 哈希安全协作。
+- Agent 对话改为权威有序内容块；文本、tool use 和 tool result 在同一无边框回复内按真实 provider 顺序连续呈现，清空时间线返回真实 PNG。
+
+### 改进（Changed）
+
+- 外观设置移除未生效的深浅切换与勾号抖动，保留深色标准/紧凑密度；模型清理说明和所有 disclosure 使用统一进入/退出动画与焦点恢复。
+- 素材库 Home 入口移动到左侧分类栏顶部；Home 移除 AI 生成记录，项目卡改为 16:9 真实封面或包含项目名、画布比例与轨道结构的占位。
+- macOS 原生交通灯与 38px TitleBar 的左/右 26px 图标控件使用同一垂直中心。
+
+### 安全与可靠性（Security / Reliability）
+
+- 外部 MCP catalog、凭据 generation、listener 生命周期、last-used 持久化与 session/request 取消均采用 fail-closed 事务和明确的 shutdown barrier。
+- Agent sequence 重放、history resync、Motion revision conflict、项目切换、Save As、发布取消与媒体持久化均绑定权威工程身份，防止迟到结果跨项目提交或覆盖本地编辑。
+- Motion HTML/CSS 禁止网络与活动脚本，预览/发布有文档、图片、帧数、尺寸和结果总量边界；新增 CodeMirror MIT 许可证 inventory 门禁。
+
+### Beta 已知边界
+
+- macOS 候选包仍为 ad-hoc 签名且未公证；Windows 安装器仍未使用 Authenticode。平台安装与升级证据必须来自候选 exact-SHA CI/实机，不能由 macOS 或浏览器 fallback 替代。
+- 在最终打包 `.app` GUI 验收、远端 main CI 和签名 secret 预检完成前，不创建或发布 `v1.0.0-beta.5`。
+
 ## [1.0.0-beta.2] — 2026-08-03
 
 ### 新增（Added）

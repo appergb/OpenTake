@@ -303,9 +303,10 @@ cd ..
 cargo tauri dev
 ```
 
-> **Current Status**: `1.0.0-beta.4` candidate. The local editing, preview,
-> persistence, export, Agent, Motion Canvas, and reviewed AI workflow verticals
-> are implemented. See the [Beta release notes](docs/releases/1.0.0-beta.4.md)
+> **Current Status**: `1.0.0-beta.5` candidate. The local editing, preview,
+> persistence, export, authenticated external MCP, ordered Agent conversation,
+> Motion Studio, and reviewed AI workflow verticals are implemented. See the
+> [Beta release notes](docs/releases/1.0.0-beta.5.md)
 > for validation scope and platform/provider limits.
 
 The sibling directory `palmier-pro-upstream/` contains upstream Swift sources for reference during porting.
@@ -321,6 +322,7 @@ The sibling directory `palmier-pro-upstream/` contains upstream Swift sources fo
 | `1.0.0-beta.2` | 2026-08-08 | Hardened Beta: official Codex login, atomic timeline gestures, secure MCP and interaction polish |
 | `1.0.0-beta.3` | 2026-08-09 | Playback Beta: app-wide Space transport, native HEVC source preview and release-pipeline hardening |
 | `1.0.0-beta.4` | 2026-08-10 | Release candidate: timing and transition persistence, export consistency, signed updater and Windows tract security upgrade |
+| `1.0.0-beta.5` | 2026-08-14 | Agent workflow Beta: persistent authenticated MCP, ordered inline tools, Motion Studio, project previews and interface polish |
 | *(planned)* `1.0.0` | TBD | Phase 10: Full release — CapCut parity + deep Agent integration |
 
 📖 [Full Roadmap](docs/architecture/ROADMAP.md)

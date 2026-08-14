@@ -155,6 +155,13 @@ jobs:
               rf"(?:-{identifier}(?:\.{identifier})*)?$"
           )
           tag = os.environ["RELEASE_TAG"]
+          event_name = os.environ["GITHUB_EVENT_NAME"]
+          if event_name == "workflow_dispatch":
+              expected_version = "1.0.0-beta.4"
+              expected_wix_version = "1.0.0.4"
+          else:
+              expected_version = "1.0.0-beta.5"
+              expected_wix_version = "1.0.0.5"
           if "+" in tag:
               raise SystemExit("SemVer build metadata is unsupported for updater asset URLs")
           if SEMVER_RE.fullmatch(tag) is None:
@@ -170,15 +177,19 @@ jobs:
           }
           if versions != {version}:
               raise SystemExit(f"tag/version mismatch: {tag} != {sorted(versions)}")
+          if version != expected_version:
+              raise SystemExit(
+                  f"release identity mismatch for {event_name}: {version} != {expected_version}"
+              )
           wix_version = tauri["bundle"]["windows"]["wix"]["version"]
-          if wix_version != "1.0.0.4":
+          if wix_version != expected_wix_version:
               raise SystemExit(f"unexpected Windows installer version: {wix_version}")
           notes = Path("docs/releases") / f"{version}.md"
           if not notes.is_file() or not notes.read_text(encoding="utf-8").strip():
               raise SystemExit(f"release notes are missing or empty: {notes}")
           prerelease = "-" in version.split("+", 1)[0]
-          if version == "1.0.0-beta.4" and not prerelease:
-              raise SystemExit("OpenTake 1.0.0-beta.4 must remain a prerelease")
+          if version == "1.0.0-beta.5" and not prerelease:
+              raise SystemExit("OpenTake 1.0.0-beta.5 must remain a prerelease")
           if not prerelease:
               raise SystemExit("this release workflow publishes prereleases only")
 
@@ -215,6 +226,7 @@ jobs:
     env:
       TARGET_SHA: ${{ needs.validate.outputs.source_sha }}
       RELEASE_TOOLING_SHA: ${{ needs.validate.outputs.tooling_sha }}
+      OPENTAKE_EXPECTED_RELEASE_VERSION: ${{ needs.validate.outputs.version }}
       CI: true
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -321,7 +333,7 @@ jobs:
             > "$tooling_root/test_provision_ffmpeg_sidecars.py"
           git cat-file blob "$RELEASE_TOOLING_SHA:.github/workflows/release.yml" \
             > "$tooling_root/release.yml"
-          git cat-file blob "$RELEASE_TOOLING_SHA:docs/releases/1.0.0-beta.4.md" \
+          git cat-file blob "$RELEASE_TOOLING_SHA:docs/releases/1.0.0-beta.5.md" \
             > "$tooling_root/release-notes.md"
           test -s "$tooling_root/check_release_workflow.py"
           test -s "$tooling_root/test_check_release_workflow.py"
