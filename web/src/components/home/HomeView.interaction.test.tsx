@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
+  generationLog: vi.fn(async () => ({ version: 1, entries: [] })),
   newProjectAndEnter: vi.fn(),
   openProjectPath: vi.fn(),
   openProjectViaDialog: vi.fn(),
@@ -16,7 +17,7 @@ vi.mock("../../i18n", () => ({
 
 vi.mock("../../lib/api", () => ({
   isTauri: false,
-  generationLog: async () => ({ version: 1, entries: [] }),
+  generationLog: mocks.generationLog,
 }));
 
 vi.mock("../../store/projectActions", () => ({
@@ -56,6 +57,7 @@ function buttonsNamed(label: string): HTMLButtonElement[] {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.generationLog.mockResolvedValue({ version: 1, entries: [] });
   mocks.newProjectAndEnter.mockResolvedValue(undefined);
   mocks.openProjectPath.mockResolvedValue(undefined);
   mocks.openProjectViaDialog.mockResolvedValue(undefined);
@@ -270,6 +272,19 @@ describe("Home recent-project controls", () => {
     expect(card?.getAttribute("aria-pressed")).toBe("true");
     await act(async () => launcher?.click());
     expect(card?.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("keeps the project context menu available from the semantic preview card", async () => {
+    await act(async () => root?.render(<HomeView />));
+    const card = container?.querySelector<HTMLButtonElement>(
+      'button.home-project-card[aria-label="Recent Demo"]',
+    );
+    const preview = card?.querySelector<HTMLElement>("figure.home-project-preview");
+
+    expect(preview?.tagName).toBe("FIGURE");
+    await act(async () => preview?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true })));
+
+    expect(container?.querySelector('[role="dialog"][aria-label="home.projectActions"]')).not.toBeNull();
   });
 
   it("control-ec1cd7a2d49bb97a remove a recent project entry", async () => {

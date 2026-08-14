@@ -18,8 +18,9 @@
 //! snapshot, then write atomically": each JSON component is written to a
 //! sibling temp file and renamed into place, so a crash never leaves a
 //! half-written `project.json`. `save` owns only the JSON components (and the
-//! thumbnail when held); it never creates or deletes `media/` or
-//! `chat-sessions/`, which the media and agent layers manage out-of-band.
+//! thumbnail when held); it never creates or deletes `media/`,
+//! `chat-sessions/`, or `motion-documents/`, which their owning layers manage
+//! out-of-band.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -97,6 +98,19 @@ impl ProjectCompatibility {
     }
 }
 
+/// Requested mutation for the optional project cover in an explicit save.
+///
+/// `Preserve` is the compatibility/default behavior for ordinary saves,
+/// `Replace` commits newly captured JPEG bytes, and `Remove` represents the
+/// authoritative result that the project has no visible cover content.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ThumbnailUpdate {
+    #[default]
+    Preserve,
+    Replace(Vec<u8>),
+    Remove,
+}
+
 /// An opened `.opentake` project: the bundle path plus its decoded components.
 ///
 /// Media files referenced by `manifest` live under the bundle's `media/`
@@ -116,8 +130,8 @@ pub struct Project {
     /// The generation log (`generation-log.json`). `None` when the file was
     /// absent or failed to parse; the latter also makes compatibility read-only.
     pub generation_log: Option<GenerationLog>,
-    /// JPEG thumbnail bytes to write on the next `save`. `None` leaves any
-    /// existing `thumbnail.jpg` on disk untouched.
+    /// Optional cover bytes to write on the next save. `None` preserves an
+    /// existing on-disk cover, matching the original public API.
     pub thumbnail: Option<Vec<u8>>,
     compatibility: ProjectCompatibility,
 }
@@ -338,6 +352,18 @@ impl Project {
         EncodedProject::prepare(self)?.write_to(root)
     }
 
+    /// Persist this snapshot with an explicit optional-cover mutation.
+    ///
+    /// This additive API keeps [`Self::thumbnail`] source-compatible while
+    /// allowing authoritative callers to distinguish preserve from removal.
+    pub fn save_to_root_with_thumbnail_update(
+        &self,
+        root: &ProjectRoot,
+        thumbnail: ThumbnailUpdate,
+    ) -> Result<()> {
+        EncodedProject::prepare_with_thumbnail_update(self, thumbnail)?.write_to(root)
+    }
+
     /// Publish a complete fresh sibling bundle and return the exact root that
     /// became visible. Sessions adopt this retained authority only after the
     /// directory publication commit succeeds.
@@ -346,13 +372,32 @@ impl Project {
         bundle: impl AsRef<Path>,
         media_source: Option<&ProjectRoot>,
     ) -> Result<ProjectRoot> {
-        let encoded = EncodedProject::prepare(self)?;
+        self.publish_complete_to_with_thumbnail_update(
+            bundle,
+            media_source,
+            self.thumbnail
+                .clone()
+                .map_or(ThumbnailUpdate::Preserve, ThumbnailUpdate::Replace),
+        )
+    }
+
+    /// Publish a complete fresh sibling with an explicit optional-cover
+    /// mutation while retaining all other bundle components.
+    pub fn publish_complete_to_with_thumbnail_update(
+        &self,
+        bundle: impl AsRef<Path>,
+        media_source: Option<&ProjectRoot>,
+        thumbnail: ThumbnailUpdate,
+    ) -> Result<ProjectRoot> {
+        let preserve_thumbnail = matches!(thumbnail, ThumbnailUpdate::Preserve);
+        let encoded = EncodedProject::prepare_with_thumbnail_update(self, thumbnail)?;
         let publisher = ProjectRoot::begin_replace(bundle.as_ref())?;
         encoded.write_to(publisher.stage())?;
         if let Some(source) = media_source {
             source.copy_media_to(publisher.stage())?;
             source.copy_chat_sessions_to(publisher.stage())?;
-            if self.thumbnail.is_none() {
+            source.copy_motion_documents_to(publisher.stage())?;
+            if preserve_thumbnail {
                 source.copy_thumbnail_to(publisher.stage())?;
             }
         }
@@ -372,12 +417,14 @@ impl Project {
         bundle: impl AsRef<Path>,
         media_source: ProjectRoot,
     ) -> Result<ProjectRoot> {
+        let preserve_thumbnail = self.thumbnail.is_none();
         let encoded = EncodedProject::prepare(self)?;
         let publisher = ProjectRoot::begin_replace(bundle.as_ref())?;
         encoded.write_to(publisher.stage())?;
         media_source.copy_media_to(publisher.stage())?;
         media_source.copy_chat_sessions_to(publisher.stage())?;
-        if self.thumbnail.is_none() {
+        media_source.copy_motion_documents_to(publisher.stage())?;
+        if preserve_thumbnail {
             media_source.copy_thumbnail_to(publisher.stage())?;
         }
         drop(media_source);
@@ -399,6 +446,7 @@ impl Project {
         media_byte_size: u64,
         media: &mut dyn std::io::Read,
     ) -> Result<ProjectRoot> {
+        let preserve_thumbnail = self.thumbnail.is_none();
         let encoded = EncodedProject::prepare(self)?;
         let publisher = ProjectRoot::begin_replace(bundle.as_ref())?;
         encoded.write_to(publisher.stage())?;
@@ -407,7 +455,8 @@ impl Project {
             .stage()
             .write_new_media_leaf(media_leaf, media_byte_size, media)?;
         media_source.copy_chat_sessions_to(publisher.stage())?;
-        if self.thumbnail.is_none() {
+        media_source.copy_motion_documents_to(publisher.stage())?;
+        if preserve_thumbnail {
             media_source.copy_thumbnail_to(publisher.stage())?;
         }
         drop(media_source);
@@ -429,12 +478,23 @@ struct EncodedProject {
     timeline: Vec<u8>,
     manifest: Vec<u8>,
     generation_log: Option<Vec<u8>>,
-    thumbnail: Option<Vec<u8>>,
+    thumbnail: ThumbnailUpdate,
 }
 
 impl EncodedProject {
     /// Produce the exact byte snapshot before any destination path is created.
     fn prepare(project: &Project) -> Result<Self> {
+        let thumbnail = project
+            .thumbnail
+            .clone()
+            .map_or(ThumbnailUpdate::Preserve, ThumbnailUpdate::Replace);
+        Self::prepare_with_thumbnail_update(project, thumbnail)
+    }
+
+    fn prepare_with_thumbnail_update(
+        project: &Project,
+        thumbnail: ThumbnailUpdate,
+    ) -> Result<Self> {
         project.compatibility.ensure_writable()?;
         project
             .timeline
@@ -451,7 +511,7 @@ impl EncodedProject {
                 .as_ref()
                 .map(|log| encode_component(layout::GENERATION_LOG_FILE, log))
                 .transpose()?,
-            thumbnail: project.thumbnail.clone(),
+            thumbnail,
         })
     }
 
@@ -461,8 +521,12 @@ impl EncodedProject {
         if let Some(log) = &self.generation_log {
             root.write_atomic(layout::GENERATION_LOG_FILE, log)?;
         }
-        if let Some(thumbnail) = &self.thumbnail {
-            root.write_atomic(layout::THUMBNAIL_FILE, thumbnail)?;
+        match &self.thumbnail {
+            ThumbnailUpdate::Preserve => {}
+            ThumbnailUpdate::Replace(thumbnail) => {
+                root.write_atomic(layout::THUMBNAIL_FILE, thumbnail)?;
+            }
+            ThumbnailUpdate::Remove => root.remove_optional_component(layout::THUMBNAIL_FILE)?,
         }
         Ok(())
     }
@@ -824,6 +888,40 @@ mod tests {
     }
 
     #[test]
+    fn complete_publish_carries_motion_documents_across_save_as() {
+        let tmp = TmpDir::new("complete-motion-documents");
+        let source = tmp.path().join("Source.opentake");
+        let target = tmp.path().join("Target.opentake");
+        let project = Project::new(&source);
+        project.save().unwrap();
+        fs::create_dir_all(source.join("motion-documents/rev-document")).unwrap();
+        fs::write(
+            source.join("motion-documents/catalog.json"),
+            br#"{"schemaVersion":1,"documents":{}}"#,
+        )
+        .unwrap();
+        fs::write(
+            source.join("motion-documents/rev-document/index.html"),
+            b"<main>Motion Studio</main>",
+        )
+        .unwrap();
+        let source_root = ProjectRoot::open(&source).unwrap();
+
+        project
+            .publish_complete_to(&target, Some(&source_root))
+            .expect("Save As must carry project-local motion documents");
+
+        assert_eq!(
+            fs::read(target.join("motion-documents/catalog.json")).unwrap(),
+            br#"{"schemaVersion":1,"documents":{}}"#
+        );
+        assert_eq!(
+            fs::read(target.join("motion-documents/rev-document/index.html")).unwrap(),
+            b"<main>Motion Studio</main>"
+        );
+    }
+
+    #[test]
     fn complete_publish_replaces_the_owned_source_root() {
         let tmp = TmpDir::new("complete-same-target");
         let target = tmp.path().join("Project.opentake");
@@ -846,6 +944,26 @@ mod tests {
         );
         assert_eq!(fs::read(target.join("media/clip.bin")).unwrap(), b"media");
         assert_eq!(fs::read(target.join("thumbnail.jpg")).unwrap(), b"cover");
+    }
+
+    #[test]
+    fn explicit_thumbnail_removal_deletes_only_the_retained_optional_component() {
+        let tmp = TmpDir::new("remove-thumbnail");
+        let target = tmp.path().join("Project.opentake");
+        let mut project = Project::new(&target);
+        project.thumbnail = Some(b"cover".to_vec());
+        project.save().unwrap();
+        fs::write(target.join("keep.bin"), b"keep").unwrap();
+
+        let root = ProjectRoot::open(&target).unwrap();
+        project
+            .save_to_root_with_thumbnail_update(&root, ThumbnailUpdate::Remove)
+            .expect("thumbnail removal is a valid save");
+
+        assert!(!target.join("thumbnail.jpg").exists());
+        assert_eq!(fs::read(target.join("keep.bin")).unwrap(), b"keep");
+        assert!(target.join("project.json").is_file());
+        assert!(target.join("media.json").is_file());
     }
 
     #[test]

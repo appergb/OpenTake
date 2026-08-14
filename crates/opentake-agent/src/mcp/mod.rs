@@ -18,5 +18,8 @@ pub mod generation;
 pub mod media_bridge;
 mod media_catalog;
 pub mod motion;
+pub mod motion_documents;
 pub mod server;
 pub mod vision;
+
+pub use server::{AuthenticatedMcpClient, BearerAuthorizer, ManagedMcpEndpoint, ManagedMcpError};

@@ -61,6 +61,7 @@ same-file = "1.0.6"
 cap-std = "4.0.2"
 cap-fs-ext = "4.0.2"
 sha2 = "0.10"
+getrandom = "0.3"
 uuid = { workspace = true }
 tempfile = "3"
 # Optional account scaffold: verify a token only against a user-configured
@@ -113,8 +114,24 @@ windows-sys = { version = "0.61", features = [
 opentake-media = { workspace = true, features = ["test-faults"] }
 tauri = { version = "2", features = ["protocol-asset", "test"] }
 tokio = { version = "1", features = ["test-util"] }
+rmcp = { version = "2.2.0", features = [
+  "client",
+  "transport-streamable-http-client-reqwest",
+] }
+# rmcp 2.2's reqwest transport calls the compatibility alias added in 0.2.4;
+# 0.2.2/0.2.3 expose only the differently named predecessor.
+sse-stream = "=0.2.4"
+tracing = "0.1"
+
+[[test]]
+name = "external_mcp_integration"
+path = "tests/external_mcp_integration.rs"
+required-features = ["external-mcp-integration"]
 
 [features]
+# Exposes the narrow real-keychain lifecycle harness only to the explicitly
+# selected integration target. Normal debug and release builds omit it.
+external-mcp-integration = []
 # `default` now includes `playback-engine`: the continuous Rust streaming engine
 # is the shipped preview path (upstream's single always-composited surface), so a
 # plain `cargo build`/`cargo test` compiles and exercises it. The feature is kept

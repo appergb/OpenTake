@@ -1,5 +1,7 @@
 // @vitest-environment happy-dom
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import React from "react";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -7,12 +9,15 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { LibraryEntry } from "../../lib/libraryApi";
-import { useLibraryStore } from "../../store/libraryStore";
+import { useI18nStore } from "../../i18n";
+import { stopLibrarySync, useLibraryStore } from "../../store/libraryStore";
+import { useEditorUiStore } from "../../store/uiStore";
 import { textContrastRatio } from "../../../test/contrast";
 import {
   LibraryEntryCard,
   LibraryEntryGrid,
   LibrarySearchBox,
+  LibraryView,
   libraryEntryPreviewSource,
 } from "./LibraryView";
 
@@ -21,18 +26,35 @@ import {
 
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
+let componentStyles: HTMLStyleElement | null = null;
 
 const originalActions = {
   importToProject: useLibraryStore.getState().importToProject,
   categorize: useLibraryStore.getState().categorize,
   unfavorite: useLibraryStore.getState().unfavorite,
 };
+const originalLibraryViewState = {
+  entries: useLibraryStore.getState().entries,
+  loading: useLibraryStore.getState().loading,
+  error: useLibraryStore.getState().error,
+  selectedCategory: useLibraryStore.getState().selectedCategory,
+  search: useLibraryStore.getState().search,
+  sort: useLibraryStore.getState().sort,
+};
+const originalView = useEditorUiStore.getState().view;
+const originalLocale = useI18nStore.getState().locale;
 
 afterEach(async () => {
   if (root) await act(async () => root?.unmount());
   container?.remove();
+  componentStyles?.remove();
   root = null;
   container = null;
+  componentStyles = null;
+  stopLibrarySync();
+  useLibraryStore.setState(originalLibraryViewState);
+  useEditorUiStore.setState({ view: originalView });
+  useI18nStore.getState().setLocale(originalLocale);
   useLibraryStore.setState(originalActions);
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -134,5 +156,93 @@ describe("LibraryEntryCard keyboard actions", () => {
 
     await act(async () => actions[2]?.click());
     expect(unfavorite).toHaveBeenCalledWith(entry.id);
+  });
+});
+
+describe("Library navigation", () => {
+  it("resolves the rail top padding to the shared titlebar safe area", async () => {
+    componentStyles = document.createElement("style");
+    componentStyles.textContent = `
+      :root {
+        --titlebar-safe-top: 44px;
+        --space-sm: 8px;
+        --space-xl: 24px;
+      }
+      ${readFileSync(resolve(process.cwd(), "src/styles/components.css"), "utf8")}
+    `;
+    document.head.append(componentStyles);
+
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => root?.render(<LibraryView />));
+
+    const rail = container.querySelector<HTMLElement>(".library-category-rail");
+    expect(rail).not.toBeNull();
+    expect(getComputedStyle(rail!).paddingTop).toBe("44px");
+  });
+
+  it("keeps one Home action first in the rail and preserves the selected category on re-entry", async () => {
+    useI18nStore.getState().setLocale("en");
+    useLibraryStore.setState({
+      entries: [],
+      loading: false,
+      error: null,
+      selectedCategory: "all",
+      search: "",
+      sort: "recent",
+    });
+    useEditorUiStore.getState().setView("library");
+
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+    await act(async () => root?.render(<LibraryView />));
+
+    const homeActions = container.querySelectorAll<HTMLButtonElement>(
+      'button[aria-label="Back to Home"]',
+    );
+    expect(homeActions).toHaveLength(1);
+
+    const rail = container.querySelector("aside");
+    const header = container.querySelector("main > header");
+    expect(rail).not.toBeNull();
+    expect(header).not.toBeNull();
+    expect(rail?.querySelector("button")).toBe(homeActions[0]);
+
+    for (const [label, id] of [
+      ["All", "all"],
+      ["Video", "video"],
+      ["Audio", "audio"],
+      ["Sound FX", "sound"],
+      ["Image", "image"],
+      ["Effects", "effect"],
+    ] as const) {
+      const category = [...(rail?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find(
+        (button) => button.textContent?.trim() === label,
+      );
+      expect(category).toBeDefined();
+      await act(async () => category?.click());
+      expect(useLibraryStore.getState().selectedCategory).toBe(id);
+      expect(header?.querySelector('button[aria-label="Back to Home"]')).toBeNull();
+    }
+
+    const video = [...(rail?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find(
+      (button) => button.textContent?.trim() === "Video",
+    );
+    await act(async () => video?.click());
+    await act(async () => homeActions[0]?.click());
+    expect(useEditorUiStore.getState().view).toBe("home");
+
+    await act(async () => root?.unmount());
+    root = createRoot(container);
+    useEditorUiStore.getState().setView("library");
+    await act(async () => root?.render(<LibraryView />));
+
+    expect(useLibraryStore.getState().selectedCategory).toBe("video");
+    const reenteredVideo = [...container.querySelectorAll<HTMLButtonElement>("aside button")].find(
+      (button) => button.textContent?.trim() === "Video",
+    );
+    expect(reenteredVideo?.style.fontWeight).toBe("var(--fw-semibold)");
   });
 });

@@ -16,6 +16,10 @@ mod commands;
 // drive the export orchestrator (`export::run_export`) against the library
 // target. The Tauri command itself is registered below like the other modules.
 pub mod export;
+#[cfg(not(feature = "external-mcp-integration"))]
+mod external_mcp;
+#[cfg(feature = "external-mcp-integration")]
+pub mod external_mcp;
 pub mod feedback;
 mod fs_availability;
 mod generation;
@@ -26,6 +30,7 @@ mod lut;
 mod mcp;
 mod media;
 pub mod motion;
+mod motion_documents;
 // Public for the same reason as `export`: integration acceptance drives the
 // standalone compositing path against a generated project snapshot.
 pub mod render;
@@ -127,28 +132,18 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .on_window_event(|window, event| {
             if let WindowEvent::CloseRequested { api, .. } = event {
-                // Background-run: don't quit, hide and return to Home.
+                // Background-run: don't quit. The actual hide waits for the
+                // bounded off-thread composite-cover save, so CloseRequested
+                // has parity with explicit Save without blocking the UI event
+                // thread on ffmpeg/GPU/bundle I/O.
                 api.prevent_close();
-                // Flush the open project before hiding so background-run never
-                // loses edits (autosave is debounced; this is the final write).
-                // No-op when no project is open (save_project returns an error we
-                // intentionally ignore). Once an update owns admission, its
-                // own final save is authoritative and no later close event may
-                // write across that barrier.
-                if let Some(core) = window.app_handle().try_state::<AppCore>() {
-                    if let Some(admission) = window
-                        .app_handle()
-                        .try_state::<updater::InstallAdmissionGate>()
-                    {
-                        if let Ok(_activity) = updater::begin_mutating_activity(&admission) {
-                            let _ = core.save_project(None);
-                        }
-                    } else {
-                        let _ = core.save_project(None);
-                    }
-                }
-                let _ = window.hide();
-                let _ = window.app_handle().emit("go_home", ());
+                let window = window.clone();
+                let app = window.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = commands::save_current_project_with_composite_cover(app).await;
+                    let _ = window.hide();
+                    let _ = window.app_handle().emit("go_home", ());
+                });
             }
         })
         .setup(|app| {
@@ -214,6 +209,10 @@ pub fn run() {
                 cache_root.clone(),
                 models_dir.clone(),
             ));
+            let motion_document_app = app.handle().clone();
+            let motion_document_notify: mcp::MotionDocumentNotifier = Arc::new(move |change| {
+                let _ = motion_document_app.emit("motion_document_changed", change);
+            });
             let chat_state = chat::ChatState::new_with_capabilities(
                 core.clone(),
                 workflows_dir,
@@ -222,11 +221,22 @@ pub fn run() {
                 generation_bridge.clone(),
                 motion_bridge.clone(),
                 advanced_bridge.clone(),
+                motion_document_notify,
                 install_admission.clone(),
             );
-            // The fixed-port external MCP endpoint is disabled for Beta until
-            // the product has an authenticated pairing UX. Official Codex
-            // turns bind their own authenticated per-turn endpoint.
+            let external_mcp_state = match app.path().app_data_dir() {
+                Ok(data_dir) => external_mcp::ExternalMcpState::load(
+                    core.clone(),
+                    chat_state.external_mcp_components(),
+                    &data_dir,
+                    Arc::new(opentake_gen::KeyringStore::new()),
+                ),
+                Err(error) => external_mcp::ExternalMcpState::auth_failure(
+                    core.clone(),
+                    chat_state.external_mcp_components(),
+                    format!("could not resolve external MCP application data directory: {error}"),
+                ),
+            };
 
             // A global favorite must never silently become a temporary file.
             // Keep the editor usable if app-data resolution fails, but make all
@@ -239,8 +249,11 @@ pub fn run() {
                     "global library unavailable: could not resolve app data directory: {error}"
                 )),
             };
+            let motion_document_store =
+                Arc::new(motion_documents::MotionDocumentStore::new(core.clone()));
 
             app.manage(core);
+            app.manage(motion_document_store);
             app.manage(commands::ProjectLifecycleCoordinator::default());
             app.manage(generation_bridge);
             let motion_state =
@@ -270,6 +283,14 @@ pub fn run() {
                     }
                 });
             app.manage(chat_state);
+            app.manage(external_mcp_state);
+            external_mcp::install_status_emitter(
+                app.handle(),
+                &app.state::<external_mcp::ExternalMcpState>(),
+            );
+            tauri::async_runtime::block_on(
+                app.state::<external_mcp::ExternalMcpState>().initialize(),
+            );
             app.manage(codex::CodexAuthState::default());
             app.manage(MediaState::new_with_admission(
                 engine,
@@ -398,9 +419,16 @@ pub fn run() {
             generation::generation_cancel,
             generation::generation_retry,
             motion::motion_capability,
+            motion::motion_preview,
+            motion::motion_preview_cancel,
             motion::motion_add,
             motion::motion_edit,
             motion::motion_cancel,
+            motion_documents::motion_document_list,
+            motion_documents::motion_document_create,
+            motion_documents::motion_document_read,
+            motion_documents::motion_document_hash,
+            motion_documents::motion_document_patch,
             advanced::matting_model_status,
             advanced::download_matting_model,
             advanced::cancel_matting_model_download,
@@ -428,9 +456,15 @@ pub fn run() {
             codex::codex_logout,
             chat::chat_send,
             chat::chat_history,
+            chat::chat_history_authoritative,
             chat::chat_sessions,
             chat::chat_session_set_open,
             chat::chat_cancel,
+            external_mcp::external_mcp_status,
+            external_mcp::external_mcp_set_enabled,
+            external_mcp::external_mcp_pair,
+            external_mcp::external_mcp_regenerate,
+            external_mcp::external_mcp_revoke,
             transcribe::transcribe_model_status,
             transcribe::download_transcribe_model,
             transcribe::transcribe_media,
@@ -468,6 +502,9 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, _event| {
+            if matches!(&_event, RunEvent::Exit) {
+                external_mcp::shutdown_on_exit(_app);
+            }
             // A user-driven Quit must not interrupt bundle replacement. The
             // updater's own restart has a programmatic exit code and remains
             // allowed after both save barriers succeed.

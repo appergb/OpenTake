@@ -15,8 +15,26 @@ import { refreshMedia, resetProjectMediaState } from "./mediaStore";
 import { openDialog, saveDialog } from "../lib/dialog";
 import { t } from "../i18n";
 import { stopNativePlaybackForProjectBoundary } from "../components/preview/nativePlaybackSession";
+import { useMotionStudioStore } from "./motionStudioStore";
 
 const PROJECT_EXT = "opentake";
+
+async function flushMotionStudioBeforeProjectBoundary(): Promise<void> {
+  const motion = useMotionStudioStore.getState();
+  await motion.flushSave();
+  const latest = useMotionStudioStore.getState();
+  if (
+    latest.savingFile ||
+    latest.conflict ||
+    ["validating", "rendering", "encoding", "committing"].includes(latest.publishPhase) ||
+    latest.dirtyFiles["index.html"] ||
+    latest.dirtyFiles["styles.css"]
+  ) {
+    throw new Error(
+      "Motion Studio 更改尚未保存，请先解决保存错误或版本冲突 / Motion Studio changes are not saved; resolve the save error or revision conflict first.",
+    );
+  }
+}
 
 /** Ensure a chosen path carries the `.opentake` bundle extension. */
 function withExt(path: string): string {
@@ -62,6 +80,7 @@ export async function newProjectAndEnter(): Promise<void> {
   try {
     const save = await saveDialog();
     if (!save) {
+      await flushMotionStudioBeforeProjectBoundary();
       await stopNativePlaybackForProjectBoundary();
       const snapshot = await api.projectNew(null);
       useProjectStore.getState().replaceProjectSnapshot(snapshot);
@@ -83,6 +102,7 @@ export async function newProjectAndEnter(): Promise<void> {
     if (typeof chosen !== "string") return; // cancelled
 
     const requestedPath = withExt(chosen);
+    await flushMotionStudioBeforeProjectBoundary();
     await stopNativePlaybackForProjectBoundary();
     // The desktop command persists a separate fresh session first and only
     // replaces the live project after that bundle can be reopened. A failed
@@ -262,6 +282,8 @@ async function runSaveCurrentProjectAs(): Promise<void> {
       filters: [{ name: "OpenTake", extensions: [PROJECT_EXT] }],
     });
     if (typeof selected !== "string" || !requestIsExactCurrent()) return;
+    await flushMotionStudioBeforeProjectBoundary();
+    if (!requestIsExactCurrent()) return;
     const committedPath = await api.projectSave(
       withExt(selected),
       request.projectEpoch,
@@ -297,9 +319,10 @@ function projectLifecycleErrorMessage(error: unknown): string {
 }
 
 export async function openProjectPath(path: string): Promise<void> {
-  await stopNativePlaybackForProjectBoundary();
   let snap: Awaited<ReturnType<typeof api.projectOpen>>;
   try {
+    await flushMotionStudioBeforeProjectBoundary();
+    await stopNativePlaybackForProjectBoundary();
     snap = await api.projectOpen(path);
   } catch (error) {
     const message = projectLifecycleErrorMessage(error);
@@ -349,6 +372,7 @@ export async function openProjectViaDialog(): Promise<void> {
 export async function openSampleProject(slug: string, startTutorial: boolean): Promise<void> {
   try {
     const path = await api.sampleProjectMaterialize(slug);
+    await flushMotionStudioBeforeProjectBoundary();
     await stopNativePlaybackForProjectBoundary();
     const snapshot = await api.projectOpen(path);
     useProjectStore.getState().replaceProjectSnapshot(snapshot);

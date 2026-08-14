@@ -35,6 +35,13 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 /// ship as a template package with audited assets instead.
 pub const DEFAULT_MAX_DOCUMENT_BYTES: usize = 256 * 1024;
 
+/// CSP embedded in project-authored HTML/CSS documents before Chromium adds
+/// its independent request interception. It permits only inline styles; the
+/// deterministic clock is injected by CDP before author content and needs no
+/// document script permission. Network, filesystem-adjacent, navigation, frame,
+/// worker, media, form, and author-script capabilities stay closed.
+pub const OFFLINE_DOCUMENT_CSP: &str = "default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; media-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'; worker-src 'none'";
+
 /// An allowed network origin (scheme + host[:port]), e.g.
 /// `https://cdn.jsdelivr.net`. Compared case-insensitively by exact prefix on the
 /// request URL's origin. We deliberately do NOT support wildcards: each origin a

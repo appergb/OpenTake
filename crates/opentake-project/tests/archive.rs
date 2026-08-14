@@ -222,7 +222,7 @@ fn missing_source_is_reported_and_kept_dangling() {
 }
 
 #[test]
-fn carries_thumbnail_and_chat_sessions() {
+fn carries_thumbnail_chat_sessions_and_motion_documents() {
     let tmp = TempDir::new("archive-extras");
     let source_bundle = tmp.child("Src.opentake");
     write_file(&source_bundle.join("thumbnail.jpg"), b"JPEGDATA");
@@ -233,6 +233,17 @@ fn carries_thumbnail_and_chat_sessions() {
     write_file(
         &source_bundle.join("chat-sessions").join("s2.json"),
         br#"{"id":"s2"}"#,
+    );
+    write_file(
+        &source_bundle.join("motion-documents").join("catalog.json"),
+        br#"{"schemaVersion":1,"documents":{}}"#,
+    );
+    write_file(
+        &source_bundle
+            .join("motion-documents")
+            .join("rev-document")
+            .join("styles.css"),
+        b"body { background: #111; }",
     );
 
     let dest = tmp.child("Extras.opentake");
@@ -251,6 +262,14 @@ fn carries_thumbnail_and_chat_sessions() {
     );
     assert!(dest.join("chat-sessions").join("s1.json").is_file());
     assert!(dest.join("chat-sessions").join("s2.json").is_file());
+    assert_eq!(
+        std::fs::read(dest.join("motion-documents/catalog.json")).unwrap(),
+        br#"{"schemaVersion":1,"documents":{}}"#
+    );
+    assert_eq!(
+        std::fs::read(dest.join("motion-documents/rev-document/styles.css")).unwrap(),
+        b"body { background: #111; }"
+    );
 }
 
 #[test]

@@ -30,14 +30,14 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard};
 
 use opentake_domain::{
     ClipType, GenerationInput, MediaAsset, MediaManifest, MediaManifestEntry, MediaProxy, Timeline,
 };
 use opentake_ops::command::{ClipEntry, EditCommand, EditResult};
 use opentake_ops::IdGen;
-use opentake_project::{GenerationLog, ProjectCompatibility, ProjectRootIdentity};
+use opentake_project::{GenerationLog, ProjectCompatibility, ProjectRootIdentity, ThumbnailUpdate};
 use same_file::Handle;
 
 use crate::deps::CoreDeps;
@@ -364,6 +364,7 @@ impl DeferredCoreEvents {
 pub struct AppCore {
     session: Arc<Mutex<CoreSessionSlot>>,
     project_identity_workflow: Arc<RwLock<()>>,
+    project_bundle_publication: Arc<Mutex<()>>,
     project_identity_transition: Arc<Mutex<Vec<ProjectIdentityTransitionListener>>>,
     events: EventBus,
     deps: Arc<CoreDeps>,
@@ -393,6 +394,7 @@ impl AppCore {
                 editor: EditorSession::new_project(),
             })),
             project_identity_workflow: Arc::new(RwLock::new(())),
+            project_bundle_publication: Arc::new(Mutex::new(())),
             project_identity_transition: Arc::new(Mutex::new(Vec::new())),
             events: EventBus::new(),
             deps: Arc::new(deps),
@@ -531,6 +533,16 @@ impl AppCore {
     pub fn lock_project_identity_workflow(&self) -> RwLockReadGuard<'_, ()> {
         self.project_identity_workflow
             .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Serialize publications that replace a complete project bundle with
+    /// project-local component commits. Both classes of writer must hold this
+    /// gate before they snapshot or publish bundle contents, otherwise a full
+    /// replacement can silently discard a just-published component revision.
+    pub fn lock_project_bundle_publication(&self) -> MutexGuard<'_, ()> {
+        self.project_bundle_publication
+            .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
@@ -912,7 +924,13 @@ impl AppCore {
         path: Option<PathBuf>,
         thumbnail: Option<Vec<u8>>,
     ) -> Result<PathBuf> {
-        self.save_project_with_thumbnail_at_identity(None, None, path, thumbnail)
+        self.save_project_with_thumbnail_update_at_identity(
+            None,
+            None,
+            path,
+            thumbnail.map_or(ThumbnailUpdate::Preserve, ThumbnailUpdate::Replace),
+            || true,
+        )
     }
 
     /// Save only if the project session still has the caller's exact identity.
@@ -926,20 +944,59 @@ impl AppCore {
         path: Option<PathBuf>,
         thumbnail: Option<Vec<u8>>,
     ) -> Result<PathBuf> {
-        self.save_project_with_thumbnail_at_identity(
+        self.save_project_with_thumbnail_update_at_identity(
+            Some(expected_project_epoch),
+            expected_project_path,
+            path,
+            thumbnail.map_or(ThumbnailUpdate::Preserve, ThumbnailUpdate::Replace),
+            || true,
+        )
+    }
+
+    /// Save only if the project identity still matches, with an explicit
+    /// authoritative cover mutation.
+    pub fn save_project_with_thumbnail_update_for_project(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_path: Option<&Path>,
+        path: Option<PathBuf>,
+        thumbnail: ThumbnailUpdate,
+    ) -> Result<PathBuf> {
+        self.save_project_with_thumbnail_update_at_identity(
             Some(expected_project_epoch),
             expected_project_path,
             path,
             thumbnail,
+            || true,
         )
     }
 
-    fn save_project_with_thumbnail_at_identity(
+    /// Identity-bound explicit cover save whose final caller checkpoint runs
+    /// under the same session lock immediately before persistence begins.
+    pub fn save_project_with_thumbnail_update_for_project_if(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_path: Option<&Path>,
+        path: Option<PathBuf>,
+        thumbnail: ThumbnailUpdate,
+        can_commit: impl FnOnce() -> bool,
+    ) -> Result<PathBuf> {
+        self.save_project_with_thumbnail_update_at_identity(
+            Some(expected_project_epoch),
+            expected_project_path,
+            path,
+            thumbnail,
+            can_commit,
+        )
+    }
+
+    fn save_project_with_thumbnail_update_at_identity(
         &self,
         expected_project_epoch: Option<u64>,
         expected_project_path: Option<&Path>,
         path: Option<PathBuf>,
-        thumbnail: Option<Vec<u8>>,
+        thumbnail: ThumbnailUpdate,
+        can_commit: impl FnOnce() -> bool,
     ) -> Result<PathBuf> {
         let changes_identity = path.is_some();
         if changes_identity {
@@ -956,10 +1013,14 @@ impl AppCore {
                     || session.editor.project_dir() != expected_project_path
             }) {
                 Err(CoreError::StaleProject)
+            } else if !can_commit() {
+                Err(CoreError::Unsupported(
+                    "project cover save was cancelled before commit",
+                ))
             } else {
                 session
                     .editor
-                    .save_project_with_thumbnail(path, thumbnail)
+                    .save_project_with_thumbnail_update(path, thumbnail)
                     .map(|written| (written, session.project_epoch))
             }
         };
@@ -1110,6 +1171,7 @@ impl AppCore {
         mutate: impl FnOnce(&mut EditorSession, &dyn IdGen) -> Result<T>,
         persist: impl FnOnce(&mut EditorSession) -> Result<PathBuf>,
     ) -> Result<T> {
+        let bundle_publication = self.lock_project_bundle_publication();
         let (value, count, written) = {
             let mut session = self.lock();
             ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
@@ -1127,6 +1189,9 @@ impl AppCore {
                 }
             }
         };
+        // Event subscribers may synchronously re-enter project component
+        // stores, so publication locks must be released before broadcasting.
+        drop(bundle_publication);
         self.events.emit(&CoreEvent::MediaChanged {
             project_epoch: expected_project_epoch,
             count,
@@ -1279,6 +1344,40 @@ impl AppCore {
         )
     }
 
+    /// Commit a project-managed Motion render while the caller holds the
+    /// complete-bundle publication gate. Events are queued so the caller can
+    /// first disarm any retained-file rollback guard, release the publication
+    /// gate, and only then notify synchronous subscribers.
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_motion_media_for_project_deferred(
+        &self,
+        publication: &MutexGuard<'_, ()>,
+        expected_project_epoch: u64,
+        expected_version: u64,
+        expected_project_dir: &Path,
+        path: impl AsRef<Path>,
+        name: impl Into<String>,
+        probe: &ProbedMedia,
+        provenance: GenerationInput,
+        placement: MotionPlacement,
+        events: &mut DeferredCoreEvents,
+    ) -> Result<MotionMediaCommit> {
+        self.commit_generated_media_for_project_deferred(
+            publication,
+            expected_project_epoch,
+            expected_version,
+            expected_project_dir,
+            path,
+            name,
+            ClipType::Video,
+            probe,
+            provenance,
+            placement,
+            "Add Motion Graphic",
+            events,
+        )
+    }
+
     /// Atomically register a completed generated audio/video file and place or
     /// replace its timeline clip. The generated file must already be a
     /// regular, non-symlink child of the active bundle's `media/` directory.
@@ -1299,6 +1398,46 @@ impl AppCore {
         provenance: GenerationInput,
         placement: MotionPlacement,
         action_name: &str,
+    ) -> Result<MotionMediaCommit> {
+        let publication = self.lock_project_bundle_publication();
+        let mut events = DeferredCoreEvents::default();
+        let commit = self.commit_generated_media_for_project_deferred(
+            &publication,
+            expected_project_epoch,
+            expected_version,
+            expected_project_dir,
+            path,
+            name,
+            kind,
+            probe,
+            provenance,
+            placement,
+            action_name,
+            &mut events,
+        )?;
+        drop(publication);
+        self.emit_deferred(events);
+        Ok(commit)
+    }
+
+    /// Deferred-event form of [`Self::commit_generated_media_for_project`].
+    /// The guard parameter makes the required serialization with complete
+    /// bundle replacement explicit at every call site.
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_generated_media_for_project_deferred(
+        &self,
+        _publication: &MutexGuard<'_, ()>,
+        expected_project_epoch: u64,
+        expected_version: u64,
+        expected_project_dir: &Path,
+        path: impl AsRef<Path>,
+        name: impl Into<String>,
+        kind: ClipType,
+        probe: &ProbedMedia,
+        provenance: GenerationInput,
+        placement: MotionPlacement,
+        action_name: &str,
+        events: &mut DeferredCoreEvents,
     ) -> Result<MotionMediaCommit> {
         let path = path.as_ref();
         let media_dir = expected_project_dir.join(opentake_project::layout::MEDIA_DIR);
@@ -1408,15 +1547,15 @@ impl AppCore {
             }
         };
 
-        self.events.emit(&CoreEvent::TimelineChanged {
+        events.push(CoreEvent::TimelineChanged {
             project_epoch: expected_project_epoch,
             version: commit.edit.timeline_version,
         });
-        self.events.emit(&CoreEvent::MediaChanged {
+        events.push(CoreEvent::MediaChanged {
             project_epoch: expected_project_epoch,
             count,
         });
-        self.events.emit(&CoreEvent::ProjectSaved {
+        events.push(CoreEvent::ProjectSaved {
             path: written.to_string_lossy().into_owned(),
             project_epoch: expected_project_epoch,
         });
@@ -2385,6 +2524,278 @@ mod tests {
     }
 
     #[test]
+    fn bundle_publication_gate_blocks_complete_generation_replacement() {
+        let bundle = project_bundle("generation-publication-gate");
+        let core = AppCore::new();
+        core.open_project(&bundle).unwrap();
+        let snapshot = core.runtime_snapshot();
+        let publication = core.lock_project_bundle_publication();
+        let replacement = core.clone();
+        let destination = bundle.clone();
+        let (started, entered) = std::sync::mpsc::channel();
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            let result = replacement.persist_generation_mutation_using(
+                snapshot.project_epoch,
+                &destination,
+                |_editor, _ids| Ok(()),
+                |_editor| Ok(destination.clone()),
+            );
+            sent.send(result).unwrap();
+        });
+
+        entered
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(received
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .is_err());
+        drop(publication);
+        received
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("generation replacement proceeds after publication gate releases")
+            .unwrap();
+        worker.join().unwrap();
+        let _ = std::fs::remove_dir_all(bundle);
+    }
+
+    #[test]
+    fn generation_events_reenter_bundle_publication_after_commit_without_deadlock() {
+        let bundle = project_bundle("generation-publication-reentry");
+        let core = AppCore::new();
+        core.open_project(&bundle).unwrap();
+        let snapshot = core.runtime_snapshot();
+        let reentrant = core.clone();
+        let (event_sent, event_received) = std::sync::mpsc::channel();
+        core.subscribe(move |event| {
+            if matches!(event, CoreEvent::ProjectSaved { .. }) {
+                let _publication = reentrant.lock_project_bundle_publication();
+                event_sent.send(()).unwrap();
+            }
+        });
+        let worker_core = core.clone();
+        let destination = bundle.clone();
+        let (done_sent, done_received) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = worker_core.persist_generation_mutation_using(
+                snapshot.project_epoch,
+                &destination,
+                |_editor, _ids| Ok(()),
+                |_editor| Ok(destination.clone()),
+            );
+            done_sent.send(result).unwrap();
+        });
+
+        event_received
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("subscriber can re-enter publication after commit");
+        done_received
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("generation publication completes")
+            .unwrap();
+        worker.join().unwrap();
+        let _ = std::fs::remove_dir_all(bundle);
+    }
+
+    #[test]
+    fn motion_media_commit_defers_events_until_bundle_publication_releases() {
+        let bundle = project_bundle("motion-publication-events");
+        let core = AppCore::new();
+        core.open_project(&bundle).unwrap();
+        let media_dir = opentake_project::layout::media_dir(&bundle);
+        std::fs::create_dir_all(&media_dir).unwrap();
+        let rendered = media_dir.join("motion-deferred.mp4");
+        std::fs::write(&rendered, b"validated-render-fixture").unwrap();
+        let snapshot = core.runtime_snapshot();
+        let reentrant = core.clone();
+        let (event_sent, event_received) = std::sync::mpsc::channel();
+        core.subscribe(move |event| {
+            if matches!(event, CoreEvent::ProjectSaved { .. }) {
+                let _publication = reentrant.lock_project_bundle_publication();
+                event_sent.send(()).unwrap();
+            }
+        });
+
+        let publication = core.lock_project_bundle_publication();
+        let mut events = DeferredCoreEvents::default();
+        core.commit_motion_media_for_project_deferred(
+            &publication,
+            snapshot.project_epoch,
+            snapshot.version,
+            &bundle,
+            &rendered,
+            "Motion Deferred",
+            &ProbedMedia::default(),
+            GenerationInput::default(),
+            MotionPlacement::Add {
+                start_frame: 0,
+                duration_frames: 1,
+                track_index: Some(0),
+            },
+            &mut events,
+        )
+        .unwrap();
+        assert!(event_received.try_recv().is_err());
+        drop(publication);
+        core.emit_deferred(events);
+        event_received
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("subscriber can re-enter publication after motion commit");
+
+        let _ = std::fs::remove_dir_all(bundle);
+    }
+
+    #[test]
+    fn motion_publication_serializes_with_complete_bundle_replacement() {
+        let bundle = project_bundle("motion-complete-replacement");
+        let core = AppCore::new();
+        core.open_project(&bundle).unwrap();
+        let media_dir = opentake_project::layout::media_dir(&bundle);
+        std::fs::create_dir_all(&media_dir).unwrap();
+        let rendered = media_dir.join("motion-complete.mp4");
+        let rendered_bytes = b"complete-motion-render";
+        std::fs::write(&rendered, rendered_bytes).unwrap();
+        let snapshot = core.runtime_snapshot();
+
+        let publication = core.lock_project_bundle_publication();
+        let replacement = core.clone();
+        let destination = bundle.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = replacement.persist_generation_mutation_using(
+                snapshot.project_epoch,
+                &destination,
+                |_editor, _ids| Ok(()),
+                |editor| editor.save_generation_state(),
+            );
+            done_tx.send(result).unwrap();
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+
+        let current = core.runtime_snapshot();
+        let mut events = DeferredCoreEvents::default();
+        let committed = core
+            .commit_motion_media_for_project_deferred(
+                &publication,
+                current.project_epoch,
+                current.version,
+                &bundle,
+                &rendered,
+                "Motion Complete",
+                &ProbedMedia::default(),
+                GenerationInput::default(),
+                MotionPlacement::Add {
+                    start_frame: 0,
+                    duration_frames: 1,
+                    track_index: Some(0),
+                },
+                &mut events,
+            )
+            .unwrap();
+        assert!(done_rx
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .is_err());
+        drop(publication);
+        core.emit_deferred(events);
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("complete replacement proceeds after motion publication")
+            .unwrap();
+        worker.join().unwrap();
+
+        let reopened = AppCore::new();
+        reopened.open_project(&bundle).unwrap();
+        assert!(reopened
+            .media()
+            .entries
+            .iter()
+            .any(|entry| entry.id == committed.media.id));
+        assert_eq!(std::fs::read(&rendered).unwrap(), rendered_bytes);
+        let _ = std::fs::remove_dir_all(bundle);
+    }
+
+    #[test]
+    fn motion_publication_identity_lease_keeps_save_as_copy_complete() {
+        let bundle = project_bundle("motion-save-as-source");
+        let destination = project_bundle("motion-save-as-target");
+        let _ = std::fs::remove_dir_all(&destination);
+        let core = AppCore::new();
+        core.open_project(&bundle).unwrap();
+        let media_dir = opentake_project::layout::media_dir(&bundle);
+        std::fs::create_dir_all(&media_dir).unwrap();
+        let rendered = media_dir.join("motion-save-as.mp4");
+        let rendered_bytes = b"complete-before-save-as";
+        std::fs::write(&rendered, rendered_bytes).unwrap();
+
+        let publication = core.lock_project_bundle_publication();
+        let identity = core.lock_project_identity_workflow();
+        let save_as_core = core.clone();
+        let save_as_destination = destination.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let result = save_as_core.save_project(Some(save_as_destination));
+            done_tx.send(result).unwrap();
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+
+        let snapshot = core.runtime_snapshot();
+        let mut events = DeferredCoreEvents::default();
+        let committed = core
+            .commit_motion_media_for_project_deferred(
+                &publication,
+                snapshot.project_epoch,
+                snapshot.version,
+                &bundle,
+                &rendered,
+                "Motion Save As",
+                &ProbedMedia::default(),
+                GenerationInput::default(),
+                MotionPlacement::Add {
+                    start_frame: 0,
+                    duration_frames: 1,
+                    track_index: Some(0),
+                },
+                &mut events,
+            )
+            .unwrap();
+        assert!(done_rx
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .is_err());
+        assert!(!destination.exists());
+        drop(identity);
+        drop(publication);
+        core.emit_deferred(events);
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("Save As proceeds after Motion releases identity")
+            .unwrap();
+        worker.join().unwrap();
+
+        let reopened = AppCore::new();
+        reopened.open_project(&destination).unwrap();
+        assert!(reopened
+            .media()
+            .entries
+            .iter()
+            .any(|entry| entry.id == committed.media.id));
+        assert_eq!(
+            std::fs::read(destination.join("media/motion-save-as.mp4")).unwrap(),
+            rendered_bytes
+        );
+        let _ = std::fs::remove_dir_all(bundle);
+        let _ = std::fs::remove_dir_all(destination);
+    }
+
+    #[test]
     fn identity_bound_save_never_writes_a_replacement_project_to_the_old_request_target() {
         let first = project_bundle("save-identity-first");
         let second = project_bundle("save-identity-second");
@@ -2897,10 +3308,12 @@ mod tests {
 
     #[test]
     fn open_save_roundtrip_through_core_emits_lifecycle_events() {
+        static SAVE_ROUNDTRIP_SEQ: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "opentake-core-appcore-{}-{}.opentake",
+            "opentake-core-appcore-{}-{}-{}.opentake",
             std::process::id(),
-            line!()
+            line!(),
+            SAVE_ROUNDTRIP_SEQ.fetch_add(1, Ordering::Relaxed),
         ));
         let _ = std::fs::remove_dir_all(&dir);
 

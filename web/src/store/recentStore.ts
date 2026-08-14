@@ -5,12 +5,15 @@
  */
 
 import { create } from "zustand";
+import type { HomeProjectPreview } from "../lib/api";
 import { useProjectStore } from "./projectStore";
 
 const LS_RECENTS = "recentProjects";
 const MAX_RECENTS = 12;
 const MAX_RECENT_PATH_CHARS = 32_768;
 const MAX_RECENT_NAME_CHARS = 512;
+const MAX_PREVIEW_TRACKS = 64;
+const PROJECT_TRACK_KINDS = new Set(["video", "audio", "image", "text", "lottie"]);
 let validationInFlight: Promise<void> | null = null;
 
 export interface RecentProject {
@@ -20,6 +23,7 @@ export interface RecentProject {
   createdAt?: number;
   modifiedAt?: number;
   thumbnailPath?: string | null;
+  preview?: HomeProjectPreview;
   missing?: boolean;
   offline?: boolean;
 }
@@ -28,6 +32,39 @@ function finiteTimestamp(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? value
     : undefined;
+}
+
+function decodeProjectPreview(value: unknown): HomeProjectPreview | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const source = value as Partial<HomeProjectPreview>;
+  if (
+    !Number.isInteger(source.canvasWidth)
+    || !Number.isInteger(source.canvasHeight)
+    || (source.canvasWidth ?? 0) <= 0
+    || (source.canvasHeight ?? 0) <= 0
+    || (source.canvasWidth ?? 0) > 2_147_483_647
+    || (source.canvasHeight ?? 0) > 2_147_483_647
+    || !Array.isArray(source.trackKinds)
+    || source.trackKinds.length > MAX_PREVIEW_TRACKS
+    || source.trackKinds.some((kind) => !PROJECT_TRACK_KINDS.has(kind))
+  ) {
+    return undefined;
+  }
+  return {
+    canvasWidth: source.canvasWidth as number,
+    canvasHeight: source.canvasHeight as number,
+    trackKinds: [...source.trackKinds],
+  } as HomeProjectPreview;
+}
+
+function currentProjectPreview(path: string): HomeProjectPreview | undefined {
+  const project = useProjectStore.getState();
+  if (project.projectPath !== path) return undefined;
+  return decodeProjectPreview({
+    canvasWidth: project.timeline.width,
+    canvasHeight: project.timeline.height,
+    trackKinds: project.timeline.tracks.map((track) => track.type),
+  });
 }
 
 /** Decode the localStorage startup cache without trusting its size or fields. */
@@ -68,6 +105,7 @@ export function decodeRecentProjects(raw: string | null): RecentProject[] {
         createdAt: finiteTimestamp(source.createdAt),
         modifiedAt: finiteTimestamp(source.modifiedAt),
         thumbnailPath,
+        preview: decodeProjectPreview(source.preview),
         missing: source.missing === true,
         offline: source.offline === true,
       });
@@ -140,6 +178,7 @@ export const useRecentStore = create<RecentState>((set, get) => ({
       createdAt: existing?.createdAt ?? openedAt,
       modifiedAt: existing?.modifiedAt ?? openedAt,
       thumbnailPath: existing?.thumbnailPath ?? null,
+      preview: currentProjectPreview(path) ?? existing?.preview,
       missing: false,
       offline: false,
     };
@@ -158,9 +197,17 @@ export const useRecentStore = create<RecentState>((set, get) => ({
     }
   },
   markSaved: (path, modifiedAt = Date.now(), thumbnailPath = projectThumbnailPath(path)) => {
+    const preview = currentProjectPreview(path);
     const next = get().recents.map((entry) => (
       entry.path === path
-        ? { ...entry, modifiedAt, thumbnailPath, missing: false, offline: false }
+        ? {
+            ...entry,
+            modifiedAt,
+            thumbnailPath,
+            preview: preview ?? entry.preview,
+            missing: false,
+            offline: false,
+          }
         : entry
     ));
     persist(next);

@@ -8,10 +8,47 @@ import {
   decodePlaybackCommandError,
   decodePlaybackFrameEvent,
   decodePrewarmResult,
+  externalMcpPair,
+  externalMcpRegenerate,
+  externalMcpRevoke,
+  externalMcpSetEnabled,
+  externalMcpStatus,
   getTimeline,
+  motionDocumentCreate,
+  motionDocumentList,
+  onExternalMcpStatusChanged,
   projectNew,
   projectOpen,
 } from "./api";
+
+describe("browser external MCP safety defaults", () => {
+  it("reports the endpoint disabled without inventing clients or credentials", async () => {
+    await expect(externalMcpStatus()).resolves.toEqual({
+      revision: 0,
+      enabled: false,
+      state: "disabled",
+      endpoint: "http://127.0.0.1:19789/mcp",
+      clients: [],
+      error: null,
+    });
+  });
+
+  it("rejects every durable pairing mutation outside the desktop shell", async () => {
+    await expect(externalMcpSetEnabled(true)).rejects.toThrow("desktop app");
+    await expect(externalMcpPair("Cursor")).rejects.toThrow("desktop app");
+    await expect(externalMcpRegenerate("client-1")).rejects.toThrow("desktop app");
+    await expect(externalMcpRevoke("client-1")).rejects.toThrow("desktop app");
+  });
+
+  it("returns a harmless listener disposer outside the desktop shell", async () => {
+    let calls = 0;
+    const dispose = await onExternalMcpStatusChanged(() => {
+      calls += 1;
+    });
+    dispose();
+    expect(calls).toBe(0);
+  });
+});
 
 describe("browser account scaffold defaults", () => {
   it("stays offline and performs no login outside the desktop shell", async () => {
@@ -27,15 +64,34 @@ describe("browser account scaffold defaults", () => {
 
 describe("browser project snapshot compatibility defaults", () => {
   it("marks every fallback snapshot as a known writable in-memory project", async () => {
-    for (const snapshot of [
+    const snapshots = [
       await getTimeline(),
       await projectNew(),
       await projectOpen("/tmp/browser.opentake"),
-    ]) {
-      expect(snapshot.projectPath).toBeNull();
+    ];
+    for (const snapshot of snapshots) {
       expect(snapshot.compatibilityReadOnly).toBe(false);
       expect(snapshot.compatibilityBlockers).toEqual([]);
     }
+    expect(snapshots[1]?.projectPath).toBeNull();
+    expect(snapshots[2]?.projectPath).toBe("/tmp/browser.opentake");
+  });
+
+  it("isolates browser Motion documents across project identities", async () => {
+    const before = await getTimeline();
+    await motionDocumentCreate({ title: "Project A motion" });
+    await expect(motionDocumentList()).resolves.toHaveLength(1);
+
+    const created = await projectNew();
+    expect(created.projectEpoch).toBeGreaterThan(before.projectEpoch);
+    expect(created.projectPath).toBeNull();
+    await expect(motionDocumentList()).resolves.toEqual([]);
+
+    await motionDocumentCreate({ title: "Unsaved motion" });
+    const opened = await projectOpen("/tmp/project-b.opentake");
+    expect(opened.projectEpoch).toBeGreaterThan(created.projectEpoch);
+    expect(opened.projectPath).toBe("/tmp/project-b.opentake");
+    await expect(motionDocumentList()).resolves.toEqual([]);
   });
 });
 

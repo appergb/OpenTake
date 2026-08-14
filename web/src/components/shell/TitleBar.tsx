@@ -1,6 +1,6 @@
 /**
- * Title bar (SPEC §2.8). Leading: Home, Agent panel, and View controls. Trailing:
- * Library + Settings + Export Video + Export Subtitles + Export (interchange).
+ * Title bar (SPEC §2.8). Leading: Home, Chat, Motion Studio, and View controls.
+ * Trailing: Library + Settings + Export Video + Export Subtitles + Export (interchange).
  * (UpdateBadge/Avatar belong to a separate issue.)
  *
  * The "Export" button opens a small menu of standard timeline-interchange
@@ -8,13 +8,21 @@
  * OTIO (DaVinci・industry standard), and EDL (CMX3600) — each opening the native
  * save dialog with the right extension and calling its backend command.
  *
- * The Agent panel keeps all three upstream access paths: the visible gradient
- * title-bar toggle, the §2.9 View menu, and the keyboard shortcut. Layout
- * presets and the other panel-visibility toggles live in the View menu.
+ * Chat remains discoverable through the visible gradient title-bar control,
+ * the §2.9 View menu, and the keyboard shortcut. Layout presets and the other
+ * panel-visibility toggles live in the View menu.
  */
 
 import { useEffect, useRef, useState } from "react";
-import { Upload, Home, Settings as SettingsIcon, Library, Film, Captions } from "lucide-react";
+import {
+  Braces,
+  Upload,
+  Home,
+  Settings as SettingsIcon,
+  Library,
+  Film,
+  Captions,
+} from "lucide-react";
 import { Icon } from "../ui/Icon";
 import { ViewMenu } from "./ViewMenu";
 import { useEditorUiStore } from "../../store/uiStore";
@@ -53,6 +61,7 @@ type InterchangeFormat = (typeof INTERCHANGE_FORMATS)[number];
 
 export function TitleBar() {
   const setView = useEditorUiStore((s) => s.setView);
+  const view = useEditorUiStore((s) => s.view);
   const setSettingsOpen = useEditorUiStore((s) => s.setSettingsOpen);
   const setExportDialogOpen = useEditorUiStore((s) => s.setExportDialogOpen);
   const pushToast = useEditorUiStore((s) => s.pushToast);
@@ -75,6 +84,11 @@ export function TitleBar() {
   // Video export needs something to render: disable the entry when no track
   // holds a clip (an empty timeline would only encode black frames).
   const hasClips = tracks.some((track) => track.clips.length > 0);
+
+  const openChat = () => {
+    setView("editor");
+    if (!agentPanelVisible) toggleAgentPanel();
+  };
 
   /**
    * Export the timeline to a chosen interchange `format`. Mirrors the new-project
@@ -167,46 +181,68 @@ export function TitleBar() {
         borderBottom: "var(--bw-thin) solid var(--border-primary)",
       }}
     >
-      {/* Leading: Home (return to launcher). */}
-      <button
-        title={t("title.backHome")}
-        aria-label={t("title.backHome")}
-        onClick={() => setView("home")}
-        className="hover-area"
-        style={{
-          width: 26,
-          height: 26,
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          color: "var(--text-secondary)",
-        }}
+      <nav
+        aria-label={t("title.primaryNavigation")}
+        style={{ display: "flex", alignItems: "center", gap: "var(--space-sm)" }}
       >
-        <Icon icon={Home} size={13} />
-      </button>
+        <button
+          title={t("title.backHome")}
+          aria-label={t("title.backHome")}
+          aria-current={view === "home" ? "page" : undefined}
+          onClick={() => setView("home")}
+          className="hover-area"
+          style={{
+            width: 26,
+            height: 26,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: "var(--text-secondary)",
+          }}
+        >
+          <Icon icon={Home} size={13} />
+        </button>
 
-      {/* §2.8 upstream Agent entry: always discoverable, with visible state. */}
-      <button
-        title={t("title.toggleAgent")}
-        aria-label={t("title.toggleAgent")}
-        aria-pressed={agentPanelVisible}
-        onClick={toggleAgentPanel}
-        className="hover-area"
-        style={{
-          width: 26,
-          height: 26,
-          display: "inline-flex",
-          alignItems: "center",
-          justifyContent: "center",
-          opacity: agentPanelVisible ? 1 : 0.55,
-          transition: "opacity var(--anim-transition) ease-out",
-        }}
-      >
-        <AgentGradientIcon />
-      </button>
+        <button
+          title={t("title.chat")}
+          aria-label={t("title.chat")}
+          aria-current={view === "editor" && agentPanelVisible ? "page" : undefined}
+          onClick={openChat}
+          className="hover-area"
+          style={{
+            width: 26,
+            height: 26,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            opacity: view === "editor" && agentPanelVisible ? 1 : 0.55,
+            transition: "opacity var(--anim-transition) ease-out",
+          }}
+        >
+          <AgentGradientIcon />
+        </button>
 
-      {/* §2.9 menu entry point (hosts Layout presets + Agent panel + visibility). */}
-      <ViewMenu />
+        <button
+          title={t("motionStudio.entry")}
+          aria-label={t("motionStudio.entry")}
+          aria-current={view === "motion" ? "page" : undefined}
+          onClick={() => setView("motion")}
+          className="hover-area"
+          style={{
+            width: 26,
+            height: 26,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: view === "motion" ? "var(--text-primary)" : "var(--text-secondary)",
+            opacity: view === "motion" ? 1 : 0.7,
+          }}
+        >
+          <Icon icon={Braces} size={13} />
+        </button>
+
+        <ViewMenu />
+      </nav>
 
       <div data-tauri-drag-region style={{ flex: 1 }} />
 

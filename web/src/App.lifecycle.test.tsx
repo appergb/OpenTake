@@ -45,10 +45,13 @@ vi.mock("./components/preview/nativePlaybackSession", () => ({
   stopNativePlaybackForProjectBoundary: srv.stopNativePlayback,
 }));
 vi.mock("./i18n", () => ({ initI18n: vi.fn() }));
-vi.mock("./store/settingsStore", () => ({
+const settings = vi.hoisted(() => ({
   initProxyPlayback: vi.fn(),
-  initTheme: vi.fn(),
   initWindowSize: vi.fn(),
+}));
+vi.mock("./store/settingsStore", () => ({
+  initProxyPlayback: settings.initProxyPlayback,
+  initWindowSize: settings.initWindowSize,
 }));
 vi.mock("./hooks/useKeyboardShortcuts", () => ({ useKeyboardShortcuts: vi.fn() }));
 vi.mock("./components/preview/previewEngine", () => ({ useTimelinePlaybackEngine: vi.fn() }));
@@ -112,6 +115,21 @@ vi.mock("./components/media/LibraryView", async () => {
     },
   };
 });
+vi.mock("./components/motion/MotionStudio", async () => {
+  const React = await vi.importActual<typeof import("react")>("react");
+  return {
+    MotionStudio: () => {
+      const [count, setCount] = React.useState(0);
+      return (
+        <div data-testid="motion-studio">
+          <button data-testid="motion-state" onClick={() => setCount((value) => value + 1)}>
+            {count}
+          </button>
+        </div>
+      );
+    },
+  };
+});
 vi.mock("./components/shell/ViewMenu", () => ({ ApplicationMenuBridge: () => null }));
 
 import App from "./App";
@@ -131,6 +149,8 @@ describe("App lifecycle listeners", () => {
     srv.stopLibrarySync.mockReset();
     srv.onGoHome.mockReset().mockResolvedValue(vi.fn());
     srv.stopNativePlayback.mockReset().mockResolvedValue(undefined);
+    settings.initProxyPlayback.mockReset();
+    settings.initWindowSize.mockReset();
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -164,6 +184,13 @@ describe("App lifecycle listeners", () => {
     expect(unsubscribe).toHaveBeenCalledOnce();
     expect(srv.stopSync).toHaveBeenCalledOnce();
     expect(srv.stopMediaSync).toHaveBeenCalledOnce();
+  });
+
+  it("initializes persisted window preferences without a theme initializer", async () => {
+    await act(async () => root?.render(<App />));
+
+    expect(settings.initWindowSize).toHaveBeenCalledOnce();
+    expect(settings.initProxyPlayback).toHaveBeenCalledOnce();
   });
 
   it("ignores an old go-home callback after its owning effect is disposed", async () => {
@@ -363,6 +390,23 @@ describe("App lifecycle listeners", () => {
     expect(container.querySelector('[data-testid="library-state"]')?.textContent).toBe("1");
     expect(libraryScroll.scrollTop).toBe(109);
     expect(srv.startLibrarySync).toHaveBeenCalledTimes(2);
+  });
+
+  it("mounts only Motion Studio as active and preserves the visited Chat editor", async () => {
+    useEditorUiStore.setState({ view: "editor" });
+    await act(async () => root?.render(<App />));
+    const editorState = container.querySelector<HTMLButtonElement>('[data-testid="editor-state"]')!;
+    await act(async () => editorState.click());
+
+    await act(async () => useEditorUiStore.getState().setView("motion"));
+    const active = container.querySelector<HTMLElement>('[data-app-view="motion"]');
+    expect(active?.hidden).toBe(false);
+    expect(active?.querySelector('[data-testid="motion-studio"]')).not.toBeNull();
+    expect(container.querySelector<HTMLElement>('[data-app-view="editor"]')?.hidden).toBe(true);
+    expect(container.querySelectorAll('[data-app-view]:not([hidden])')).toHaveLength(1);
+
+    await act(async () => useEditorUiStore.getState().setView("editor"));
+    expect(container.querySelector('[data-testid="editor-state"]')?.textContent).toBe("1");
   });
 
   it("stops playback before a go-home callback changes the view", async () => {

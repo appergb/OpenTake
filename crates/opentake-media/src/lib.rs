@@ -155,24 +155,29 @@ pub use frame::RgbaFrame;
 
 pub use color::{hdr_decode_input_args, hdr_tonemap_filter};
 pub use probe::{parse_probe, probe, MediaProbe};
-pub use proxy::{create_proxy, file_sha256, ProxyProgressCallback, ProxyRequest, ProxyResult};
+pub use proxy::{
+    create_proxy, file_sha256, file_sha256_file_cancellable, ProxyProgressCallback, ProxyRequest,
+    ProxyResult,
+};
 
 pub use decode::{
-    convert_frame_rate, decode_frame_at, decode_frame_at_cancellable, decode_frames_at,
-    decode_frames_at_cancellable, decode_pcm_interleaved, decode_pcm_interleaved_cancellable,
-    extract_pcm, extract_pcm_cancellable, extract_pcm_cancellable_with_progress,
-    interpolate_frame_pair, FrameInterpolationFallback, FrameInterpolationMode,
-    FrameInterpolationResult, FrameRateSample, FrameRequest, PcmBuffer, PcmFormat,
-    PcmProgressCallback, PcmSpec, StreamDecodeControl, StreamVideoFrame, VideoStream,
-    VideoStreamRequest, DEFAULT_VIDEO_STREAM_QUEUE_CAPACITY,
+    convert_frame_rate, decode_frame_at, decode_frame_at_cancellable,
+    decode_frame_file_at_cancellable, decode_frames_at, decode_frames_at_cancellable,
+    decode_pcm_interleaved, decode_pcm_interleaved_cancellable, extract_pcm,
+    extract_pcm_cancellable, extract_pcm_cancellable_with_progress, interpolate_frame_pair,
+    FrameInterpolationFallback, FrameInterpolationMode, FrameInterpolationResult, FrameRateSample,
+    FrameRequest, PcmBuffer, PcmFormat, PcmProgressCallback, PcmSpec, StreamDecodeControl,
+    StreamVideoFrame, VideoStream, VideoStreamRequest, DEFAULT_VIDEO_STREAM_QUEUE_CAPACITY,
 };
 
 pub use encode::{ExportPreset, ExportResolution, VideoCodec, VideoEncoder};
 
 pub use thumbnail::{
-    capture_project_thumbnail, image_thumbnail, pick_thumbnail_source, video_thumbnail_times,
-    video_thumbnails, PartialThumbCallback, ThumbnailCacheMeta, ThumbnailKind, ThumbnailSource,
-    VideoThumb,
+    capture_project_composite_thumbnail, capture_project_thumbnail,
+    encode_project_composite_thumbnail, image_thumbnail, pick_thumbnail_source,
+    representative_project_thumbnail_frame, video_thumbnail_times, video_thumbnails,
+    PartialThumbCallback, ProjectCompositeThumbnailSnapshot, ThumbnailCacheMeta, ThumbnailKind,
+    ThumbnailSource, VideoThumb, PROJECT_COMPOSITE_COVER_BOUNDS,
 };
 
 pub use timecode::{parse_smpte_timecode, read_start_timecode_frame};

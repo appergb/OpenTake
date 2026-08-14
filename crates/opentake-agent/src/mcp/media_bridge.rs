@@ -23,9 +23,10 @@
 //! Both methods default to `Err("unsupported")` so a hand-rolled bridge (or the
 //! absence of one) never breaks the build.
 
-use opentake_domain::ClipType;
+use opentake_domain::{ClipType, Timeline};
 use opentake_media::{MediaCancelToken, TranscriptionResult};
 
+use crate::mcp::core_handle::CoreRevision;
 use crate::tools::result::Block;
 
 /// Maximum inline `import_media.source.bytes` payload size before base64 decode.
@@ -39,6 +40,27 @@ pub const IMPORT_BYTES_DECODED_MAX: usize = 11 * 1024 * 1024;
 /// Maximum Streamable-HTTP request body accepted by the local MCP server.
 /// Leaves 1 MiB of JSON envelope headroom around the advertised base64 cap.
 pub const MCP_REQUEST_BODY_MAX: usize = IMPORT_BYTES_BASE64_MAX + 1024 * 1024;
+
+/// Matches the browser's `MAX_CHAT_IMAGE_BASE64_CHARS`. A host result larger
+/// than this never enters persisted chat state or an MCP response.
+pub const TIMELINE_RESULT_IMAGE_BASE64_MAX: usize = 1024 * 1024;
+
+/// Post-commit facts used to decide whether a timeline result image belongs to
+/// one successful mutation.
+#[derive(Debug, Clone)]
+pub struct TimelineMutationReceipt {
+    pub visible_clip_count_before: usize,
+    pub visible_clip_count_after: usize,
+    pub committed_revision: Option<CoreRevision>,
+}
+
+/// Immutable input for a post-commit timeline capture. The exact committed
+/// timeline travels with its revision so a host can reject stale project bytes.
+#[derive(Debug, Clone)]
+pub struct TimelineResultCaptureRequest {
+    pub timeline: Timeline,
+    pub mutation: TimelineMutationReceipt,
+}
 
 /// One composited timeline frame produced by [`MediaBridge::inspect_timeline`],
 /// ready to become MCP image content. `bytes` are already-encoded image data
@@ -334,6 +356,29 @@ pub struct SearchMediaResult {
 /// so the [`Dispatcher`](super::dispatch::Dispatcher) can hold `Arc<dyn
 /// MediaBridge>` across threads (matching [`CoreHandle`](super::core_handle)).
 pub trait MediaBridge: Send + Sync {
+    /// Count meaningful visual leaves through the host's authoritative render
+    /// plan. The dispatcher intentionally does not duplicate compositor
+    /// visibility rules in the agent crate.
+    fn visible_timeline_clip_count(&self, _timeline: &Timeline) -> Result<usize, BridgeError> {
+        Err(BridgeError::unavailable(
+            "timeline result visibility is not available in this build",
+        ))
+    }
+
+    /// Produce one bounded PNG content block for the exact committed timeline.
+    /// The host owns compositing, encoding, retained source authority, and the
+    /// final project-revision check. `cancel` is the caller's original request
+    /// token and must be propagated to every blocking render operation.
+    fn capture_timeline_result(
+        &self,
+        _request: &TimelineResultCaptureRequest,
+        _cancel: &MediaCancelToken,
+    ) -> Result<Block, BridgeError> {
+        Err(BridgeError::unavailable(
+            "timeline result capture is not available in this build",
+        ))
+    }
+
     /// Inspect one source asset with real decoded frames and optional on-device
     /// transcription. The default is explicitly unavailable so non-desktop
     /// embedders do not advertise a fake success.

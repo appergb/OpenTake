@@ -1,7 +1,46 @@
-import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
+// @vitest-environment happy-dom
 
-const settingsSource = readFileSync(new URL("./SettingsView.tsx", import.meta.url), "utf8");
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
+import { describe, expect, it } from "vitest";
+import { useI18nStore } from "../../i18n";
+import { useSettingsStore } from "../../store/settingsStore";
+import { useEditorUiStore } from "../../store/uiStore";
+import { SettingsView } from "./SettingsView";
+
+const settingsSource = readFileSync(
+  resolve(process.cwd(), "src/components/settings/SettingsView.tsx"),
+  "utf8",
+);
+
+function appearanceChoices(windowSize: "standard" | "compact"): Array<{
+  text: string;
+  flex: string;
+  labelStyle: string;
+  svgCount: number;
+}> {
+  useI18nStore.setState({ locale: "zh-CN" });
+  useEditorUiStore.setState({ settingsPane: "appearance" });
+  useSettingsStore.setState({ windowSize });
+  const container = document.createElement("div");
+  document.body.append(container);
+  const root = createRoot(container);
+  act(() => root.render(createElement(SettingsView)));
+  const choices = [...container.querySelectorAll<HTMLElement>('[role="radio"]')].map((choice) => ({
+    text: choice.textContent?.trim() ?? "",
+    flex: choice.style.flex,
+    labelStyle: choice.querySelector<HTMLElement>("span")?.getAttribute("style") ?? "",
+    svgCount: choice.querySelectorAll("svg").length,
+  }));
+  act(() => root.unmount());
+  container.remove();
+  return choices;
+}
+
+(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
+  .IS_REACT_ACT_ENVIRONMENT = true;
 
 describe("SettingsView minimal embedded visual direction", () => {
   it("uses one unified settings surface without header divider", () => {
@@ -15,9 +54,20 @@ describe("SettingsView minimal embedded visual direction", () => {
     expect(settingsSource).not.toContain("border: \"var(--bw-thin) solid var(--border-primary)\",");
   });
 
-  it("keeps settings controls restrained instead of heavy bordered blocks", () => {
-    expect(settingsSource).toContain("settingsControlStyle");
-    expect(settingsSource).toContain("background: \"var(--home-hover)\"");
+  it("keeps dark layout choices equal-sized with stable label geometry", () => {
+    const standard = appearanceChoices("standard");
+    const compact = appearanceChoices("compact");
+
+    expect(standard).toHaveLength(2);
+    expect(standard.map((choice) => choice.text)).toEqual([
+      "深色 · 标准",
+      "深色 · 紧凑",
+    ]);
+    expect(standard.map((choice) => choice.flex)).toEqual(["1 1 0px", "1 1 0px"]);
+    expect(standard.map((choice) => choice.svgCount)).toEqual([0, 0]);
+    expect(standard.map((choice) => choice.labelStyle)).toEqual(
+      compact.map((choice) => choice.labelStyle),
+    );
   });
 
   it("uses a wide settings window with a left sidebar", () => {

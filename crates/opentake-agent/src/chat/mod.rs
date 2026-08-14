@@ -22,6 +22,6 @@ pub mod store;
 pub use llm::{
     no_key_guide, provider_from_choice, stream_chat, ChatRequest, LlmError, LlmProvider, ToolSchema,
 };
-pub use r#loop::{ChatLoop, ChatTurnGate, EmitLoop, LoopError, LoopEvent};
-pub use session::{AgentContentBlock, ChatMessage, ChatSession, Role, ToolCall};
+pub use r#loop::{ChatLoop, ChatTurn, ChatTurnGate, EmitLoop, LoopError, LoopEvent};
+pub use session::{next_message_id, AgentContentBlock, ChatMessage, ChatSession, Role, ToolCall};
 pub use store::{ChatSessionStore, ChatSessionStoreError};

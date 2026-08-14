@@ -8,10 +8,22 @@
  * editing truth always lives in Rust when running under Tauri.
  */
 
+import {
+  MAX_CHAT_BLOCK_INDEX,
+  MAX_CHAT_DELTA_CHARS,
+  MAX_CHAT_EVENT_SEQUENCE,
+  canonicalizeBoundedChatEvent,
+  isBoundedAgentContentBlock,
+  isBoundedChatId,
+  isBoundedChatHistorySnapshot,
+  isBoundedChatSessionsSnapshot,
+  isBoundedTerminalChatMessage,
+} from "./types";
 import type {
   AccountInfo,
   AccountStatus,
   AudioDenoise,
+  AgentContentBlock,
   CaptionRequest,
   ChatMessage,
   ChatSession,
@@ -19,12 +31,20 @@ import type {
   ClipType,
   EditRequest,
   EditResult,
+  ExternalMcpPairingReceipt,
+  ExternalMcpStatus,
   GenerateCaptionsResult,
-  GenerationLog,
   MediaList,
   MattingModelStatus,
   MotionTrackingRegion,
   MotionTrackingResult,
+  MotionDocument,
+  MotionDocumentCreateRequest,
+  MotionDocumentHashRequest,
+  MotionDocumentPatchRequest,
+  MotionDocumentSummary,
+  MotionPreviewRequest,
+  MotionPreviewResponse,
   GenerateMatteResult,
   RemoveObjectResult,
   MatchColorResult,
@@ -57,6 +77,9 @@ import type {
 export const isTauri =
   typeof window !== "undefined" &&
   "__TAURI_INTERNALS__" in (window as unknown as Record<string, unknown>);
+
+let browserProjectEpoch = 0;
+let browserProjectPath: string | null = null;
 
 type InvokeFn = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
 type ListenFn = (
@@ -117,6 +140,83 @@ async function ensureTauri(): Promise<void> {
 
 // MARK: - Commands
 
+const externalMcpBrowserStatus: ExternalMcpStatus = {
+  revision: 0,
+  enabled: false,
+  state: "disabled",
+  endpoint: "http://127.0.0.1:19789/mcp",
+  clients: [],
+  error: null,
+};
+
+function requireExternalMcpDesktop(): InvokeFn {
+  if (!invokeImpl) throw new Error("External MCP pairing requires the desktop app");
+  return invokeImpl;
+}
+
+export async function externalMcpStatus(): Promise<ExternalMcpStatus> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<ExternalMcpStatus>("external_mcp_status");
+  return externalMcpBrowserStatus;
+}
+
+export async function externalMcpSetEnabled(enabled: boolean): Promise<ExternalMcpStatus> {
+  await ensureTauri();
+  return requireExternalMcpDesktop()<ExternalMcpStatus>("external_mcp_set_enabled", { enabled });
+}
+
+export async function externalMcpPair(name: string): Promise<ExternalMcpPairingReceipt> {
+  await ensureTauri();
+  return requireExternalMcpDesktop()<ExternalMcpPairingReceipt>("external_mcp_pair", { name });
+}
+
+export async function externalMcpRegenerate(
+  clientId: string,
+): Promise<ExternalMcpPairingReceipt> {
+  await ensureTauri();
+  return requireExternalMcpDesktop()<ExternalMcpPairingReceipt>("external_mcp_regenerate", {
+    clientId,
+  });
+}
+
+export async function externalMcpRevoke(clientId: string): Promise<ExternalMcpStatus> {
+  await ensureTauri();
+  return requireExternalMcpDesktop()<ExternalMcpStatus>("external_mcp_revoke", { clientId });
+}
+
+/**
+ * Subscribe before fetching a fresh snapshot. Events cover future transitions;
+ * the status command closes the registration gap if an event was missed.
+ */
+export async function onExternalMcpStatusChanged(
+  handler: (status: ExternalMcpStatus) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl || !invokeImpl) return () => {};
+  let disposed = false;
+  let latestRevision = -1;
+  const publish = (status: ExternalMcpStatus) => {
+    if (!disposed && status.revision >= latestRevision) {
+      latestRevision = status.revision;
+      handler(status);
+    }
+  };
+  const unlisten = await listenImpl("external_mcp_status_changed", (event) => {
+    publish(event.payload as ExternalMcpStatus);
+  });
+  try {
+    const current = await invokeImpl<ExternalMcpStatus>("external_mcp_status");
+    publish(current);
+  } catch (error) {
+    unlisten();
+    throw error;
+  }
+  return () => {
+    disposed = true;
+    unlisten();
+  };
+}
+
 /** Check OpenTake's pinned GitHub release channel for a signed update. */
 export async function checkForAppUpdate(): Promise<AppUpdateMetadata | null> {
   await ensureTauri();
@@ -155,22 +255,11 @@ export async function getTimeline(): Promise<RuntimeTimelineSnapshot> {
   if (invokeImpl) return invokeImpl<RuntimeTimelineSnapshot>("get_timeline");
   return {
     ...fallback.getTimeline(),
-    projectEpoch: 0,
-    projectPath: null,
+    projectEpoch: browserProjectEpoch,
+    projectPath: browserProjectPath,
     compatibilityReadOnly: false,
     compatibilityBlockers: [],
   };
-}
-
-/** The current session's append-only AI generation audit log (rows + credits
- *  math, persisted as `generation-log.json`). Read-only: the UI never mutates
- *  the log; only the core's generation lifecycle appends. Infallible — a
- *  session with no project yields the empty log. Outside Tauri it resolves to
- *  the honest empty log (no fake data). */
-export async function generationLog(): Promise<GenerationLog> {
-  await ensureTauri();
-  if (invokeImpl) return invokeImpl<GenerationLog>("generation_log");
-  return { version: 1, entries: [] };
 }
 
 function editIdentityArgs(expected: ProjectEditIdentity): Record<string, unknown> {
@@ -235,10 +324,13 @@ export async function projectNew(path: string | null = null): Promise<RuntimeTim
     return invokeImpl<RuntimeTimelineSnapshot>("project_new", { path });
   }
   fallback.reset();
+  resetBrowserMotionDocument();
+  browserProjectEpoch += 1;
+  browserProjectPath = path;
   return {
     ...fallback.getTimeline(),
-    projectEpoch: 0,
-    projectPath: null,
+    projectEpoch: browserProjectEpoch,
+    projectPath: browserProjectPath,
     compatibilityReadOnly: false,
     compatibilityBlockers: [],
   };
@@ -247,10 +339,14 @@ export async function projectNew(path: string | null = null): Promise<RuntimeTim
 export async function projectOpen(path: string): Promise<RuntimeTimelineSnapshot> {
   await ensureTauri();
   if (invokeImpl) return invokeImpl<RuntimeTimelineSnapshot>("project_open", { path });
+  fallback.reset();
+  resetBrowserMotionDocument();
+  browserProjectEpoch += 1;
+  browserProjectPath = path;
   return {
     ...fallback.getTimeline(),
-    projectEpoch: 0,
-    projectPath: null,
+    projectEpoch: browserProjectEpoch,
+    projectPath: browserProjectPath,
     compatibilityReadOnly: false,
     compatibilityBlockers: [],
   };
@@ -302,8 +398,15 @@ export interface HomeProjectEntry {
   openedAt: number;
   modifiedAt: number;
   thumbnailPath?: string | null;
+  preview?: HomeProjectPreview;
   missing: boolean;
   offline: boolean;
+}
+
+export interface HomeProjectPreview {
+  canvasWidth: number;
+  canvasHeight: number;
+  trackKinds: ClipType[];
 }
 
 export interface LegacyRecentProject {
@@ -533,12 +636,23 @@ export type MotionProgressPhase =
   | "committing"
   | "complete";
 
+export interface MotionProgressUpdate {
+  phase: MotionProgressPhase;
+  doneFrames?: number;
+  totalFrames?: number;
+}
+
 export interface MotionAddRequest {
   code?: string;
   templateId?: "title-card" | "lower-third.glass";
+  documentId?: string;
+  revisionHash?: string;
   params?: Record<string, string>;
   startFrame: number;
   durationFrames: number;
+  width?: number;
+  height?: number;
+  fps?: number;
   transparent?: boolean;
   trackIndex?: number;
 }
@@ -548,6 +662,10 @@ export interface MotionCommit {
   assetId: string;
   contentHash: string;
   actionName: string;
+  sourceDocument?: {
+    documentId: string;
+    revisionHash: string;
+  };
   output: {
     renderer: string;
     rendererVersion: string;
@@ -567,6 +685,178 @@ export async function motionCapability(): Promise<boolean> {
   return false;
 }
 
+const BROWSER_MOTION_HTML = `<main class="motion-stage">
+  <p class="motion-kicker">Motion Studio</p>
+  <h1>让创意动起来</h1>
+  <p class="motion-subtitle">Real HTML · Real CSS · Real motion</p>
+</main>
+`;
+const BROWSER_MOTION_CSS = `html, body { width: 100%; height: 100%; margin: 0; background: #111214; color: #f7f7f5; }
+.motion-stage { display: grid; align-content: center; width: 100%; height: 100%; padding: 10%; }
+h1 { animation: title-in 1.2s both; }
+@keyframes title-in { from { opacity: 0; transform: translateY(48px); } to { opacity: 1; transform: none; } }
+`;
+let browserMotionRevision = 1;
+let browserMotionDocument: MotionDocument | null = null;
+
+function resetBrowserMotionDocument(): void {
+  browserMotionRevision = 1;
+  browserMotionDocument = null;
+}
+
+function browserRevisionHash(): string {
+  return browserMotionRevision.toString(16).padStart(64, "0");
+}
+
+function createBrowserMotionDocument(): MotionDocument {
+  browserMotionDocument = {
+    summary: {
+      id: "00000000-0000-4000-8000-000000000001",
+      title: "Motion Studio",
+      revisionHash: browserRevisionHash(),
+      updatedAt: Date.now(),
+    },
+    html: BROWSER_MOTION_HTML,
+    css: BROWSER_MOTION_CSS,
+    parameters: {},
+  };
+  return structuredClone(browserMotionDocument);
+}
+
+export async function motionDocumentList(): Promise<MotionDocumentSummary[]> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<MotionDocumentSummary[]>("motion_document_list");
+  return browserMotionDocument ? [structuredClone(browserMotionDocument.summary)] : [];
+}
+
+export async function motionDocumentCreate(
+  request: MotionDocumentCreateRequest,
+): Promise<MotionDocument> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<MotionDocument>("motion_document_create", { request });
+  return createBrowserMotionDocument();
+}
+
+export async function motionDocumentRead(documentId: string): Promise<MotionDocument> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<MotionDocument>("motion_document_read", { documentId });
+  if (!browserMotionDocument || browserMotionDocument.summary.id !== documentId) {
+    throw new Error("Motion Studio document could not be read");
+  }
+  return structuredClone(browserMotionDocument);
+}
+
+export async function motionDocumentHash(
+  request: MotionDocumentHashRequest,
+): Promise<string> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<string>("motion_document_hash", { request });
+  if (!browserMotionDocument || browserMotionDocument.summary.id !== request.documentId) {
+    throw new Error("Motion Studio document could not be read");
+  }
+  if (browserMotionDocument.summary.revisionHash !== request.baselineHash) {
+    throw new Error("motion document revision conflict");
+  }
+  return (browserMotionRevision + 1).toString(16).padStart(64, "0");
+}
+
+export async function motionDocumentPatch(
+  request: MotionDocumentPatchRequest,
+): Promise<MotionDocument> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<MotionDocument>("motion_document_patch", { request });
+  if (!browserMotionDocument || browserMotionDocument.summary.id !== request.documentId) {
+    throw new Error("Motion Studio document could not be read");
+  }
+  if (browserMotionDocument.summary.revisionHash !== request.baselineHash) {
+    throw new Error("motion document revision conflict");
+  }
+  const edit = request.edits.length === 1 ? request.edits[0] : undefined;
+  if (!edit || edit.start !== 0) throw new Error("browser Motion Studio accepts full-source edits");
+  browserMotionRevision += 1;
+  browserMotionDocument = {
+    ...browserMotionDocument,
+    summary: {
+      ...browserMotionDocument.summary,
+      revisionHash: request.expectedResultHash,
+      updatedAt: Date.now(),
+    },
+    ...(request.file === "index.html" ? { html: edit.replacement } : { css: edit.replacement }),
+  };
+  return structuredClone(browserMotionDocument);
+}
+
+export interface MotionDocumentChangedEvent {
+  projectEpoch: number;
+  projectPath: string;
+  summary: MotionDocumentSummary;
+}
+
+export async function onMotionDocumentChanged(
+  handler: (change: MotionDocumentChangedEvent) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("motion_document_changed", (event) => {
+    if (typeof event.payload !== "object" || event.payload === null) return;
+    const payload = event.payload as Record<string, unknown>;
+    const summary = payload.summary;
+    if (
+      !Number.isSafeInteger(payload.projectEpoch) ||
+      Number(payload.projectEpoch) < 0 ||
+      typeof payload.projectPath !== "string" ||
+      payload.projectPath.length === 0 ||
+      typeof summary !== "object" ||
+      summary === null
+    ) return;
+    const candidate = summary as Record<string, unknown>;
+    if (
+      typeof candidate.id !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(candidate.id) ||
+      typeof candidate.title !== "string" ||
+      candidate.title.trim().length === 0 ||
+      Array.from(candidate.title).length > 120 ||
+      /[\u0000-\u001f\u007f]/.test(candidate.title) ||
+      typeof candidate.revisionHash !== "string" ||
+      !/^[0-9a-f]{64}$/.test(candidate.revisionHash) ||
+      !Number.isSafeInteger(candidate.updatedAt) ||
+      Number(candidate.updatedAt) <= 0
+    ) return;
+    handler({
+      projectEpoch: Number(payload.projectEpoch),
+      projectPath: payload.projectPath,
+      summary: {
+        id: candidate.id,
+        title: candidate.title,
+        revisionHash: candidate.revisionHash,
+        updatedAt: Number(candidate.updatedAt),
+      },
+    });
+  });
+}
+
+export async function motionPreview(request: MotionPreviewRequest): Promise<MotionPreviewResponse> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<MotionPreviewResponse>("motion_preview", { request });
+  if (!browserMotionDocument || browserMotionDocument.summary.revisionHash !== request.revisionHash) {
+    throw new Error("Motion Studio document changed; reload before previewing");
+  }
+  return {
+    revisionHash: request.revisionHash,
+    frame: request.frame,
+    // A valid transparent 1×1 PNG keeps the browser-only shell deterministic.
+    pngDataUrl:
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+2uVHAAAAAElFTkSuQmCC",
+    diagnostics: [],
+  };
+}
+
+export async function motionPreviewCancel(): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("motion_preview_cancel");
+  return false;
+}
+
 export async function addMotion(request: MotionAddRequest): Promise<MotionCommit> {
   await ensureTauri();
   if (invokeImpl) return invokeImpl<MotionCommit>("motion_add", { request });
@@ -580,19 +870,33 @@ export async function cancelMotion(): Promise<boolean> {
 }
 
 export async function onMotionProgress(
-  handler: (phase: MotionProgressPhase) => void,
+  handler: (update: MotionProgressUpdate) => void,
 ): Promise<() => void> {
   await ensureTauri();
   if (!listenImpl) return () => {};
   return listenImpl("motion_progress", (event) => {
+    if (typeof event.payload !== "object" || event.payload === null) return;
+    const payload = event.payload as Record<string, unknown>;
     if (
-      typeof event.payload === "string" &&
-      ["validating", "rendering", "encoding", "committing", "complete"].includes(
-        event.payload,
-      )
-    ) {
-      handler(event.payload as MotionProgressPhase);
+      typeof payload.phase !== "string" ||
+      !["validating", "rendering", "encoding", "committing", "complete"].includes(payload.phase)
+    ) return;
+    if (payload.phase === "rendering") {
+      if (
+        !Number.isSafeInteger(payload.doneFrames) ||
+        !Number.isSafeInteger(payload.totalFrames) ||
+        Number(payload.totalFrames) < 1 ||
+        Number(payload.doneFrames) < 0 ||
+        Number(payload.doneFrames) > Number(payload.totalFrames)
+      ) return;
+      handler({
+        phase: "rendering",
+        doneFrames: Number(payload.doneFrames),
+        totalFrames: Number(payload.totalFrames),
+      });
+      return;
     }
+    handler({ phase: payload.phase as MotionProgressPhase });
   });
 }
 
@@ -1844,25 +2148,154 @@ export async function accountGetStatus(): Promise<AccountStatus> {
 
 // MARK: - In-app chat (#HANDOFF-3.3)
 
-export interface ChatDelta {
+export interface ChatStreamIdentity {
   projectEpoch: number;
   projectPath: string;
   sessionId: string;
+  messageId: string;
+  sequence: number;
+}
+
+export interface ChatDelta extends ChatStreamIdentity {
+  type: "blockDelta";
+  blockIndex: number;
   delta: string;
 }
 
-export interface ChatToolCallEvent {
-  projectEpoch: number;
-  projectPath: string;
-  sessionId: string;
-  toolCall: ChatToolCall;
+export interface ChatBlockUpsertEvent extends ChatStreamIdentity {
+  type: "blockUpsert";
+  blockIndex: number;
+  block: AgentContentBlock;
 }
 
-export interface ChatDoneEvent {
-  projectEpoch: number;
-  projectPath: string;
-  sessionId: string;
+export interface ChatDoneEvent extends ChatStreamIdentity {
+  type: "done";
   message: ChatMessage;
+}
+
+/** Temporary Beta 4 display compatibility; `block` remains authoritative. */
+export type ChatToolCallEvent = ChatBlockUpsertEvent & { toolCall: ChatToolCall };
+
+export type ChatStreamEvent = ChatDelta | ChatBlockUpsertEvent | ChatDoneEvent;
+export type ChatStreamEventName = "chat_delta" | "chat_tool_call" | "chat_done";
+
+export interface ChatStreamDecodeFailure {
+  eventName: ChatStreamEventName;
+  reason:
+    | "invalid_identity"
+    | "invalid_sequence"
+    | "invalid_block_index"
+    | "invalid_block"
+    | "invalid_message";
+  sessionId?: string;
+  messageId?: string;
+}
+
+export type ChatStreamDecodeResult =
+  | { ok: true; event: ChatStreamEvent }
+  | { ok: false; failure: ChatStreamDecodeFailure };
+
+export type ChatStreamMalformedHandler = (failure: ChatStreamDecodeFailure) => void;
+
+function boundedBlockIndex(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= MAX_CHAT_BLOCK_INDEX;
+}
+
+function compatibilityToolCall(block: AgentContentBlock): ChatToolCall {
+  if (block.type === "toolUse") {
+    return {
+      id: block.id,
+      name: block.name,
+      args: block.input,
+      result: block.result,
+      isError: block.isError,
+    };
+  }
+  if (block.type === "toolResult") {
+    return {
+      id: block.toolUseId,
+      name: "tool_result",
+      args: {},
+      result: block.content,
+      isError: block.isError,
+    };
+  }
+  return { id: `text-${block.text.length}`, name: "text", args: {} };
+}
+
+/**
+ * Decode the three Rust events as a discriminated union. Consumers may use the
+ * returned failure identity to request one authoritative session history reload;
+ * no partial event is ever guessed or applied.
+ */
+export function decodeChatStreamEvent(
+  eventName: ChatStreamEventName,
+  payload: unknown,
+): ChatStreamDecodeResult {
+  const raw = typeof payload === "object" && payload !== null ? payload as Record<string, unknown> : {};
+  const sessionId = isBoundedChatId(raw.sessionId) ? raw.sessionId : undefined;
+  const messageId = isBoundedChatId(raw.messageId) ? raw.messageId : undefined;
+  if (
+    !Number.isSafeInteger(raw.projectEpoch) || (raw.projectEpoch as number) < 0 ||
+    typeof raw.projectPath !== "string" || raw.projectPath.length === 0 || raw.projectPath.length > 4096 ||
+    !sessionId || !messageId
+  ) {
+    return { ok: false, failure: { eventName, reason: "invalid_identity", sessionId, messageId } };
+  }
+  if (
+    typeof raw.sequence !== "number" ||
+    !Number.isSafeInteger(raw.sequence) ||
+    raw.sequence < 0 ||
+    raw.sequence > MAX_CHAT_EVENT_SEQUENCE
+  ) {
+    return { ok: false, failure: { eventName, reason: "invalid_sequence", sessionId, messageId } };
+  }
+  const identity = {
+    projectEpoch: raw.projectEpoch as number,
+    projectPath: raw.projectPath,
+    sessionId,
+    messageId,
+    sequence: raw.sequence,
+  };
+  if (eventName === "chat_delta") {
+    if (!boundedBlockIndex(raw.blockIndex)) {
+      return { ok: false, failure: { eventName, reason: "invalid_block_index", sessionId, messageId } };
+    }
+    if (typeof raw.delta !== "string" || raw.delta.length > MAX_CHAT_DELTA_CHARS) {
+      return { ok: false, failure: { eventName, reason: "invalid_block", sessionId, messageId } };
+    }
+    const event: ChatDelta = { type: "blockDelta", ...identity, blockIndex: raw.blockIndex, delta: raw.delta };
+    if (canonicalizeBoundedChatEvent(event) === null) {
+      return { ok: false, failure: { eventName, reason: "invalid_block", sessionId, messageId } };
+    }
+    return { ok: true, event };
+  }
+  if (eventName === "chat_tool_call") {
+    if (!boundedBlockIndex(raw.blockIndex)) {
+      return { ok: false, failure: { eventName, reason: "invalid_block_index", sessionId, messageId } };
+    }
+    if (!isBoundedAgentContentBlock(raw.block)) {
+      return { ok: false, failure: { eventName, reason: "invalid_block", sessionId, messageId } };
+    }
+    const event: ChatBlockUpsertEvent = {
+      type: "blockUpsert",
+      ...identity,
+      blockIndex: raw.blockIndex,
+      block: raw.block,
+    };
+    if (canonicalizeBoundedChatEvent(event) === null) {
+      return { ok: false, failure: { eventName, reason: "invalid_block", sessionId, messageId } };
+    }
+    return { ok: true, event };
+  }
+  if (!isBoundedTerminalChatMessage(raw.message, messageId)) {
+    return { ok: false, failure: { eventName, reason: "invalid_message", sessionId, messageId } };
+  }
+  const event: ChatDoneEvent = { type: "done", ...identity, message: raw.message };
+  if (canonicalizeBoundedChatEvent(event) === null) {
+    return { ok: false, failure: { eventName, reason: "invalid_message", sessionId, messageId } };
+  }
+  return { ok: true, event };
 }
 
 export async function chatSend(
@@ -1890,12 +2323,35 @@ export async function chatHistory(
   expectedProjectPath: string,
 ): Promise<ChatMessage[]> {
   await ensureTauri();
-  if (invokeImpl)
-    return invokeImpl<ChatMessage[]>("chat_history", {
+  if (invokeImpl) {
+    const snapshot = await invokeImpl<unknown>("chat_history", {
       sessionId,
       expectedProjectEpoch,
       expectedProjectPath,
     });
+    const decoded = decodeChatHistorySnapshot(snapshot);
+    if (!decoded) throw new Error("invalid Agent chat history snapshot");
+    return decoded;
+  }
+  return [];
+}
+
+export async function chatHistoryAuthoritative(
+  sessionId: string,
+  expectedProjectEpoch: number,
+  expectedProjectPath: string,
+): Promise<ChatMessage[]> {
+  await ensureTauri();
+  if (invokeImpl) {
+    const snapshot = await invokeImpl<unknown>("chat_history_authoritative", {
+      sessionId,
+      expectedProjectEpoch,
+      expectedProjectPath,
+    });
+    const decoded = decodeChatHistorySnapshot(snapshot);
+    if (!decoded) throw new Error("invalid authoritative Agent chat history snapshot");
+    return decoded;
+  }
   return [];
 }
 
@@ -1904,12 +2360,24 @@ export async function chatSessions(
   expectedProjectPath: string,
 ): Promise<ChatSession[]> {
   await ensureTauri();
-  if (invokeImpl)
-    return invokeImpl<ChatSession[]>("chat_sessions", {
+  if (invokeImpl) {
+    const snapshot = await invokeImpl<unknown>("chat_sessions", {
       expectedProjectEpoch,
       expectedProjectPath,
     });
+    const decoded = decodeChatSessionsSnapshot(snapshot);
+    if (!decoded) throw new Error("invalid Agent chat sessions snapshot");
+    return decoded;
+  }
   return [];
+}
+
+export function decodeChatHistorySnapshot(value: unknown): ChatMessage[] | null {
+  return isBoundedChatHistorySnapshot(value) ? value : null;
+}
+
+export function decodeChatSessionsSnapshot(value: unknown): ChatSession[] | null {
+  return isBoundedChatSessionsSnapshot(value) ? value : null;
 }
 
 export async function chatSessionSetOpen(
@@ -2023,89 +2491,42 @@ export async function onGoHome(handler: () => void): Promise<() => void> {
 
 export async function onChatDelta(
   handler: (event: ChatDelta) => void,
+  onMalformed?: ChatStreamMalformedHandler,
 ): Promise<() => void> {
   await ensureTauri();
   if (!listenImpl) return () => {};
   return listenImpl("chat_delta", (e) => {
-    const payload = e.payload as
-      | { projectEpoch?: number; projectPath?: string; sessionId?: string; delta?: string }
-      | undefined;
-    if (
-      payload &&
-      typeof payload.projectEpoch === "number" &&
-      typeof payload.projectPath === "string" &&
-      typeof payload.sessionId === "string" &&
-      typeof payload.delta === "string"
-    ) {
-      handler({
-        projectEpoch: payload.projectEpoch,
-        projectPath: payload.projectPath,
-        sessionId: payload.sessionId,
-        delta: payload.delta,
-      });
-    }
+    const decoded = decodeChatStreamEvent("chat_delta", e.payload);
+    if (!decoded.ok) onMalformed?.(decoded.failure);
+    else if (decoded.event.type === "blockDelta") handler(decoded.event);
   });
 }
 
 export async function onChatToolCall(
   handler: (event: ChatToolCallEvent) => void,
+  onMalformed?: ChatStreamMalformedHandler,
 ): Promise<() => void> {
   await ensureTauri();
   if (!listenImpl) return () => {};
   return listenImpl("chat_tool_call", (e) => {
-    const payload = e.payload as
-      | {
-          projectEpoch?: number;
-          projectPath?: string;
-          sessionId?: string;
-          toolCall?: ChatToolCall;
-        }
-      | undefined;
-    if (
-      payload &&
-      typeof payload.projectEpoch === "number" &&
-      typeof payload.projectPath === "string" &&
-      typeof payload.sessionId === "string" &&
-      payload.toolCall
-    ) {
-      handler({
-        projectEpoch: payload.projectEpoch,
-        projectPath: payload.projectPath,
-        sessionId: payload.sessionId,
-        toolCall: payload.toolCall,
-      });
+    const decoded = decodeChatStreamEvent("chat_tool_call", e.payload);
+    if (!decoded.ok) onMalformed?.(decoded.failure);
+    else if (decoded.event.type === "blockUpsert") {
+      handler({ ...decoded.event, toolCall: compatibilityToolCall(decoded.event.block) });
     }
   });
 }
 
 export async function onChatDone(
   handler: (event: ChatDoneEvent) => void,
+  onMalformed?: ChatStreamMalformedHandler,
 ): Promise<() => void> {
   await ensureTauri();
   if (!listenImpl) return () => {};
   return listenImpl("chat_done", (e) => {
-    const payload = e.payload as
-      | {
-          projectEpoch?: number;
-          projectPath?: string;
-          sessionId?: string;
-          message?: ChatMessage;
-        }
-      | undefined;
-    if (
-      payload &&
-      typeof payload.projectEpoch === "number" &&
-      typeof payload.projectPath === "string" &&
-      typeof payload.sessionId === "string" &&
-      payload.message
-    ) {
-      handler({
-        projectEpoch: payload.projectEpoch,
-        projectPath: payload.projectPath,
-        sessionId: payload.sessionId,
-        message: payload.message,
-      });
-    }
+    const decoded = decodeChatStreamEvent("chat_done", e.payload);
+    if (!decoded.ok) onMalformed?.(decoded.failure);
+    else if (decoded.event.type === "done") handler(decoded.event);
   });
 }
 

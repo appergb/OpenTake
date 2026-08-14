@@ -112,7 +112,7 @@ describe("uiStore schema-safe persistence", () => {
     first.getState().selectClips(new Set(["project-clip"]));
     const restarted = createEditorUiStore().getState();
     expect(restarted).toMatchObject({
-      view: "home",
+      view: "editor",
       currentFrame: 0,
       activeFrame: 0,
       maximizedPanel: null,

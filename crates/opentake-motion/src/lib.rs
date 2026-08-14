@@ -53,7 +53,9 @@ pub mod source;
 // Flat re-export of the public API for ergonomic downstream use.
 pub use cache::{content_hash, MotionCache};
 pub use error::{MotionError, MotionResult};
-pub use integration::{FrameDecoder, MotionClipSource};
+pub use integration::{
+    read_single_preview_png, FrameDecoder, MotionClipSource, MAX_PREVIEW_PNG_BYTES,
+};
 pub use manifest::{
     DurationMode, DurationSpec, FpsPolicy, MotionPlugin, MotionPluginAuthor, ParamSpec,
 };
@@ -61,5 +63,8 @@ pub use renderer::{
     deterministic_clock_script, HeadlessChromiumRenderer, MotionCancellationToken, MotionRenderer,
     StubRenderer,
 };
-pub use sandbox::{AllowedOrigin, SandboxPolicy};
-pub use source::{limits, MotionRenderRequest, MotionSource, ParamValue, RenderedClip};
+pub use sandbox::{AllowedOrigin, SandboxPolicy, OFFLINE_DOCUMENT_CSP};
+pub use source::{
+    limits, MotionDocumentSource, MotionRenderRequest, MotionSource, MotionSourceDiagnostic,
+    ParamValue, RenderedClip,
+};

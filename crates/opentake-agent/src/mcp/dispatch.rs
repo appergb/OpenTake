@@ -46,13 +46,19 @@ use crate::mcp::gen_catalog;
 use crate::mcp::generation::{GenerationBridge, GenerationRequest};
 use crate::mcp::media_bridge::{
     frame_to_block, media_frame_to_block, BridgeErrorKind, ImportSource, InspectMediaRequest,
-    InspectMediaResult, InspectResult, MediaBridge, SearchCandidate, TranscriptSource,
-    IMPORT_BYTES_BASE64_MAX,
+    InspectMediaResult, InspectResult, MediaBridge, SearchCandidate, TimelineMutationReceipt,
+    TimelineResultCaptureRequest, TranscriptSource, IMPORT_BYTES_BASE64_MAX,
+    TIMELINE_RESULT_IMAGE_BASE64_MAX,
 };
 use crate::mcp::media_catalog::ModelMediaCatalog;
 use crate::mcp::motion::{
     model_safe_commit, AddMotionRequest, EditMotionRequest, MotionBridge, MotionBridgeError,
     MotionBridgeErrorKind, MotionSourceRequest,
+};
+use crate::mcp::motion_documents::{
+    decode_request as decode_motion_document_request, result_from_error as motion_document_error,
+    result_from_operation as finish_motion_document_operation, AdmittedMotionDocumentOperation,
+    MotionDocumentBridge, MotionDocumentTool,
 };
 use crate::mcp::vision::VisionBridge;
 use crate::plugin::registry::PluginRegistry;
@@ -76,6 +82,7 @@ const INSPECT_MEDIA_MAX_FRAMES: usize = 12;
 const INSPECT_MEDIA_MAX_SEGMENTS: usize = 400;
 const INSPECT_MEDIA_MAX_WORDS: usize = 10_000;
 const DIRECT_UNDO_SCOPE: &str = "opentake:direct";
+const TIMELINE_RESULT_WARNING: &str = "Timeline preview unavailable.";
 
 thread_local! {
     static ACTIVE_UNDO_SCOPES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
@@ -110,6 +117,24 @@ struct AgentUndoMarker {
     head: CoreUndoHead,
 }
 
+/// The synchronous edit phase plus an optional post-commit capture. Desktop
+/// project gates run [`Dispatcher::finish_dispatch`] only after releasing their
+/// project-identity lease, so GPU work cannot block a project switch.
+pub struct DispatchReceipt {
+    result: ToolResult,
+    timeline_result: TimelineResultCompletion,
+}
+
+enum TimelineResultCompletion {
+    None,
+    Capture(TimelineResultCaptureRequest),
+    Warning,
+    MotionDocument {
+        tool: ToolName,
+        operation: Box<dyn AdmittedMotionDocumentOperation>,
+    },
+}
+
 /// Resource class used by the HTTP MCP host before it starts blocking work.
 /// Unknown or malformed calls are conservatively treated as mutations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -136,6 +161,9 @@ pub(crate) fn dispatch_admission_class(name: &str, args: &Value) -> DispatchAdmi
         | ToolName::SmartReframe
         | ToolName::TightenSilences
         | ToolName::RemoveFillerWords => DispatchAdmissionClass::ReadOnly,
+        ToolName::ListMotionDocuments
+        | ToolName::ReadMotionDocument
+        | ToolName::PreviewMotionDocument => DispatchAdmissionClass::ReadOnly,
         ToolName::AutoCutToBeats => match args.get("write") {
             None | Some(Value::Bool(false)) => DispatchAdmissionClass::ReadOnly,
             Some(_) => DispatchAdmissionClass::Mutation,
@@ -171,6 +199,9 @@ pub(crate) fn dispatch_admission_class(name: &str, args: &Value) -> DispatchAdmi
         | ToolName::ApplyEffect
         | ToolName::AddMotionGraphic
         | ToolName::EditMotionGraphic
+        | ToolName::CreateMotionDocument
+        | ToolName::PatchMotionDocument
+        | ToolName::PublishMotionDocument
         | ToolName::TrackMotion
         | ToolName::GenerateMatte
         | ToolName::RemoveObject
@@ -200,6 +231,10 @@ pub struct Dispatcher {
     /// Deterministic render + atomic import/place host capability. Motion tools
     /// are discoverable only while this bridge reports production readiness.
     motion_bridge: Option<Arc<dyn MotionBridge>>,
+    /// Project-authorized HTML/CSS document editing and exact preview/publish.
+    /// Admission captures a host authority under the lifecycle gate; execution
+    /// is deferred until that gate releases its identity read lease.
+    motion_document_bridge: Option<Arc<dyn MotionDocumentBridge>>,
     /// Capability-gated advanced workflows. Each tool is discovered only when
     /// this bridge explicitly reports a production implementation for it.
     advanced_bridge: Option<Arc<dyn AdvancedWorkflowBridge>>,
@@ -274,6 +309,7 @@ impl Dispatcher {
             bridge,
             generation_bridge,
             motion_bridge,
+            motion_document_bridge: None,
             advanced_bridge,
             vision_bridge: None,
             agent_undo: Mutex::new(HashMap::new()),
@@ -286,6 +322,14 @@ impl Dispatcher {
     /// setter keeps every existing bridge constructor source-compatible.
     pub fn with_vision_bridge(mut self, vision_bridge: Option<Arc<dyn VisionBridge>>) -> Self {
         self.vision_bridge = vision_bridge;
+        self
+    }
+
+    pub fn with_motion_document_bridge(
+        mut self,
+        bridge: Option<Arc<dyn MotionDocumentBridge>>,
+    ) -> Self {
+        self.motion_document_bridge = bridge;
         self
     }
 
@@ -326,6 +370,12 @@ impl Dispatcher {
             .is_some_and(|bridge| bridge.can_render_motion())
     }
 
+    pub fn can_edit_motion_documents(&self) -> bool {
+        self.motion_document_bridge
+            .as_ref()
+            .is_some_and(|bridge| bridge.can_edit_motion_documents())
+    }
+
     pub fn advertised_tools(&self) -> Vec<ToolName> {
         let mut tools = ToolName::ALL.to_vec();
         if !self.has_media_bridge() {
@@ -336,6 +386,9 @@ impl Dispatcher {
         }
         if self.can_render_motion() {
             tools.extend(ToolName::MOTION);
+        }
+        if self.can_edit_motion_documents() {
+            tools.extend(ToolName::MOTION_DOCUMENTS);
         }
         if let Some(bridge) = &self.advanced_bridge {
             for tool in bridge.supported_tools() {
@@ -387,33 +440,78 @@ impl Dispatcher {
         args: Value,
         cancel: &opentake_media::MediaCancelToken,
     ) -> ToolResult {
+        let receipt = self.dispatch_cancellable_scoped_deferred(undo_scope, name, args, cancel);
+        self.finish_dispatch(receipt, cancel)
+    }
+
+    /// Execute and commit a tool without performing the optional GPU capture.
+    /// Hosts with project lifecycle locks use this as phase one.
+    pub fn dispatch_cancellable_scoped_deferred(
+        &self,
+        undo_scope: &str,
+        name: &str,
+        args: Value,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> DispatchReceipt {
         let _undo_scope = ActiveUndoScope::enter(undo_scope);
         if cancel.is_cancelled() {
-            return ToolResult::error("Cancelled");
+            return DispatchReceipt::complete(ToolResult::error("Cancelled"));
         }
         // 1. Resolve the tool name.
         let Ok(tool) = name.parse::<ToolName>() else {
-            return ToolResult::public_error(
+            return DispatchReceipt::complete(ToolResult::public_error(
                 PublicErrorKind::UnknownTool,
                 format!("Unknown tool: {name}"),
-            );
+            ));
         };
 
         // Validate the complete wire shape before snapshots or side effects.
         // Known-but-hidden compatibility names keep their strict schema
         // contract, but a valid invocation is rejected below as unavailable.
         if let Err(error) = validate_tool_args(tool, &args) {
-            return ToolResult::public_error(
+            return DispatchReceipt::complete(ToolResult::public_error(
                 PublicErrorKind::InvalidArguments(tool),
                 error.message,
-            );
+            ));
         }
         if !self.advertised_tools().contains(&tool) {
             let message = match tool.hidden_capability_reason() {
                 Some(reason) => format!("Tool is not advertised: {} ({reason})", tool.as_str()),
                 None => format!("Tool is not advertised: {}", tool.as_str()),
             };
-            return ToolResult::public_error(PublicErrorKind::UnknownTool, message);
+            return DispatchReceipt::complete(ToolResult::public_error(
+                PublicErrorKind::UnknownTool,
+                message,
+            ));
+        }
+
+        // Motion Studio operations must acquire the host's publication lock in
+        // publication -> identity order. Admit against the exact project while
+        // the caller's lifecycle lease is still held, then execute from
+        // finish_dispatch after that lease is released.
+        if MotionDocumentTool::from_tool_name(tool).is_some() {
+            let request = match decode_motion_document_request(tool, &args) {
+                Ok(request) => request,
+                Err(error) => {
+                    return DispatchReceipt::complete(ToolResult::public_error(
+                        PublicErrorKind::InvalidArguments(tool),
+                        error.message,
+                    ))
+                }
+            };
+            let Some(bridge) = self.motion_document_bridge.as_ref() else {
+                return DispatchReceipt::complete(ToolResult::public_error(
+                    PublicErrorKind::CapabilityUnavailable(tool),
+                    "Motion Studio document host capability is unavailable",
+                ));
+            };
+            return match bridge.admit(request) {
+                Ok(operation) => DispatchReceipt {
+                    result: ToolResult::ok(""),
+                    timeline_result: TimelineResultCompletion::MotionDocument { tool, operation },
+                },
+                Err(error) => DispatchReceipt::complete(motion_document_error(tool, error)),
+            };
         }
 
         // 2. Snapshot the pre-run state.
@@ -425,10 +523,10 @@ impl Dispatcher {
         let args = match short_id::expand_id_prefixes(&args, &universe) {
             Ok(v) => v,
             Err(e) => {
-                return ToolResult::public_error(
+                return DispatchReceipt::complete(ToolResult::public_error(
                     PublicErrorKind::InvalidArguments(tool),
                     e.message,
-                );
+                ));
             }
         };
 
@@ -437,7 +535,7 @@ impl Dispatcher {
         let mut op = OpContext::default();
         let result = match self.run_body(tool, &args, &before, &manifest, &mut op, cancel) {
             Ok(r) => r,
-            Err(e) => return ToolResult::error(e.message),
+            Err(e) => return DispatchReceipt::complete(ToolResult::error(e.message)),
         };
 
         // 6. Attach the context signal against the post-run timeline.
@@ -452,7 +550,117 @@ impl Dispatcher {
         //    created ids in summaries shorten too).
         let post_manifest = self.handle.media();
         let post_universe = short_id::current_id_universe(&after, &post_manifest);
-        short_id::shorten_ids(result, &post_universe)
+        let result = short_id::shorten_ids(result, &post_universe);
+        let timeline_result =
+            self.timeline_result_completion(tool, &args, &before, &after, &result, cancel);
+        DispatchReceipt {
+            result,
+            timeline_result,
+        }
+    }
+
+    /// Direct-scope counterpart to [`Self::dispatch_cancellable_scoped_deferred`].
+    pub fn dispatch_cancellable_deferred(
+        &self,
+        name: &str,
+        args: Value,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> DispatchReceipt {
+        self.dispatch_cancellable_scoped_deferred(DIRECT_UNDO_SCOPE, name, args, cancel)
+    }
+
+    /// Complete the optional capture and merge it into the already-successful
+    /// tool result. Capture errors are deliberately non-transactional and are
+    /// exposed only as one fixed warning.
+    pub fn finish_dispatch(
+        &self,
+        mut receipt: DispatchReceipt,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> ToolResult {
+        let request =
+            match std::mem::replace(&mut receipt.timeline_result, TimelineResultCompletion::None) {
+                TimelineResultCompletion::None => return receipt.result,
+                TimelineResultCompletion::Warning => {
+                    insert_timeline_result_warning(&mut receipt.result);
+                    return receipt.result;
+                }
+                TimelineResultCompletion::MotionDocument { tool, operation } => {
+                    return finish_motion_document_operation(tool, operation, cancel)
+                }
+                TimelineResultCompletion::Capture(request) => request,
+            };
+        let Some(bridge) = self.bridge.as_ref() else {
+            return receipt.result;
+        };
+        let expected_revision = request.mutation.committed_revision.as_ref();
+        if cancel.is_cancelled()
+            || expected_revision.is_some()
+                && self.handle.current_revision().as_ref() != expected_revision
+        {
+            insert_timeline_result_warning(&mut receipt.result);
+            return receipt.result;
+        }
+        let captured = bridge.capture_timeline_result(&request, cancel);
+        if cancel.is_cancelled()
+            || expected_revision.is_some()
+                && self.handle.current_revision().as_ref() != expected_revision
+        {
+            insert_timeline_result_warning(&mut receipt.result);
+            return receipt.result;
+        }
+        match captured {
+            Ok(Block::Image { base64, media_type })
+                if media_type == "image/png"
+                    && !base64.is_empty()
+                    && base64.len() <= TIMELINE_RESULT_IMAGE_BASE64_MAX =>
+            {
+                insert_after_summary(&mut receipt.result, Block::image(base64, media_type));
+            }
+            Ok(_) | Err(_) => insert_timeline_result_warning(&mut receipt.result),
+        }
+        receipt.result
+    }
+
+    fn timeline_result_completion(
+        &self,
+        tool: ToolName,
+        args: &Value,
+        before: &Timeline,
+        after: &Timeline,
+        result: &ToolResult,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> TimelineResultCompletion {
+        if result.is_error
+            || cancel.is_cancelled()
+            || tool == ToolName::Undo
+            || dispatch_admission_class(tool.as_str(), args) != DispatchAdmissionClass::Mutation
+            || before == after
+        {
+            return TimelineResultCompletion::None;
+        }
+        let Some(bridge) = self.bridge.as_ref() else {
+            return TimelineResultCompletion::None;
+        };
+        let visible_clip_count_before = match bridge.visible_timeline_clip_count(before) {
+            Ok(count) => count,
+            Err(_) => return TimelineResultCompletion::Warning,
+        };
+        let visible_clip_count_after = match bridge.visible_timeline_clip_count(after) {
+            Ok(count) => count,
+            Err(_) => return TimelineResultCompletion::Warning,
+        };
+        if visible_clip_count_before > 0 && visible_clip_count_after == 0 {
+            TimelineResultCompletion::Capture(TimelineResultCaptureRequest {
+                timeline: after.clone(),
+                mutation: TimelineMutationReceipt {
+                    visible_clip_count_before,
+                    visible_clip_count_after,
+                    committed_revision: self.handle.current_revision(),
+                },
+            })
+        } else {
+            TimelineResultCompletion::None
+        }
     }
 
     /// Decode args + execute one tool, returning its neutral result or a tool
@@ -544,6 +752,14 @@ impl Dispatcher {
             | ToolName::UpscaleMedia => self.submit_generation(tool, args, cancel),
             ToolName::AddMotionGraphic => self.add_motion_graphic(args, cancel),
             ToolName::EditMotionGraphic => self.edit_motion_graphic(args, cancel),
+            ToolName::ListMotionDocuments
+            | ToolName::ReadMotionDocument
+            | ToolName::CreateMotionDocument
+            | ToolName::PatchMotionDocument
+            | ToolName::PreviewMotionDocument
+            | ToolName::PublishMotionDocument => Err(ToolError::new(
+                "Motion Studio document execution was not deferred",
+            )),
             ToolName::TrackMotion
             | ToolName::GenerateMatte
             | ToolName::RemoveObject
@@ -2727,6 +2943,24 @@ impl Dispatcher {
     }
 }
 
+impl DispatchReceipt {
+    fn complete(result: ToolResult) -> Self {
+        Self {
+            result,
+            timeline_result: TimelineResultCompletion::None,
+        }
+    }
+}
+
+fn insert_after_summary(result: &mut ToolResult, block: Block) {
+    let index = usize::from(matches!(result.content.first(), Some(Block::Text { .. })));
+    result.content.insert(index, block);
+}
+
+fn insert_timeline_result_warning(result: &mut ToolResult) {
+    insert_after_summary(result, Block::text(TIMELINE_RESULT_WARNING));
+}
+
 fn ensure_not_cancelled(cancel: &opentake_media::MediaCancelToken) -> Result<(), ToolError> {
     if cancel.is_cancelled() {
         Err(ToolError::new("Cancelled"))
@@ -2900,6 +3134,14 @@ fn validate_tool_args(tool: ToolName, args: &Value) -> Result<(), ToolError> {
             if let Some(params) = decoded.params.as_ref() {
                 validate_motion_params(params, "params")?;
             }
+        }
+        ToolName::ListMotionDocuments
+        | ToolName::ReadMotionDocument
+        | ToolName::CreateMotionDocument
+        | ToolName::PatchMotionDocument
+        | ToolName::PreviewMotionDocument
+        | ToolName::PublishMotionDocument => {
+            decode_motion_document_request(tool, args)?;
         }
         ToolName::TrackMotion => {
             decode!(TrackMotionArgs);
@@ -4412,6 +4654,7 @@ mod tests {
     use opentake_domain::{ClipType, MediaManifestEntry, MediaSource, Track};
     use opentake_ops::command::EditResult;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use crate::mcp::core_handle::CoreHandle;
@@ -4507,6 +4750,70 @@ mod tests {
 
     fn dispatcher_with(handle: Arc<dyn CoreHandle>) -> Dispatcher {
         Dispatcher::new(handle, Arc::new(RwLock::new(PluginRegistry::new())))
+    }
+
+    struct DeferredDocumentBridge {
+        admitted: Arc<AtomicUsize>,
+        executed: Arc<AtomicUsize>,
+    }
+
+    struct DeferredDocumentOperation {
+        executed: Arc<AtomicUsize>,
+    }
+
+    impl AdmittedMotionDocumentOperation for DeferredDocumentOperation {
+        fn execute(
+            self: Box<Self>,
+            _cancel: &opentake_media::MediaCancelToken,
+        ) -> Result<
+            crate::mcp::motion_documents::MotionDocumentResponse,
+            crate::mcp::motion_documents::MotionDocumentBridgeError,
+        > {
+            self.executed.fetch_add(1, Ordering::SeqCst);
+            Ok(crate::mcp::motion_documents::MotionDocumentResponse::Documents(Vec::new()))
+        }
+    }
+
+    impl MotionDocumentBridge for DeferredDocumentBridge {
+        fn can_edit_motion_documents(&self) -> bool {
+            true
+        }
+
+        fn admit(
+            &self,
+            _request: crate::mcp::motion_documents::MotionDocumentRequest,
+        ) -> Result<
+            Box<dyn AdmittedMotionDocumentOperation>,
+            crate::mcp::motion_documents::MotionDocumentBridgeError,
+        > {
+            self.admitted.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(DeferredDocumentOperation {
+                executed: self.executed.clone(),
+            }))
+        }
+    }
+
+    #[test]
+    fn motion_document_execution_is_deferred_until_project_lease_is_released() {
+        let admitted = Arc::new(AtomicUsize::new(0));
+        let executed = Arc::new(AtomicUsize::new(0));
+        let dispatcher = dispatcher_with(Arc::new(TestHandle::new())).with_motion_document_bridge(
+            Some(Arc::new(DeferredDocumentBridge {
+                admitted: admitted.clone(),
+                executed: executed.clone(),
+            })),
+        );
+        let cancel = opentake_media::MediaCancelToken::new();
+        let receipt = dispatcher.dispatch_cancellable_deferred(
+            "list_motion_documents",
+            serde_json::json!({}),
+            &cancel,
+        );
+        assert_eq!(admitted.load(Ordering::SeqCst), 1);
+        assert_eq!(executed.load(Ordering::SeqCst), 0);
+        let result = dispatcher.finish_dispatch(receipt, &cancel);
+        assert!(!result.is_error, "{}", result.text_joined());
+        assert_eq!(executed.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -6458,8 +6765,8 @@ mod tests {
 
     use crate::mcp::media_bridge::{
         BridgeError, ImportOutcome, ImportSource, InspectMediaRequest, InspectMediaResult,
-        InspectResult, InspectedFrame, InspectedMediaFrame, MediaBridge, TranscriptSource,
-        TranscriptSourceResult,
+        InspectResult, InspectedFrame, InspectedMediaFrame, MediaBridge,
+        TimelineResultCaptureRequest, TranscriptSource, TranscriptSourceResult,
     };
     use crate::tools::result::Block;
     use opentake_media::{TranscriptionResult, TranscriptionSegment, TranscriptionWord};
@@ -6494,6 +6801,10 @@ mod tests {
         /// runs. Records the `(query, scope, limit, candidate ids)` of each call.
         search_result: Mutex<Option<SearchMediaResult>>,
         search_calls: Mutex<Vec<SearchCall>>,
+        timeline_result_captures: Mutex<Vec<TimelineResultCaptureRequest>>,
+        timeline_result_capture_error: Mutex<bool>,
+        timeline_visibility_error: Mutex<Option<String>>,
+        cancel_during_timeline_capture: Mutex<bool>,
     }
 
     /// One recorded `search_media` call: `(query, scope, limit, candidate ids)`.
@@ -6510,6 +6821,48 @@ mod tests {
     }
 
     impl MediaBridge for FakeBridge {
+        fn visible_timeline_clip_count(&self, timeline: &Timeline) -> Result<usize, BridgeError> {
+            if let Some(error) = self.timeline_visibility_error.lock().unwrap().as_ref() {
+                return Err(BridgeError::new(error.clone()));
+            }
+            Ok(timeline
+                .tracks
+                .iter()
+                .filter(|track| !track.hidden && track.kind != ClipType::Audio)
+                .flat_map(|track| &track.clips)
+                .filter(|clip| {
+                    clip.duration_frames > 0
+                        && clip.media_type.is_visual()
+                        && clip.opacity > 0.0
+                        && (clip.media_type != ClipType::Text
+                            || clip
+                                .text_content
+                                .as_deref()
+                                .is_some_and(|text| !text.trim().is_empty()))
+                })
+                .count())
+        }
+
+        fn capture_timeline_result(
+            &self,
+            request: &TimelineResultCaptureRequest,
+            cancel: &opentake_media::MediaCancelToken,
+        ) -> Result<Block, BridgeError> {
+            self.timeline_result_captures
+                .lock()
+                .unwrap()
+                .push(request.clone());
+            if *self.cancel_during_timeline_capture.lock().unwrap() {
+                cancel.cancel();
+            }
+            if *self.timeline_result_capture_error.lock().unwrap() {
+                return Err(BridgeError::new(
+                    "PRIVATE_CAPTURE_PATH=/Users/private/project.opentake",
+                ));
+            }
+            Ok(Block::image("iVBORw0KGgo=", "image/png"))
+        }
+
         fn inspect_media(
             &self,
             request: &InspectMediaRequest,
@@ -6673,6 +7026,293 @@ mod tests {
             Some(bridge.clone() as Arc<dyn MediaBridge>),
         );
         (d, bridge)
+    }
+
+    fn timeline_image_dispatcher(clip_count: usize) -> (Dispatcher, Arc<FakeBridge>) {
+        let mut timeline = Timeline::new();
+        let mut track = Track::new("video", ClipType::Video);
+        for index in 0..clip_count {
+            track.clips.push(Clip::new(
+                format!("clip-{index}"),
+                format!("asset-{index}"),
+                index as i32 * 30,
+                30,
+            ));
+        }
+        timeline.tracks.push(track);
+        let bridge = Arc::new(FakeBridge::default());
+        let dispatcher = Dispatcher::with_bridge(
+            Arc::new(StateHandle::new(timeline, MediaManifest::new())),
+            Arc::new(RwLock::new(PluginRegistry::new())),
+            Some(bridge.clone()),
+        );
+        (dispatcher, bridge)
+    }
+
+    struct RevisionBumpingCaptureBridge {
+        handle: Arc<StateHandle>,
+        captures: std::sync::atomic::AtomicUsize,
+    }
+
+    impl MediaBridge for RevisionBumpingCaptureBridge {
+        fn visible_timeline_clip_count(&self, timeline: &Timeline) -> Result<usize, BridgeError> {
+            Ok(timeline
+                .tracks
+                .iter()
+                .filter(|track| !track.hidden && track.kind != ClipType::Audio)
+                .flat_map(|track| &track.clips)
+                .filter(|clip| {
+                    clip.duration_frames > 0 && clip.media_type.is_visual() && clip.opacity > 0.0
+                })
+                .count())
+        }
+
+        fn capture_timeline_result(
+            &self,
+            _request: &TimelineResultCaptureRequest,
+            _cancel: &opentake_media::MediaCancelToken,
+        ) -> Result<Block, BridgeError> {
+            self.captures
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.handle
+                .apply(EditCommand::InsertTrack {
+                    kind: ClipType::Audio,
+                    at: None,
+                })
+                .expect("simulate a concurrent committed revision");
+            Ok(Block::image("iVBORw0KGgo=", "image/png"))
+        }
+    }
+
+    fn has_timeline_result_image(result: &ToolResult) -> bool {
+        result.content.iter().any(
+            |block| matches!(block, Block::Image { media_type, .. } if media_type == "image/png"),
+        )
+    }
+
+    #[test]
+    fn timeline_image_visible_to_empty_records_receipt_and_orders_text_then_png() {
+        let (dispatcher, bridge) = timeline_image_dispatcher(1);
+
+        let result =
+            dispatcher.dispatch("remove_clips", serde_json::json!({"clipIds": ["clip-0"]}));
+
+        assert!(!result.is_error, "{}", result.text_joined());
+        assert!(matches!(result.content.first(), Some(Block::Text { .. })));
+        assert!(matches!(
+            result.content.get(1),
+            Some(Block::Image { media_type, .. }) if media_type == "image/png"
+        ));
+        let captures = bridge.timeline_result_captures.lock().unwrap();
+        assert_eq!(captures.len(), 1);
+        assert_eq!(captures[0].mutation.visible_clip_count_before, 1);
+        assert_eq!(captures[0].mutation.visible_clip_count_after, 0);
+    }
+
+    #[test]
+    fn timeline_image_delete_that_leaves_visible_content_does_not_capture() {
+        let (dispatcher, bridge) = timeline_image_dispatcher(2);
+
+        let result =
+            dispatcher.dispatch("remove_clips", serde_json::json!({"clipIds": ["clip-0"]}));
+
+        assert!(!result.is_error, "{}", result.text_joined());
+        assert!(!has_timeline_result_image(&result));
+        assert!(bridge.timeline_result_captures.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn timeline_image_non_visual_mutation_does_not_capture() {
+        let (dispatcher, bridge) = timeline_image_dispatcher(1);
+
+        let result = dispatcher.dispatch("deactivate_workflow", serde_json::json!({}));
+
+        assert!(!result.is_error, "{}", result.text_joined());
+        assert!(!has_timeline_result_image(&result));
+        assert!(bridge.timeline_result_captures.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn timeline_image_unchanged_timeline_visibility_failure_does_not_warn() {
+        let (dispatcher, bridge) = timeline_image_dispatcher(1);
+        *bridge.timeline_visibility_error.lock().unwrap() =
+            Some("PRIVATE_VISIBILITY_PATH=/Users/private/project.opentake".into());
+
+        let result = dispatcher.dispatch("deactivate_workflow", serde_json::json!({}));
+
+        assert!(!result.is_error, "{}", result.text_joined());
+        assert!(!result.text_joined().contains(TIMELINE_RESULT_WARNING));
+        assert!(!result.text_joined().contains("PRIVATE_VISIBILITY_PATH"));
+        assert!(!has_timeline_result_image(&result));
+        assert!(bridge.timeline_result_captures.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn timeline_image_failed_mutation_rolls_back_and_does_not_capture() {
+        let (dispatcher, bridge) = timeline_image_dispatcher(1);
+
+        let result =
+            dispatcher.dispatch("remove_clips", serde_json::json!({"clipIds": ["missing"]}));
+
+        assert!(result.is_error);
+        assert_eq!(dispatcher.timeline().tracks[0].clips.len(), 1);
+        assert!(!has_timeline_result_image(&result));
+        assert!(bridge.timeline_result_captures.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn timeline_image_cancelled_mutation_does_not_capture() {
+        let (dispatcher, bridge) = timeline_image_dispatcher(1);
+        let cancel = opentake_media::MediaCancelToken::new();
+        cancel.cancel();
+
+        let result = dispatcher.dispatch_cancellable(
+            "remove_clips",
+            serde_json::json!({"clipIds": ["clip-0"]}),
+            &cancel,
+        );
+
+        assert!(result.is_error);
+        assert_eq!(dispatcher.timeline().tracks[0].clips.len(), 1);
+        assert!(!has_timeline_result_image(&result));
+        assert!(bridge.timeline_result_captures.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn timeline_image_cancelled_during_capture_returns_no_image() {
+        let (dispatcher, bridge) = timeline_image_dispatcher(1);
+        let cancel = opentake_media::MediaCancelToken::new();
+        *bridge.cancel_during_timeline_capture.lock().unwrap() = true;
+
+        let result = dispatcher.dispatch_cancellable(
+            "remove_clips",
+            serde_json::json!({"clipIds": ["clip-0"]}),
+            &cancel,
+        );
+
+        assert!(!result.is_error, "the committed edit remains successful");
+        assert!(!has_timeline_result_image(&result));
+        assert!(result.text_joined().contains(TIMELINE_RESULT_WARNING));
+        assert_eq!(bridge.timeline_result_captures.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn timeline_image_stale_revision_after_capture_returns_no_image() {
+        let mut timeline = Timeline::new();
+        let mut track = Track::new("video", ClipType::Video);
+        track.clips.push(Clip::new("clip-0", "asset-0", 0, 30));
+        timeline.tracks.push(track);
+        let handle = Arc::new(StateHandle::new(timeline, MediaManifest::new()));
+        let bridge = Arc::new(RevisionBumpingCaptureBridge {
+            handle: handle.clone(),
+            captures: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let dispatcher = Dispatcher::with_bridge(
+            handle,
+            Arc::new(RwLock::new(PluginRegistry::new())),
+            Some(bridge.clone()),
+        );
+
+        let result =
+            dispatcher.dispatch("remove_clips", serde_json::json!({"clipIds": ["clip-0"]}));
+
+        assert!(
+            !result.is_error,
+            "the committed deletion remains successful"
+        );
+        assert!(!has_timeline_result_image(&result));
+        assert!(result.text_joined().contains(TIMELINE_RESULT_WARNING));
+        assert_eq!(
+            bridge.captures.load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[test]
+    fn timeline_image_undo_never_captures() {
+        let (dispatcher, bridge) = timeline_image_dispatcher(1);
+        let removed =
+            dispatcher.dispatch("remove_clips", serde_json::json!({"clipIds": ["clip-0"]}));
+        assert!(has_timeline_result_image(&removed));
+        bridge.timeline_result_captures.lock().unwrap().clear();
+
+        let undone = dispatcher.dispatch("undo", serde_json::json!({}));
+
+        assert!(!undone.is_error, "{}", undone.text_joined());
+        assert!(!has_timeline_result_image(&undone));
+        assert!(bridge.timeline_result_captures.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn timeline_image_batched_delete_captures_once_with_exact_counts() {
+        let (dispatcher, bridge) = timeline_image_dispatcher(2);
+
+        let result = dispatcher.dispatch(
+            "remove_clips",
+            serde_json::json!({"clipIds": ["clip-0", "clip-1"]}),
+        );
+
+        assert!(!result.is_error, "{}", result.text_joined());
+        assert!(has_timeline_result_image(&result));
+        let captures = bridge.timeline_result_captures.lock().unwrap();
+        assert_eq!(captures.len(), 1);
+        assert_eq!(captures[0].mutation.visible_clip_count_before, 2);
+        assert_eq!(captures[0].mutation.visible_clip_count_after, 0);
+    }
+
+    #[test]
+    fn timeline_image_capture_failure_preserves_edit_and_appends_sanitized_warning() {
+        let (dispatcher, bridge) = timeline_image_dispatcher(1);
+        *bridge.timeline_result_capture_error.lock().unwrap() = true;
+
+        let result =
+            dispatcher.dispatch("remove_clips", serde_json::json!({"clipIds": ["clip-0"]}));
+
+        assert!(!result.is_error, "{}", result.text_joined());
+        assert_eq!(
+            dispatcher
+                .timeline()
+                .tracks
+                .iter()
+                .map(|track| track.clips.len())
+                .sum::<usize>(),
+            0
+        );
+        assert!(!has_timeline_result_image(&result));
+        assert!(result
+            .text_joined()
+            .contains("Timeline preview unavailable."));
+        assert!(!result.text_joined().contains("PRIVATE_CAPTURE_PATH"));
+    }
+
+    #[test]
+    fn timeline_image_visibility_failure_preserves_edit_and_appends_sanitized_warning() {
+        let (dispatcher, bridge) = timeline_image_dispatcher(1);
+        *bridge.timeline_visibility_error.lock().unwrap() =
+            Some("PRIVATE_VISIBILITY_PATH=/Users/private/project.opentake".into());
+
+        let result =
+            dispatcher.dispatch("remove_clips", serde_json::json!({"clipIds": ["clip-0"]}));
+
+        assert!(!result.is_error, "{}", result.text_joined());
+        assert_eq!(
+            dispatcher
+                .timeline()
+                .tracks
+                .iter()
+                .map(|track| track.clips.len())
+                .sum::<usize>(),
+            0,
+            "visibility failure must not roll back the committed deletion"
+        );
+        assert!(matches!(result.content.first(), Some(Block::Text { .. })));
+        assert!(matches!(
+            result.content.get(1),
+            Some(Block::Text { text }) if text == TIMELINE_RESULT_WARNING
+        ));
+        assert!(!has_timeline_result_image(&result));
+        assert!(!result.text_joined().contains("PRIVATE_VISIBILITY_PATH"));
+        assert!(bridge.timeline_result_captures.lock().unwrap().is_empty());
     }
 
     fn inspected_transcript() -> TranscriptionResult {

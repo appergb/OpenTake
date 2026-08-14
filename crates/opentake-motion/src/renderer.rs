@@ -78,6 +78,16 @@ pub fn deterministic_clock_script() -> &'static str {
   var current = 0;
   var listeners = [];
   var randomState = 0x6d2b79f5;
+  function pinAnimations(seconds) {
+    if (!document.getAnimations) return;
+    var animations = document.getAnimations();
+    for (var i = 0; i < animations.length; i++) {
+      try {
+        animations[i].pause();
+        animations[i].currentTime = seconds * 1000;
+      } catch (e) { /* a detached animation may disappear while seeking */ }
+    }
+  }
   try { Date.now = function () { return Math.round(current * 1000); }; } catch (e) {}
   try {
     Object.defineProperty(performance, 'now', {
@@ -110,11 +120,15 @@ pub fn deterministic_clock_script() -> &'static str {
           });
         }
       } catch (e) { /* timeline may be read-only; listeners still fire */ }
+      pinAnimations(seconds);
       var pending = [];
       for (var i = 0; i < listeners.length; i++) {
         try { pending.push(Promise.resolve(listeners[i](seconds))); } catch (e) {}
       }
       await Promise.all(pending);
+      // A seek listener may create a CSS/Web Animation. Freeze those at the
+      // same exact playhead before the compositor is allowed to paint.
+      pinAnimations(seconds);
     },
     // Authors register frame callbacks: OpenTake.onSeek(t => { ... }).
     onSeek: function (fn) { if (typeof fn === 'function') listeners.push(fn); }
@@ -485,12 +499,12 @@ impl HeadlessChromiumRenderer {
         format!("data:text/html;charset=utf-8,{encoded}")
     }
 
-    /// The plan of per-frame virtual-time stamps the backend will seek through:
-    /// `[0/fps, 1/fps, ..., (n-1)/fps]`. Pure helper that documents and tests the
-    /// time grid without launching anything.
+    /// The plan of per-frame virtual-time stamps the backend will seek through,
+    /// beginning at `start_frame / fps`. Pure helper that documents and tests
+    /// the time grid without launching anything.
     pub fn frame_time_grid(req: &MotionRenderRequest) -> Vec<f64> {
         (0..req.duration_frames)
-            .map(|i| i as f64 / req.fps as f64)
+            .map(|i| (req.start_frame + i) as f64 / req.fps as f64)
             .collect()
     }
 
@@ -500,6 +514,17 @@ impl HeadlessChromiumRenderer {
         &self,
         req: &MotionRenderRequest,
         cancellation: &MotionCancellationToken,
+    ) -> MotionResult<RenderedClip> {
+        self.render_with_cancellation_and_progress(req, cancellation, &|_, _| {})
+    }
+
+    /// Render with cooperative cancellation and report each durably written
+    /// frame. Cache hits report the complete frame count in one callback.
+    pub fn render_with_cancellation_and_progress(
+        &self,
+        req: &MotionRenderRequest,
+        cancellation: &MotionCancellationToken,
+        progress: &dyn Fn(u32, u32),
     ) -> MotionResult<RenderedClip> {
         let validated = (|| {
             req.validate()?;
@@ -516,11 +541,11 @@ impl HeadlessChromiumRenderer {
 
         #[cfg(feature = "chromium")]
         {
-            chromium_backend::render(self, req, cancellation)
+            chromium_backend::render(self, req, cancellation, progress)
         }
         #[cfg(not(feature = "chromium"))]
         {
-            let _ = (&self.cache, cancellation);
+            let _ = (&self.cache, cancellation, progress);
             Err(MotionError::renderer_unavailable(
                 "headless-Chromium backend is not compiled in; build with the \
                  `chromium` feature, or use StubRenderer for offline/deterministic rendering",
@@ -785,8 +810,9 @@ mod chromium_backend {
         renderer: &HeadlessChromiumRenderer,
         req: &MotionRenderRequest,
         cancellation: &MotionCancellationToken,
+        progress: &dyn Fn(u32, u32),
     ) -> MotionResult<RenderedClip> {
-        let result = render_inner(renderer, req, cancellation);
+        let result = render_inner(renderer, req, cancellation, progress);
         if result.is_err() {
             renderer.browser_pool.invalidate_idle();
         }
@@ -797,6 +823,7 @@ mod chromium_backend {
         renderer: &HeadlessChromiumRenderer,
         req: &MotionRenderRequest,
         cancellation: &MotionCancellationToken,
+        progress: &dyn Fn(u32, u32),
     ) -> MotionResult<RenderedClip> {
         if cancellation.is_cancelled() {
             return Err(MotionError::Cancelled);
@@ -834,6 +861,7 @@ mod chromium_backend {
 
         let hash = content_hash(req);
         if renderer.cache.is_cached(req) {
+            progress(req.duration_frames, req.duration_frames);
             return Ok(clip_from_cache(req, hash, renderer.cache.dir_for(req)));
         }
 
@@ -850,6 +878,7 @@ mod chromium_backend {
         check_abort(cancellation, deadline, renderer.policy.timeout)?;
         if renderer.cache.is_cached(req) {
             browser.commit_reuse();
+            progress(req.duration_frames, req.duration_frames);
             return Ok(clip_from_cache(req, hash, renderer.cache.dir_for(req)));
         }
 
@@ -1035,6 +1064,10 @@ mod chromium_backend {
             let path = MotionCache::frame_file(&dir, index);
             std::fs::write(&path, png)?;
             frames.push(path);
+            progress(
+                u32::try_from(index).unwrap_or(u32::MAX).saturating_add(1),
+                req.duration_frames,
+            );
         }
 
         cdp.close_target(&target_id)?;
@@ -5546,6 +5579,9 @@ mod tests {
         assert!(s.contains("seek"));
         assert!(s.contains("currentTime"));
         assert!(s.contains("onSeek"));
+        assert!(s.contains("document.getAnimations"));
+        assert!(s.contains("animations[i].pause()"));
+        assert!(s.contains("animations[i].currentTime = seconds * 1000"));
     }
 
     #[test]

@@ -10,6 +10,7 @@ import { HomeView } from "./components/home/HomeView";
 import { SettingsView } from "./components/settings/SettingsView";
 import { UpdateCenter } from "./components/settings/UpdateDialog";
 import { LibraryView } from "./components/media/LibraryView";
+import { MotionStudio } from "./components/motion/MotionStudio";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useTimelinePlaybackEngine } from "./components/preview/previewEngine";
 import { useAutosave } from "./hooks/useAutosave";
@@ -18,7 +19,7 @@ import { startMediaSync, stopMediaSync } from "./store/mediaStore";
 import { startLibrarySync, stopLibrarySync } from "./store/libraryStore";
 import { useEditorUiStore } from "./store/uiStore";
 import { initI18n } from "./i18n";
-import { initProxyPlayback, initTheme, initWindowSize } from "./store/settingsStore";
+import { initProxyPlayback, initWindowSize } from "./store/settingsStore";
 import { isTauri, onGoHome } from "./lib/api";
 import { stopNativePlaybackForProjectBoundary } from "./components/preview/nativePlaybackSession";
 import { useUpdateStore } from "./store/updateStore";
@@ -67,12 +68,22 @@ function Toast() {
   );
 }
 
-const PRIMARY_VIEWS = ["home", "library", "editor"] as const;
+const PRIMARY_VIEWS = ["home", "library", "editor", "motion"] as const;
 type PrimaryView = (typeof PRIMARY_VIEWS)[number];
 
 function PrimaryViewContent({ view }: { view: PrimaryView }) {
   if (view === "home") return <HomeView />;
   if (view === "library") return <LibraryView />;
+  if (view === "motion") {
+    return (
+      <>
+        <TitleBar />
+        <div style={{ flex: 1, minHeight: 0 }}>
+          <MotionStudio />
+        </div>
+      </>
+    );
+  }
   return (
     <>
       <TitleBar />
@@ -95,13 +106,12 @@ export default function App() {
   const view = useEditorUiStore((s) => s.view);
   const settingsOpen = useEditorUiStore((s) => s.settingsOpen);
   const activePrimaryView: PrimaryView =
-    view === "home" || view === "library" ? view : "editor";
+    view === "home" || view === "library" || view === "motion" ? view : "editor";
   const mountedPrimaryViews = useRef(new Set<PrimaryView>());
   mountedPrimaryViews.current.add(activePrimaryView);
 
   useEffect(() => {
     initI18n();
-    initTheme();
     initWindowSize();
     initProxyPlayback();
     const stopUpdateScheduler = isTauri

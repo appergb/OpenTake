@@ -1,17 +1,16 @@
 /**
  * Settings view. Reachable from both the Home sidebar and the editor title bar.
  * Panes (single scrollable page in this phase): General (language), Appearance
- * (theme), Import, AI (BYOK), MCP, optional Account, and About.
+ * (dark window layout), Import, AI (BYOK), MCP, optional Account, and About.
  * Preferences persist via `settingsStore` / `i18nStore`;
  * the BYOK key is stored in the OS keychain via the `secret_*` Tauri commands
  * (see `lib/api.ts`) — the plaintext key never reaches this component's
  * persisted state.
  */
 
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   Bot,
-  Check,
   Copy,
   Download,
   ExternalLink,
@@ -30,7 +29,6 @@ import { Dropdown } from "../ui/Dropdown";
 import { useT, useI18nStore, LOCALES } from "../../i18n";
 import {
   useSettingsStore,
-  type Theme,
   type ByokProvider,
   type WindowSizeOpt,
 } from "../../store/settingsStore";
@@ -48,6 +46,7 @@ import {
 } from "../../lib/api";
 import type { SecretStatus } from "../../lib/types";
 import { AccountPane } from "./AccountPane";
+import { ExternalMcpPane } from "./ExternalMcpPane";
 import { StoragePane } from "./StoragePane";
 import { UpdateSettingsControl } from "./UpdateDialog";
 
@@ -112,7 +111,13 @@ export function SettingsView() {
   const setSettingsOpen = useEditorUiStore((s) => s.setSettingsOpen);
   const activePane = useEditorUiStore((s) => s.settingsPane);
   const setActivePane = useEditorUiStore((s) => s.setSettingsPane);
+  const [mcpReceiptOperationPending, setMcpReceiptOperationPending] = useState(false);
+  const mcpReceiptOperationPendingRef = useRef(false);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const handleMcpReceiptOperationPendingChange = useCallback((pending: boolean) => {
+    mcpReceiptOperationPendingRef.current = pending;
+    setMcpReceiptOperationPending(pending);
+  }, []);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -127,6 +132,7 @@ export function SettingsView() {
       if (event.defaultPrevented) return;
       if (event.key === "Escape") {
         event.preventDefault();
+        if (mcpReceiptOperationPendingRef.current) return;
         setSettingsOpen(false);
         return;
       }
@@ -210,6 +216,7 @@ export function SettingsView() {
           <div style={{ display: "flex", alignItems: "center", gap: "var(--space-md)" }}>
             <button
               type="button"
+              disabled={mcpReceiptOperationPending}
               onClick={() => setSettingsOpen(false)}
               className="hover-area"
               style={{
@@ -228,6 +235,7 @@ export function SettingsView() {
               type="button"
               title="Close"
               aria-label="Close"
+              disabled={mcpReceiptOperationPending}
               onClick={() => setSettingsOpen(false)}
               className="hover-area"
               style={{
@@ -246,7 +254,11 @@ export function SettingsView() {
         </header>
 
         <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
-          <SettingsSidebar activePane={activePane} onSelect={setActivePane} />
+          <SettingsSidebar
+            activePane={activePane}
+            disabled={mcpReceiptOperationPending}
+            onSelect={setActivePane}
+          />
           <div
             style={{
               flex: 1,
@@ -255,7 +267,7 @@ export function SettingsView() {
               padding: "var(--space-lg) var(--space-xl) var(--space-xl)",
             }}
           >
-            {renderActivePane(activePane)}
+            {renderActivePane(activePane, handleMcpReceiptOperationPendingChange)}
           </div>
         </div>
       </div>
@@ -265,9 +277,11 @@ export function SettingsView() {
 
 function SettingsSidebar({
   activePane,
+  disabled,
   onSelect,
 }: {
   activePane: SettingsPaneId;
+  disabled: boolean;
   onSelect: (pane: SettingsPaneId) => void;
 }) {
   const t = useT();
@@ -281,6 +295,7 @@ function SettingsSidebar({
             <button
               key={pane.id}
               type="button"
+              disabled={disabled}
               onClick={() => onSelect(pane.id)}
               className="hover-area"
               style={{
@@ -308,7 +323,10 @@ function SettingsSidebar({
   );
 }
 
-function renderActivePane(activePane: SettingsPaneId) {
+function renderActivePane(
+  activePane: SettingsPaneId,
+  onMcpReceiptOperationPendingChange: (pending: boolean) => void,
+) {
   switch (activePane) {
     case "general":
       return <GeneralPane />;
@@ -319,7 +337,11 @@ function renderActivePane(activePane: SettingsPaneId) {
     case "ai":
       return <AiPane />;
     case "mcp":
-      return <McpPane />;
+      return (
+        <ExternalMcpPane
+          onReceiptOperationPendingChange={onMcpReceiptOperationPendingChange}
+        />
+      );
     case "shortcuts":
       return <ShortcutsPane />;
     case "account":
@@ -386,55 +408,6 @@ function Field({
   );
 }
 
-/** Segmented control used for enum settings (language/theme). */
-function Segmented<T extends string>({
-  value,
-  options,
-  onChange,
-}: {
-  value: T;
-  options: Array<{ id: T; label: string }>;
-  onChange: (id: T) => void;
-}) {
-  return (
-    <div
-      style={{
-        display: "inline-flex",
-        padding: 2,
-        gap: 2,
-        ...settingsControlStyle,
-        borderRadius: "var(--radius-sm)",
-      }}
-    >
-      {options.map((opt) => {
-        const active = opt.id === value;
-        return (
-          <button
-            key={opt.id}
-            type="button"
-            onClick={() => onChange(opt.id)}
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 4,
-              height: 24,
-              padding: "0 var(--space-md)",
-              borderRadius: "var(--radius-xs-sm)",
-              background: active ? "var(--home-selected)" : "transparent",
-              color: active ? "var(--text-primary)" : "var(--text-tertiary)",
-              fontSize: "var(--fs-sm)",
-              fontWeight: "var(--fw-medium)",
-            }}
-          >
-            {active && <Icon icon={Check} size={11} />}
-            {opt.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
 function GeneralPane() {
   const t = useT();
   const locale = useI18nStore((s) => s.locale);
@@ -485,39 +458,74 @@ function GeneralPane() {
 
 function AppearancePane() {
   const t = useT();
-  const theme = useSettingsStore((s) => s.theme);
-  const setTheme = useSettingsStore((s) => s.setTheme);
   const windowSize = useSettingsStore((s) => s.windowSize);
   const setWindowSize = useSettingsStore((s) => s.setWindowSize);
+  const options: Array<{ id: WindowSizeOpt; label: string }> = [
+    { id: "standard", label: t("settings.darkLayout.standard") },
+    { id: "compact", label: t("settings.darkLayout.compact") },
+  ];
+
+  const select = (size: WindowSizeOpt) => {
+    void setWindowSize(size);
+  };
 
   return (
     <Section title={t("settings.section.appearance")}>
       <Field
-        label={t("settings.theme")}
-        description={t("settings.themeDesc")}
-        control={
-          <Segmented<Theme>
-            value={theme}
-            options={[
-              { id: "dark", label: t("settings.theme.dark") },
-              { id: "light", label: t("settings.theme.light") },
-            ]}
-            onChange={setTheme}
-          />
-        }
-      />
-      <Field
-        label={t("settings.windowSize")}
+        label={t("settings.darkLayout")}
         description={t("settings.windowSizeDesc")}
         control={
-          <Segmented<WindowSizeOpt>
-            value={windowSize}
-            options={[
-              { id: "standard", label: t("settings.windowSize.standard") },
-              { id: "compact", label: t("settings.windowSize.compact") },
-            ]}
-            onChange={setWindowSize}
-          />
+          <div
+            role="radiogroup"
+            aria-label={t("settings.windowSize")}
+            style={{
+              display: "flex",
+              width: 244,
+              padding: 2,
+              gap: 2,
+              background: "var(--home-hover)",
+              borderRadius: "var(--radius-sm)",
+            }}
+          >
+            {options.map((option, index) => {
+              const active = option.id === windowSize;
+              return (
+                <button
+                  key={option.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  tabIndex={active ? 0 : -1}
+                  onClick={() => select(option.id)}
+                  onKeyDown={(event) => {
+                    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight" && event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+                    event.preventDefault();
+                    const direction = event.key === "ArrowLeft" || event.key === "ArrowUp" ? -1 : 1;
+                    const nextIndex = (index + direction + options.length) % options.length;
+                    const next = options[nextIndex]!;
+                    select(next.id);
+                    (event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="radio"]')[nextIndex])?.focus();
+                  }}
+                  style={{
+                    display: "flex",
+                    flex: "1 1 0",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    height: 28,
+                    padding: "0 var(--space-sm)",
+                    border: active ? "var(--bw-thin) solid var(--border-primary)" : "var(--bw-thin) solid transparent",
+                    borderRadius: "var(--radius-xs-sm)",
+                    background: active ? "var(--home-selected)" : "transparent",
+                    color: active ? "var(--text-primary)" : "var(--text-tertiary)",
+                    fontSize: "var(--fs-sm)",
+                    fontWeight: "var(--fw-medium)",
+                  }}
+                >
+                  <span style={{ display: "flex", width: "100%", justifyContent: "center" }}>{option.label}</span>
+                </button>
+              );
+            })}
+          </div>
         }
       />
     </Section>
@@ -971,49 +979,5 @@ function Value({ children }: { children: React.ReactNode }) {
     <span className="tabular" style={{ fontSize: "var(--fs-sm-md)", color: "var(--text-secondary)" }}>
       {children}
     </span>
-  );
-}
-
-/**
- * External MCP is fail-closed in this Beta until the app has an explicit,
- * authenticated pairing flow. Official Codex sign-in uses a separate
- * per-turn authenticated endpoint and remains available in the AI pane.
- */
-function McpPane() {
-  const t = useT();
-
-  return (
-    <Section title={t("settings.section.mcp")}>
-      <div style={{ fontSize: "var(--fs-md)", color: "var(--text-primary)", fontWeight: "var(--fw-medium)" }}>
-        {t("mcp.title")}
-      </div>
-      <div style={{ fontSize: "var(--fs-xs)", color: "var(--text-tertiary)", marginTop: -12 }}>
-        {t("mcp.overview")}
-      </div>
-      <div
-        role="status"
-        aria-live="polite"
-        data-external-mcp-status="paused"
-        style={{
-          display: "flex",
-          alignItems: "flex-start",
-          gap: "var(--space-md)",
-          ...settingsControlStyle,
-          borderRadius: "var(--radius-sm)",
-          padding: "var(--space-md)",
-        }}
-      >
-        <Icon icon={Plug} size={16} />
-        <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-xs)" }}>
-          <div style={{ fontSize: "var(--fs-sm-md)", color: "var(--text-primary)", fontWeight: "var(--fw-medium)" }}>
-            {t("mcp.pausedTitle")}
-          </div>
-          <div style={{ fontSize: "var(--fs-xs)", color: "var(--text-tertiary)" }}>
-            {t("mcp.pausedDesc")}
-          </div>
-        </div>
-      </div>
-      <div style={{ fontSize: "var(--fs-xs)", color: "var(--text-tertiary)" }}>{t("mcp.note")}</div>
-    </Section>
   );
 }

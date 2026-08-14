@@ -14,13 +14,20 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cap_fs_ext::{ambient_authority, DirExt};
 use cap_std::fs::Dir;
-use serde::{Deserialize, Serialize};
+use serde::{
+    de::{self, SeqAccess, Visitor},
+    Deserialize, Deserializer, Serialize,
+};
 use tauri::{AppHandle, Manager};
 
 static REGISTRY_LOCK: Mutex<()> = Mutex::new(());
 const MAX_RECENT_PROJECTS: usize = 12;
 const MAX_PROJECT_PATH_BYTES: usize = 32_768;
 const MAX_REGISTRY_BYTES: u64 = 512 * 1024;
+const MAX_PROJECT_PREVIEW_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_PROJECT_PREVIEW_TRACKS: usize = 64;
+const MAX_HOME_THUMBNAIL_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_HOME_THUMBNAIL_DIMENSION: u32 = 16_384;
 const HOME_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -74,8 +81,80 @@ pub struct HomeProjectEntry {
     opened_at: u64,
     modified_at: u64,
     thumbnail_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preview: Option<HomeProjectPreview>,
     missing: bool,
     offline: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HomeProjectPreview {
+    canvas_width: i32,
+    canvas_height: i32,
+    track_kinds: Vec<opentake_domain::ClipType>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct HomeProjectPreviewWire {
+    width: Option<i32>,
+    height: Option<i32>,
+    #[serde(
+        default,
+        rename = "tracks",
+        deserialize_with = "deserialize_optional_home_track_kinds"
+    )]
+    track_kinds: Option<Vec<opentake_domain::ClipType>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HomeTrackPreviewWire {
+    #[serde(rename = "type")]
+    kind: opentake_domain::ClipType,
+}
+
+fn deserialize_optional_home_track_kinds<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<opentake_domain::ClipType>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct TrackKindsVisitor;
+
+    impl<'de> Visitor<'de> for TrackKindsVisitor {
+        type Value = Vec<opentake_domain::ClipType>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                formatter,
+                "at most {MAX_PROJECT_PREVIEW_TRACKS} project tracks"
+            )
+        }
+
+        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut kinds = Vec::with_capacity(
+                sequence
+                    .size_hint()
+                    .unwrap_or_default()
+                    .min(MAX_PROJECT_PREVIEW_TRACKS),
+            );
+            while let Some(track) = sequence.next_element::<HomeTrackPreviewWire>()? {
+                if kinds.len() == MAX_PROJECT_PREVIEW_TRACKS {
+                    return Err(de::Error::custom(format!(
+                        "project preview exceeds the {MAX_PROJECT_PREVIEW_TRACKS}-track limit"
+                    )));
+                }
+                kinds.push(track.kind);
+            }
+            Ok(kinds)
+        }
+    }
+
+    deserializer.deserialize_seq(TrackKindsVisitor).map(Some)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -312,9 +391,34 @@ fn home_entry(
         opened_at: entry.last_opened_at,
         modified_at,
         thumbnail_path,
+        preview: None,
         missing,
         offline,
     }
+}
+
+fn read_project_preview(bundle: &Path) -> Option<HomeProjectPreview> {
+    let root = opentake_project::ProjectRoot::open(bundle).ok()?;
+    let file = root.open_asset_file(Path::new("project.json")).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_PROJECT_PREVIEW_BYTES {
+        return None;
+    }
+    let wire: HomeProjectPreviewWire =
+        serde_json::from_reader(file.take(MAX_PROJECT_PREVIEW_BYTES + 1)).ok()?;
+    let (Some(canvas_width), Some(canvas_height), Some(track_kinds)) =
+        (wire.width, wire.height, wire.track_kinds)
+    else {
+        return None;
+    };
+    if canvas_width <= 0 || canvas_height <= 0 {
+        return None;
+    }
+    Some(HomeProjectPreview {
+        canvas_width,
+        canvas_height,
+        track_kinds,
+    })
 }
 
 fn stored_modified_at(entry: &ProjectEntry) -> u64 {
@@ -368,8 +472,49 @@ fn probe_project_entry(
         .or_else(|| modified_millis(&bundle_metadata))
         .unwrap_or_else(|| stored_modified_at(entry));
     let thumbnail = entry.path.join("thumbnail.jpg");
-    let thumbnail_path = authorize_thumbnail(&thumbnail).then_some(thumbnail);
-    home_entry(entry, modified_at, thumbnail_path, false, false)
+    let thumbnail_path =
+        (valid_home_thumbnail(&thumbnail) && authorize_thumbnail(&thumbnail)).then_some(thumbnail);
+    let mut result = home_entry(entry, modified_at, thumbnail_path, false, false);
+    result.preview = read_project_preview(&entry.path);
+    result
+}
+
+fn valid_home_thumbnail(path: &Path) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.len() == 0
+        || metadata.len() > MAX_HOME_THUMBNAIL_BYTES
+    {
+        return false;
+    }
+    let Ok(file) = fs::File::open(path) else {
+        return false;
+    };
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    if file
+        .take(MAX_HOME_THUMBNAIL_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() as u64 != metadata.len()
+    {
+        return false;
+    }
+    let Ok(reader) = image::ImageReader::new(std::io::Cursor::new(bytes)).with_guessed_format()
+    else {
+        return false;
+    };
+    if reader.format() != Some(image::ImageFormat::Jpeg) {
+        return false;
+    }
+    reader.into_dimensions().is_ok_and(|(width, height)| {
+        width > 0
+            && height > 0
+            && width <= MAX_HOME_THUMBNAIL_DIMENSION
+            && height <= MAX_HOME_THUMBNAIL_DIMENSION
+    })
 }
 
 fn probe_project_entries_with(
@@ -1123,6 +1268,15 @@ pub async fn home_project_reveal(app: AppHandle, path: String) -> Result<(), Str
 mod tests {
     use super::*;
 
+    fn write_test_jpeg(path: &Path, color: [u8; 3]) {
+        let pixels = color.repeat(16 * 9);
+        let mut bytes = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 80)
+            .encode(&pixels, 16, 9, image::ExtendedColorType::Rgb8)
+            .unwrap();
+        fs::write(path, bytes).unwrap();
+    }
+
     #[test]
     fn missing_entry_survives_registry_load_and_safe_trash_removes_only_after_success() {
         let directory = tempfile::tempdir().unwrap();
@@ -1381,7 +1535,7 @@ mod tests {
         let project = directory.path().join("Metadata.opentake");
         fs::create_dir(&project).unwrap();
         fs::write(project.join("project.json"), b"{}").unwrap();
-        fs::write(project.join("thumbnail.jpg"), b"jpeg").unwrap();
+        write_test_jpeg(&project.join("thumbnail.jpg"), [20, 40, 80]);
 
         let mut registry = ProjectRegistry::load(ledger).unwrap();
         registry
@@ -1399,8 +1553,138 @@ mod tests {
 
         assert!(entry.modified_at > 0);
         assert_eq!(entry.thumbnail_path, Some(project.join("thumbnail.jpg")));
+        assert!(serde_json::to_value(&entry)
+            .unwrap()
+            .get("preview")
+            .is_none());
         assert!(!entry.missing);
         assert!(!entry.offline);
+    }
+
+    #[test]
+    fn thumbnail_invalid_prior_jpeg_is_retained_but_not_advertised() {
+        let directory = tempfile::tempdir().unwrap();
+        let ledger = directory.path().join("project-registry.json");
+        let project = directory.path().join("InvalidCover.opentake");
+        fs::create_dir(&project).unwrap();
+        fs::write(project.join("project.json"), b"{}").unwrap();
+        fs::write(project.join("thumbnail.jpg"), b"not-a-jpeg").unwrap();
+
+        let mut registry = ProjectRegistry::load(ledger).unwrap();
+        registry
+            .register_at(
+                project.clone(),
+                10,
+                capture_registered_bundle_identity(&project).unwrap(),
+            )
+            .unwrap();
+        let entry = probe_project_entries_with(registry.entries_snapshot(), |_| true)
+            .pop()
+            .unwrap();
+
+        assert_eq!(entry.thumbnail_path, None);
+        assert_eq!(
+            fs::read(project.join("thumbnail.jpg")).unwrap(),
+            b"not-a-jpeg"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn thumbnail_atomic_replacement_failure_retains_previous_valid_jpeg() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let bundle = directory.path().join("AtomicCover.opentake");
+        let prior_path = directory.path().join("prior.jpg");
+        let replacement_path = directory.path().join("replacement.jpg");
+        write_test_jpeg(&prior_path, [20, 40, 80]);
+        write_test_jpeg(&replacement_path, [200, 10, 10]);
+        let prior = fs::read(&prior_path).unwrap();
+        let replacement = fs::read(&replacement_path).unwrap();
+        let mut project = opentake_project::Project::new(&bundle);
+        project.thumbnail = Some(prior.clone());
+        project.save().unwrap();
+        let original_mode = fs::metadata(&bundle).unwrap().permissions().mode();
+        fs::set_permissions(&bundle, fs::Permissions::from_mode(0o555)).unwrap();
+
+        project.thumbnail = Some(replacement);
+        let result = project.save();
+        fs::set_permissions(&bundle, fs::Permissions::from_mode(original_mode)).unwrap();
+
+        assert!(result.is_err(), "read-only atomic replacement must fail");
+        assert_eq!(fs::read(bundle.join("thumbnail.jpg")).unwrap(), prior);
+    }
+
+    #[test]
+    fn filesystem_probe_reports_explicit_canvas_and_actual_track_kinds() {
+        let directory = tempfile::tempdir().unwrap();
+        let ledger = directory.path().join("project-registry.json");
+        let project = directory.path().join("Portrait.opentake");
+        fs::create_dir(&project).unwrap();
+        fs::write(
+            project.join("project.json"),
+            br#"{
+                "width": 1080,
+                "height": 1920,
+                "tracks": [
+                    { "type": "video", "clips": [] },
+                    { "type": "audio", "clips": [] }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let mut registry = ProjectRegistry::load(ledger).unwrap();
+        registry.register_at(project, 10, None).unwrap();
+        let entry = probe_project_entries_with(registry.entries_snapshot(), |_| false)
+            .pop()
+            .unwrap();
+        let json = serde_json::to_value(entry).unwrap();
+
+        assert_eq!(json["preview"]["canvasWidth"], 1080);
+        assert_eq!(json["preview"]["canvasHeight"], 1920);
+        assert_eq!(
+            json["preview"]["trackKinds"],
+            serde_json::json!(["video", "audio"])
+        );
+    }
+
+    #[test]
+    fn filesystem_probe_omits_preview_when_tracks_are_not_explicit() {
+        let directory = tempfile::tempdir().unwrap();
+        let ledger = directory.path().join("project-registry.json");
+        let project = directory.path().join("Incomplete.opentake");
+        fs::create_dir(&project).unwrap();
+        fs::write(
+            project.join("project.json"),
+            br#"{ "width": 1080, "height": 1920 }"#,
+        )
+        .unwrap();
+
+        let mut registry = ProjectRegistry::load(ledger).unwrap();
+        registry.register_at(project, 10, None).unwrap();
+        let entry = probe_project_entries_with(registry.entries_snapshot(), |_| false)
+            .pop()
+            .unwrap();
+
+        assert!(serde_json::to_value(entry)
+            .unwrap()
+            .get("preview")
+            .is_none());
+
+        fs::write(
+            directory.path().join("Incomplete.opentake/project.json"),
+            br#"{ "width": 1080, "height": 1920, "tracks": [] }"#,
+        )
+        .unwrap();
+        let entry = probe_project_entries_with(registry.entries_snapshot(), |_| false)
+            .pop()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(entry).unwrap()["preview"]["trackKinds"],
+            serde_json::json!([])
+        );
     }
 
     #[test]

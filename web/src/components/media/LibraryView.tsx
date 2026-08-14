@@ -106,7 +106,7 @@ export function LibraryView() {
         color: "var(--text-primary)",
       }}
     >
-      <CategoryTree custom={customCategories} />
+      <CategoryTree custom={customCategories} onNavigateHome={() => setView("home")} />
 
       <main
         style={{
@@ -118,7 +118,7 @@ export function LibraryView() {
             "radial-gradient(120% 80% at 100% 0%, rgba(245,239,228,0.05), transparent 60%), var(--bg-surface)",
         }}
       >
-        {/* 顶部条:返回主页 + 标题 + 搜索 + 排序 */}
+        {/* 顶部条:标题 + 搜索 + 排序 */}
         <header
           data-tauri-drag-region
           style={{
@@ -128,24 +128,6 @@ export function LibraryView() {
             padding: "var(--titlebar-safe-top) var(--space-xl) var(--space-md)",
           }}
         >
-          <button
-            type="button"
-            title={t("title.backHome")}
-            aria-label={t("title.backHome")}
-            onClick={() => setView("home")}
-            className="hover-area"
-            style={{
-              width: 26,
-              height: 26,
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-              borderRadius: "var(--radius-sm)",
-              color: "var(--text-secondary)",
-            }}
-          >
-            <Icon icon={Home} size={14} />
-          </button>
           <h1
             style={{
               margin: 0,
@@ -184,13 +166,20 @@ export function LibraryView() {
   );
 }
 
-function CategoryTree({ custom }: { custom: ReadonlyArray<string> }) {
+function CategoryTree({
+  custom,
+  onNavigateHome,
+}: {
+  custom: ReadonlyArray<string>;
+  onNavigateHome: () => void;
+}) {
   const t = useT();
   const selectedCategory = useLibraryStore((s) => s.selectedCategory);
   const setSelectedCategory = useLibraryStore((s) => s.setSelectedCategory);
 
   return (
     <aside
+      className="library-category-rail"
       style={{
         width: 200,
         flex: "0 0 auto",
@@ -203,6 +192,15 @@ function CategoryTree({ custom }: { custom: ReadonlyArray<string> }) {
         overflowY: "auto",
       }}
     >
+      <button
+        type="button"
+        title={t("title.backHome")}
+        aria-label={t("title.backHome")}
+        onClick={onNavigateHome}
+        className="library-category-rail__home hover-area"
+      >
+        <Icon icon={Home} size={14} />
+      </button>
       <div
         style={{
           padding: "0 var(--space-sm) var(--space-md)",

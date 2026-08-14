@@ -21,8 +21,8 @@
 //!   bundled; `copied_internal` counts `.project` files copied; `total_bytes`
 //!   is the bytes copied into the new bundle.
 //! - After writing `project.json` / `media.json` / `generation-log.json`, the
-//!   source bundle's `thumbnail.jpg` and `chat-sessions/` are carried across
-//!   when present.
+//!   source bundle's `thumbnail.jpg`, `chat-sessions/`, and
+//!   `motion-documents/` are carried across when present.
 
 use std::collections::HashMap;
 use std::fs;
@@ -33,6 +33,7 @@ use opentake_domain::{MediaManifest, MediaSource, Timeline};
 use crate::error::{ProjectError, Result};
 use crate::gen_log::GenerationLog;
 use crate::layout;
+use crate::project_root::ProjectRoot;
 
 /// Outcome of an [`archive`] run. 1:1 with upstream `PalmierProjectExporter.Report`.
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
@@ -160,6 +161,9 @@ pub fn archive(
             &layout::chat_sessions_dir(source_bundle),
             &layout::chat_sessions_dir(dest_bundle),
         )?;
+        let source_root = ProjectRoot::open(source_bundle)?;
+        let destination_root = ProjectRoot::open(dest_bundle)?;
+        source_root.copy_motion_documents_to(&destination_root)?;
     }
 
     Ok(report)

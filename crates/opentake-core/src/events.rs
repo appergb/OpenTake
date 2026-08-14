@@ -153,7 +153,11 @@ impl EventBus {
             .map(|(_, listener)| Arc::clone(listener))
             .collect();
         for listener in listeners {
-            listener(event);
+            // Subscribers are application adapters, not part of the durable
+            // core transaction. One faulty listener must never turn an
+            // already-committed mutation into an apparent command failure or
+            // prevent later mirrors from receiving the same event.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| listener(event)));
         }
     }
 }
@@ -201,6 +205,25 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn panicking_subscriber_is_isolated_from_publishers_and_later_subscribers() {
+        let bus = EventBus::new();
+        bus.subscribe(|_| panic!("subscriber failure"));
+        let delivered = Arc::new(Mutex::new(0_u32));
+        let sink = Arc::clone(&delivered);
+        bus.subscribe(move |_| *sink.lock().unwrap() += 1);
+
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bus.emit(&CoreEvent::ProjectSaved {
+                path: "p".into(),
+                project_epoch: 1,
+            });
+        }));
+
+        assert!(result.is_ok());
+        assert_eq!(*delivered.lock().unwrap(), 1);
     }
 
     #[test]

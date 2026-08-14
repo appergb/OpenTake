@@ -1,21 +1,20 @@
 //! Project cover thumbnail — the representative-frame capture written into a
-//! bundle's `thumbnail.jpg` on save. 1:1 port of upstream
-//! `VideoProject.captureThumbnail` (`Project/VideoProject.swift:261-300`).
+//! bundle's `thumbnail.jpg` on save.
 //!
-//! Upstream walks `timeline.tracks where track.type == .video`, then each clip
-//! in order, and returns the first frame it can grab:
+//! Upstream `VideoProject.captureThumbnail` walks
+//! `timeline.tracks where track.type == .video`, then each clip in order, and
+//! returns the first frame it can grab:
 //! - an **image** clip → `ImageEncoder.thumbnail(url, maxPixelSize: 640)` →
 //!   `encodeJPEG(quality: 0.7)`;
 //! - a **video** clip → `AVAssetImageGenerator` (`maximumSize = 320×180`,
 //!   `appliesPreferredTrackTransform`) seeked to
 //!   `CMTime(value: clip.trimStartFrame, timescale: fps)` → JPEG `quality 0.7`.
 //!
-//! The **pick** ([`pick_thumbnail_source`]) is a pure function over the timeline
-//! and manifest (resolvable-file filter lives here because the media layer,
-//! unlike `opentake-domain`, may touch the filesystem), so the track/clip
-//! selection rule is unit-testable without ffmpeg. The **capture**
-//! ([`capture_project_thumbnail`]) decodes and JPEG-encodes and therefore needs
-//! ffmpeg / a real image file.
+//! OpenTake retains that source-only path for compatibility, but Home covers use
+//! [`capture_project_composite_thumbnail`]: the desktop renderer supplies the
+//! same composited RGBA frame used by preview/export, and this module applies
+//! the deterministic 16:9 cover policy plus JPEG encoding. The media layer does
+//! not own a second renderer.
 
 use std::path::{Path, PathBuf};
 
@@ -33,6 +32,9 @@ pub const IMAGE_COVER_MAX_PIXEL: u32 = 640;
 /// `generator.maximumSize = CGSize(width: 320, height: 180)`.
 pub const VIDEO_COVER_MAX_SIZE: (u32, u32) = (320, 180);
 
+/// Default bounded 16:9 surface for an authoritative project composite.
+pub const PROJECT_COMPOSITE_COVER_BOUNDS: (u32, u32) = (640, 360);
+
 /// Seek tolerance (seconds) for the video cover grab. Upstream's
 /// `AVAssetImageGenerator` uses its default tolerances (not zero); a modest
 /// window keeps the grab cheap and reliably lands a decodable frame near the
@@ -43,6 +45,27 @@ pub const VIDEO_COVER_TOLERANCE_SECS: f64 = 1.0;
 /// `image`'s `JpegEncoder` takes a 1–100 quality, so 72 ≈ 0.7. Named (not
 /// hardcoded) per the media-layer "no magic thresholds" rule.
 pub const PROJECT_THUMB_JPEG_QUALITY: u8 = 72;
+
+/// Borrowed state needed to validate/select a representative composite without
+/// coupling the media crate to the desktop renderer.
+#[derive(Clone, Copy, Debug)]
+pub struct ProjectCompositeThumbnailSnapshot<'a> {
+    timeline: &'a Timeline,
+    project_base: Option<&'a Path>,
+}
+
+impl<'a> ProjectCompositeThumbnailSnapshot<'a> {
+    pub fn new(timeline: &'a Timeline, project_base: Option<&'a Path>) -> Self {
+        Self {
+            timeline,
+            project_base,
+        }
+    }
+
+    pub fn representative_frame(self, manifest: &MediaManifest) -> Option<i32> {
+        representative_project_thumbnail_frame(self.timeline, manifest, self.project_base)
+    }
+}
 
 /// Which decode path a picked clip needs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,6 +153,119 @@ pub fn capture_project_thumbnail(
     encode_source(&source, fps).ok()
 }
 
+/// Choose a deterministic frame inside the first visible, resolvable visual
+/// clip. A valid outgoing cross-dissolve prefers its midpoint so a cover can
+/// truthfully represent both sides of an authored transition; otherwise the
+/// clip midpoint avoids unstable half-open boundaries.
+pub fn representative_project_thumbnail_frame(
+    timeline: &Timeline,
+    manifest: &MediaManifest,
+    project_base: Option<&Path>,
+) -> Option<i32> {
+    let resolver = MediaResolver::new(manifest, project_base);
+    for track in timeline.tracks.iter().filter(|track| !track.hidden) {
+        for (index, clip) in track.clips.iter().enumerate() {
+            if !clip_is_compositable(clip, timeline, &resolver) || clip.duration_frames <= 0 {
+                continue;
+            }
+            if let (Some(transition), Some(incoming)) =
+                (clip.transition_out.as_ref(), track.clips.get(index + 1))
+            {
+                let transition_matches = transition.kind
+                    == opentake_domain::TransitionKind::CrossDissolve
+                    && (transition.from_clip_id.is_empty() || transition.from_clip_id == clip.id)
+                    && transition.to_clip_id == incoming.id
+                    && incoming.start_frame == clip.end_frame()
+                    && incoming.duration_frames > 0
+                    && clip_is_compositable(incoming, timeline, &resolver);
+                if transition_matches {
+                    let duration = transition
+                        .duration_frames
+                        .max(1)
+                        .min(clip.duration_frames)
+                        .min(incoming.duration_frames);
+                    let transition_start = clip.end_frame() - duration;
+                    return Some((transition_start + duration / 2).min(clip.end_frame() - 1));
+                }
+            }
+            return Some(clip.start_frame + (clip.duration_frames - 1) / 2);
+        }
+    }
+    None
+}
+
+fn clip_is_compositable(
+    clip: &opentake_domain::Clip,
+    timeline: &Timeline,
+    resolver: &MediaResolver<'_>,
+) -> bool {
+    if !clip.media_type.is_visual() {
+        return false;
+    }
+    if let Some(sequence_id) = clip.nested_sequence_id.as_deref() {
+        return timeline
+            .nested_sequences
+            .iter()
+            .any(|sequence| sequence.id == sequence_id && sequence.timeline.total_frames() > 0);
+    }
+    match clip.media_type {
+        ClipType::Text => {
+            clip.text_content
+                .as_deref()
+                .is_some_and(|content| !content.trim().is_empty())
+                && clip.text_style.is_some()
+        }
+        ClipType::Video | ClipType::Image | ClipType::Lottie => resolver
+            .expected_path(&clip.media_ref)
+            .is_some_and(|path| path.is_file()),
+        ClipType::Audio => false,
+    }
+}
+
+/// JPEG-encode an already-authoritative project composite. `frame` must be the
+/// RGBA result returned by the shared preview/export compositor for
+/// `snapshot.representative_frame(manifest)`. This function deliberately owns
+/// only cover geometry and encoding.
+///
+/// The output is the largest exact 16:9 raster that fits inside `bounds`.
+/// The project canvas is resized to fit and centered over an opaque black
+/// background. This keeps the bounded Home surface predictable without
+/// cropping authored canvas content or relying on JPEG alpha handling.
+pub fn capture_project_composite_thumbnail(
+    snapshot: ProjectCompositeThumbnailSnapshot<'_>,
+    manifest: &MediaManifest,
+    frame: &crate::frame::RgbaFrame,
+    bounds: (u32, u32),
+) -> Option<Vec<u8>> {
+    snapshot.representative_frame(manifest)?;
+    encode_project_composite_thumbnail(frame, bounds)
+}
+
+/// Apply only the bounded cover-surface policy and JPEG encoding to a frame
+/// already selected and produced by the authoritative render plan. This form is
+/// used by strict retained-source capture so media paths are not reopened just
+/// to repeat representative-frame selection.
+pub fn encode_project_composite_thumbnail(
+    frame: &crate::frame::RgbaFrame,
+    bounds: (u32, u32),
+) -> Option<Vec<u8>> {
+    let (width, height) = bounded_sixteen_by_nine(bounds)?;
+    let rgba = image::RgbaImage::from_raw(frame.width, frame.height, frame.rgba.clone())?;
+    let contained = image::DynamicImage::ImageRgba8(rgba)
+        .resize(width, height, image::imageops::FilterType::Lanczos3)
+        .to_rgb8();
+    let mut cover = image::RgbImage::from_pixel(width, height, image::Rgb([0, 0, 0]));
+    let x = i64::from(width.saturating_sub(contained.width()) / 2);
+    let y = i64::from(height.saturating_sub(contained.height()) / 2);
+    image::imageops::overlay(&mut cover, &contained, x, y);
+    encode_dynamic_jpeg(&image::DynamicImage::ImageRgb8(cover)).ok()
+}
+
+fn bounded_sixteen_by_nine(bounds: (u32, u32)) -> Option<(u32, u32)> {
+    let scale = (bounds.0 / 16).min(bounds.1 / 9);
+    (scale > 0).then_some((scale * 16, scale * 9))
+}
+
 /// Decode the picked clip's cover frame and JPEG-encode it. Split out so the
 /// (ffmpeg-dependent) capture is a single fallible step the caller degrades to
 /// `None`.
@@ -156,7 +292,11 @@ fn encode_source(source: &ThumbnailSource, fps: i32) -> Result<Vec<u8>> {
 fn encode_jpeg(frame: &crate::frame::RgbaFrame) -> Result<Vec<u8>> {
     let rgba = image::RgbaImage::from_raw(frame.width, frame.height, frame.rgba.clone())
         .ok_or_else(|| crate::error::MediaError::Encode("thumbnail: bad rgba buffer".into()))?;
-    let rgb = image::DynamicImage::ImageRgba8(rgba).to_rgb8();
+    encode_dynamic_jpeg(&image::DynamicImage::ImageRgba8(rgba))
+}
+
+fn encode_dynamic_jpeg(image: &image::DynamicImage) -> Result<Vec<u8>> {
+    let rgb = image.to_rgb8();
     let mut jpg_bytes = Vec::new();
     {
         let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
@@ -179,7 +319,8 @@ fn encode_jpeg(frame: &crate::frame::RgbaFrame) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use opentake_domain::{
-        Clip, ClipType, MediaManifest, MediaManifestEntry, MediaSource, Timeline, Track,
+        Clip, ClipType, MediaManifest, MediaManifestEntry, MediaSource, Point, TextStyle, Timeline,
+        Track, Transform, Transition, TransitionKind,
     };
     use std::fs;
     use std::path::PathBuf;
@@ -246,6 +387,117 @@ mod tests {
             .save(&p)
             .unwrap();
         p
+    }
+
+    fn touch_color_png(dir: &Path, name: &str, color: [u8; 4]) -> PathBuf {
+        let p = dir.join(name);
+        image::RgbaImage::from_pixel(320, 180, image::Rgba(color))
+            .save(&p)
+            .unwrap();
+        p
+    }
+
+    fn composite_fixture(dir: &Path) -> (Timeline, MediaManifest, crate::frame::RgbaFrame) {
+        let background = touch_color_png(dir, "background.png", [210, 20, 20, 255]);
+        let incoming = touch_color_png(dir, "incoming.png", [20, 180, 20, 255]);
+        let overlay = touch_color_png(dir, "overlay.png", [20, 40, 220, 255]);
+        let mut manifest = MediaManifest::new();
+        manifest
+            .entries
+            .push(entry("background", ClipType::Video, &background));
+        manifest
+            .entries
+            .push(entry("incoming", ClipType::Video, &incoming));
+        manifest
+            .entries
+            .push(entry("overlay", ClipType::Image, &overlay));
+
+        let mut background_clip = clip("background-clip", "background", ClipType::Video, 0);
+        background_clip.duration_frames = 30;
+        background_clip.transition_out = Some(Transition {
+            from_clip_id: "background-clip".into(),
+            to_clip_id: "incoming-clip".into(),
+            kind: TransitionKind::CrossDissolve,
+            duration_frames: 10,
+        });
+        let mut incoming_clip = clip("incoming-clip", "incoming", ClipType::Video, 0);
+        incoming_clip.start_frame = 30;
+        incoming_clip.duration_frames = 30;
+        let mut background_track = Track::new("background-track", ClipType::Video);
+        background_track.clips = vec![background_clip, incoming_clip];
+
+        let mut overlay_clip = clip("overlay-clip", "overlay", ClipType::Image, 0);
+        overlay_clip.start_frame = 20;
+        overlay_clip.duration_frames = 20;
+        overlay_clip.transform = Transform::from_center(Point { x: 0.78, y: 0.5 }, 0.3, 0.6);
+        overlay_clip.transform.rotation = 8.0;
+        let mut overlay_track = Track::new("overlay-track", ClipType::Video);
+        overlay_track.clips.push(overlay_clip);
+
+        let mut text_clip = clip("text-clip", "", ClipType::Text, 0);
+        text_clip.start_frame = 20;
+        text_clip.duration_frames = 20;
+        text_clip.text_content = Some("Composite".into());
+        text_clip.text_style = Some(TextStyle::default());
+        text_clip.transform = Transform::from_center(Point { x: 0.28, y: 0.5 }, 0.4, 0.2);
+        let mut text_track = Track::new("text-track", ClipType::Text);
+        text_track.clips.push(text_clip);
+
+        let mut timeline = Timeline::new();
+        timeline.width = 320;
+        timeline.height = 180;
+        timeline.tracks = vec![background_track, overlay_track, text_track];
+
+        // A hand-derived stand-in for the authoritative renderer output at the
+        // cross-dissolve midpoint: red background, green transition evidence,
+        // transformed blue overlay, and white text evidence.
+        let mut pixels = image::RgbaImage::from_pixel(320, 180, image::Rgba([210, 20, 20, 255]));
+        for y in 150..180 {
+            for x in 0..320 {
+                pixels.put_pixel(x, y, image::Rgba([20, 180, 20, 255]));
+            }
+        }
+        for y in 40..140 {
+            for x in 210..300 {
+                pixels.put_pixel(x, y, image::Rgba([20, 40, 220, 255]));
+            }
+        }
+        for y in 76..96 {
+            for x in 25..145 {
+                pixels.put_pixel(x, y, image::Rgba([245, 245, 245, 255]));
+            }
+        }
+        (
+            timeline,
+            manifest,
+            crate::frame::RgbaFrame {
+                width: 320,
+                height: 180,
+                rgba: pixels.into_raw(),
+            },
+        )
+    }
+
+    fn desired_composite_capture(
+        timeline: &Timeline,
+        manifest: &MediaManifest,
+        frame: &crate::frame::RgbaFrame,
+        bounds: (u32, u32),
+    ) -> Option<Vec<u8>> {
+        capture_project_composite_thumbnail(
+            ProjectCompositeThumbnailSnapshot::new(timeline, None),
+            manifest,
+            frame,
+            bounds,
+        )
+    }
+
+    fn desired_representative_frame(
+        timeline: &Timeline,
+        manifest: &MediaManifest,
+        project_base: Option<&Path>,
+    ) -> Option<i32> {
+        representative_project_thumbnail_frame(timeline, manifest, project_base)
     }
 
     #[test]
@@ -372,5 +624,170 @@ mod tests {
         let tl = Timeline::new();
         let manifest = MediaManifest::new();
         assert!(capture_project_thumbnail(&tl, &manifest, None).is_none());
+    }
+
+    #[test]
+    fn composite_thumbnail_contains_background_transition_overlay_transform_and_text_evidence() {
+        let dir = TmpDir::new("composite-layers");
+        let (timeline, manifest, composite) = composite_fixture(dir.path());
+
+        let bytes =
+            desired_composite_capture(&timeline, &manifest, &composite, VIDEO_COVER_MAX_SIZE)
+                .expect("composite JPEG");
+        let decoded = image::load_from_memory(&bytes)
+            .expect("decode cover")
+            .to_rgb8();
+
+        let background = decoded.get_pixel(180, 20).0;
+        let transition = decoded.get_pixel(180, 168).0;
+        let overlay = decoded.get_pixel(250, 90).0;
+        let text = decoded.get_pixel(80, 85).0;
+        assert!(background[0] > 150 && background[1] < 80, "{background:?}");
+        assert!(transition[1] > 110 && transition[0] < 100, "{transition:?}");
+        assert!(overlay[2] > 140 && overlay[0] < 100, "{overlay:?}");
+        assert!(text.iter().all(|channel| *channel > 190), "{text:?}");
+    }
+
+    #[test]
+    fn composite_thumbnail_uses_transition_midpoint_as_stable_representative_frame() {
+        let dir = TmpDir::new("composite-representative");
+        let (timeline, manifest, _) = composite_fixture(dir.path());
+
+        assert_eq!(
+            desired_representative_frame(&timeline, &manifest, None),
+            Some(25)
+        );
+    }
+
+    #[test]
+    fn composite_thumbnail_is_deterministically_bounded_to_sixteen_by_nine() {
+        let dir = TmpDir::new("composite-bounds");
+        let (timeline, manifest, composite) = composite_fixture(dir.path());
+
+        let first = desired_composite_capture(&timeline, &manifest, &composite, (200, 200))
+            .expect("first JPEG");
+        let second = desired_composite_capture(&timeline, &manifest, &composite, (200, 200))
+            .expect("second JPEG");
+        let decoded = image::load_from_memory(&first).expect("decode bounded cover");
+
+        assert_eq!((decoded.width(), decoded.height()), (192, 108));
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn composite_thumbnail_letterboxes_portrait_canvas_without_cropping() {
+        let dir = TmpDir::new("composite-portrait-letterbox");
+        let source = touch_color_png(dir.path(), "portrait.png", [220, 30, 20, 255]);
+        let mut manifest = MediaManifest::new();
+        manifest
+            .entries
+            .push(entry("portrait", ClipType::Image, &source));
+        let mut timeline = Timeline::new();
+        timeline.width = 180;
+        timeline.height = 320;
+        let mut track = Track::new("video", ClipType::Video);
+        track
+            .clips
+            .push(clip("portrait-clip", "portrait", ClipType::Image, 0));
+        timeline.tracks.push(track);
+        let portrait = crate::frame::RgbaFrame::new(180, 320, [220, 30, 20, 255].repeat(180 * 320));
+
+        let bytes = desired_composite_capture(
+            &timeline,
+            &manifest,
+            &portrait,
+            PROJECT_COMPOSITE_COVER_BOUNDS,
+        )
+        .expect("portrait cover");
+        let decoded = image::load_from_memory(&bytes).unwrap().to_rgb8();
+
+        assert_eq!((decoded.width(), decoded.height()), (640, 360));
+        assert!(decoded
+            .get_pixel(0, 180)
+            .0
+            .iter()
+            .all(|channel| *channel < 12));
+        let center = decoded.get_pixel(320, 180).0;
+        assert!(center[0] > 180 && center[1] < 70, "{center:?}");
+        assert!(decoded
+            .get_pixel(639, 180)
+            .0
+            .iter()
+            .all(|channel| *channel < 12));
+    }
+
+    #[test]
+    fn composite_thumbnail_letterboxes_four_by_three_canvas_at_exact_boundaries() {
+        let dir = TmpDir::new("composite-four-three-letterbox");
+        let source = touch_color_png(dir.path(), "four-three.png", [20, 80, 220, 255]);
+        let mut manifest = MediaManifest::new();
+        manifest
+            .entries
+            .push(entry("four-three", ClipType::Image, &source));
+        let mut timeline = Timeline::new();
+        timeline.width = 400;
+        timeline.height = 300;
+        let mut track = Track::new("video", ClipType::Video);
+        track
+            .clips
+            .push(clip("four-three-clip", "four-three", ClipType::Image, 0));
+        timeline.tracks.push(track);
+        let frame = crate::frame::RgbaFrame::new(400, 300, [20, 80, 220, 255].repeat(400 * 300));
+
+        let bytes =
+            desired_composite_capture(&timeline, &manifest, &frame, PROJECT_COMPOSITE_COVER_BOUNDS)
+                .expect("four-by-three cover");
+        let decoded = image::load_from_memory(&bytes).unwrap().to_rgb8();
+
+        assert!(decoded
+            .get_pixel(79, 180)
+            .0
+            .iter()
+            .all(|channel| *channel < 15));
+        let first_content = decoded.get_pixel(82, 180).0;
+        assert!(first_content[2] > 160, "{first_content:?}");
+        let last_content = decoded.get_pixel(557, 180).0;
+        assert!(last_content[2] > 160, "{last_content:?}");
+        assert!(decoded
+            .get_pixel(560, 180)
+            .0
+            .iter()
+            .all(|channel| *channel < 15));
+    }
+
+    #[test]
+    fn composite_thumbnail_returns_none_for_empty_project() {
+        assert!(desired_composite_capture(
+            &Timeline::new(),
+            &MediaManifest::new(),
+            &crate::frame::RgbaFrame {
+                width: 2,
+                height: 2,
+                rgba: vec![0; 16],
+            },
+            VIDEO_COVER_MAX_SIZE,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn composite_thumbnail_returns_none_when_every_visual_source_is_offline() {
+        let dir = TmpDir::new("composite-offline");
+        let missing = dir.path().join("missing.png");
+        let mut manifest = MediaManifest::new();
+        manifest
+            .entries
+            .push(entry("missing", ClipType::Image, &missing));
+        let mut timeline = Timeline::new();
+        let mut track = Track::new("video", ClipType::Video);
+        track
+            .clips
+            .push(clip("missing-clip", "missing", ClipType::Image, 0));
+        timeline.tracks.push(track);
+
+        assert_eq!(
+            desired_representative_frame(&timeline, &manifest, None),
+            None
+        );
     }
 }

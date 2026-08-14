@@ -11,12 +11,28 @@ const codex = vi.hoisted(() => ({
   logout: vi.fn(),
 }));
 
+const mcp = vi.hoisted(() => ({
+  status: vi.fn(),
+  setEnabled: vi.fn(),
+  pair: vi.fn(),
+  regenerate: vi.fn(),
+  revoke: vi.fn(),
+  subscribe: vi.fn(),
+  unlisten: vi.fn(),
+}));
+
 vi.mock("../../lib/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../lib/api")>()),
   codexAuthStatus: codex.status,
   codexLoginStart: codex.login,
   codexLoginCancel: codex.cancel,
   codexLogout: codex.logout,
+  externalMcpStatus: mcp.status,
+  externalMcpSetEnabled: mcp.setEnabled,
+  externalMcpPair: mcp.pair,
+  externalMcpRegenerate: mcp.regenerate,
+  externalMcpRevoke: mcp.revoke,
+  onExternalMcpStatusChanged: mcp.subscribe,
 }));
 
 import { useEditorUiStore } from "../../store/uiStore";
@@ -30,6 +46,34 @@ import { SettingsView } from "./SettingsView";
 let container: HTMLDivElement;
 let root: Root;
 
+const mcpEndpoint = "http://127.0.0.1:19789/mcp";
+
+function mcpClient() {
+  return {
+    id: "client-1",
+    name: "Cursor",
+    tokenDigest: "abc123def456",
+    createdAt: 1_700_000_000,
+    lastUsedAt: null,
+    revokedAt: null,
+  };
+}
+
+function mcpStatus(clients: ReturnType<typeof mcpClient>[] = []) {
+  return {
+    revision: 1,
+    enabled: clients.length > 0,
+    state: clients.length > 0 ? "listening" as const : "disabled" as const,
+    endpoint: mcpEndpoint,
+    clients,
+    error: null,
+  };
+}
+
+function mcpReceipt(token: string) {
+  return { client: mcpClient(), endpoint: mcpEndpoint, bearerToken: token };
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -38,6 +82,21 @@ function deferred<T>() {
     reject = rej;
   });
   return { promise, resolve, reject };
+}
+
+async function setInput(element: HTMLInputElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+  if (!setter) throw new Error("missing native input value setter");
+  await act(async () => {
+    setter.call(element, value);
+    element.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+}
+
+function button(label: string) {
+  return [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+    (candidate) => candidate.textContent?.trim() === label,
+  )!;
 }
 
 function Harness() {
@@ -55,8 +114,14 @@ function Harness() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  const initialMcpStatus = mcpStatus();
+  mcp.status.mockResolvedValue(initialMcpStatus);
+  mcp.subscribe.mockImplementation(async (handler: (status: typeof initialMcpStatus) => void) => {
+    handler(initialMcpStatus);
+    return mcp.unlisten;
+  });
   useEditorUiStore.setState({ settingsOpen: false, settingsPane: "general" });
-  useSettingsStore.setState({ byokProvider: "anthropic" });
+  useSettingsStore.setState({ byokProvider: "anthropic", windowSize: "standard" });
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -178,18 +243,109 @@ it("keeps the compact proxy switch inside a 24px pointer target", async () => {
   expect(proxySwitch.style.height).toBe("16px");
 });
 
-it("keeps unauthenticated external MCP fail-closed while preserving official Codex guidance", async () => {
+it("switches dark window layouts with an accessible radio group", async () => {
+  useEditorUiStore.setState({ settingsPane: "appearance" });
+  await act(async () => root.render(<Harness />));
+  await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
+
+  const group = container.querySelector<HTMLElement>('[role="radiogroup"]');
+  const choices = [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
+  expect(group?.getAttribute("aria-label")).toBe(t("settings.windowSize"));
+  expect(choices.map((choice) => choice.textContent?.trim())).toEqual(["深色 · 标准", "深色 · 紧凑"]);
+  expect(choices[0]?.getAttribute("aria-checked")).toBe("true");
+  expect(choices[1]?.getAttribute("aria-checked")).toBe("false");
+
+  await act(async () => {
+    choices[0]!.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "ArrowRight",
+      bubbles: true,
+      cancelable: true,
+    }));
+  });
+
+  expect(useSettingsStore.getState().windowSize).toBe("compact");
+  expect(choices[1]?.getAttribute("aria-checked")).toBe("true");
+  expect(document.activeElement).toBe(choices[1]);
+});
+
+it("renders external MCP pairing controls fail-closed outside the desktop shell", async () => {
   useEditorUiStore.setState({ settingsPane: "mcp" });
   await act(async () => root.render(<Harness />));
   await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
 
-  const status = container.querySelector<HTMLElement>("[data-external-mcp-status='paused']");
+  const status = container.querySelector<HTMLElement>("[data-external-mcp-status='disabled']");
+  const toggle = container.querySelector<HTMLInputElement>("input[role='switch']");
   expect(status?.getAttribute("role")).toBe("status");
-  expect(status?.textContent).toContain(t("mcp.pausedTitle"));
+  expect(status?.textContent).toContain(t("mcp.status.disabled"));
+  expect(toggle?.checked).toBe(false);
   expect(container.textContent).toContain(t("mcp.note"));
-  expect(container.textContent).not.toContain("127.0.0.1:19789");
-  expect(container.textContent).not.toContain("codex mcp add");
-  expect(container.textContent).not.toContain("claude mcp add");
+  expect(container.textContent).toContain("http://127.0.0.1:19789/mcp");
+  expect(container.querySelector<HTMLInputElement>("input[name='external-mcp-client-name']")).not.toBeNull();
+});
+
+it("blocks pane navigation and modal close until a paired receipt is rendered", async () => {
+  const pair = deferred<ReturnType<typeof mcpReceipt>>();
+  const token = `pair-receipt-${crypto.randomUUID()}`;
+  mcp.pair.mockReturnValueOnce(pair.promise);
+  useEditorUiStore.setState({ settingsPane: "mcp" });
+  await act(async () => root.render(<Harness />));
+  await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
+  await act(async () => undefined);
+
+  await setInput(
+    container.querySelector<HTMLInputElement>("input[name='external-mcp-client-name']")!,
+    "Cursor",
+  );
+  await act(async () => button(t("mcp.pair")).click());
+
+  const done = button(t("settings.done"));
+  const close = container.querySelector<HTMLButtonElement>("button[aria-label='Close']")!;
+  const general = button(t("settings.section.general"));
+  expect(done.disabled).toBe(true);
+  expect(close.disabled).toBe(true);
+  expect(general.disabled).toBe(true);
+  await act(async () => {
+    document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "Escape",
+      bubbles: true,
+      cancelable: true,
+    }));
+  });
+  expect(useEditorUiStore.getState()).toMatchObject({ settingsOpen: true, settingsPane: "mcp" });
+
+  await act(async () => pair.resolve(mcpReceipt(token)));
+  expect(container.textContent).toContain(token);
+  expect(done.disabled).toBe(false);
+  expect(close.disabled).toBe(false);
+  expect(general.disabled).toBe(false);
+});
+
+it("blocks navigation until a regenerated receipt is rendered", async () => {
+  const initial = mcpStatus([mcpClient()]);
+  const regenerate = deferred<ReturnType<typeof mcpReceipt>>();
+  const token = `regenerated-receipt-${crypto.randomUUID()}`;
+  mcp.status.mockResolvedValue(initial);
+  mcp.subscribe.mockImplementation(async (handler: (status: typeof initial) => void) => {
+    handler(initial);
+    return mcp.unlisten;
+  });
+  mcp.regenerate.mockReturnValueOnce(regenerate.promise);
+  useEditorUiStore.setState({ settingsPane: "mcp" });
+  await act(async () => root.render(<Harness />));
+  await act(async () => container.querySelector<HTMLButtonElement>("button")!.click());
+  await act(async () => undefined);
+
+  await act(async () => button(t("mcp.regenerate")).click());
+  await act(async () => button(t("mcp.confirmRegenerate")).click());
+  const done = button(t("settings.done"));
+  const general = button(t("settings.section.general"));
+  expect(done.disabled).toBe(true);
+  expect(general.disabled).toBe(true);
+
+  await act(async () => regenerate.resolve(mcpReceipt(token)));
+  expect(container.textContent).toContain(token);
+  expect(done.disabled).toBe(false);
+  expect(general.disabled).toBe(false);
 });
 
 it("drives official Codex ChatGPT login, polling, cancellation, logout, and unavailable states", async () => {

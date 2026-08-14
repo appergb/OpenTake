@@ -21,11 +21,50 @@
 //! keeps this crate's default dependency surface free of a decoder while still
 //! being fully testable.
 
+use std::io::Read;
 use std::path::Path;
 
 use opentake_render::{DecodedFrame, FrameProvider, SourceMetrics};
 
 use crate::source::RenderedClip;
+
+/// Maximum encoded PNG returned across the Tauri preview boundary. The live
+/// renderer also bounds dimensions, but encoded bytes need their own cap before
+/// base64 expansion in the WebView process.
+pub const MAX_PREVIEW_PNG_BYTES: usize = 8 * 1024 * 1024;
+
+/// Read the one frame produced by a preview render without trusting file
+/// metadata alone. Growth after metadata is caught by the `take(limit + 1)`
+/// boundary and non-PNG cache corruption fails closed.
+pub fn read_single_preview_png(clip: &RenderedClip) -> crate::MotionResult<Vec<u8>> {
+    if clip.frames.len() != 1 {
+        return Err(crate::MotionError::render_failed(
+            "preview renderer must return exactly one frame",
+        ));
+    }
+    let mut file = std::fs::File::open(&clip.frames[0])?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.len() > MAX_PREVIEW_PNG_BYTES as u64 {
+        return Err(crate::MotionError::render_failed(
+            "preview PNG exceeds its byte limit",
+        ));
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    Read::by_ref(&mut file)
+        .take(MAX_PREVIEW_PNG_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_PREVIEW_PNG_BYTES {
+        return Err(crate::MotionError::render_failed(
+            "preview PNG exceeds its byte limit",
+        ));
+    }
+    if !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Err(crate::MotionError::render_failed(
+            "preview renderer returned a non-PNG frame",
+        ));
+    }
+    Ok(bytes)
+}
 
 /// A function that decodes a frame file into straight-or-premultiplied RGBA.
 /// Returns `None` on a missing/corrupt file (the compositor treats that frame as
@@ -201,5 +240,20 @@ mod tests {
         let (clip, _tmp) = render_clip(false);
         let src = MotionClipSource::new(clip, image_decoder);
         assert!(src.decoded_frame("ref", -5).is_some());
+    }
+
+    #[test]
+    fn single_preview_png_is_bounded_and_validated() {
+        let (mut clip, _tmp) = render_clip(false);
+        clip.frames.truncate(1);
+        assert!(read_single_preview_png(&clip)
+            .unwrap()
+            .starts_with(b"\x89PNG\r\n\x1a\n"));
+
+        std::fs::write(&clip.frames[0], b"not-png").unwrap();
+        assert!(read_single_preview_png(&clip)
+            .unwrap_err()
+            .to_string()
+            .contains("non-PNG"));
     }
 }

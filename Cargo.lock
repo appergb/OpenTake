@@ -3690,7 +3690,7 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "opentake-agent"
-version = "1.0.0-beta.4"
+version = "1.0.0-beta.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3725,7 +3725,7 @@ dependencies = [
 
 [[package]]
 name = "opentake-core"
-version = "1.0.0-beta.4"
+version = "1.0.0-beta.5"
 dependencies = [
  "opentake-domain",
  "opentake-ops",
@@ -3739,7 +3739,7 @@ dependencies = [
 
 [[package]]
 name = "opentake-domain"
-version = "1.0.0-beta.4"
+version = "1.0.0-beta.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -3747,7 +3747,7 @@ dependencies = [
 
 [[package]]
 name = "opentake-gen"
-version = "1.0.0-beta.4"
+version = "1.0.0-beta.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3765,7 +3765,7 @@ dependencies = [
 
 [[package]]
 name = "opentake-media"
-version = "1.0.0-beta.4"
+version = "1.0.0-beta.5"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -3803,7 +3803,7 @@ dependencies = [
 
 [[package]]
 name = "opentake-motion"
-version = "1.0.0-beta.4"
+version = "1.0.0-beta.5"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -3821,7 +3821,7 @@ dependencies = [
 
 [[package]]
 name = "opentake-ops"
-version = "1.0.0-beta.4"
+version = "1.0.0-beta.5"
 dependencies = [
  "opentake-domain",
  "serde_json",
@@ -3829,7 +3829,7 @@ dependencies = [
 
 [[package]]
 name = "opentake-process-tree"
-version = "1.0.0-beta.4"
+version = "1.0.0-beta.5"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -3837,7 +3837,7 @@ dependencies = [
 
 [[package]]
 name = "opentake-project"
-version = "1.0.0-beta.4"
+version = "1.0.0-beta.5"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
@@ -3856,7 +3856,7 @@ dependencies = [
 
 [[package]]
 name = "opentake-render"
-version = "1.0.0-beta.4"
+version = "1.0.0-beta.5"
 dependencies = [
  "bytemuck",
  "cosmic-text",
@@ -3873,7 +3873,7 @@ dependencies = [
 
 [[package]]
 name = "opentake-tauri"
-version = "1.0.0-beta.4"
+version = "1.0.0-beta.5"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -3884,6 +3884,7 @@ dependencies = [
  "crossbeam-channel",
  "futures",
  "futures-util",
+ "getrandom 0.3.4",
  "glob",
  "http-range",
  "image",
@@ -3905,6 +3906,7 @@ dependencies = [
  "quick-xml",
  "reqwest 0.12.28",
  "reqwest 0.13.4",
+ "rmcp",
  "rustls",
  "same-file",
  "semver",
@@ -3912,6 +3914,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sse-stream",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -3920,6 +3923,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tempfile",
  "tokio",
+ "tracing",
  "uuid",
  "velato",
  "windows-sys 0.61.2",
@@ -4859,6 +4863,7 @@ dependencies = [
  "pastey 0.2.3",
  "pin-project-lite",
  "rand 0.10.2",
+ "reqwest 0.13.4",
  "rmcp-macros",
  "schemars 1.2.1",
  "serde",
@@ -5714,9 +5719,9 @@ dependencies = [
 
 [[package]]
 name = "sse-stream"
-version = "0.2.3"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3962b63f038885f15bce2c6e02c0e7925c072f1ac86bb60fd44c5c6b762fb72"
+checksum = "39f24a9b78c40b90817bbcd1821c74ddfd74916aadd29403d001532a9195532d"
 dependencies = [
  "bytes",
  "futures-util",

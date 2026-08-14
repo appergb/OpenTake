@@ -9,7 +9,10 @@ pub mod project;
 pub mod sprite;
 
 pub use project::{
-    capture_project_thumbnail, pick_thumbnail_source, ThumbnailKind, ThumbnailSource,
+    capture_project_composite_thumbnail, capture_project_thumbnail,
+    encode_project_composite_thumbnail, pick_thumbnail_source,
+    representative_project_thumbnail_frame, ProjectCompositeThumbnailSnapshot, ThumbnailKind,
+    ThumbnailSource, PROJECT_COMPOSITE_COVER_BOUNDS,
 };
 pub use sprite::{
     encode_sprite, load_sprite, save_sprite, EncodedSpriteArtifact, ThumbnailCacheMeta, VideoThumb,

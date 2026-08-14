@@ -91,7 +91,7 @@ pub struct ChatMessage {
     pub content: String,
     #[serde(default)]
     pub tool_calls: Vec<ToolCall>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub blocks: Vec<AgentContentBlock>,
     pub created_at: i64,
     /// When role == Tool: the `tool_call_id` this result answers. OpenAI's
@@ -107,47 +107,77 @@ pub struct ChatMessage {
 
 impl ChatMessage {
     pub fn user(text: impl Into<String>) -> Self {
+        let text = text.into();
         let mut message = ChatMessage {
-            id: next_id(),
+            id: next_message_id(),
             role: Role::User,
-            content: text.into(),
+            content: String::new(),
             tool_calls: Vec::new(),
-            blocks: Vec::new(),
+            blocks: (!text.is_empty())
+                .then_some(AgentContentBlock::Text { text })
+                .into_iter()
+                .collect(),
             created_at: now_millis(),
             tool_call_id: None,
             tool_is_error: None,
         };
-        message.refresh_blocks();
+        message.refresh_legacy_fields();
         message
     }
 
     pub fn assistant(text: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
+        Self::assistant_with_id(next_message_id(), text, tool_calls)
+    }
+
+    pub fn assistant_with_id(
+        id: impl Into<String>,
+        text: impl Into<String>,
+        tool_calls: Vec<ToolCall>,
+    ) -> Self {
+        let text = text.into();
+        let mut blocks = Vec::with_capacity(usize::from(!text.is_empty()) + tool_calls.len());
+        if !text.is_empty() {
+            blocks.push(AgentContentBlock::Text { text });
+        }
+        blocks.extend(tool_calls.into_iter().map(AgentContentBlock::from));
+        Self::assistant_blocks_with_id(id, blocks)
+    }
+
+    pub fn assistant_blocks(blocks: Vec<AgentContentBlock>) -> Self {
+        Self::assistant_blocks_with_id(next_message_id(), blocks)
+    }
+
+    pub fn assistant_blocks_with_id(id: impl Into<String>, blocks: Vec<AgentContentBlock>) -> Self {
         let mut message = ChatMessage {
-            id: next_id(),
+            id: id.into(),
             role: Role::Assistant,
-            content: text.into(),
-            tool_calls,
-            blocks: Vec::new(),
+            content: String::new(),
+            tool_calls: Vec::new(),
+            blocks,
             created_at: now_millis(),
             tool_call_id: None,
             tool_is_error: None,
         };
-        message.refresh_blocks();
+        message.refresh_legacy_fields();
         message
     }
 
     pub fn system(text: impl Into<String>) -> Self {
+        let text = text.into();
         let mut message = ChatMessage {
-            id: next_id(),
+            id: next_message_id(),
             role: Role::System,
-            content: text.into(),
+            content: String::new(),
             tool_calls: Vec::new(),
-            blocks: Vec::new(),
+            blocks: (!text.is_empty())
+                .then_some(AgentContentBlock::Text { text })
+                .into_iter()
+                .collect(),
             created_at: now_millis(),
             tool_call_id: None,
             tool_is_error: None,
         };
-        message.refresh_blocks();
+        message.refresh_legacy_fields();
         message
     }
 
@@ -174,7 +204,7 @@ impl ChatMessage {
     ) -> Self {
         let tool_call_id = tool_call_id.into();
         ChatMessage {
-            id: next_id(),
+            id: next_message_id(),
             role: Role::Tool,
             content: legacy_result.to_string(),
             tool_calls: Vec::new(),
@@ -200,9 +230,148 @@ impl ChatMessage {
         )
     }
 
-    /// Rebuild the structured representation after an in-place update to the
-    /// temporary legacy view fields.
-    pub(crate) fn refresh_blocks(&mut self) {
+    /// Append a streamed text chunk and return the authoritative block index.
+    /// Only an adjacent text block is consolidated; text separated by a tool
+    /// event remains a distinct block.
+    pub fn append_text_delta(&mut self, delta: impl AsRef<str>) -> usize {
+        let delta = delta.as_ref();
+        let block_index = match self.blocks.last_mut() {
+            Some(AgentContentBlock::Text { text }) => {
+                text.push_str(delta);
+                self.blocks.len() - 1
+            }
+            _ => {
+                self.blocks.push(AgentContentBlock::Text {
+                    text: delta.to_string(),
+                });
+                self.blocks.len() - 1
+            }
+        };
+        self.refresh_legacy_fields();
+        block_index
+    }
+
+    /// Append a text delta to one provider-addressed block. A new block may be
+    /// created only at the current tail; gaps or type mismatches are rejected.
+    pub fn append_text_delta_at(&mut self, block_index: usize, delta: impl AsRef<str>) -> bool {
+        let delta = delta.as_ref();
+        let applied = if block_index == self.blocks.len() {
+            self.blocks.push(AgentContentBlock::Text {
+                text: delta.to_string(),
+            });
+            true
+        } else if let Some(AgentContentBlock::Text { text }) = self.blocks.get_mut(block_index) {
+            text.push_str(delta);
+            true
+        } else {
+            false
+        };
+        if applied {
+            self.refresh_legacy_fields();
+        }
+        applied
+    }
+
+    /// Insert or replace one provider-addressed block without changing its
+    /// position. Provider indices must be contiguous.
+    pub fn upsert_block_at(&mut self, block_index: usize, block: AgentContentBlock) -> bool {
+        let applied = if block_index == self.blocks.len() {
+            self.blocks.push(block);
+            true
+        } else if let Some(existing) = self.blocks.get_mut(block_index) {
+            *existing = block;
+            true
+        } else {
+            false
+        };
+        if applied {
+            self.refresh_legacy_fields();
+        }
+        applied
+    }
+
+    /// Insert a tool request in event order, or update the already-addressed
+    /// block when dispatch later fills its result.
+    pub fn upsert_tool_use(&mut self, tool_call: ToolCall) -> usize {
+        if let Some((index, block)) = self.blocks.iter_mut().enumerate().find(|(_, block)| {
+            matches!(block, AgentContentBlock::ToolUse { id, .. } if id == &tool_call.id)
+        }) {
+            *block = AgentContentBlock::from(tool_call);
+            self.refresh_legacy_fields();
+            return index;
+        }
+        self.blocks.push(AgentContentBlock::from(tool_call));
+        let index = self.blocks.len() - 1;
+        self.refresh_legacy_fields();
+        index
+    }
+
+    /// Derive temporary flat compatibility fields from authoritative blocks.
+    /// This never mutates or reorders `blocks`.
+    pub fn refresh_legacy_fields(&mut self) {
+        self.content = if self.role == Role::Tool {
+            self.blocks
+                .iter()
+                .find_map(|block| match block {
+                    AgentContentBlock::ToolResult {
+                        content, is_error, ..
+                    } => Some(legacy_tool_result_content(
+                        content,
+                        is_error.unwrap_or(false),
+                    )),
+                    _ => None,
+                })
+                .unwrap_or_default()
+        } else {
+            self.blocks
+                .iter()
+                .filter_map(|block| match block {
+                    AgentContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<String>()
+        };
+        self.tool_calls = self
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                AgentContentBlock::ToolUse {
+                    id,
+                    name,
+                    input,
+                    result,
+                    is_error,
+                } => Some(ToolCall {
+                    id: id.clone(),
+                    name: name.clone(),
+                    args: input.clone(),
+                    result: result.clone(),
+                    is_error: *is_error,
+                }),
+                _ => None,
+            })
+            .collect();
+        self.tool_call_id = None;
+        self.tool_is_error = None;
+        if self.role == Role::Tool {
+            if let Some(AgentContentBlock::ToolResult {
+                tool_use_id,
+                is_error,
+                ..
+            }) = self
+                .blocks
+                .iter()
+                .find(|block| matches!(block, AgentContentBlock::ToolResult { .. }))
+            {
+                self.tool_call_id = Some(tool_use_id.clone());
+                self.tool_is_error = *is_error;
+            }
+        }
+    }
+
+    /// Migrate the temporary Beta 4 flat fields when no authoritative blocks
+    /// were persisted yet.
+    fn migrate_legacy_fields_to_blocks(&mut self) {
         let mut blocks = Vec::new();
         if !self.content.is_empty() && self.role != Role::Tool {
             blocks.push(AgentContentBlock::Text {
@@ -233,6 +402,34 @@ impl ChatMessage {
     }
 }
 
+fn legacy_tool_result_content(content: &[Block], is_error: bool) -> String {
+    if let [Block::Text { text }] = content {
+        if serde_json::from_str::<serde_json::Value>(text).is_ok() {
+            return text.clone();
+        }
+    }
+    let summary = content
+        .iter()
+        .filter_map(|block| match block {
+            Block::Text { text } => Some(text.as_str()),
+            Block::Image { .. } => None,
+        })
+        .collect::<String>();
+    serde_json::json!({"summary": summary, "isError": is_error}).to_string()
+}
+
+impl From<ToolCall> for AgentContentBlock {
+    fn from(tool_call: ToolCall) -> Self {
+        AgentContentBlock::ToolUse {
+            id: tool_call.id,
+            name: tool_call.name,
+            input: tool_call.args,
+            result: tool_call.result,
+            is_error: tool_call.is_error,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ChatMessageWire {
@@ -243,7 +440,7 @@ struct ChatMessageWire {
     #[serde(default)]
     tool_calls: Vec<ToolCall>,
     #[serde(default)]
-    blocks: Vec<AgentContentBlock>,
+    blocks: Option<Vec<AgentContentBlock>>,
     created_at: i64,
     #[serde(default)]
     tool_call_id: Option<String>,
@@ -257,79 +454,23 @@ impl<'de> Deserialize<'de> for ChatMessage {
         D: serde::Deserializer<'de>,
     {
         let wire = ChatMessageWire::deserialize(deserializer)?;
+        let has_authoritative_blocks = wire.blocks.is_some();
         let mut message = ChatMessage {
             id: wire.id,
             role: wire.role,
             content: wire.content,
             tool_calls: wire.tool_calls,
-            blocks: wire.blocks,
+            blocks: wire.blocks.unwrap_or_default(),
             created_at: wire.created_at,
             tool_call_id: wire.tool_call_id,
             tool_is_error: wire.tool_is_error,
         };
-        if message.blocks.is_empty() {
-            message.refresh_blocks();
+        if has_authoritative_blocks {
+            message.refresh_legacy_fields();
         } else {
-            message.apply_blocks_to_legacy_view();
+            message.migrate_legacy_fields_to_blocks();
         }
         Ok(message)
-    }
-}
-
-impl ChatMessage {
-    fn apply_blocks_to_legacy_view(&mut self) {
-        if self.role != Role::Tool {
-            self.content = self
-                .blocks
-                .iter()
-                .filter_map(|block| match block {
-                    AgentContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<String>();
-        }
-        if self.role == Role::Assistant {
-            self.tool_calls = self
-                .blocks
-                .iter()
-                .filter_map(|block| match block {
-                    AgentContentBlock::ToolUse {
-                        id,
-                        name,
-                        input,
-                        result,
-                        is_error,
-                    } => Some(ToolCall {
-                        id: id.clone(),
-                        name: name.clone(),
-                        args: input.clone(),
-                        result: result.clone(),
-                        is_error: *is_error,
-                    }),
-                    _ => None,
-                })
-                .collect();
-        }
-        if self.role == Role::Tool {
-            if let Some(AgentContentBlock::ToolResult {
-                tool_use_id,
-                content,
-                is_error,
-            }) = self
-                .blocks
-                .iter()
-                .find(|block| matches!(block, AgentContentBlock::ToolResult { .. }))
-            {
-                if self.content.is_empty() {
-                    self.content = match content.as_slice() {
-                        [Block::Text { text }] => text.clone(),
-                        _ => serde_json::to_string(content).unwrap_or_default(),
-                    };
-                }
-                self.tool_call_id = Some(tool_use_id.clone());
-                self.tool_is_error = *is_error;
-            }
-        }
     }
 }
 
@@ -376,7 +517,7 @@ fn default_true() -> bool {
 /// millisecond are disambiguated by the counter.
 static ID_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-fn next_id() -> String {
+pub fn next_message_id() -> String {
     let n = ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     format!("m{}-{n}", now_millis())
 }
@@ -389,195 +530,4 @@ fn now_millis() -> i64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn roles_serialize_lowercase() {
-        assert_eq!(serde_json::to_string(&Role::User).unwrap(), "\"user\"");
-        assert_eq!(
-            serde_json::to_string(&Role::Assistant).unwrap(),
-            "\"assistant\""
-        );
-        assert_eq!(serde_json::to_string(&Role::Tool).unwrap(), "\"tool\"");
-    }
-
-    #[test]
-    fn message_camelcase_round_trip() {
-        let m = ChatMessage::assistant("hi", vec![]);
-        let v = serde_json::to_value(&m).unwrap();
-        assert_eq!(v["role"], "assistant");
-        assert_eq!(v["content"], "hi");
-        assert_eq!(
-            v["createdAt"],
-            serde_json::Value::Number(m.created_at.into())
-        );
-        assert!(v["toolCalls"].is_array());
-        assert!(v.get("toolCallId").is_none());
-    }
-
-    #[test]
-    fn tool_call_carries_result_only_when_present() {
-        let mut tc = ToolCall::request("call-1", "get_timeline", serde_json::json!({}));
-        let v = serde_json::to_value(&tc).unwrap();
-        assert!(v.get("result").is_none());
-        assert!(v.get("isError").is_none());
-        tc.result = Some(serde_json::json!({"ok": true}));
-        tc.is_error = Some(false);
-        let v = serde_json::to_value(&tc).unwrap();
-        assert_eq!(v["result"]["ok"], true);
-        assert_eq!(v["isError"], false);
-    }
-
-    #[test]
-    fn tool_result_message_has_tool_call_id() {
-        let m = ChatMessage::tool_result("call-1", serde_json::json!({"summary": "ok"}));
-        let v = serde_json::to_value(&m).unwrap();
-        assert_eq!(v["role"], "tool");
-        assert_eq!(v["toolCallId"], "call-1");
-        assert!(v.get("toolIsError").is_none());
-        assert!(v["content"].as_str().unwrap().contains("summary"));
-    }
-
-    #[test]
-    fn tool_error_result_round_trips_an_explicit_error_marker() {
-        let m = ChatMessage::tool_error_result("call-1", serde_json::json!({"error": "Cancelled"}));
-        let v = serde_json::to_value(&m).unwrap();
-        assert_eq!(v["toolIsError"], true);
-        let back: ChatMessage = serde_json::from_value(v).unwrap();
-        assert_eq!(back.tool_is_error, Some(true));
-    }
-
-    #[test]
-    fn ids_are_unique_under_rapid_minting() {
-        let mut ids = std::collections::HashSet::new();
-        for _ in 0..1000 {
-            ids.insert(next_id());
-        }
-        assert_eq!(ids.len(), 1000);
-    }
-
-    #[test]
-    fn session_round_trip() {
-        let mut s = ChatSession::new("sess-1");
-        s.provider = Some("openai".into());
-        s.is_open = false;
-        s.messages.push(ChatMessage::user("hello"));
-        let json = serde_json::to_string(&s).unwrap();
-        let back: ChatSession = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.id, "sess-1");
-        assert_eq!(back.provider.as_deref(), Some("openai"));
-        assert!(!back.is_open);
-        assert_eq!(back.messages.len(), 1);
-        assert_eq!(back.messages[0].role, Role::User);
-    }
-
-    #[test]
-    fn content_blocks_use_the_tagged_camel_case_wire_contract() {
-        let message = ChatMessage::assistant(
-            "working",
-            vec![ToolCall::request(
-                "call-1",
-                "split_clip",
-                serde_json::json!({"clipId": "c1"}),
-            )],
-        );
-
-        let value = serde_json::to_value(&message).unwrap();
-
-        assert_eq!(
-            value["blocks"][0],
-            serde_json::json!({
-                "type": "text",
-                "text": "working"
-            })
-        );
-        assert_eq!(
-            value["blocks"][1],
-            serde_json::json!({
-                "type": "toolUse",
-                "id": "call-1",
-                "name": "split_clip",
-                "input": {"clipId": "c1"}
-            })
-        );
-    }
-
-    #[test]
-    fn legacy_flat_messages_migrate_to_content_blocks() {
-        let legacy = serde_json::json!({
-            "id": "legacy-1",
-            "role": "assistant",
-            "content": "working",
-            "toolCalls": [{
-                "id": "call-1",
-                "name": "split_clip",
-                "args": {"clipId": "c1"},
-                "result": {"ok": true},
-                "isError": false
-            }],
-            "createdAt": 1
-        });
-
-        let message: ChatMessage = serde_json::from_value(legacy).unwrap();
-
-        assert_eq!(message.blocks.len(), 2);
-        assert!(matches!(
-            &message.blocks[0],
-            AgentContentBlock::Text { text } if text == "working"
-        ));
-        assert!(matches!(
-            &message.blocks[1],
-            AgentContentBlock::ToolUse { id, is_error, .. }
-                if id == "call-1" && *is_error == Some(false)
-        ));
-    }
-
-    #[test]
-    fn legacy_sessions_without_is_open_default_to_open() {
-        let legacy = serde_json::json!({
-            "id": "legacy-session",
-            "messages": [],
-            "createdAt": 1
-        });
-
-        let session: ChatSession = serde_json::from_value(legacy).unwrap();
-
-        assert!(session.is_open);
-    }
-
-    #[test]
-    fn native_tool_result_blocks_round_trip_images_in_order() {
-        use crate::tools::result::Block;
-
-        let message = ChatMessage::tool_result_blocks(
-            "call-image",
-            vec![
-                Block::text("before"),
-                Block::image("aW1hZ2U=", "image/png"),
-                Block::text("after"),
-            ],
-            serde_json::json!({"summary": "beforeafter", "isError": false}),
-            false,
-        );
-
-        let json = serde_json::to_string(&message).unwrap();
-        let restored: ChatMessage = serde_json::from_str(&json).unwrap();
-
-        let AgentContentBlock::ToolResult { content, .. } = &restored.blocks[0] else {
-            panic!("expected a native tool result block");
-        };
-        assert_eq!(
-            content,
-            &vec![
-                Block::text("before"),
-                Block::image("aW1hZ2U=", "image/png"),
-                Block::text("after"),
-            ]
-        );
-        assert_eq!(
-            restored.content,
-            serde_json::json!({"summary": "beforeafter", "isError": false}).to_string()
-        );
-    }
-}
+mod tests;

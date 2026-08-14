@@ -43,7 +43,7 @@ use opentake_ops::command::{self, EditCommand, EditResult};
 use opentake_ops::{EditorState, IdGen};
 use opentake_project::{
     GenerationLog, GenerationLogEntry, Project, ProjectCompatibility, ProjectRoot,
-    ProjectRootIdentity,
+    ProjectRootIdentity, ThumbnailUpdate,
 };
 use same_file::Handle;
 
@@ -407,6 +407,18 @@ impl EditorSession {
         path: Option<PathBuf>,
         thumbnail: Option<Vec<u8>>,
     ) -> Result<PathBuf> {
+        self.save_project_with_thumbnail_update(
+            path,
+            thumbnail.map_or(ThumbnailUpdate::Preserve, ThumbnailUpdate::Replace),
+        )
+    }
+
+    /// Persist with an explicit authoritative cover mutation.
+    pub fn save_project_with_thumbnail_update(
+        &mut self,
+        path: Option<PathBuf>,
+        thumbnail: ThumbnailUpdate,
+    ) -> Result<PathBuf> {
         self.ensure_mutable()?;
         // Remember the currently-open bundle before we adopt any new target, so
         // a save-as knows the source `media/` to carry across.
@@ -432,9 +444,6 @@ impl EditorSession {
             Project::new_with_compatibility(target.clone(), self.compatibility.clone());
         project.timeline = self.state.timeline.clone();
         project.manifest = self.state.manifest.clone();
-        // Cover image (upstream `snapshotThumbnail` → `thumbnail.jpg`): only set
-        // when the caller produced bytes; otherwise leave the on-disk cover as-is.
-        project.thumbnail = thumbnail;
         // Preserve an existing valid-but-empty optional component across
         // Save-As; otherwise only create the log once there are rows.
         if self.generation_log_component_present || !self.generation_log.entries.is_empty() {
@@ -442,10 +451,14 @@ impl EditorSession {
         }
         let new_root = if same_target {
             let root = self.project_root.as_ref().ok_or(CoreError::NoProjectOpen)?;
-            project.save_to_root(root)?;
+            project.save_to_root_with_thumbnail_update(root, thumbnail)?;
             None
         } else {
-            Some(project.publish_complete_to(&target, self.project_root.as_ref())?)
+            Some(project.publish_complete_to_with_thumbnail_update(
+                &target,
+                self.project_root.as_ref(),
+                thumbnail,
+            )?)
         };
 
         self.project_dir = Some(target.clone());
@@ -1972,6 +1985,24 @@ mod tests {
         // existing thumbnail.jpg (bundle.save only writes it when Some).
         s.save_project_with_thumbnail(None, None).unwrap();
         assert_eq!(std::fs::read(dir.join("thumbnail.jpg")).unwrap(), jpeg);
+    }
+
+    #[test]
+    fn explicit_thumbnail_remove_is_distinct_from_capture_failure_preserve() {
+        let tmp = TmpDir::new("thumb-remove");
+        let dir = tmp.path().join("Remove.opentake");
+        let mut session = EditorSession::new_project();
+        session.state = EditorState::from_timeline(one_video_track());
+        let jpeg = vec![0xFF, 0xD8, 4, 2, 0xFF, 0xD9];
+        session
+            .save_project_with_thumbnail(Some(dir.clone()), Some(jpeg))
+            .unwrap();
+
+        session
+            .save_project_with_thumbnail_update(None, ThumbnailUpdate::Remove)
+            .unwrap();
+
+        assert!(!dir.join("thumbnail.jpg").exists());
     }
 
     #[test]

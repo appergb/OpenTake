@@ -123,9 +123,20 @@ fn save_then_open_is_lossless() {
     assert_eq!(reopened.manifest, project.manifest);
     assert_eq!(reopened.generation_log, project.generation_log);
     // Thumbnail is not loaded back into memory by `open` (left on disk).
-    assert!(reopened.thumbnail.is_none());
+    assert_eq!(reopened.thumbnail, None);
     let thumb = std::fs::read(bundle.join("thumbnail.jpg")).unwrap();
     assert_eq!(thumb, b"\xff\xd8\xff\xe0JPEGDATA");
+}
+
+#[test]
+fn project_thumbnail_field_remains_option_compatible() {
+    let tmp = TempDir::new("thumbnail-api");
+    let mut project = Project::new(tmp.child("Compatibility.opentake"));
+    let thumbnail: Option<Vec<u8>> = Some(b"legacy public field".to_vec());
+
+    project.thumbnail = thumbnail.clone();
+
+    assert_eq!(project.thumbnail, thumbnail);
 }
 
 #[test]

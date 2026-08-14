@@ -17,7 +17,8 @@
 //! ├── generation-log.json  # GenerationLog (AI generation audit, optional)
 //! ├── thumbnail.jpg        # cover image (optional)
 //! ├── media/               # project-internal media (.project relative paths)
-//! └── chat-sessions/       # agent chat history, one <session>.json each
+//! ├── chat-sessions/       # agent chat history, one <session>.json each
+//! └── motion-documents/    # Motion Studio HTML/CSS sources
 //! ```
 //!
 //! ## What this crate provides
@@ -58,7 +59,7 @@ mod safe_fs;
 pub mod xmlnode;
 
 pub use archive::{archive, ArchiveReport, MissingMedia};
-pub use bundle::{copy_media_dir, Project, ProjectCompatibility};
+pub use bundle::{copy_media_dir, Project, ProjectCompatibility, ThumbnailUpdate};
 pub use edl::export_edl;
 pub use error::{ProjectError, Result};
 pub use fcpxml::{export_xmeml, export_xmeml_with_timecodes};

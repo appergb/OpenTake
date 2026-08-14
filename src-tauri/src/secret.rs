@@ -14,6 +14,64 @@ use tauri::State;
 
 use opentake_gen::{KeyStore, KeyringStore};
 
+/// Narrow secret storage boundary for persistent external MCP credentials.
+/// Catalog metadata deliberately contains only a token digest; this boundary
+/// keeps the token itself in the existing OpenTake keychain service.
+#[allow(dead_code)] // Task 1 adds the seam before Task 4 wires the Tauri commands.
+pub(crate) trait McpSecretStore: Send + Sync {
+    fn save_mcp_secret(&self, account: &str, value: &str) -> Result<(), String>;
+    fn load_mcp_secret(&self, account: &str) -> Result<Option<String>, String>;
+    fn delete_mcp_secret(&self, account: &str) -> Result<(), String>;
+}
+
+impl McpSecretStore for KeyringStore {
+    fn save_mcp_secret(&self, account: &str, value: &str) -> Result<(), String> {
+        self.save(account, value).map_err(|error| error.to_string())
+    }
+
+    fn load_mcp_secret(&self, account: &str) -> Result<Option<String>, String> {
+        self.load(account).map_err(|error| error.to_string())
+    }
+
+    fn delete_mcp_secret(&self, account: &str) -> Result<(), String> {
+        self.delete(account).map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct MemoryMcpSecretStore {
+    secrets: std::sync::Mutex<std::collections::HashMap<String, String>>,
+}
+
+#[cfg(test)]
+impl McpSecretStore for MemoryMcpSecretStore {
+    fn save_mcp_secret(&self, account: &str, value: &str) -> Result<(), String> {
+        self.secrets
+            .lock()
+            .map_err(|_| "in-memory MCP secret store lock poisoned".to_string())?
+            .insert(account.to_owned(), value.to_owned());
+        Ok(())
+    }
+
+    fn load_mcp_secret(&self, account: &str) -> Result<Option<String>, String> {
+        Ok(self
+            .secrets
+            .lock()
+            .map_err(|_| "in-memory MCP secret store lock poisoned".to_string())?
+            .get(account)
+            .cloned())
+    }
+
+    fn delete_mcp_secret(&self, account: &str) -> Result<(), String> {
+        self.secrets
+            .lock()
+            .map_err(|_| "in-memory MCP secret store lock poisoned".to_string())?
+            .remove(account);
+        Ok(())
+    }
+}
+
 /// Masked status of a provider's stored key. `has_key` drives the UI; `masked`
 /// is the bullet-masked form (empty when there is no key).
 #[derive(Debug, Serialize)]

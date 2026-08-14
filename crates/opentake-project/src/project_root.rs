@@ -377,6 +377,16 @@ impl ProjectRoot {
         )
     }
 
+    /// Copy project-local Motion Studio sources during complete-bundle
+    /// publication through retained no-follow roots.
+    pub fn copy_motion_documents_to(&self, destination: &ProjectRoot) -> Result<()> {
+        self.copy_directory_component_to(
+            destination,
+            crate::layout::MOTION_DOCUMENTS_DIR,
+            "motion-documents-copy",
+        )
+    }
+
     /// Preserve the optional project cover across complete-bundle publication.
     pub(crate) fn copy_thumbnail_to(&self, destination: &ProjectRoot) -> Result<()> {
         if let Some(bytes) = self.read_optional(crate::layout::THUMBNAIL_FILE)? {
@@ -498,6 +508,24 @@ impl ProjectRoot {
         // after it before cleanup is disarmed.
         tmp.cleanup_on_drop = false;
         Ok(())
+    }
+
+    /// Remove one configured optional project component through the retained
+    /// root. The final leaf is opened no-follow and verified as the same regular
+    /// file immediately before unlink, so this never reopens the ambient bundle
+    /// path or follows a substituted symlink.
+    pub(crate) fn remove_optional_component(&self, name: &str) -> Result<()> {
+        validate_leaf(name).map_err(|error| ProjectError::io(self.path.join(name), error))?;
+        if project_component_max_bytes(name).is_none() {
+            return Err(ProjectError::io(
+                self.path.join(name),
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "project component has no configured byte limit",
+                ),
+            ));
+        }
+        remove_file_artifact(&self.dir, &self.path, OsStr::new(name))
     }
 
     /// Read one no-follow regular file from `chat-sessions/`, bounded before

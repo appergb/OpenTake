@@ -14,13 +14,14 @@
  * an honest empty report and this pane renders its unsupported state.
  */
 
-import { useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { HardDrive } from "lucide-react";
 import { useT } from "../../i18n";
 import { storageClear, storageUsage } from "../../lib/api";
 import type { StorageCategoryId, StorageUsage } from "../../lib/types";
 import { formatBytes } from "../../lib/storageFormat";
 import { Icon } from "../ui/Icon";
+import { Reveal } from "../ui/Reveal";
 
 const controlStyle: CSSProperties = {
   background: "var(--home-hover)",
@@ -34,9 +35,17 @@ const sectionStyle: CSSProperties = {
   gap: "var(--space-lg)",
 };
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function Section({
+  title,
+  children,
+  sectionRef,
+}: {
+  title: string;
+  children: React.ReactNode;
+  sectionRef?: React.Ref<HTMLElement>;
+}) {
   return (
-    <section>
+    <section ref={sectionRef} tabIndex={sectionRef ? -1 : undefined}>
       <h2
         style={{
           margin: "0 0 var(--space-md)",
@@ -75,9 +84,15 @@ export function StoragePane() {
   const [error, setError] = useState<string | null>(null);
   const [clearing, setClearing] = useState<StorageCategoryId | null>(null);
   const [confirming, setConfirming] = useState<StorageCategoryId | null>(null);
+  const [focusTarget, setFocusTarget] = useState<"model" | "afterModel" | null>(null);
+  const mountedRef = useRef(false);
+  const operationEpochRef = useRef(0);
+  const paneRef = useRef<HTMLElement>(null);
+  const clearButtonRefs = useRef<Partial<Record<StorageCategoryId, HTMLButtonElement | null>>>({});
 
   useEffect(() => {
     let alive = true;
+    mountedRef.current = true;
     setError(null);
     storageUsage().then(
       (next) => {
@@ -89,22 +104,54 @@ export function StoragePane() {
     );
     return () => {
       alive = false;
+      mountedRef.current = false;
+      operationEpochRef.current += 1;
     };
   }, []);
+
+  useEffect(() => {
+    if (!focusTarget) return;
+
+    if (focusTarget === "model") {
+      (clearButtonRefs.current.models ?? paneRef.current)?.focus();
+    } else {
+      const modelIndex = CATEGORY_ORDER.indexOf("models");
+      const stableFocusOrder = [
+        ...CATEGORY_ORDER.slice(modelIndex + 1),
+        ...CATEGORY_ORDER.slice(0, modelIndex).reverse(),
+      ];
+      const next = stableFocusOrder
+        .map((id) => clearButtonRefs.current[id])
+        .find((button): button is HTMLButtonElement => Boolean(button && !button.disabled));
+      (next ?? paneRef.current)?.focus();
+    }
+
+    setFocusTarget(null);
+  }, [focusTarget, usage, clearing, confirming]);
 
   const runClear = async (categories: StorageCategoryId[], modelsConfirmed: boolean) => {
     if (clearing) return;
     const inFlight = categories[0]!;
+    const operationEpoch = ++operationEpochRef.current;
+    const isCurrentOperation = () =>
+      mountedRef.current && operationEpochRef.current === operationEpoch;
+    let succeeded = false;
     setClearing(inFlight);
     setError(null);
     try {
       const next = await storageClear(categories, modelsConfirmed);
+      if (!isCurrentOperation()) return;
       setUsage(next);
+      succeeded = true;
+      if (inFlight === "models") setFocusTarget("afterModel");
     } catch (reason) {
+      if (!isCurrentOperation()) return;
       setError(t("storage.error", { error: errorMessage(reason) }));
     } finally {
-      setClearing(null);
-      setConfirming(null);
+      if (isCurrentOperation()) {
+        setClearing(null);
+        if (succeeded || inFlight !== "models") setConfirming(null);
+      }
     }
   };
 
@@ -113,13 +160,18 @@ export function StoragePane() {
     if (category === "models" && confirming !== "models") {
       // Models are re-downloads: the confirm step is mandatory (and the Rust
       // command independently rejects an unconfirmed models clear).
+      setError(null);
       setConfirming("models");
       return;
     }
     void runClear([category], category === "models");
   };
 
-  const cancelConfirm = () => setConfirming(null);
+  const cancelConfirm = () => {
+    setError(null);
+    setConfirming(null);
+    setFocusTarget("model");
+  };
 
   if (usage === null && error === null) {
     return (
@@ -157,7 +209,7 @@ export function StoragePane() {
   const totalZero = usage.totalBytes === 0;
 
   return (
-    <Section title={t("settings.section.storage")}>
+    <Section title={t("settings.section.storage")} sectionRef={paneRef}>
       <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-xs)" }}>
         <div style={{ fontSize: "var(--fs-sm-md)", color: "var(--text-tertiary)" }}>
           {t("storage.desc")}
@@ -205,8 +257,9 @@ export function StoragePane() {
         const isClearingThis = clearing === id;
         const showConfirm = confirming === id;
         return (
-          <div key={id} style={{ display: "flex", flexDirection: "column", gap: "var(--space-xs)" }}>
+          <div key={id} className="storage-category-row" data-storage-row={id}>
             <div
+              className="storage-category-row__main"
               style={{
                 display: "flex",
                 alignItems: "center",
@@ -226,86 +279,95 @@ export function StoragePane() {
                 </div>
               </div>
               <div style={{ flex: "0 0 auto" }}>
-                {showConfirm ? (
-                  <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-xs)", alignItems: "flex-end" }}>
-                    <div style={{ display: "inline-flex", gap: "var(--space-xs)", alignItems: "center" }}>
-                      <span style={{ fontSize: "var(--fs-xs)", color: "var(--text-secondary)" }}>
-                        {t("storage.clearConfirmTitle")}
-                      </span>
-                      <button
-                        type="button"
-                        data-category="models"
-                        data-action="confirm-remove"
-                        disabled={busy}
-                        onClick={() => void runClear(["models"], true)}
-                        className="hover-area"
-                        style={{
-                          height: 28,
-                          padding: "0 var(--space-md)",
-                          borderRadius: "var(--radius-sm)",
-                          ...controlStyle,
-                          color: "var(--status-error)",
-                          fontSize: "var(--fs-sm)",
-                          fontWeight: "var(--fw-medium)",
-                        }}
-                      >
-                        {t("storage.confirmRemove")}
-                      </button>
-                      <button
-                        type="button"
-                        data-category="models"
-                        data-action="confirm-cancel"
-                        disabled={busy}
-                        onClick={cancelConfirm}
-                        className="hover-area"
-                        style={{
-                          height: 28,
-                          padding: "0 var(--space-md)",
-                          borderRadius: "var(--radius-sm)",
-                          color: "var(--text-tertiary)",
-                          fontSize: "var(--fs-sm)",
-                        }}
-                      >
-                        {t("storage.confirmCancel")}
-                      </button>
-                    </div>
-                    <div style={{ fontSize: "var(--fs-xxs)", color: "var(--text-muted)" }}>
-                      {t("storage.clearConfirmBody")}
-                    </div>
-                  </div>
-                ) : (
-                  <button
-                    type="button"
-                    data-category={id}
-                    data-action="clear"
-                    disabled={busy || category.bytes === 0}
-                    onClick={() => startClear(id)}
-                    className="hover-area"
-                    style={{
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: 4,
-                      height: 28,
-                      padding: "0 var(--space-md)",
-                      borderRadius: "var(--radius-sm)",
-                      ...controlStyle,
-                      color: "var(--text-secondary)",
-                      fontSize: "var(--fs-sm)",
-                      fontWeight: "var(--fw-medium)",
-                      opacity: busy || category.bytes === 0 ? 0.4 : 1,
-                    }}
-                  >
-                    {isClearingThis && <Icon icon={HardDrive} size={13} />}
-                    {isClearingThis ? t("storage.clearing") : t("storage.clear")}
-                  </button>
-                )}
+                <button
+                  ref={(button) => {
+                    clearButtonRefs.current[id] = button;
+                  }}
+                  type="button"
+                  data-category={id}
+                  data-action="clear"
+                  disabled={busy || showConfirm || category.bytes === 0}
+                  onClick={() => startClear(id)}
+                  className="hover-area"
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 4,
+                    height: 28,
+                    padding: "0 var(--space-md)",
+                    borderRadius: "var(--radius-sm)",
+                    ...controlStyle,
+                    color: "var(--text-secondary)",
+                    fontSize: "var(--fs-sm)",
+                    fontWeight: "var(--fw-medium)",
+                    opacity: busy || showConfirm || category.bytes === 0 ? 0.4 : 1,
+                  }}
+                >
+                  {isClearingThis && <Icon icon={HardDrive} size={13} />}
+                  {isClearingThis ? t("storage.clearing") : t("storage.clear")}
+                </button>
               </div>
             </div>
+            {id === "models" && (
+              <Reveal open={showConfirm} role="group">
+                <div className="storage-model-confirmation">
+                  <div className="storage-model-confirmation__actions">
+                    <span style={{ fontSize: "var(--fs-xs)", color: "var(--text-secondary)" }}>
+                      {t("storage.clearConfirmTitle")}
+                    </span>
+                    <button
+                      type="button"
+                      data-category="models"
+                      data-action="confirm-remove"
+                      disabled={busy}
+                      onClick={() => void runClear(["models"], true)}
+                      className="hover-area"
+                      style={{
+                        height: 28,
+                        padding: "0 var(--space-md)",
+                        borderRadius: "var(--radius-sm)",
+                        ...controlStyle,
+                        color: "var(--status-error)",
+                        fontSize: "var(--fs-sm)",
+                        fontWeight: "var(--fw-medium)",
+                      }}
+                    >
+                      {t("storage.confirmRemove")}
+                    </button>
+                    <button
+                      type="button"
+                      data-category="models"
+                      data-action="confirm-cancel"
+                      disabled={busy}
+                      onClick={cancelConfirm}
+                      className="hover-area"
+                      style={{
+                        height: 28,
+                        padding: "0 var(--space-md)",
+                        borderRadius: "var(--radius-sm)",
+                        color: "var(--text-tertiary)",
+                        fontSize: "var(--fs-sm)",
+                      }}
+                    >
+                      {t("storage.confirmCancel")}
+                    </button>
+                  </div>
+                  <div style={{ fontSize: "var(--fs-xxs)", color: "var(--text-muted)" }}>
+                    {t("storage.clearConfirmBody")}
+                  </div>
+                  {error && (
+                    <div role="alert" style={{ fontSize: "var(--fs-xs)", color: "var(--status-error)" }}>
+                      {error}
+                    </div>
+                  )}
+                </div>
+              </Reveal>
+            )}
           </div>
         );
       })}
 
-      {error && (
+      {error && confirming !== "models" && (
         <div role="alert" style={{ fontSize: "var(--fs-xs)", color: "var(--status-error)" }}>
           {error}
         </div>

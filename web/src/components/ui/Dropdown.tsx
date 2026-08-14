@@ -6,7 +6,7 @@
  * the caller (i18n language pack), so adding a locale needs no change here.
  *
  * Closes on outside click or Escape. Generic over the option id type so callers
- * keep their narrow union (`Locale`, `Theme`, …).
+ * keep their narrow union (for example, `Locale`).
  */
 
 import { useCallback, useEffect, useId, useRef, useState } from "react";

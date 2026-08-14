@@ -91,6 +91,13 @@ vi.mock("../lib/api", () => ({
   canUndo: async () => false,
   canRedo: async () => false,
   getMedia: srv.getMedia,
+  motionDocumentList: vi.fn(async () => []),
+  motionDocumentCreate: vi.fn(async () => { throw new Error("unused"); }),
+  motionDocumentRead: vi.fn(async () => { throw new Error("unused"); }),
+  motionDocumentHash: vi.fn(async () => "0".repeat(64)),
+  motionDocumentPatch: vi.fn(async () => { throw new Error("unused"); }),
+  motionPreview: vi.fn(async () => { throw new Error("unused"); }),
+  motionPreviewCancel: vi.fn(async () => false),
 }));
 
 vi.mock("../components/preview/nativePlaybackSession", () => ({
@@ -115,6 +122,9 @@ import { useMediaStore } from "./mediaStore";
 import { useProjectStore } from "./projectStore";
 import { useRecentStore } from "./recentStore";
 import { useI18nStore } from "../i18n";
+import { useMotionStudioStore } from "./motionStudioStore";
+
+const defaultMotionFlushSave = useMotionStudioStore.getState().flushSave;
 
 beforeEach(() => {
   srv.save.mockReset();
@@ -125,6 +135,13 @@ beforeEach(() => {
   srv.getDefaultProjectDir.mockResolvedValue("");
   srv.checkPathExists.mockReset();
   srv.checkPathExists.mockResolvedValue(false);
+  useMotionStudioStore.setState({
+    dirtyFiles: { "index.html": false, "styles.css": false },
+    conflict: null,
+    savingFile: null,
+    publishPhase: "idle",
+    flushSave: defaultMotionFlushSave,
+  });
 });
 
 describe("newProjectAndEnter default path", () => {
@@ -241,6 +258,61 @@ describe("openProjectPath", () => {
     expect(useRecentStore.getState().recents[0]?.path).toBe("/tmp/core-resolved.opentake");
     expect(useMediaStore.getState().items.map((item) => item.id)).toEqual(["m1"]);
     expect(useEditorUiStore.getState().view).toBe("editor");
+  });
+
+  it("waits for a debounced Motion Studio save before replacing project authority", async () => {
+    const motionSave = deferred<void>();
+    const flushSave = vi.fn(async () => {
+      await motionSave.promise;
+      useMotionStudioStore.setState({
+        dirtyFiles: { "index.html": false, "styles.css": false },
+      });
+    });
+    useMotionStudioStore.setState({
+      dirtyFiles: { "index.html": true, "styles.css": false },
+      conflict: null,
+      savingFile: null,
+      flushSave,
+    });
+
+    const opening = openProjectPath("/tmp/demo.opentake");
+    await Promise.resolve();
+    expect(flushSave).toHaveBeenCalledOnce();
+    expect(srv.projectOpen).not.toHaveBeenCalled();
+
+    motionSave.resolve();
+    await opening;
+    expect(srv.projectOpen).toHaveBeenCalledWith("/tmp/demo.opentake");
+  });
+
+  it("blocks a project boundary while Motion Studio has an unresolved conflict", async () => {
+    useMotionStudioStore.setState({
+      dirtyFiles: { "index.html": true, "styles.css": false },
+      conflict: { file: "index.html", localSource: "<main>mine</main>" },
+      savingFile: null,
+      flushSave: vi.fn(async () => undefined),
+    });
+
+    await expect(openProjectPath("/tmp/demo.opentake")).rejects.toThrow("Motion Studio");
+    expect(srv.projectOpen).not.toHaveBeenCalled();
+
+    useMotionStudioStore.setState({
+      dirtyFiles: { "index.html": false, "styles.css": false },
+      conflict: null,
+    });
+  });
+
+  it("blocks a project boundary while a Motion Studio publish is committing", async () => {
+    useMotionStudioStore.setState({
+      dirtyFiles: { "index.html": false, "styles.css": false },
+      conflict: null,
+      savingFile: null,
+      publishPhase: "committing",
+      flushSave: vi.fn(async () => undefined),
+    });
+
+    await expect(openProjectPath("/tmp/demo.opentake")).rejects.toThrow("Motion Studio");
+    expect(srv.projectOpen).not.toHaveBeenCalled();
   });
 
   it("clears a media error from the previously open project", async () => {

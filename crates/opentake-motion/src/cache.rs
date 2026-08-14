@@ -33,13 +33,15 @@ pub fn content_hash(req: &MotionRenderRequest) -> String {
 
     // Version the key format so a future change to what we hash invalidates old
     // entries instead of silently colliding.
-    hasher.update(b"opentake-motion/v1\n");
+    hasher.update(b"opentake-motion/v2\n");
 
     // Numeric/flags first (fixed-width, no ambiguity).
     hasher.update(b"fps=");
     hasher.update(req.fps.to_le_bytes());
     hasher.update(b";frames=");
     hasher.update(req.duration_frames.to_le_bytes());
+    hasher.update(b";start=");
+    hasher.update(req.start_frame.to_le_bytes());
     hasher.update(b";w=");
     hasher.update(req.width.to_le_bytes());
     hasher.update(b";h=");
@@ -282,6 +284,9 @@ mod tests {
         let mut longer = base.clone();
         longer.duration_frames = 120;
         assert_ne!(content_hash(&base), content_hash(&longer));
+
+        let offset = base.clone().with_start_frame(1);
+        assert_ne!(content_hash(&base), content_hash(&offset));
     }
 
     #[test]
