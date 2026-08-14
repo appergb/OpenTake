@@ -444,9 +444,6 @@ impl EditorSession {
             Project::new_with_compatibility(target.clone(), self.compatibility.clone());
         project.timeline = self.state.timeline.clone();
         project.manifest = self.state.manifest.clone();
-        // Cover image (upstream `snapshotThumbnail` → `thumbnail.jpg`): only set
-        // when the caller produced bytes; otherwise leave the on-disk cover as-is.
-        project.thumbnail = thumbnail;
         // Preserve an existing valid-but-empty optional component across
         // Save-As; otherwise only create the log once there are rows.
         if self.generation_log_component_present || !self.generation_log.entries.is_empty() {
@@ -454,10 +451,14 @@ impl EditorSession {
         }
         let new_root = if same_target {
             let root = self.project_root.as_ref().ok_or(CoreError::NoProjectOpen)?;
-            project.save_to_root(root)?;
+            project.save_to_root_with_thumbnail_update(root, thumbnail)?;
             None
         } else {
-            Some(project.publish_complete_to(&target, self.project_root.as_ref())?)
+            Some(project.publish_complete_to_with_thumbnail_update(
+                &target,
+                self.project_root.as_ref(),
+                thumbnail,
+            )?)
         };
 
         self.project_dir = Some(target.clone());

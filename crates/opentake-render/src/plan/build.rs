@@ -8,7 +8,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use opentake_domain::{Clip, ClipType, NestedSequence, Timeline, TransitionKind};
+use opentake_domain::{
+    AnimatableProperty, Clip, ClipType, NestedSequence, Timeline, TransitionKind,
+};
 
 use super::affine::{affine_transform, compose, crop_to_uv};
 use super::types::{
@@ -682,7 +684,7 @@ impl RenderPlan {
         Some((incoming_plan, &incoming_plan.clip, progress))
     }
 
-    fn transition_midpoint(&self, index: usize) -> Option<i32> {
+    fn transition_interval(&self, index: usize) -> Option<(i32, i32)> {
         let plan = self.clip_plans.get(index)?;
         let transition = plan.clip.transition_out.as_ref()?;
         let incoming_plan = self.clip_plans.get(index + 1)?;
@@ -699,46 +701,116 @@ impl RenderPlan {
             .max(1)
             .min((plan.end_frame - plan.start_frame).max(1))
             .min((incoming_plan.end_frame - incoming_plan.start_frame).max(1));
-        Some((plan.end_frame - duration + duration / 2).min(plan.end_frame - 1))
+        Some((plan.end_frame - duration, plan.end_frame))
+    }
+
+    fn transition_midpoint(&self, index: usize) -> Option<i32> {
+        let (start, end) = self.transition_interval(index)?;
+        Some((start + (end - start) / 2).min(end - 1))
+    }
+
+    fn representative_candidates(&self, index: Option<usize>, plan: &ClipPlan) -> Vec<i32> {
+        let midpoint = plan.start_frame + (plan.end_frame - plan.start_frame - 1) / 2;
+        let mut candidates = Vec::new();
+        if let Some(transition_midpoint) = index.and_then(|index| self.transition_midpoint(index)) {
+            candidates.push(transition_midpoint);
+        } else {
+            candidates.push(midpoint);
+        }
+
+        let mut anchors = vec![plan.start_frame, plan.end_frame - 1];
+        for clip in std::iter::once(&plan.clip).chain(
+            plan.compound_ancestors
+                .iter()
+                .map(|ancestor| &ancestor.clip),
+        ) {
+            for property in [
+                AnimatableProperty::Opacity,
+                AnimatableProperty::Position,
+                AnimatableProperty::Scale,
+                AnimatableProperty::Rotation,
+                AnimatableProperty::Crop,
+            ] {
+                anchors.extend(clip.keyframe_frames(property));
+            }
+            if clip.fade_in_frames > 0 {
+                anchors.push(clip.start_frame);
+                anchors.push(clip.start_frame.saturating_add(clip.fade_in_frames));
+            }
+            if clip.fade_out_frames > 0 {
+                anchors.push(clip.end_frame().saturating_sub(clip.fade_out_frames));
+                anchors.push(clip.end_frame().saturating_sub(1));
+            }
+        }
+        if let Some((start, end)) = index.and_then(|index| self.transition_interval(index)) {
+            anchors.push(start);
+            anchors.push(start + (end - start) / 2);
+            anchors.push(end - 1);
+        }
+        anchors.retain(|frame| *frame >= plan.start_frame && *frame < plan.end_frame);
+        anchors.sort_unstable();
+        anchors.dedup();
+
+        for &anchor in &anchors {
+            candidates.push(anchor);
+            if anchor > plan.start_frame {
+                candidates.push(anchor - 1);
+            }
+            if anchor + 1 < plan.end_frame {
+                candidates.push(anchor + 1);
+            }
+        }
+        for interval in anchors.windows(2) {
+            candidates.push(interval[0] + (interval[1] - interval[0]) / 2);
+        }
+        let mut seen = HashSet::new();
+        candidates.retain(|frame| seen.insert(*frame));
+        candidates
     }
 
     /// Pick the earliest deterministic frame which the authoritative plan says
     /// produces a meaningful draw. Candidate order and transition adjacency are
     /// derived from the flattened plan, not from persisted track/clip ordering.
     pub fn representative_frame(&self, timeline: &Timeline) -> Option<i32> {
-        let mut candidates = self
+        let mut groups = self
             .clip_plans
             .iter()
             .enumerate()
             .filter(|(_, plan)| plan_has_meaningful_source(plan))
             .map(|(index, plan)| {
-                let frame = self.transition_midpoint(index).unwrap_or_else(|| {
-                    plan.start_frame + (plan.end_frame - plan.start_frame - 1) / 2
-                });
-                (plan.start_frame, frame)
+                (
+                    plan.start_frame,
+                    index,
+                    self.representative_candidates(Some(index), plan),
+                )
             })
             .chain(
                 self.text_plans
                     .iter()
-                    .filter(|plan| plan_has_meaningful_source(plan))
-                    .map(|plan| {
+                    .enumerate()
+                    .filter(|(_, plan)| plan_has_meaningful_source(plan))
+                    .map(|(index, plan)| {
                         (
                             plan.start_frame,
-                            plan.start_frame + (plan.end_frame - plan.start_frame - 1) / 2,
+                            self.clip_plans.len() + index,
+                            self.representative_candidates(None, plan),
                         )
                     }),
             )
             .collect::<Vec<_>>();
-        candidates.sort_unstable();
-        candidates.dedup();
+        groups.sort_by_key(|(start, order, _)| (*start, *order));
+        let mut seen = HashSet::new();
 
-        candidates.into_iter().find_map(|(_, frame)| {
-            self.frame(timeline, frame)
-                .draws
-                .iter()
-                .any(|draw| self.draw_is_meaningful(draw))
-                .then_some(frame)
-        })
+        groups
+            .into_iter()
+            .flat_map(|(_, _, candidates)| candidates)
+            .filter(|frame| seen.insert(*frame))
+            .find(|frame| {
+                self.frame(timeline, *frame)
+                    .draws
+                    .iter()
+                    .any(|draw| self.draw_is_meaningful(draw))
+            })
     }
 
     fn draw_is_meaningful(&self, draw: &LayerDraw<'_>) -> bool {
@@ -790,13 +862,7 @@ impl RenderPlan {
 }
 
 fn plan_has_meaningful_source(plan: &ClipPlan) -> bool {
-    let transform = plan.clip.transform;
-    if !transform.width.is_finite()
-        || !transform.height.is_finite()
-        || transform.width <= 0.0
-        || transform.height <= 0.0
-        || plan.end_frame <= plan.start_frame
-    {
+    if plan.end_frame <= plan.start_frame {
         return false;
     }
     match &plan.source {

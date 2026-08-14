@@ -1,6 +1,6 @@
 # Task 6 implementer report
 
-Status: COMPLETE — review round 1/5 remediations and CloseRequested parity are implemented.
+Status: COMPLETE — review round 2/5 remediations and CloseRequested parity are implemented.
 
 ## Scope completed
 
@@ -91,3 +91,47 @@ git diff --check
 ```
 
 Observed results: project 1/1, core 1/1, render 3/3, media 2/2, and Tauri 19/19 passed. The Tauri group covers corrupt image/video/text, unauthorized external media, retained project-local media, layered output, stale identity, cancellation-before-commit, tri-state removal/preservation, and CloseRequested parity. Strict clippy passed for all changed library targets and the Tauri library. After those runs, concurrent chat changes temporarily broke the Tauri test target (`BlockDeltaPayload` / `assistant_with_id` / `DonePayload.message_id` mismatch), so the final post-checkpoint compile evidence is `cargo check -p opentake-core -p opentake-tauri`. Task 6 files pass rustfmt and diff checks; workspace-wide fmt and `--all-targets` Tauri clippy remain blocked by those unrelated concurrent chat edits.
+
+## Review round 2/5 remediation
+
+- Restored the source-compatible public `Project.thumbnail: Option<Vec<u8>>`. Explicit authoritative removal now travels through additive `save_to_root_with_thumbnail_update` and `publish_complete_to_with_thumbnail_update` APIs; ordinary callers retain the original `Some = replace`, `None = preserve` contract.
+- Replaced the single-midpoint representative probe with deterministic groups derived from flattened render-plan span boundaries, opacity/position/scale/rotation/crop keyframes, fade boundaries, and validated transition intervals. Midpoint remains the stable first choice, but candidates at and around every visual event prevent animated opacity or scale from making a visible project look empty.
+- Added a capture → precommit → commit atomic handshake. Timeout atomically cancels capture/precommit work and may then return; if the worker has entered commit, the async Save/Close caller awaits it and reports the actual publication result. The final transition into commit occurs under the existing session identity checkpoint immediately before persistence.
+- Added a barrier regression after the identity checkpoint and before publication. It triggers timeout, observes the old thumbnail at response time, releases the detached worker, and proves that worker still cannot publish afterward. A complementary test proves a commit already in progress returns its real result instead of a timeout.
+
+### Round 2 RED evidence
+
+```text
+cargo test -p opentake-project --test roundtrip project_thumbnail_field_remains_option_compatible --no-run
+```
+
+Exit 101: assigning `Option<Vec<u8>>` to `Project.thumbnail` failed because round 1 had changed the public field to `ThumbnailUpdate`.
+
+```text
+cargo test -p opentake-render representative_frame_finds_ -- --nocapture
+```
+
+Exit 101: both opacity and scale fixtures returned `None` instead of frame 8 because only frame 4 (the invisible midpoint) was sampled.
+
+```text
+cargo test -p opentake-tauri timed_out_cover_precommit_barrier_prevents_post_response_publication --lib --no-run
+```
+
+Exit 101: the precommit gate, timeout await helper, and gate-bound save helper did not exist.
+
+### Round 2 GREEN evidence
+
+```text
+cargo test -p opentake-project
+cargo test -p opentake-core
+cargo test -p opentake-render
+cargo test -p opentake-media
+cargo test -p opentake-tauri commands::project_open_async_tests --lib -- --nocapture
+cargo test -p opentake-tauri home::tests::thumbnail_ --lib -- --nocapture
+cargo test -p opentake-tauri --lib
+cargo clippy -p opentake-project -p opentake-core -p opentake-render -p opentake-media -p opentake-tauri --all-targets -- -D warnings
+cargo fmt --all -- --check
+git diff --check
+```
+
+Observed results: project 166 unit + all integration suites passed; core 70 unit + all integration suites passed; render 63 unit + all integration suites passed; media 432 passed / 1 environment-gated ignored plus all integration suites (one Main10 fixture test ignored); Tauri focused project-save/open 21/21 and Home thumbnail 2/2 passed; the complete Tauri library suite passed 667/667. Strict all-target clippy, workspace rustfmt, and diff checks passed. Unrelated concurrent chat/web and audit working-tree files were not included.

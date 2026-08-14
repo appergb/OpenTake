@@ -477,6 +477,38 @@ fn representative_frame_ignores_empty_text_and_degenerate_visual_boxes() {
     assert_eq!(plan.representative_frame(&timeline), None);
 }
 
+#[test]
+fn representative_frame_finds_opacity_visible_only_away_from_midpoint() {
+    let mut clip = video_clip("late-opacity", 0, 9);
+    clip.opacity_track = Some(KeyframeTrack::from_keyframes(vec![
+        Keyframe::with_interpolation(0, 0.0, Interpolation::Hold),
+        Keyframe::new(8, 1.0),
+    ]));
+    let timeline = single_video_timeline(clip);
+
+    let plan = build_render_plan(&timeline, RS, &TestMetrics::default());
+
+    assert_eq!(plan.representative_frame(&timeline), Some(8));
+}
+
+#[test]
+fn representative_frame_finds_scale_visible_only_away_from_midpoint() {
+    let mut clip = video_clip("late-scale", 0, 9);
+    clip.scale_track = Some(KeyframeTrack::from_keyframes(vec![
+        Keyframe::with_interpolation(
+            0,
+            opentake_domain::AnimPair::new(0.0, 0.0),
+            Interpolation::Hold,
+        ),
+        Keyframe::new(8, opentake_domain::AnimPair::new(1.0, 1.0)),
+    ]));
+    let timeline = single_video_timeline(clip);
+
+    let plan = build_render_plan(&timeline, RS, &TestMetrics::default());
+
+    assert_eq!(plan.representative_frame(&timeline), Some(8));
+}
+
 // --- Source frame index (SPEC §2.5, upstream insertClip L301-343) ---
 
 #[test]

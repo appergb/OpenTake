@@ -587,6 +587,98 @@ enum ProjectCoverCapture {
     CaptureFailed,
 }
 
+const COVER_SAVE_CAPTURING: u8 = 0;
+const COVER_SAVE_PRECOMMIT: u8 = 1;
+const COVER_SAVE_COMMITTING: u8 = 2;
+const COVER_SAVE_CANCELLED: u8 = 3;
+
+/// Linearizes timeout cancellation against the final project publication.
+/// A timeout may return immediately while capture/precommit work is still
+/// running, but once the worker owns `COMMITTING` the async caller must await
+/// and report the real publication result.
+#[derive(Debug, Default)]
+struct ProjectCoverCommitGate {
+    phase: std::sync::atomic::AtomicU8,
+}
+
+impl ProjectCoverCommitGate {
+    fn enter_precommit(&self) -> bool {
+        self.phase
+            .compare_exchange(
+                COVER_SAVE_CAPTURING,
+                COVER_SAVE_PRECOMMIT,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn begin_commit(&self) -> bool {
+        self.phase
+            .compare_exchange(
+                COVER_SAVE_PRECOMMIT,
+                COVER_SAVE_COMMITTING,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    /// Returns `true` only when timeout won before publication began.
+    fn cancel_before_commit(&self) -> bool {
+        loop {
+            let phase = self.phase.load(std::sync::atomic::Ordering::Acquire);
+            match phase {
+                COVER_SAVE_CAPTURING | COVER_SAVE_PRECOMMIT => {
+                    if self
+                        .phase
+                        .compare_exchange(
+                            phase,
+                            COVER_SAVE_CANCELLED,
+                            std::sync::atomic::Ordering::AcqRel,
+                            std::sync::atomic::Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        return true;
+                    }
+                }
+                COVER_SAVE_COMMITTING => return false,
+                COVER_SAVE_CANCELLED => return true,
+                _ => unreachable!("invalid project cover commit phase"),
+            }
+        }
+    }
+}
+
+async fn await_project_cover_save_worker(
+    operation: &'static str,
+    timeout: std::time::Duration,
+    cancel: opentake_media::MediaCancelToken,
+    gate: std::sync::Arc<ProjectCoverCommitGate>,
+    mut task: tauri::async_runtime::JoinHandle<Result<String, CmdError>>,
+) -> Result<String, CmdError> {
+    match tokio::time::timeout(timeout, &mut task).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => Err(internal_error(format!("{operation} task failed: {error}"))),
+        Err(_) => {
+            cancel.cancel();
+            if gate.cancel_before_commit() {
+                Err(internal_error(format!(
+                    "{operation} timed out after {timeout:?}"
+                )))
+            } else {
+                match task.await {
+                    Ok(result) => result,
+                    Err(error) => Err(internal_error(format!(
+                        "{operation} task failed after commit began: {error}"
+                    ))),
+                }
+            }
+        }
+    }
+}
+
 pub(crate) async fn save_project_with_composite_cover<R: tauri::Runtime>(
     app: AppHandle<R>,
     path: Option<String>,
@@ -605,6 +697,8 @@ pub(crate) async fn save_project_with_composite_cover<R: tauri::Runtime>(
     }
     let cancel = opentake_media::MediaCancelToken::new();
     let worker_cancel = cancel.clone();
+    let gate = std::sync::Arc::new(ProjectCoverCommitGate::default());
+    let worker_gate = gate.clone();
     let deadline = std::time::Instant::now() + PROJECT_COVER_SAVE_TIMEOUT;
     let task = tauri::async_runtime::spawn_blocking(move || {
         let admission = app.state::<crate::updater::InstallAdmissionGate>();
@@ -621,18 +715,17 @@ pub(crate) async fn save_project_with_composite_cover<R: tauri::Runtime>(
             expected_project_path,
             &worker_cancel,
             deadline,
+            &worker_gate,
         )
     });
-    match tokio::time::timeout(PROJECT_COVER_SAVE_TIMEOUT, task).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(error)) => Err(internal_error(format!("project save task failed: {error}"))),
-        Err(_) => {
-            cancel.cancel();
-            Err(internal_error(format!(
-                "project save timed out after {PROJECT_COVER_SAVE_TIMEOUT:?}"
-            )))
-        }
-    }
+    await_project_cover_save_worker(
+        "project save",
+        PROJECT_COVER_SAVE_TIMEOUT,
+        cancel,
+        gate,
+        task,
+    )
+    .await
 }
 
 /// CloseRequested parity entry point. It snapshots the current identity once
@@ -663,13 +756,16 @@ fn save_project_with_composite_cover_blocking<R: tauri::Runtime>(
     expected_project_path: Option<String>,
     cancel: &opentake_media::MediaCancelToken,
     deadline: std::time::Instant,
+    gate: &ProjectCoverCommitGate,
 ) -> Result<String, CmdError> {
-    project_save_for_project_with_checkpoint(
+    project_save_for_project_with_commit_gate(
         core,
         path,
         expected_project_epoch,
         expected_project_path,
         |snapshot| capture_composite_project_thumbnail(app, core, snapshot, render, cancel),
+        gate,
+        || {},
         || !cancel.is_cancelled() && std::time::Instant::now() < deadline,
     )
 }
@@ -780,12 +876,37 @@ fn project_save_for_project(
     )
 }
 
+#[cfg(test)]
 fn project_save_for_project_with_checkpoint(
     core: &AppCore,
     path: Option<String>,
     expected_project_epoch: u64,
     expected_project_path: Option<String>,
     capture_thumbnail: impl FnOnce(&opentake_core::ProjectRuntimeSnapshot) -> ProjectCoverCapture,
+    can_commit: impl FnOnce() -> bool,
+) -> Result<String, CmdError> {
+    let gate = ProjectCoverCommitGate::default();
+    project_save_for_project_with_commit_gate(
+        core,
+        path,
+        expected_project_epoch,
+        expected_project_path,
+        capture_thumbnail,
+        &gate,
+        || {},
+        can_commit,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn project_save_for_project_with_commit_gate(
+    core: &AppCore,
+    path: Option<String>,
+    expected_project_epoch: u64,
+    expected_project_path: Option<String>,
+    capture_thumbnail: impl FnOnce(&opentake_core::ProjectRuntimeSnapshot) -> ProjectCoverCapture,
+    gate: &ProjectCoverCommitGate,
+    before_publication: impl FnOnce(),
     can_commit: impl FnOnce() -> bool,
 ) -> Result<String, CmdError> {
     let snapshot = core.runtime_snapshot();
@@ -800,13 +921,21 @@ fn project_save_for_project_with_checkpoint(
         ProjectCoverCapture::NoVisibleContent => opentake_project::ThumbnailUpdate::Remove,
         ProjectCoverCapture::CaptureFailed => opentake_project::ThumbnailUpdate::Preserve,
     };
+    if !gate.enter_precommit() {
+        return Err(internal_error(
+            "project cover save was cancelled before precommit",
+        ));
+    }
     let target = path.map(std::path::PathBuf::from);
     core.save_project_with_thumbnail_update_for_project_if(
         expected_project_epoch,
         expected_project_path.as_deref().map(std::path::Path::new),
         target,
         thumbnail,
-        can_commit,
+        || {
+            before_publication();
+            can_commit() && gate.begin_commit()
+        },
     )
     .map(|p| p.to_string_lossy().into_owned())
     .map_err(CmdError::from)
@@ -2228,10 +2357,11 @@ impl KeyframeValueDto {
 #[cfg(test)]
 mod project_open_async_tests {
     use super::{
-        capture_composite_project_thumbnail, prepare_saved_project_off_thread,
-        project_save_for_project, project_save_for_project_with_checkpoint,
+        await_project_cover_save_worker, capture_composite_project_thumbnail, internal_error,
+        prepare_saved_project_off_thread, project_save_for_project,
+        project_save_for_project_with_checkpoint, project_save_for_project_with_commit_gate,
         run_blocking_with_timeout, save_current_project_with_composite_cover, ProjectCoverCapture,
-        ProjectLifecycleCoordinator,
+        ProjectCoverCommitGate, ProjectLifecycleCoordinator,
     };
     use opentake_core::core::PreparedProjectOpen;
     use opentake_core::AppCore;
@@ -2605,7 +2735,7 @@ mod project_open_async_tests {
         let bundle = fixture.path().join("KeepCover.opentake");
         let previous = jpeg_bytes([20, 40, 80]);
         let mut project = opentake_project::Project::new(&bundle);
-        project.thumbnail = opentake_project::ThumbnailUpdate::Replace(previous.clone());
+        project.thumbnail = Some(previous.clone());
         project.save().expect("save prior cover fixture");
         let core = AppCore::new();
         core.open_project(&bundle).expect("open fixture");
@@ -2631,7 +2761,7 @@ mod project_open_async_tests {
         let fixture = tempfile::tempdir().expect("fixture tempdir");
         let bundle = fixture.path().join("EmptyCover.opentake");
         let mut project = opentake_project::Project::new(&bundle);
-        project.thumbnail = opentake_project::ThumbnailUpdate::Replace(b"not a jpeg".to_vec());
+        project.thumbnail = Some(b"not a jpeg".to_vec());
         project.save().expect("save invalid prior fixture");
         let core = AppCore::new();
         core.open_project(&bundle).expect("open fixture");
@@ -2655,7 +2785,7 @@ mod project_open_async_tests {
         let bundle = fixture.path().join("Cancelled.opentake");
         let previous = jpeg_bytes([11, 22, 33]);
         let mut project = opentake_project::Project::new(&bundle);
-        project.thumbnail = opentake_project::ThumbnailUpdate::Replace(previous.clone());
+        project.thumbnail = Some(previous.clone());
         project.save().expect("save prior cover");
         let core = AppCore::new();
         core.open_project(&bundle).expect("open fixture");
@@ -2676,6 +2806,106 @@ mod project_open_async_tests {
             std::fs::read(bundle.join("thumbnail.jpg")).expect("prior cover remains"),
             previous
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn timed_out_cover_precommit_barrier_prevents_post_response_publication() {
+        let fixture = tempfile::tempdir().expect("timeout fixture");
+        let bundle = fixture.path().join("TimedOut.opentake");
+        let previous = jpeg_bytes([12, 24, 48]);
+        let replacement = jpeg_bytes([220, 110, 55]);
+        let mut project = opentake_project::Project::new(&bundle);
+        project.thumbnail = Some(previous.clone());
+        project.save().expect("save prior cover");
+        let core = AppCore::new();
+        core.open_project(&bundle).expect("open fixture");
+        let snapshot = core.runtime_snapshot();
+        let gate = std::sync::Arc::new(ProjectCoverCommitGate::default());
+        let cancel = opentake_media::MediaCancelToken::new();
+        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let worker_gate = gate.clone();
+        let worker = tauri::async_runtime::spawn_blocking(move || {
+            let result = project_save_for_project_with_commit_gate(
+                &core,
+                None,
+                snapshot.project_epoch,
+                Some(bundle.to_string_lossy().into_owned()),
+                |_| ProjectCoverCapture::Captured(replacement),
+                &worker_gate,
+                move || {
+                    reached_tx.send(()).expect("signal precommit barrier");
+                    release_rx.recv().expect("release precommit barrier");
+                },
+                || true,
+            );
+            let _ = done_tx.send(());
+            result
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), reached_rx)
+            .await
+            .expect("worker reaches the post-checkpoint barrier")
+            .expect("barrier sender remains live");
+        let error = await_project_cover_save_worker(
+            "project save",
+            Duration::from_millis(10),
+            cancel,
+            gate,
+            worker,
+        )
+        .await
+        .expect_err("precommit timeout returns without publishing");
+
+        assert_eq!(error.code, "internal");
+        assert!(error.message.contains("timed out"));
+        assert_eq!(
+            std::fs::read(fixture.path().join("TimedOut.opentake/thumbnail.jpg"))
+                .expect("cover remains at timeout response"),
+            previous
+        );
+
+        release_tx.send(()).expect("release detached worker");
+        tokio::time::timeout(Duration::from_secs(1), done_rx)
+            .await
+            .expect("cancelled worker finishes")
+            .expect("done sender remains live");
+        assert_eq!(
+            std::fs::read(fixture.path().join("TimedOut.opentake/thumbnail.jpg"))
+                .expect("cover remains after detached worker finishes"),
+            previous
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn timeout_waits_for_the_actual_result_once_cover_commit_begins() {
+        let gate = std::sync::Arc::new(ProjectCoverCommitGate::default());
+        assert!(gate.enter_precommit());
+        assert!(gate.begin_commit());
+        let cancel = opentake_media::MediaCancelToken::new();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let worker = tauri::async_runtime::spawn_blocking(move || {
+            release_rx.recv().expect("release committing worker");
+            Err(internal_error("actual publication failure"))
+        });
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            release_tx.send(()).expect("release after timeout");
+        });
+
+        let error = await_project_cover_save_worker(
+            "project save",
+            Duration::from_millis(10),
+            cancel,
+            gate,
+            worker,
+        )
+        .await
+        .expect_err("committing worker's real result wins over timeout");
+
+        assert_eq!(error.code, "internal");
+        assert_eq!(error.message, "actual publication failure");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2993,8 +3223,10 @@ mod project_open_async_tests {
         let mut text_clip = Clip::new("text", "", 20, 20);
         text_clip.media_type = ClipType::Text;
         text_clip.text_content = Some("Composite".into());
-        let mut text_style = TextStyle::default();
-        text_style.background = Fill::new(true, Rgba::new(0.8, 0.1, 0.8, 1.0));
+        let text_style = TextStyle {
+            background: Fill::new(true, Rgba::new(0.8, 0.1, 0.8, 1.0)),
+            ..TextStyle::default()
+        };
         text_clip.text_style = Some(text_style);
         text_clip.transform = Transform::from_center(Point { x: 0.28, y: 0.5 }, 0.4, 0.2);
         let mut text_track = Track::new("text", ClipType::Text);

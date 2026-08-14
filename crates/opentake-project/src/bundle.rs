@@ -97,7 +97,7 @@ impl ProjectCompatibility {
     }
 }
 
-/// Requested mutation for the optional project cover.
+/// Requested mutation for the optional project cover in an explicit save.
 ///
 /// `Preserve` is the compatibility/default behavior for ordinary saves,
 /// `Replace` commits newly captured JPEG bytes, and `Remove` represents the
@@ -129,8 +129,9 @@ pub struct Project {
     /// The generation log (`generation-log.json`). `None` when the file was
     /// absent or failed to parse; the latter also makes compatibility read-only.
     pub generation_log: Option<GenerationLog>,
-    /// Cover mutation to apply on the next save.
-    pub thumbnail: ThumbnailUpdate,
+    /// Optional cover bytes to write on the next save. `None` preserves an
+    /// existing on-disk cover, matching the original public API.
+    pub thumbnail: Option<Vec<u8>>,
     compatibility: ProjectCompatibility,
 }
 
@@ -150,7 +151,7 @@ impl Project {
             timeline: Timeline::new(),
             manifest: MediaManifest::new(),
             generation_log: None,
-            thumbnail: ThumbnailUpdate::Preserve,
+            thumbnail: None,
             compatibility,
         }
     }
@@ -293,7 +294,7 @@ impl Project {
             timeline,
             manifest,
             generation_log,
-            thumbnail: ThumbnailUpdate::Preserve,
+            thumbnail: None,
             compatibility,
         })
     }
@@ -350,6 +351,18 @@ impl Project {
         EncodedProject::prepare(self)?.write_to(root)
     }
 
+    /// Persist this snapshot with an explicit optional-cover mutation.
+    ///
+    /// This additive API keeps [`Self::thumbnail`] source-compatible while
+    /// allowing authoritative callers to distinguish preserve from removal.
+    pub fn save_to_root_with_thumbnail_update(
+        &self,
+        root: &ProjectRoot,
+        thumbnail: ThumbnailUpdate,
+    ) -> Result<()> {
+        EncodedProject::prepare_with_thumbnail_update(self, thumbnail)?.write_to(root)
+    }
+
     /// Publish a complete fresh sibling bundle and return the exact root that
     /// became visible. Sessions adopt this retained authority only after the
     /// directory publication commit succeeds.
@@ -358,13 +371,31 @@ impl Project {
         bundle: impl AsRef<Path>,
         media_source: Option<&ProjectRoot>,
     ) -> Result<ProjectRoot> {
-        let encoded = EncodedProject::prepare(self)?;
+        self.publish_complete_to_with_thumbnail_update(
+            bundle,
+            media_source,
+            self.thumbnail
+                .clone()
+                .map_or(ThumbnailUpdate::Preserve, ThumbnailUpdate::Replace),
+        )
+    }
+
+    /// Publish a complete fresh sibling with an explicit optional-cover
+    /// mutation while retaining all other bundle components.
+    pub fn publish_complete_to_with_thumbnail_update(
+        &self,
+        bundle: impl AsRef<Path>,
+        media_source: Option<&ProjectRoot>,
+        thumbnail: ThumbnailUpdate,
+    ) -> Result<ProjectRoot> {
+        let preserve_thumbnail = matches!(thumbnail, ThumbnailUpdate::Preserve);
+        let encoded = EncodedProject::prepare_with_thumbnail_update(self, thumbnail)?;
         let publisher = ProjectRoot::begin_replace(bundle.as_ref())?;
         encoded.write_to(publisher.stage())?;
         if let Some(source) = media_source {
             source.copy_media_to(publisher.stage())?;
             source.copy_chat_sessions_to(publisher.stage())?;
-            if matches!(self.thumbnail, ThumbnailUpdate::Preserve) {
+            if preserve_thumbnail {
                 source.copy_thumbnail_to(publisher.stage())?;
             }
         }
@@ -384,12 +415,13 @@ impl Project {
         bundle: impl AsRef<Path>,
         media_source: ProjectRoot,
     ) -> Result<ProjectRoot> {
+        let preserve_thumbnail = self.thumbnail.is_none();
         let encoded = EncodedProject::prepare(self)?;
         let publisher = ProjectRoot::begin_replace(bundle.as_ref())?;
         encoded.write_to(publisher.stage())?;
         media_source.copy_media_to(publisher.stage())?;
         media_source.copy_chat_sessions_to(publisher.stage())?;
-        if matches!(self.thumbnail, ThumbnailUpdate::Preserve) {
+        if preserve_thumbnail {
             media_source.copy_thumbnail_to(publisher.stage())?;
         }
         drop(media_source);
@@ -411,6 +443,7 @@ impl Project {
         media_byte_size: u64,
         media: &mut dyn std::io::Read,
     ) -> Result<ProjectRoot> {
+        let preserve_thumbnail = self.thumbnail.is_none();
         let encoded = EncodedProject::prepare(self)?;
         let publisher = ProjectRoot::begin_replace(bundle.as_ref())?;
         encoded.write_to(publisher.stage())?;
@@ -419,7 +452,7 @@ impl Project {
             .stage()
             .write_new_media_leaf(media_leaf, media_byte_size, media)?;
         media_source.copy_chat_sessions_to(publisher.stage())?;
-        if matches!(self.thumbnail, ThumbnailUpdate::Preserve) {
+        if preserve_thumbnail {
             media_source.copy_thumbnail_to(publisher.stage())?;
         }
         drop(media_source);
@@ -447,6 +480,17 @@ struct EncodedProject {
 impl EncodedProject {
     /// Produce the exact byte snapshot before any destination path is created.
     fn prepare(project: &Project) -> Result<Self> {
+        let thumbnail = project
+            .thumbnail
+            .clone()
+            .map_or(ThumbnailUpdate::Preserve, ThumbnailUpdate::Replace);
+        Self::prepare_with_thumbnail_update(project, thumbnail)
+    }
+
+    fn prepare_with_thumbnail_update(
+        project: &Project,
+        thumbnail: ThumbnailUpdate,
+    ) -> Result<Self> {
         project.compatibility.ensure_writable()?;
         project
             .timeline
@@ -463,7 +507,7 @@ impl EncodedProject {
                 .as_ref()
                 .map(|log| encode_component(layout::GENERATION_LOG_FILE, log))
                 .transpose()?,
-            thumbnail: project.thumbnail.clone(),
+            thumbnail,
         })
     }
 
@@ -869,12 +913,14 @@ mod tests {
         let tmp = TmpDir::new("remove-thumbnail");
         let target = tmp.path().join("Project.opentake");
         let mut project = Project::new(&target);
-        project.thumbnail = ThumbnailUpdate::Replace(b"cover".to_vec());
+        project.thumbnail = Some(b"cover".to_vec());
         project.save().unwrap();
         fs::write(target.join("keep.bin"), b"keep").unwrap();
 
-        project.thumbnail = ThumbnailUpdate::Remove;
-        project.save().expect("thumbnail removal is a valid save");
+        let root = ProjectRoot::open(&target).unwrap();
+        project
+            .save_to_root_with_thumbnail_update(&root, ThumbnailUpdate::Remove)
+            .expect("thumbnail removal is a valid save");
 
         assert!(!target.join("thumbnail.jpg").exists());
         assert_eq!(fs::read(target.join("keep.bin")).unwrap(), b"keep");
