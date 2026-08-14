@@ -715,6 +715,134 @@ describe("AgentPanel project sessions", () => {
     expect(useChatStore.getState().takeHistoryResyncRequest()).toBeNull();
   });
 
+  it("installs an in-flight authoritative snapshot after the panel unmounts", async () => {
+    let resolveAuthoritative: (messages: Array<Record<string, unknown>>) => void = () => {};
+    apiMocks.chatHistoryAuthoritative.mockReturnValueOnce(new Promise((resolve) => {
+      resolveAuthoritative = resolve;
+    }));
+    await act(async () => {
+      root?.render(<AgentPanel />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      apiMocks.deltaHandler?.({
+        projectEpoch: 41,
+        projectPath: "/tmp/Current.opentake",
+        sessionId: "chat-restored",
+        messageId: "assistant-gap",
+        sequence: 0,
+        blockIndex: 0,
+        delta: "partial",
+      });
+      apiMocks.deltaHandler?.({
+        projectEpoch: 41,
+        projectPath: "/tmp/Current.opentake",
+        sessionId: "chat-restored",
+        messageId: "assistant-gap",
+        sequence: 2,
+        blockIndex: 0,
+        delta: "gap",
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(useChatStore.getState().resyncingSessionIds["chat-restored"]).toBe(true);
+    expect(container?.querySelector<HTMLTextAreaElement>("textarea")?.disabled).toBe(true);
+    expect(apiMocks.chatHistoryAuthoritative).toHaveBeenCalledOnce();
+
+    await act(async () => root?.unmount());
+    root = null;
+    const authoritative = [{
+      id: "final-after-unmount",
+      role: "assistant",
+      content: "terminal snapshot",
+      toolCalls: [],
+      blocks: [{ type: "text", text: "terminal snapshot" }],
+      createdAt: 9,
+    }];
+    await act(async () => {
+      resolveAuthoritative(authoritative);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(useChatStore.getState().sessionMessages["chat-restored"]).toEqual(authoritative);
+    expect(useChatStore.getState().resyncingSessionIds["chat-restored"]).toBeUndefined();
+  });
+
+  it("requeues a CAS-rejected re-sync and resumes it after remount", async () => {
+    let resolveStale: (messages: Array<Record<string, unknown>>) => void = () => {};
+    apiMocks.chatHistoryAuthoritative.mockReturnValueOnce(new Promise((resolve) => {
+      resolveStale = resolve;
+    }));
+    await act(async () => {
+      root?.render(<AgentPanel />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      apiMocks.deltaHandler?.({
+        projectEpoch: 41,
+        projectPath: "/tmp/Current.opentake",
+        sessionId: "chat-restored",
+        messageId: "assistant-gap",
+        sequence: 0,
+        blockIndex: 0,
+        delta: "partial",
+      });
+      apiMocks.deltaHandler?.({
+        projectEpoch: 41,
+        projectPath: "/tmp/Current.opentake",
+        sessionId: "chat-restored",
+        messageId: "assistant-gap",
+        sequence: 2,
+        blockIndex: 0,
+        delta: "gap",
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => root?.unmount());
+    root = null;
+    useChatStore.getState().beginMessage("chat-restored", "assistant-newer");
+    await act(async () => {
+      resolveStale([{
+        id: "stale",
+        role: "assistant",
+        content: "stale snapshot",
+        toolCalls: [],
+        blocks: [{ type: "text", text: "stale snapshot" }],
+        createdAt: 8,
+      }]);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(useChatStore.getState().historyResyncRequests["chat-restored"]).toBeDefined();
+
+    const final = [{
+      id: "authoritative-newer",
+      role: "assistant",
+      content: "new terminal snapshot",
+      toolCalls: [],
+      blocks: [{ type: "text", text: "new terminal snapshot" }],
+      createdAt: 10,
+    }];
+    apiMocks.chatHistoryAuthoritative.mockResolvedValueOnce(final);
+    apiMocks.chatSessions.mockReturnValueOnce(new Promise(() => {}));
+    root = createRoot(container!);
+    await act(async () => {
+      root?.render(<AgentPanel />);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(apiMocks.chatHistoryAuthoritative).toHaveBeenCalledTimes(2);
+    expect(useChatStore.getState().sessionMessages["chat-restored"]).toEqual(final);
+    expect(useChatStore.getState().resyncingSessionIds["chat-restored"]).toBeUndefined();
+  });
+
   it("does not let a late startup snapshot overwrite a touched inactive session", async () => {
     let resolveSessions: (sessions: Array<Record<string, unknown>>) => void = () => {};
     apiMocks.chatSessions.mockReturnValueOnce(new Promise((resolve) => {

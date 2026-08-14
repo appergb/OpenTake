@@ -145,3 +145,58 @@ Review-fix scope additionally owns `src-tauri/src/chat.rs`,
 files. Concurrent editor audit artifacts were preserved and not staged.
 
 Review-fix commit target: `fix(agent): make conversation resync authoritative`
+
+## Review fix round 2 — exact-turn snapshots and resumable re-sync
+
+- Bound each authoritative request to the single `TurnCancel` owner observed at
+  request time. The owner now completes with an immutable clone of the durable
+  terminal history, so turn A returns its own snapshot even when turn B reserves
+  the same session before the waiting command resumes.
+- Made authoritative store installation independent of `AgentPanel` mount
+  lifetime. Project-generation and per-session-version CAS still protect the
+  write; rejected writes requeue the same poisoned session, and a remount
+  resumes the queued request without allowing the startup session list to clear
+  or overwrite it. The selected session composer stays disabled while re-sync
+  is active.
+- Split snapshot validation from the one-event ceiling: messages remain bounded
+  to 1 MiB, histories to 8 MiB per session, and session lists to 32 MiB / 256
+  sessions. Aggregate bytes are counted incrementally without canonicalizing a
+  whole project-sized response at once.
+- Integrated the deferred timeline-result gate needed by the empty-timeline
+  result path. The edit commits under the exact project identity lease, GPU
+  capture runs after that lease is released, and a final identity/cancellation
+  check discards any result captured across a project replacement. Capture
+  warnings remain non-transactional and never roll back the committed edit.
+
+Round 2 RED evidence was observed before production fixes:
+
+- The authoritative history regression timed out after turn A completed and
+  turn B registered, showing the old loop had rebound the request to B.
+- The unmount regression left no installed snapshot, the CAS rejection left no
+  retry request, and the selected composer remained enabled during poison.
+- A valid multi-message history above 1 MiB and a valid 256-session list were
+  rejected by the former event-sized decoder.
+- The blocking capture fixture showed Save As timing out while the old chat gate
+  retained its project identity read lease across GPU work.
+
+Round 2 GREEN verification on the integrated tree:
+
+- `pnpm -C web exec vitest run src/components/agent/AgentPanel.persistence.test.tsx`
+  — 21/21 passed.
+- `pnpm -C web exec vitest run src/store/chatStore.test.ts`
+  — 36/36 passed.
+- `pnpm -C web test` — 144 files and 1317/1317 tests passed.
+- `cargo test -p opentake-tauri --lib chat::tests` — 24/24 passed,
+  including exact-turn ownership and the deferred-capture project transition.
+- `cargo clippy -p opentake-tauri --lib -- -D warnings` passed.
+- `cargo build -p opentake-tauri` passed.
+- `pnpm -C web build` passed (`tsc -b` and Vite production build).
+- `git diff --check` passed for all owned round 2 files.
+
+`cargo test --workspace` advanced through the Agent, core, domain, media, and
+motion unit suites before the live Chromium 4K smoke timed out after 180 seconds;
+the two later Chromium cases then reported the shared gate as poisoned. These
+three failures are confined to `opentake-motion/tests/chromium.rs` and do not
+exercise the Task 3 chat/Web changes.
+
+Round 2 commit target: `fix(agent): bind resync to exact turn snapshot`

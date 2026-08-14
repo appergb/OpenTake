@@ -107,6 +107,10 @@ interface ChatStoreState {
     reason: ChatHistoryResyncReason,
   ) => void;
   takeHistoryResyncRequest: () => ChatHistoryResyncRequest | null;
+  rescheduleHistoryResync: (
+    request: ChatHistoryResyncRequest,
+    projectGeneration: number,
+  ) => void;
   setMessages: (messages: ChatMessage[]) => void;
   setMessagesForSession: (sessionId: string, messages: ChatMessage[]) => void;
   installSessionSnapshot: (
@@ -736,6 +740,24 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     });
     return request;
   },
+
+  rescheduleHistoryResync: (request, projectGeneration) => set((state) => {
+    if (
+      state.projectGeneration !== projectGeneration ||
+      !state.resyncingSessionIds[request.sessionId] ||
+      state.deletedSessionIds[request.sessionId]
+    ) {
+      return state;
+    }
+    return reconcile({
+      ...state,
+      historyResyncRequests: {
+        ...state.historyResyncRequests,
+        [request.sessionId]: request,
+      },
+      resyncSessionOrder: touch(state.resyncSessionOrder, request.sessionId),
+    });
+  }),
 
   setMessages: (messages) => get().setMessagesForSession(get().sessionId, messages),
 

@@ -61,7 +61,11 @@ export function AgentPanel() {
   const finalize = useChatStore((state) => state.finalize);
   const requestHistoryResync = useChatStore((state) => state.requestHistoryResync);
   const takeHistoryResyncRequest = useChatStore((state) => state.takeHistoryResyncRequest);
+  const rescheduleHistoryResync = useChatStore((state) => state.rescheduleHistoryResync);
   const historyResyncRequests = useChatStore((state) => state.historyResyncRequests);
+  const selectedSessionResyncing = useChatStore(
+    (state) => state.resyncingSessionIds[state.sessionId] === true,
+  );
   const setMessagesForSession = useChatStore((state) => state.setMessagesForSession);
   const installSessionSnapshot = useChatStore((state) => state.installSessionSnapshot);
   const deleteSession = useChatStore((state) => state.deleteSession);
@@ -79,7 +83,8 @@ export function AgentPanel() {
   const tabMutationRef = useRef<Promise<void>>(Promise.resolve());
   const scrollRef = useRef<HTMLDivElement>(null);
   const mountedRef = useRef(true);
-  const interactionLocked = streaming || pendingSessionId === sessionId;
+  const turnLocked = streaming || pendingSessionId === sessionId;
+  const interactionLocked = turnLocked || selectedSessionResyncing;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -213,6 +218,16 @@ export function AgentPanel() {
     const loadingSessionVersion = chat.sessionVersions[request.sessionId] ?? 0;
     void chatHistoryAuthoritative(request.sessionId, loadingEpoch, loadingPath)
       .then((history) => {
+        const installed = installSessionSnapshot(
+          request.sessionId,
+          history,
+          loadingGeneration,
+          loadingSessionVersion,
+        );
+        if (!installed) {
+          rescheduleHistoryResync(request, loadingGeneration);
+          return;
+        }
         const project = useProjectStore.getState();
         if (
           !mountedRef.current ||
@@ -221,13 +236,6 @@ export function AgentPanel() {
         ) {
           return;
         }
-        const installed = installSessionSnapshot(
-          request.sessionId,
-          history,
-          loadingGeneration,
-          loadingSessionVersion,
-        );
-        if (!installed) return;
         updateSessions((current) => current.map((session) =>
           session.id === request.sessionId ? { ...session, messages: history } : session,
         ));
@@ -238,6 +246,7 @@ export function AgentPanel() {
     installSessionSnapshot,
     projectEpoch,
     projectPath,
+    rescheduleHistoryResync,
     takeHistoryResyncRequest,
   ]);
 
@@ -276,12 +285,14 @@ export function AgentPanel() {
         }
         const openSessions = projectSessions.filter((session) => session.isOpen !== false);
         const mergedSessions = openSessions.map((session) => {
-          installSessionSnapshot(
-            session.id,
-            session.messages,
-            loadingGeneration,
-            loadingSessionVersions[session.id] ?? 0,
-          );
+          if (!useChatStore.getState().resyncingSessionIds[session.id]) {
+            installSessionSnapshot(
+              session.id,
+              session.messages,
+              loadingGeneration,
+              loadingSessionVersions[session.id] ?? 0,
+            );
+          }
           return {
             ...session,
             messages: useChatStore.getState().sessionMessages[session.id] ?? session.messages,
@@ -673,7 +684,7 @@ export function AgentPanel() {
             opacity: !isTauri ? 0.6 : 1,
           }}
         />
-        {interactionLocked ? (
+        {turnLocked ? (
           <button
             type="button"
             onClick={cancel}
@@ -688,14 +699,14 @@ export function AgentPanel() {
           <button
             type="button"
             onClick={() => void send()}
-            disabled={!isTauri || !input.trim()}
+            disabled={!isTauri || interactionLocked || !input.trim()}
             title={t("agent.send")}
             aria-label={t("agent.send")}
             className="agent-composer__action"
             style={{
               ...iconButtonStyle("var(--accent-primary)", "#111"),
-              opacity: isTauri && input.trim() ? 1 : 0.4,
-              cursor: isTauri && input.trim() ? "pointer" : "not-allowed",
+              opacity: isTauri && !interactionLocked && input.trim() ? 1 : 0.4,
+              cursor: isTauri && !interactionLocked && input.trim() ? "pointer" : "not-allowed",
             }}
           >
             <Send size={14} />

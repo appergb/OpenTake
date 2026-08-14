@@ -75,7 +75,13 @@ struct TurnCancel {
     requested: Arc<AtomicBool>,
     media: opentake_media::MediaCancelToken,
     phase: Mutex<TurnPhase>,
-    terminal: tokio::sync::watch::Sender<bool>,
+    completion: tokio::sync::watch::Sender<TurnCompletion>,
+}
+
+#[derive(Clone, Debug)]
+enum TurnCompletion {
+    Pending,
+    Terminal(Result<Vec<ChatMessage>, String>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,12 +93,12 @@ enum TurnPhase {
 
 impl TurnCancel {
     fn new() -> Self {
-        let (terminal, _) = tokio::sync::watch::channel(false);
+        let (completion, _) = tokio::sync::watch::channel(TurnCompletion::Pending);
         Self {
             requested: Arc::new(AtomicBool::new(false)),
             media: opentake_media::MediaCancelToken::new(),
             phase: Mutex::new(TurnPhase::Running),
-            terminal,
+            completion,
         }
     }
 
@@ -121,18 +127,19 @@ impl TurnCancel {
         true
     }
 
-    fn mark_terminal(&self) {
-        self.terminal.send_replace(true);
+    fn complete(&self, result: Result<Vec<ChatMessage>, String>) {
+        self.completion
+            .send_replace(TurnCompletion::Terminal(result));
     }
 
-    async fn wait_terminal(&self) {
-        let mut terminal = self.terminal.subscribe();
-        if *terminal.borrow() {
-            return;
-        }
-        while terminal.changed().await.is_ok() {
-            if *terminal.borrow() {
-                return;
+    async fn wait_completion(&self) -> Result<Vec<ChatMessage>, String> {
+        let mut completion = self.completion.subscribe();
+        loop {
+            if let TurnCompletion::Terminal(result) = &*completion.borrow() {
+                return result.clone();
+            }
+            if completion.changed().await.is_err() {
+                return Err("Agent turn completion channel closed".into());
             }
         }
     }
@@ -339,7 +346,7 @@ impl ChatState {
                         && project_dir.as_ref() == Some(&key.project_dir);
                     if !current {
                         cancel.request();
-                        cancel.mark_terminal();
+                        cancel.complete(Err("stale Agent chat project identity".into()));
                     }
                     current
                 });
@@ -544,12 +551,24 @@ impl ChatState {
     fn release_turn(&self, key: &SessionKey) {
         if let Ok(mut turns) = self.turns.lock() {
             if let Some(owner) = turns.running.remove(key) {
-                owner.mark_terminal();
+                owner.complete(Err(
+                    "Agent turn ended without a durable terminal snapshot".into()
+                ));
             }
         }
     }
 
     fn complete_turn(&self, key: &SessionKey, owner: &Arc<TurnCancel>) {
+        let terminal = self
+            .sessions
+            .lock()
+            .map_err(|error| error.to_string())
+            .and_then(|sessions| {
+                sessions
+                    .get(key)
+                    .map(|session| session.messages.clone())
+                    .ok_or_else(|| "Agent turn completed without persisted history".to_string())
+            });
         if let Ok(mut turns) = self.turns.lock() {
             let owns_turn = turns
                 .running
@@ -557,7 +576,7 @@ impl ChatState {
                 .is_some_and(|registered| Arc::ptr_eq(registered, owner));
             if owns_turn {
                 turns.running.remove(key);
-                owner.mark_terminal();
+                owner.complete(terminal);
             }
         }
     }
@@ -570,14 +589,13 @@ impl ChatState {
     ) -> Result<Vec<ChatMessage>, String> {
         let project = self.project_context_for(expected_project_epoch, expected_project_path)?;
         let key = project.key(session_id);
-        loop {
-            match self.authoritative_history_state(&project, &key, session_id)? {
-                AuthoritativeHistoryState::Wait(owner) => {
-                    owner.wait_terminal().await;
-                    self.ensure_project_context(&project)?;
-                }
-                AuthoritativeHistoryState::Ready(messages) => return Ok(messages),
+        match self.authoritative_history_state(&project, &key, session_id)? {
+            AuthoritativeHistoryState::Wait(owner) => {
+                let messages = owner.wait_completion().await?;
+                self.ensure_project_context(&project)?;
+                Ok(messages)
             }
+            AuthoritativeHistoryState::Ready(messages) => Ok(messages),
         }
     }
 
@@ -872,9 +890,17 @@ impl ChatTurnGate for ProjectTurnGate {
         name: &str,
         args: serde_json::Value,
     ) -> Option<ToolResult> {
-        self.with_current_project(|| {
-            dispatcher.dispatch_cancellable_scoped(&self.undo_scope, name, args, &self.cancel.media)
-        })
+        let receipt = self.with_current_project(|| {
+            dispatcher.dispatch_cancellable_scoped_deferred(
+                &self.undo_scope,
+                name,
+                args,
+                &self.cancel.media,
+            )
+        })?;
+        let result = dispatcher.finish_dispatch(receipt, &self.cancel.media);
+        self.with_current_project(|| ())?;
+        Some(result)
     }
 
     fn request_cancel(&self) {
@@ -1224,7 +1250,7 @@ pub async fn chat_send(
                 message,
             });
         }
-        state_clone.release_turn(&session_key);
+        state_clone.complete_turn(&session_key, &turn_owner);
     });
 
     Ok(())
@@ -1256,11 +1282,7 @@ pub async fn chat_history_authoritative(
     state
         .inner()
         .clone()
-        .authoritative_project_history(
-            expected_project_epoch,
-            &expected_project_path,
-            &session_id,
-        )
+        .authoritative_project_history(expected_project_epoch, &expected_project_path, &session_id)
         .await
 }
 
@@ -1342,6 +1364,44 @@ mod tests {
                 transcript: None,
                 transcription_unavailable: false,
             })
+        }
+    }
+
+    struct BlockingTimelineResultBridge {
+        capture_started: std::sync::mpsc::Sender<()>,
+        release_capture: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    impl opentake_agent::mcp::media_bridge::MediaBridge for BlockingTimelineResultBridge {
+        fn visible_timeline_clip_count(
+            &self,
+            timeline: &opentake_domain::Timeline,
+        ) -> Result<usize, opentake_agent::mcp::media_bridge::BridgeError> {
+            Ok(timeline
+                .tracks
+                .iter()
+                .flat_map(|track| &track.clips)
+                .filter(|clip| clip.duration_frames > 0)
+                .count())
+        }
+
+        fn capture_timeline_result(
+            &self,
+            _request: &opentake_agent::mcp::media_bridge::TimelineResultCaptureRequest,
+        ) -> Result<
+            opentake_agent::tools::result::Block,
+            opentake_agent::mcp::media_bridge::BridgeError,
+        > {
+            self.capture_started.send(()).unwrap();
+            self.release_capture
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("test must release the blocked timeline capture");
+            Ok(opentake_agent::tools::result::Block::image(
+                "iVBORw0KGgo=",
+                "image/png",
+            ))
         }
     }
 
@@ -2016,6 +2076,94 @@ mod tests {
     }
 
     #[test]
+    fn project_turn_gate_releases_identity_lease_before_timeline_result_capture() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = AppCore::new();
+        core.save_project(Some(temp.path().join("A.opentake")))
+            .unwrap();
+        let state = ChatState::new(
+            core.clone(),
+            temp.path().join("no-workflows"),
+            temp.path().join("chat-cache"),
+            temp.path().join("chat-models"),
+        );
+        let cancel = Arc::new(TurnCancel::new());
+        let gate = ProjectTurnGate {
+            project: state.project_context().unwrap(),
+            state,
+            cancel,
+            undo_scope: "test:deferred-timeline-capture".into(),
+        };
+        let handle: Arc<dyn CoreHandle> = Arc::new(AppCoreHandle::new(core.clone()));
+        let registry = Arc::new(RwLock::new(crate::mcp::build_registry(
+            &temp.path().join("no-workflows"),
+        )));
+        let (capture_started_tx, capture_started_rx) = std::sync::mpsc::channel();
+        let (release_capture_tx, release_capture_rx) = std::sync::mpsc::channel();
+        let dispatcher = Dispatcher::with_bridge(
+            handle,
+            registry,
+            Some(Arc::new(BlockingTimelineResultBridge {
+                capture_started: capture_started_tx,
+                release_capture: Mutex::new(release_capture_rx),
+            })),
+        );
+
+        let add_result = dispatcher.dispatch(
+            "add_texts",
+            serde_json::json!({
+                "entries": [
+                    {"startFrame": 0, "durationFrames": 30, "content": "visible"}
+                ]
+            }),
+        );
+        assert!(!add_result.is_error, "{}", add_result.text_joined());
+        let clip_id = dispatcher.timeline().tracks[0].clips[0].id.clone();
+
+        let dispatch_thread = std::thread::spawn(move || {
+            gate.dispatch(
+                &dispatcher,
+                "remove_clips",
+                serde_json::json!({"clipIds": [clip_id]}),
+            )
+        });
+        capture_started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("remove-last-clip should start timeline capture");
+
+        let replacement_bundle = temp.path().join("B.opentake");
+        let (transitioned_tx, transitioned_rx) = std::sync::mpsc::channel();
+        let transition_core = core.clone();
+        let transition_thread = std::thread::spawn(move || {
+            let result = transition_core.save_project(Some(replacement_bundle));
+            transitioned_tx.send(result).unwrap();
+        });
+        let transition_during_capture =
+            transitioned_rx.recv_timeout(std::time::Duration::from_millis(250));
+        let transitioned_while_capture_blocked = transition_during_capture.is_ok();
+
+        release_capture_tx.send(()).unwrap();
+        let dispatch_result = dispatch_thread.join().unwrap();
+        let transition_result = match transition_during_capture {
+            Ok(result) => result,
+            Err(_) => transitioned_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("project transition should finish after capture is released"),
+        };
+        transition_thread.join().unwrap();
+        transition_result.unwrap();
+
+        assert!(
+            transitioned_while_capture_blocked,
+            "timeline capture must not hold the project identity workflow lease"
+        );
+        assert!(
+            dispatch_result.is_none(),
+            "a result captured for the replaced project must be discarded"
+        );
+    }
+
+    #[test]
     fn reserving_a_turn_is_atomic_per_project_session() {
         let temp = tempfile::tempdir().unwrap();
         let core = AppCore::new();
@@ -2244,13 +2392,15 @@ mod tests {
             .is_err(), "durable commit alone must not precede the terminal event");
 
             state.complete_turn(&key, &owner);
-            let messages = tokio::time::timeout(
-                std::time::Duration::from_secs(1),
-                history,
-            )
-            .await
-            .expect("authoritative history must wake after terminal completion")
-            .unwrap();
+            let next_owner = Arc::new(TurnCancel::new());
+            let _next_turn_admission = state
+                .reserve_turn(key.clone(), next_owner)
+                .expect("a new turn may start after the observed turn completes");
+            let result = tokio::time::timeout(std::time::Duration::from_secs(1), history).await;
+            state.release_turn(&key);
+            let messages = result
+                .expect("authoritative history must return the observed turn instead of waiting for its successor")
+                .unwrap();
             assert_eq!(messages.len(), 2);
             assert_eq!(messages[1].content, "final reply");
         });

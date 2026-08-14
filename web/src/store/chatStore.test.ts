@@ -208,6 +208,46 @@ describe("chatStore ordered session streams", () => {
     }])?.[0].messages).toEqual([valid]);
   });
 
+  it("accepts a multi-message history above the one-event ceiling but within one persisted session", () => {
+    const chunk = "a".repeat(320_000);
+    const history = [
+      assistantMessage("large-a", [{ type: "text", text: chunk }]),
+      assistantMessage("large-b", [{ type: "text", text: chunk }]),
+    ];
+
+    expect(decodeChatHistorySnapshot(history)).toEqual(history);
+  });
+
+  it("accepts up to 256 bounded project sessions and rejects backend storage overages", () => {
+    const small = assistantMessage("small", [{ type: "text", text: "safe" }]);
+    const sessions = Array.from({ length: 256 }, (_, index) => ({
+      id: `session-${index}`,
+      messages: [small],
+      createdAt: index,
+      isOpen: true,
+    }));
+    expect(decodeChatSessionsSnapshot(sessions)).toEqual(sessions);
+    expect(decodeChatSessionsSnapshot([
+      ...sessions,
+      { id: "session-256", messages: [small], createdAt: 256, isOpen: true },
+    ])).toBeNull();
+
+    const largeText = "\u0800".repeat(160_000);
+    const nearSessionLimit = Array.from({ length: 8 }, (_, index) =>
+      assistantMessage(`large-${index}`, [{ type: "text", text: largeText }]),
+    );
+    expect(decodeChatHistorySnapshot([
+      ...nearSessionLimit,
+      assistantMessage("large-overflow", [{ type: "text", text: largeText }]),
+    ])).toBeNull();
+    expect(decodeChatSessionsSnapshot(Array.from({ length: 5 }, (_, index) => ({
+      id: `large-session-${index}`,
+      messages: nearSessionLimit,
+      createdAt: index,
+      isOpen: true,
+    })))).toBeNull();
+  });
+
   it("keeps text, tool, and following text in authoritative sequence order", () => {
     const store = useChatStore.getState();
     store.beginMessage(sessionA, "message-a");
