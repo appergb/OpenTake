@@ -40,12 +40,13 @@ use opentake_agent::mcp::dispatch::Dispatcher;
 use opentake_agent::mcp::media_bridge::{
     BridgeError, ImportOutcome, ImportSource, InspectMediaRequest, InspectMediaResult,
     InspectResult, InspectedFrame, InspectedMediaFrame, MediaBridge, SearchCandidate,
-    SearchIndexState, SearchMediaResult, SearchSpokenHit, SearchVisualHit, TranscriptSource,
-    TranscriptSourceResult, IMPORT_BYTES_DECODED_MAX,
+    SearchIndexState, SearchMediaResult, SearchSpokenHit, SearchVisualHit,
+    TimelineResultCaptureRequest, TranscriptSource, TranscriptSourceResult,
+    IMPORT_BYTES_DECODED_MAX, TIMELINE_RESULT_IMAGE_BASE64_MAX,
 };
 use opentake_agent::mcp::server::{bind_ephemeral_gated, EphemeralMcpEndpoint, EphemeralMcpError};
 use opentake_agent::plugin::registry::PluginRegistry;
-use opentake_agent::tools::result::ToolResult;
+use opentake_agent::tools::result::{Block, ToolResult};
 use opentake_core::{
     importable_clip_type, AppCore, CoreError, DeferredCoreEvents, ProbedMedia,
     ProjectRuntimeSnapshot,
@@ -564,9 +565,27 @@ impl ChatTurnGate for LiveProjectMcpGate {
         args: serde_json::Value,
         request_cancel: &opentake_media::MediaCancelToken,
     ) -> Option<ToolResult> {
-        self.with_live_dispatch(request_cancel, || {
-            dispatcher.dispatch_cancellable(name, args, request_cancel)
-        })
+        let (expected_epoch, expected_dir, receipt) =
+            self.with_live_dispatch(request_cancel, || {
+                let snapshot = self.core.runtime_snapshot();
+                (
+                    snapshot.project_epoch,
+                    snapshot.project_dir,
+                    dispatcher.dispatch_cancellable_deferred(name, args, request_cancel),
+                )
+            })?;
+        // GPU work happens after `with_live_dispatch` releases the project
+        // identity workflow read lease.
+        let result = dispatcher.finish_dispatch(receipt, request_cancel);
+        let still_current = self.with_live_project(|| {
+            let snapshot = self.core.runtime_snapshot();
+            snapshot.project_epoch == expected_epoch && snapshot.project_dir == expected_dir
+        })?;
+        if !still_current || request_cancel.is_cancelled() {
+            request_cancel.cancel();
+            return None;
+        }
+        Some(result)
     }
 
     fn dispatch_cancellable_scoped(
@@ -577,9 +596,30 @@ impl ChatTurnGate for LiveProjectMcpGate {
         undo_scope: &str,
         request_cancel: &opentake_media::MediaCancelToken,
     ) -> Option<ToolResult> {
-        self.with_live_dispatch(request_cancel, || {
-            dispatcher.dispatch_cancellable_scoped(undo_scope, name, args, request_cancel)
-        })
+        let (expected_epoch, expected_dir, receipt) =
+            self.with_live_dispatch(request_cancel, || {
+                let snapshot = self.core.runtime_snapshot();
+                (
+                    snapshot.project_epoch,
+                    snapshot.project_dir,
+                    dispatcher.dispatch_cancellable_scoped_deferred(
+                        undo_scope,
+                        name,
+                        args,
+                        request_cancel,
+                    ),
+                )
+            })?;
+        let result = dispatcher.finish_dispatch(receipt, request_cancel);
+        let still_current = self.with_live_project(|| {
+            let snapshot = self.core.runtime_snapshot();
+            snapshot.project_epoch == expected_epoch && snapshot.project_dir == expected_dir
+        })?;
+        if !still_current || request_cancel.is_cancelled() {
+            request_cancel.cancel();
+            return None;
+        }
+        Some(result)
     }
 }
 
@@ -600,6 +640,9 @@ struct TauriMediaBridge {
     /// import go through this, so imported assets are cached exactly like the
     /// panel's. Built here (the engine is not `Clone`) from the same paths.
     engine: MediaEngine,
+    /// Dedicated compositor state for post-commit agent images. It is isolated
+    /// from UI preview scheduling while still reusing its GPU context per turn.
+    render: crate::render::RenderState,
 }
 
 struct RetainedExternalSource {
@@ -695,6 +738,7 @@ impl TauriMediaBridge {
         TauriMediaBridge {
             core,
             engine: MediaEngine::new(cache_root, models_dir),
+            render: crate::render::RenderState::new(),
         }
     }
 }
@@ -720,6 +764,91 @@ fn resolve_transcript_batch(
 }
 
 impl MediaBridge for TauriMediaBridge {
+    fn visible_timeline_clip_count(
+        &self,
+        timeline: &opentake_domain::Timeline,
+    ) -> Result<usize, BridgeError> {
+        crate::render::authoritative_visible_clip_count(timeline, &self.core.media())
+            .map_err(BridgeError::new)
+    }
+
+    fn capture_timeline_result(
+        &self,
+        request: &TimelineResultCaptureRequest,
+    ) -> Result<Block, BridgeError> {
+        let expected = request
+            .mutation
+            .committed_revision
+            .as_ref()
+            .ok_or_else(|| BridgeError::new("timeline result capture lacks a project revision"))?;
+        if request.mutation.visible_clip_count_before == 0
+            || request.mutation.visible_clip_count_after != 0
+        {
+            return Err(BridgeError::new(
+                "timeline result capture receipt is not a visible-to-empty transition",
+            ));
+        }
+
+        // Snapshot under the core's internal lock, then release it before GPU
+        // work. The complete identity and timeline are rechecked before bytes
+        // cross the bridge boundary.
+        let snapshot = self.core.runtime_snapshot();
+        if snapshot.project_epoch != expected.project_epoch
+            || snapshot.version != expected.timeline_version
+            || snapshot.project_dir != expected.project_dir
+            || snapshot.timeline != request.timeline
+        {
+            return Err(BridgeError::new(
+                "timeline result capture project revision was superseded",
+            ));
+        }
+        if crate::render::authoritative_visible_clip_count(&snapshot.timeline, &snapshot.media)
+            .map_err(BridgeError::new)?
+            != 0
+        {
+            return Err(BridgeError::new(
+                "timeline result capture snapshot is not empty",
+            ));
+        }
+
+        let input = crate::render::EmptyTimelineCanvasInput {
+            project_width: snapshot.timeline.width,
+            project_height: snapshot.timeline.height,
+            fps: snapshot.timeline.fps,
+            playhead_frame: crate::render::root_timeline_playhead(snapshot.project_epoch),
+        };
+        let cancel = opentake_media::MediaCancelToken::new();
+        let authority = crate::render::CompositeSourceAuthority::new(HashMap::new());
+        let rendered = crate::render::render_timeline_result_png(
+            &snapshot.timeline,
+            &snapshot.media,
+            &snapshot.project_dir,
+            &self.render,
+            input,
+            &cancel,
+            &authority,
+        )
+        .map_err(BridgeError::new)?;
+
+        let current = self.core.runtime_snapshot();
+        if current.project_epoch != expected.project_epoch
+            || current.version != expected.timeline_version
+            || current.project_dir != expected.project_dir
+            || current.timeline != request.timeline
+        {
+            return Err(BridgeError::new(
+                "timeline result capture project changed during rendering",
+            ));
+        }
+        let base64 = base64::engine::general_purpose::STANDARD.encode(rendered.bytes);
+        if base64.is_empty() || base64.len() > TIMELINE_RESULT_IMAGE_BASE64_MAX {
+            return Err(BridgeError::new(
+                "timeline result capture exceeded the response limit",
+            ));
+        }
+        Ok(Block::image(base64, rendered.media_type))
+    }
+
     fn inspect_media(
         &self,
         request: &InspectMediaRequest,
@@ -2561,6 +2690,7 @@ fn project_frame_time_secs(source_frame: i64, timeline_fps: i32) -> f64 {
 mod tests {
     use super::*;
     use opentake_agent::mcp::core_handle::{AppCoreHandle, CoreHandle};
+    use opentake_agent::mcp::media_bridge::TimelineMutationReceipt;
     use std::sync::Condvar;
 
     #[test]
@@ -2666,6 +2796,76 @@ mod tests {
             )
             .is_none());
         assert!(core.media().folders.is_empty());
+    }
+
+    #[test]
+    fn tauri_bridge_returns_bounded_real_png_for_current_empty_revision() {
+        let fixture = tempfile::tempdir().unwrap();
+        let core = AppCore::new();
+        core.save_project(Some(fixture.path().join("Empty.opentake")))
+            .unwrap();
+        let snapshot = core.runtime_snapshot();
+        let bridge = TauriMediaBridge::new(
+            core,
+            fixture.path().join("cache"),
+            fixture.path().join("models"),
+        );
+        let block = bridge
+            .capture_timeline_result(&TimelineResultCaptureRequest {
+                timeline: snapshot.timeline,
+                mutation: TimelineMutationReceipt {
+                    visible_clip_count_before: 1,
+                    visible_clip_count_after: 0,
+                    committed_revision: Some(opentake_agent::mcp::core_handle::CoreRevision {
+                        project_epoch: snapshot.project_epoch,
+                        project_dir: snapshot.project_dir,
+                        timeline_version: snapshot.version,
+                    }),
+                },
+            })
+            .expect("capture current empty timeline");
+
+        let Block::Image { base64, media_type } = block else {
+            panic!("timeline result must be an image block");
+        };
+        assert_eq!(media_type, "image/png");
+        assert!(base64.len() <= TIMELINE_RESULT_IMAGE_BASE64_MAX);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(base64)
+            .expect("decode returned image");
+        assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+    }
+
+    #[test]
+    fn tauri_bridge_rejects_stale_project_before_returning_image_bytes() {
+        let fixture = tempfile::tempdir().unwrap();
+        let core = AppCore::new();
+        core.save_project(Some(fixture.path().join("A.opentake")))
+            .unwrap();
+        let snapshot = core.runtime_snapshot();
+        let request = TimelineResultCaptureRequest {
+            timeline: snapshot.timeline,
+            mutation: TimelineMutationReceipt {
+                visible_clip_count_before: 1,
+                visible_clip_count_after: 0,
+                committed_revision: Some(opentake_agent::mcp::core_handle::CoreRevision {
+                    project_epoch: snapshot.project_epoch,
+                    project_dir: snapshot.project_dir,
+                    timeline_version: snapshot.version,
+                }),
+            },
+        };
+        core.save_project(Some(fixture.path().join("B.opentake")))
+            .unwrap();
+        let bridge = TauriMediaBridge::new(
+            core,
+            fixture.path().join("cache"),
+            fixture.path().join("models"),
+        );
+
+        bridge
+            .capture_timeline_result(&request)
+            .expect_err("stale project capture must fail closed");
     }
 
     #[test]

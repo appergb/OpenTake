@@ -26,7 +26,7 @@ use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -48,15 +48,63 @@ use opentake_render::gpu::compositor::{
 use opentake_render::gpu::texture::upload_rgba;
 use opentake_render::wgpu;
 use opentake_render::{
-    even, try_build_render_plan, Compositor, CosmicTextRasterizer, DecodedFrame, GpuLutTexture,
-    GpuTexture, RenderDevice, RenderSize, SourceMetrics, TextRasterRequest, TextRasterizer,
-    TextureCache, TextureResolver, TextureSource,
+    even, try_build_render_plan, Compositor, CosmicTextRasterizer, DecodedFrame, FramePlan,
+    GpuLutTexture, GpuTexture, LayerDraw, RenderDevice, RenderPlan, RenderSize, SourceMetrics,
+    TextRasterRequest, TextRasterizer, TextureCache, TextureResolver, TextureSource,
 };
 
 /// Cap (longest canvas side, px) for a composite when the caller passes no
 /// `max_size`. Keeps the PNG payload small for interactive scrubbing while still
 /// looking crisp in the preview pane.
 const DEFAULT_PREVIEW_CAP: u32 = 1280;
+
+/// Agent result images stay below both the chat display dimension and its
+/// 1 MiB base64 payload ceiling (768 KiB raw expands to exactly 1 MiB).
+pub(crate) const AGENT_TIMELINE_RESULT_MAX_DIMENSION: u32 = 640;
+pub(crate) const AGENT_TIMELINE_RESULT_PNG_BYTES_MAX: usize = 768 * 1024;
+const EMPTY_TIMELINE_BACKGROUND_RGBA: [u8; 4] = [22, 24, 29, 255];
+const EMPTY_TIMELINE_MARKER_RGBA: [u8; 4] = [174, 181, 195, 255];
+
+static ROOT_TIMELINE_PLAYHEAD: OnceLock<Mutex<Option<(u64, i32)>>> = OnceLock::new();
+
+fn record_root_timeline_playhead(project_epoch: u64, frame: i32) {
+    *ROOT_TIMELINE_PLAYHEAD
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((project_epoch, frame));
+}
+
+pub(crate) fn root_timeline_playhead(project_epoch: u64) -> i32 {
+    let guard = ROOT_TIMELINE_PLAYHEAD
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard
+        .as_ref()
+        .filter(|(epoch, _)| *epoch == project_epoch)
+        .map_or(0, |(_, frame)| *frame)
+}
+
+/// Explicit project-owned inputs for the semantic empty-timeline frame. The
+/// renderer rejects values that disagree with the committed timeline snapshot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EmptyTimelineCanvasInput {
+    pub project_width: i32,
+    pub project_height: i32,
+    pub fps: i32,
+    pub playhead_frame: i32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TimelineResultPng {
+    pub bytes: Vec<u8>,
+    pub media_type: &'static str,
+    pub width: u32,
+    pub height: u32,
+    pub playhead_frame: i32,
+    pub timecode: String,
+    pub empty_canvas: bool,
+}
 
 /// Per-frame texture cache size. Bounds VRAM during scrubbing; video frames are
 /// keyed per source-frame so adjacent scrub positions reuse nothing, but a small
@@ -966,6 +1014,14 @@ pub(crate) fn representative_timeline_frame(
     manifest: &opentake_domain::MediaManifest,
     max_size: u32,
 ) -> Result<Option<i32>, String> {
+    Ok(authoritative_render_plan(timeline, manifest, max_size)?.representative_frame(timeline))
+}
+
+fn authoritative_render_plan(
+    timeline: &Timeline,
+    manifest: &opentake_domain::MediaManifest,
+    max_size: u32,
+) -> Result<RenderPlan, String> {
     let mut sizes = HashMap::new();
     let mut straight_alpha = HashSet::new();
     for entry in &manifest.entries {
@@ -988,7 +1044,50 @@ pub(crate) fn representative_timeline_frame(
         },
     )
     .map_err(|error| format!("invalid timeline graph: {error}"))?;
-    Ok(plan.representative_frame(timeline))
+    Ok(plan)
+}
+
+/// Count meaningful visual clips through the authoritative flattened render
+/// plan. Each plan entry is evaluated in isolation so a transparent or
+/// degenerate clip is not made visible merely by a neighboring transition.
+pub(crate) fn authoritative_visible_clip_count(
+    timeline: &Timeline,
+    manifest: &opentake_domain::MediaManifest,
+) -> Result<usize, String> {
+    let plan = authoritative_render_plan(timeline, manifest, AGENT_TIMELINE_RESULT_MAX_DIMENSION)?;
+    let clip_count = plan
+        .clip_plans
+        .iter()
+        .filter(|clip| {
+            RenderPlan {
+                fps: plan.fps,
+                render_size: plan.render_size,
+                total_frames: plan.total_frames,
+                clip_plans: vec![(*clip).clone()],
+                text_plans: Vec::new(),
+                audio_clips: Vec::new(),
+            }
+            .representative_frame(timeline)
+            .is_some()
+        })
+        .count();
+    let text_count = plan
+        .text_plans
+        .iter()
+        .filter(|clip| {
+            RenderPlan {
+                fps: plan.fps,
+                render_size: plan.render_size,
+                total_frames: plan.total_frames,
+                clip_plans: Vec::new(),
+                text_plans: vec![(*clip).clone()],
+                audio_clips: Vec::new(),
+            }
+            .representative_frame(timeline)
+            .is_some()
+        })
+        .count();
+    Ok(clip_count + text_count)
 }
 
 /// Encode an RGBA composite as PNG bytes. Shared by the preview data-URL path
@@ -1012,6 +1111,239 @@ fn encode_png_data_url(frame: &DecodedFrame) -> Result<String, String> {
     let bytes = encode_png_bytes(frame)?;
     let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     Ok(format!("data:image/png;base64,{b64}"))
+}
+
+fn timeline_timecode(frame: i32, fps: i32) -> String {
+    let fps = fps.max(1);
+    let frame = frame.max(0);
+    let frames = frame % fps;
+    let total_seconds = frame / fps;
+    let seconds = total_seconds % 60;
+    let total_minutes = total_seconds / 60;
+    let minutes = total_minutes % 60;
+    let hours = total_minutes / 60;
+    format!("{hours:02}:{minutes:02}:{seconds:02}:{frames:02}")
+}
+
+fn paint_empty_timeline_overlay(size: RenderSize, timecode: &str) -> DecodedFrame {
+    let width = size.width as usize;
+    let height = size.height as usize;
+    let mut rgba = vec![0_u8; width.saturating_mul(height).saturating_mul(4)];
+    for pixel in rgba.chunks_exact_mut(4) {
+        pixel.copy_from_slice(&EMPTY_TIMELINE_BACKGROUND_RGBA);
+    }
+
+    let mut paint = |x: i32, y: i32| {
+        if x < 0 || y < 0 || x >= width as i32 || y >= height as i32 {
+            return;
+        }
+        let offset = (y as usize * width + x as usize) * 4;
+        rgba[offset..offset + 4].copy_from_slice(&EMPTY_TIMELINE_MARKER_RGBA);
+    };
+
+    // A language-neutral empty-set marker: outlined circle plus diagonal slash.
+    let center_x = width as i32 / 2;
+    let center_y = height as i32 * 2 / 5;
+    let radius = (width.min(height) as i32 / 9).max(3);
+    let thickness = (radius / 7).max(1);
+    for y in center_y - radius - thickness..=center_y + radius + thickness {
+        for x in center_x - radius - thickness..=center_x + radius + thickness {
+            let dx = x - center_x;
+            let dy = y - center_y;
+            let distance_squared = dx * dx + dy * dy;
+            let outer = radius + thickness;
+            let inner = (radius - thickness).max(0);
+            let on_ring = distance_squared <= outer * outer && distance_squared >= inner * inner;
+            let on_slash = (dx + dy).abs() <= thickness && dx.abs().max(dy.abs()) <= radius;
+            if on_ring || on_slash {
+                paint(x, y);
+            }
+        }
+    }
+
+    // Render the clamped playhead timecode with a deterministic 3x5 bitmap,
+    // avoiding locale/system-font dependencies in agent results.
+    fn glyph(character: char) -> [u8; 5] {
+        match character {
+            '0' => [0b111, 0b101, 0b101, 0b101, 0b111],
+            '1' => [0b010, 0b110, 0b010, 0b010, 0b111],
+            '2' => [0b111, 0b001, 0b111, 0b100, 0b111],
+            '3' => [0b111, 0b001, 0b111, 0b001, 0b111],
+            '4' => [0b101, 0b101, 0b111, 0b001, 0b001],
+            '5' => [0b111, 0b100, 0b111, 0b001, 0b111],
+            '6' => [0b111, 0b100, 0b111, 0b101, 0b111],
+            '7' => [0b111, 0b001, 0b010, 0b010, 0b010],
+            '8' => [0b111, 0b101, 0b111, 0b101, 0b111],
+            '9' => [0b111, 0b101, 0b111, 0b001, 0b111],
+            ':' => [0, 0b010, 0, 0b010, 0],
+            _ => [0; 5],
+        }
+    }
+    let scale = ((width / (timecode.len() * 4)).min(height / 24)).clamp(1, 4) as i32;
+    let advance = 4 * scale;
+    let text_width = advance * timecode.chars().count() as i32 - scale;
+    let origin_x = (width as i32 - text_width) / 2;
+    let origin_y = height as i32 * 7 / 10;
+    for (index, character) in timecode.chars().enumerate() {
+        for (row, bits) in glyph(character).into_iter().enumerate() {
+            for column in 0..3 {
+                if bits & (1 << (2 - column)) == 0 {
+                    continue;
+                }
+                for dy in 0..scale {
+                    for dx in 0..scale {
+                        paint(
+                            origin_x + index as i32 * advance + column * scale + dx,
+                            origin_y + row as i32 * scale + dy,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    DecodedFrame::new(size.width, size.height, rgba, true)
+}
+
+struct TimelineResultTextureResolver {
+    texture: Rc<GpuTexture>,
+}
+
+impl TextureResolver for TimelineResultTextureResolver {
+    fn resolve(&mut self, _source: &TextureSource, _source_frame: i64) -> Option<Rc<GpuTexture>> {
+        Some(self.texture.clone())
+    }
+}
+
+fn composite_empty_timeline_canvas(
+    render: &RenderState,
+    size: RenderSize,
+    timecode: &str,
+) -> Result<DecodedFrame, String> {
+    let canvas = paint_empty_timeline_overlay(size, timecode);
+    let mut guard = render
+        .ctx
+        .lock()
+        .map_err(|_| "render state lock poisoned".to_string())?;
+    if guard.is_none() {
+        let dev = RenderDevice::try_new().map_err(|error| format!("no GPU device: {error}"))?;
+        *guard = Some(GpuContext {
+            compositor: Compositor::new(&dev.device),
+            text_rasterizer: CosmicTextRasterizer::new(),
+            lottie: LottieMaterializer::new(),
+            device: dev.device,
+            queue: dev.queue,
+        });
+    }
+    let ctx = guard.as_ref().expect("GPU context initialized above");
+    let texture = Rc::new(upload_rgba(
+        &ctx.device,
+        &ctx.queue,
+        &canvas,
+        false,
+        Some("agent-empty-timeline"),
+    ));
+    let source = TextureSource::Image {
+        media_ref: "agent-empty-timeline".to_string(),
+    };
+    let frame_plan = FramePlan {
+        clear_rgba: [
+            EMPTY_TIMELINE_BACKGROUND_RGBA[0] as f64 / 255.0,
+            EMPTY_TIMELINE_BACKGROUND_RGBA[1] as f64 / 255.0,
+            EMPTY_TIMELINE_BACKGROUND_RGBA[2] as f64 / 255.0,
+            1.0,
+        ],
+        draws: vec![LayerDraw {
+            source: &source,
+            source_frame: 0,
+            affine: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            nat_size: (size.width as f64, size.height as f64),
+            crop_uv: (0.0, 0.0, 1.0, 1.0),
+            opacity: 1.0,
+            needs_premultiply: false,
+            clip_id: "agent-empty-timeline",
+            color_grade: None,
+            lut: None,
+            chroma_key: None,
+            masks: &[],
+            effects: &[],
+        }],
+    };
+    let mut resolver = TimelineResultTextureResolver { texture };
+    ctx.compositor
+        .render_to_rgba(&ctx.device, &ctx.queue, size, &frame_plan, &mut resolver)
+        .map_err(|error| format!("compose empty timeline: {error}"))
+}
+
+/// Render the post-commit agent result through the Rust compositor. A
+/// non-empty timeline delegates to the same strict authoritative compositor as
+/// project capture; a genuinely empty render plan gets the explicit semantic
+/// project canvas.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_timeline_result_png(
+    timeline: &Timeline,
+    manifest: &opentake_domain::MediaManifest,
+    project_dir: &Option<PathBuf>,
+    render: &RenderState,
+    input: EmptyTimelineCanvasInput,
+    cancel: &MediaCancelToken,
+    authority: &CompositeSourceAuthority,
+) -> Result<TimelineResultPng, String> {
+    if input.project_width != timeline.width
+        || input.project_height != timeline.height
+        || input.fps != timeline.fps
+        || input.project_width <= 0
+        || input.project_height <= 0
+        || input.fps <= 0
+    {
+        return Err("empty timeline canvas does not match project snapshot".to_string());
+    }
+    if cancel.is_cancelled() {
+        return Err("timeline result capture cancelled".to_string());
+    }
+    let total_frames = timeline.total_frames();
+    let playhead_frame = if total_frames <= 0 {
+        0
+    } else {
+        input.playhead_frame.clamp(0, total_frames - 1)
+    };
+    let timecode = timeline_timecode(playhead_frame, input.fps);
+    let size = preview_render_size(
+        input.project_width,
+        input.project_height,
+        AGENT_TIMELINE_RESULT_MAX_DIMENSION,
+    );
+    let empty_canvas = authoritative_visible_clip_count(timeline, manifest)? == 0;
+    let frame = if empty_canvas {
+        composite_empty_timeline_canvas(render, size, &timecode)?
+    } else {
+        composite_timeline_frame_authorized(
+            timeline,
+            manifest,
+            project_dir,
+            render,
+            playhead_frame,
+            AGENT_TIMELINE_RESULT_MAX_DIMENSION,
+            cancel,
+            authority,
+        )?
+    };
+    if cancel.is_cancelled() {
+        return Err("timeline result capture cancelled".to_string());
+    }
+    let bytes = encode_png_bytes(&frame)?;
+    if bytes.is_empty() || bytes.len() > AGENT_TIMELINE_RESULT_PNG_BYTES_MAX {
+        return Err("timeline result PNG exceeded the bounded payload".to_string());
+    }
+    Ok(TimelineResultPng {
+        bytes,
+        media_type: "image/png",
+        width: frame.width,
+        height: frame.height,
+        playhead_frame,
+        timecode,
+        empty_canvas,
+    })
 }
 
 /// Composite the timeline at `frame` into an RGBA frame at a size capped by
@@ -1334,6 +1666,9 @@ pub fn composite_frame(
         )
     {
         return Err("preview composite was superseded".to_string());
+    }
+    if request.source_media_id.is_none() && request.sequence_id.is_none() {
+        record_root_timeline_playhead(request.project_epoch, request.frame);
     }
     Ok(CompositeFrameDto {
         width: composite.width,
@@ -1867,6 +2202,147 @@ mod tests {
             .expect("valid base64");
         // PNG magic number.
         assert_eq!(&bytes[..4], &[0x89, b'P', b'N', b'G']);
+    }
+
+    #[test]
+    fn empty_timeline_result_png_is_bounded_and_contains_background_and_semantic_overlay() {
+        let timeline = Timeline {
+            width: 320,
+            height: 180,
+            fps: 24,
+            ..Timeline::new()
+        };
+
+        let rendered = render_timeline_result_png(
+            &timeline,
+            &MediaManifest::new(),
+            &None,
+            &RenderState::new(),
+            EmptyTimelineCanvasInput {
+                project_width: timeline.width,
+                project_height: timeline.height,
+                fps: timeline.fps,
+                playhead_frame: 10_000,
+            },
+            &MediaCancelToken::new(),
+            &CompositeSourceAuthority::new(HashMap::new()),
+        )
+        .expect("render deterministic empty canvas");
+
+        assert_eq!(rendered.media_type, "image/png");
+        assert!(rendered.bytes.len() <= AGENT_TIMELINE_RESULT_PNG_BYTES_MAX);
+        let decoded = image::load_from_memory_with_format(&rendered.bytes, image::ImageFormat::Png)
+            .expect("decode result PNG")
+            .into_rgba8();
+        assert_eq!(decoded.dimensions(), (320, 180));
+        assert!(decoded.width().max(decoded.height()) <= AGENT_TIMELINE_RESULT_MAX_DIMENSION);
+        let pixels = decoded.pixels().collect::<Vec<_>>();
+        assert!(pixels
+            .iter()
+            .any(|pixel| pixel.0 == EMPTY_TIMELINE_BACKGROUND_RGBA));
+        assert!(pixels
+            .iter()
+            .any(|pixel| pixel.0 == EMPTY_TIMELINE_MARKER_RGBA));
+        assert_eq!(rendered.playhead_frame, 0);
+        assert_eq!(rendered.timecode, "00:00:00:00");
+    }
+
+    #[test]
+    fn authoritative_visible_count_uses_render_plan_source_surface_and_track_semantics() {
+        let mut timeline = Timeline {
+            width: 320,
+            height: 180,
+            fps: 24,
+            ..Timeline::new()
+        };
+        let mut text = Clip::new("meaningful-text", "", 0, 24);
+        text.media_type = ClipType::Text;
+        text.source_clip_type = ClipType::Text;
+        text.text_content = Some("   ".into());
+        text.text_style = Some(TextStyle::default());
+        text.transform.width = 0.5;
+        text.transform.height = 0.5;
+        let mut track = Track::new("text", ClipType::Text);
+        track.clips.push(text);
+        timeline.tracks.push(track);
+
+        assert_eq!(
+            authoritative_visible_clip_count(&timeline, &MediaManifest::new()).unwrap(),
+            0,
+            "blank text has no meaningful render-plan source"
+        );
+        timeline.tracks[0].clips[0].text_content = Some("visible".into());
+        assert_eq!(
+            authoritative_visible_clip_count(&timeline, &MediaManifest::new()).unwrap(),
+            1
+        );
+        timeline.tracks[0].clips[0].opacity = 0.0;
+        assert_eq!(
+            authoritative_visible_clip_count(&timeline, &MediaManifest::new()).unwrap(),
+            0,
+            "zero-opacity surfaces are not visible"
+        );
+        timeline.tracks[0].clips[0].opacity = 1.0;
+        timeline.tracks[0].hidden = true;
+        assert_eq!(
+            authoritative_visible_clip_count(&timeline, &MediaManifest::new()).unwrap(),
+            0,
+            "hidden tracks never enter the authoritative render plan"
+        );
+    }
+
+    #[test]
+    fn empty_timeline_nonempty_fixture_uses_authoritative_timeline_compositor() {
+        let mut timeline = Timeline {
+            width: 320,
+            height: 180,
+            fps: 25,
+            ..Timeline::new()
+        };
+        let mut text = Clip::new("fixture-text", "", 0, 25);
+        text.media_type = ClipType::Text;
+        text.source_clip_type = ClipType::Text;
+        text.text_content = Some("fixture".into());
+        text.text_style = Some(TextStyle::default());
+        text.transform.width = 0.5;
+        text.transform.height = 0.5;
+        let mut track = Track::new("fixture-track", ClipType::Text);
+        track.clips.push(text);
+        timeline.tracks.push(track);
+        let render = RenderState::new();
+        let authority = CompositeSourceAuthority::new(HashMap::new());
+        let cancel = MediaCancelToken::new();
+
+        let rendered = render_timeline_result_png(
+            &timeline,
+            &MediaManifest::new(),
+            &None,
+            &render,
+            EmptyTimelineCanvasInput {
+                project_width: timeline.width,
+                project_height: timeline.height,
+                fps: timeline.fps,
+                playhead_frame: 12,
+            },
+            &cancel,
+            &authority,
+        )
+        .expect("render non-empty fixture");
+        let direct = composite_timeline_frame_authorized(
+            &timeline,
+            &MediaManifest::new(),
+            &None,
+            &render,
+            12,
+            AGENT_TIMELINE_RESULT_MAX_DIMENSION,
+            &cancel,
+            &authority,
+        )
+        .and_then(|frame| encode_png_bytes(&frame))
+        .expect("direct authoritative render");
+
+        assert!(!rendered.empty_canvas);
+        assert_eq!(rendered.bytes, direct);
     }
 
     #[test]
