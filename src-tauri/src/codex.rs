@@ -18,6 +18,7 @@ use base64::Engine as _;
 use opentake_agent::chat::{ChatTurnGate, ToolCall};
 use opentake_agent::mcp::dispatch::Dispatcher;
 use opentake_agent::plugin::registry::PluginRegistry;
+use opentake_agent::tools::result::Block;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -38,6 +39,8 @@ const MAX_STDERR_CAPTURE_BYTES: usize = 64 * 1024;
 const MAX_PROBE_CAPTURE_BYTES: usize = 16 * 1024;
 const MAX_FINAL_TEXT_BYTES: usize = 256 * 1024;
 const MAX_TOOL_CALLS: usize = 512;
+const MAX_TOOL_RESULT_BLOCKS: usize = 64;
+const MAX_TOOL_RESULT_IMAGE_BASE64_BYTES: usize = 1024 * 1024;
 const CODEX_MCP_BEARER_ENV: &str = "OPENTAKE_CODEX_MCP_BEARER_TOKEN";
 const CODEX_CLEANUP_RESERVE: Duration = Duration::from_secs(2);
 
@@ -675,6 +678,63 @@ enum ExecEvent {
     TurnFailed,
 }
 
+fn normalized_codex_tool_result(item: &Value, failed: bool) -> Result<Value, CodexTurnError> {
+    if failed {
+        return Ok(serde_json::json!({ "status": "failed" }));
+    }
+    let Some(content) = item.get("result").and_then(|result| result.get("content")) else {
+        return Ok(serde_json::json!({ "status": "completed" }));
+    };
+    let content = content.as_array().ok_or(CodexTurnError::Protocol)?;
+    if content.is_empty() {
+        return Ok(serde_json::json!({ "status": "completed" }));
+    }
+    if content.len() > MAX_TOOL_RESULT_BLOCKS {
+        return Err(CodexTurnError::Protocol);
+    }
+
+    let mut blocks = Vec::with_capacity(content.len());
+    for content_block in content {
+        match content_block.get("type").and_then(Value::as_str) {
+            Some("text") => {
+                let text = content_block
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .ok_or(CodexTurnError::Protocol)?;
+                if text.len() > MAX_FINAL_TEXT_BYTES {
+                    return Err(CodexTurnError::Protocol);
+                }
+                blocks.push(Block::text(text));
+            }
+            Some("image") => {
+                let base64 = content_block
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .ok_or(CodexTurnError::Protocol)?;
+                let media_type = content_block
+                    .get("mimeType")
+                    .and_then(Value::as_str)
+                    .ok_or(CodexTurnError::Protocol)?;
+                if base64.is_empty()
+                    || base64.len() > MAX_TOOL_RESULT_IMAGE_BASE64_BYTES
+                    || !matches!(
+                        media_type,
+                        "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+                    )
+                    || base64::engine::general_purpose::STANDARD
+                        .decode(base64)
+                        .is_err()
+                {
+                    return Err(CodexTurnError::Protocol);
+                }
+                blocks.push(Block::image(base64, media_type));
+            }
+            _ => return Err(CodexTurnError::Protocol),
+        }
+    }
+    Ok(serde_json::json!({ "content": blocks }))
+}
+
 fn parse_exec_event(
     line: &str,
     tool_calls: &mut HashMap<String, ToolCall>,
@@ -726,15 +786,23 @@ fn parse_exec_event(
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({}));
             let args = redacted_tool_args(&name, args);
+            let failed = if event_type == "item.completed" {
+                let result_error = match item.get("result").and_then(|result| result.get("isError"))
+                {
+                    Some(Value::Bool(value)) => *value,
+                    Some(_) => return Err(CodexTurnError::Protocol),
+                    None => false,
+                };
+                item.get("error").is_some_and(|value| !value.is_null()) || result_error
+            } else {
+                false
+            };
             let mut call = tool_calls
                 .remove(&id)
                 .unwrap_or_else(|| ToolCall::request(id.clone(), name, args));
             if event_type == "item.completed" {
-                let failed = item.get("error").is_some_and(|value| !value.is_null());
                 call.is_error = Some(failed);
-                call.result = Some(serde_json::json!({
-                    "status": if failed { "failed" } else { "completed" }
-                }));
+                call.result = Some(normalized_codex_tool_result(item, failed)?);
             }
             let changed = !existed || previous_result.as_ref() != call.result.as_ref();
             tool_calls.insert(id.clone(), call);
@@ -1611,6 +1679,116 @@ mod tests {
             ),
             Ok(ExecEvent::AgentMessage("1280 × 720".into()))
         );
+    }
+
+    #[test]
+    fn preserves_bounded_codex_mcp_text_and_raster_result_content() {
+        let mut calls = HashMap::new();
+        let event = serde_json::json!({
+            "type": "item.completed",
+            "item": {
+                "id": "clear-timeline",
+                "type": "mcp_tool_call",
+                "tool": "remove_clips",
+                "arguments": { "clipIds": ["clip-1"] },
+                "result": {
+                    "content": [
+                        { "type": "text", "text": "Removed 1 clip" },
+                        {
+                            "type": "image",
+                            "data": "iVBORw0KGgo=",
+                            "mimeType": "image/png"
+                        }
+                    ],
+                    "structuredContent": { "privatePath": "/must/not/persist" }
+                },
+                "error": null
+            }
+        });
+
+        assert_eq!(
+            parse_exec_event(&event.to_string(), &mut calls),
+            Ok(ExecEvent::ToolChanged("clear-timeline".into()))
+        );
+        assert_eq!(
+            calls["clear-timeline"].result,
+            Some(serde_json::json!({
+                "content": [
+                    { "kind": "text", "text": "Removed 1 clip" },
+                    {
+                        "kind": "image",
+                        "base64": "iVBORw0KGgo=",
+                        "mediaType": "image/png"
+                    }
+                ]
+            }))
+        );
+        assert!(!serde_json::to_string(&calls)
+            .unwrap()
+            .contains("privatePath"));
+        assert_eq!(
+            parse_exec_event(&event.to_string(), &mut calls),
+            Ok(ExecEvent::Ignored),
+            "an exact rich-result retry must remain idempotent"
+        );
+    }
+
+    #[test]
+    fn codex_mcp_error_marker_is_strict_and_error_content_is_redacted() {
+        const PRIVATE_SENTINEL: &str = "PRIVATE_CODEX_MCP_ERROR_SENTINEL";
+        let malformed = serde_json::json!({
+            "type": "item.completed",
+            "item": {
+                "id": "malformed-error",
+                "type": "mcp_tool_call",
+                "tool": "remove_clips",
+                "arguments": {},
+                "result": {
+                    "isError": "true",
+                    "content": [{ "type": "text", "text": PRIVATE_SENTINEL }]
+                },
+                "error": null
+            }
+        });
+        let mut calls = HashMap::new();
+        assert_eq!(
+            parse_exec_event(&malformed.to_string(), &mut calls),
+            Err(CodexTurnError::Protocol)
+        );
+        assert!(calls.is_empty());
+
+        for (index, item_error) in [
+            Value::Null,
+            serde_json::json!({ "message": PRIVATE_SENTINEL }),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let event = serde_json::json!({
+                "type": "item.completed",
+                "item": {
+                    "id": format!("private-error-{index}"),
+                    "type": "mcp_tool_call",
+                    "tool": "remove_clips",
+                    "arguments": {},
+                    "result": {
+                        "isError": item_error.is_null(),
+                        "content": [{ "type": "text", "text": PRIVATE_SENTINEL }]
+                    },
+                    "error": item_error
+                }
+            });
+            assert!(matches!(
+                parse_exec_event(&event.to_string(), &mut calls),
+                Ok(ExecEvent::ToolChanged(_))
+            ));
+        }
+        let persisted = serde_json::to_string(&calls).unwrap();
+        assert!(!persisted.contains(PRIVATE_SENTINEL));
+        assert!(calls.values().all(|call| {
+            call.result == Some(serde_json::json!({ "status": "failed" }))
+                && call.is_error == Some(true)
+        }));
     }
 
     #[test]

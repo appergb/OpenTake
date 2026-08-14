@@ -131,6 +131,110 @@ describe("AssistantTurn", () => {
     expect(image?.classList.contains("agent-tool-activity__image")).toBe(true);
   });
 
+  it("renders a Codex MCP raster result inside its tool disclosure without dumping base64 text", async () => {
+    await render(assistant({
+      content: "",
+      toolCalls: [],
+      blocks: [{
+        type: "toolUse",
+        id: "clear-timeline",
+        name: "remove_clips",
+        input: { clipIds: ["clip-1"] },
+        result: {
+          content: [
+            { kind: "text", text: "Removed 1 clip" },
+            { kind: "image", mediaType: "image/png", base64: "iVBORw0KGgo=" },
+          ],
+        },
+        isError: false,
+      }],
+    }));
+
+    const trigger = container.querySelector<HTMLButtonElement>("[data-tool-activity-trigger]")!;
+    await act(async () => trigger.click());
+
+    expect(container.textContent).toContain("Removed 1 clip");
+    expect(container.querySelector("img")?.getAttribute("src")).toBe(
+      "data:image/png;base64,iVBORw0KGgo=",
+    );
+    expect(container.querySelector("pre")?.textContent).not.toContain("iVBORw0KGgo=");
+  });
+
+  it.each([
+    [
+      "an oversized image",
+      {
+        content: [{
+          kind: "image",
+          mediaType: "image/png",
+          base64: `PRIVATE_OVERSIZED_${"A".repeat(MAX_CHAT_IMAGE_BASE64_CHARS)}`,
+        }],
+      },
+      "PRIVATE_OVERSIZED_",
+      "agent.toolResultUnavailable",
+    ],
+    [
+      "too many blocks",
+      {
+        content: Array.from({ length: 65 }, (_, index) => ({
+          kind: "text",
+          text: `PRIVATE_BLOCK_${index}`,
+        })),
+      },
+      "PRIVATE_BLOCK_64",
+      "agent.toolResultUnavailable",
+    ],
+    [
+      "malformed base64",
+      {
+        content: [{
+          kind: "image",
+          mediaType: "image/png",
+          base64: "PRIVATE_MALFORMED_<script>",
+        }],
+      },
+      "PRIVATE_MALFORMED_",
+      "agent.toolImageUnavailable",
+    ],
+    [
+      "an unsupported active image type",
+      {
+        content: [{
+          kind: "image",
+          mediaType: "image/svg+xml",
+          base64: "PRIVATE_SVG_PHN2Zz48L3N2Zz4=",
+        }],
+      },
+      "PRIVATE_SVG_",
+      "agent.toolImageUnavailable",
+    ],
+  ])("redacts Codex MCP content with %s instead of pretty-printing it", async (
+    _case,
+    result,
+    sentinel,
+    unavailableLabel,
+  ) => {
+    await render(assistant({
+      content: "",
+      toolCalls: [],
+      blocks: [{
+        type: "toolUse",
+        id: "invalid-result",
+        name: "remove_clips",
+        input: {},
+        result,
+        isError: false,
+      }],
+    }));
+
+    const trigger = container.querySelector<HTMLButtonElement>("[data-tool-activity-trigger]")!;
+    await act(async () => trigger.click());
+
+    expect(container.textContent).toContain(unavailableLabel);
+    expect(container.textContent).not.toContain(sentinel);
+    expect(container.querySelector("img")).toBeNull();
+  });
+
   it("announces failed tool activity and reveals its error result", async () => {
     await render(assistant({
       content: "",

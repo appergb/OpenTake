@@ -33,8 +33,10 @@ import {
 import {
   MAX_CHAT_IMAGE_BASE64_CHARS,
   type AgentContentBlock,
+  type AgentToolResultContentBlock,
   type ChatMessage,
   type ChatSession,
+  isBoundedAgentContentBlock,
 } from "../../lib/types";
 import { useSettingsStore } from "../../store/settingsStore";
 import { mintSessionId, useChatStore } from "../../store/chatStore";
@@ -962,30 +964,70 @@ export function InlineToolActivity({
           {block.type === "toolUse"
             ? <>
                 <ToolDetail label={t("agent.toolArgs")} value={prettyJson(block.input)} />
-                {block.result !== undefined && (
-                  <ToolDetail label={t("agent.toolResult")} value={prettyJson(block.result)} />
-                )}
+                {block.result !== undefined && (() => {
+                  const content = codexMcpResultContent(block.result);
+                  if (content === undefined) {
+                    return <ToolDetail label={t("agent.toolResult")} value={prettyJson(block.result)} />;
+                  }
+                  return content === null
+                    ? <span className="agent-tool-activity__image-error">
+                        {t("agent.toolResultUnavailable")}
+                      </span>
+                    : <ToolResultContents content={content} label={label} />;
+                })()}
               </>
-            : block.content.map((content, index) => {
-                if (content.kind === "text") {
-                  return <ToolDetail key={index} label={t("agent.toolResult")} value={content.text} />;
-                }
-                const source = safeRasterDataUri(content.mediaType, content.base64);
-                return source
-                  ? <img
-                      alt={t("agent.toolImageAlt", { tool: label })}
-                      className="agent-tool-activity__image"
-                      key={index}
-                      src={source}
-                    />
-                  : <span className="agent-tool-activity__image-error" key={index}>
-                      {t("agent.toolImageUnavailable")}
-                    </span>;
-              })}
+            : <ToolResultContents content={block.content} label={label} />}
         </div>
       </Reveal>
     </div>
   );
+}
+
+function codexMcpResultContent(
+  value: unknown,
+): AgentToolResultContentBlock[] | null | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  if (!Object.prototype.hasOwnProperty.call(value, "content")) return undefined;
+  const candidate: AgentContentBlock = {
+    type: "toolResult",
+    toolUseId: "codex-result",
+    content: (value as Record<string, unknown>).content as AgentToolResultContentBlock[],
+  };
+  return isBoundedAgentContentBlock(candidate) && candidate.type === "toolResult"
+    ? candidate.content
+    : null;
+}
+
+function ToolResultContents({
+  content,
+  label,
+}: {
+  content: AgentToolResultContentBlock[];
+  label: string;
+}) {
+  const t = useT();
+  return content.map((contentBlock, index) => {
+    if (contentBlock.kind === "text") {
+      return (
+        <ToolDetail
+          key={index}
+          label={t("agent.toolResult")}
+          value={contentBlock.text}
+        />
+      );
+    }
+    const source = safeRasterDataUri(contentBlock.mediaType, contentBlock.base64);
+    return source
+      ? <img
+          alt={t("agent.toolImageAlt", { tool: label })}
+          className="agent-tool-activity__image"
+          key={index}
+          src={source}
+        />
+      : <span className="agent-tool-activity__image-error" key={index}>
+          {t("agent.toolImageUnavailable")}
+        </span>;
+  });
 }
 
 function ToolDetail({ label, value }: { label: string; value: string }) {

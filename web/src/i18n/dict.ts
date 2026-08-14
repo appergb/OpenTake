@@ -899,6 +899,7 @@ const zh: Dict = {
   "agent.toolFailed": "失败",
   "agent.toolImageAlt": "{tool} 的工具输出",
   "agent.toolImageUnavailable": "无法安全显示此图片",
+  "agent.toolResultUnavailable": "无法安全显示此工具结果",
 
   // Home
   "home.welcome": "欢迎使用 OpenTake",
@@ -2063,6 +2064,7 @@ const en: Dict = {
   "agent.toolFailed": "Failed",
   "agent.toolImageAlt": "Tool output from {tool}",
   "agent.toolImageUnavailable": "This image cannot be displayed safely",
+  "agent.toolResultUnavailable": "This tool result cannot be displayed safely",
 
   "home.welcome": "Welcome to OpenTake",
   "home.newProject": "New Project",
