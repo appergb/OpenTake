@@ -159,6 +159,17 @@ impl MotionCommandState {
         cancelled
     }
 
+    fn cancel_previews(&self) -> bool {
+        let Ok(operations) = self.operations.lock() else {
+            return false;
+        };
+        let cancelled = !operations.active_previews.is_empty();
+        for active in operations.active_previews.values() {
+            active.cancel.cancel();
+        }
+        cancelled
+    }
+
     pub fn has_active(&self) -> bool {
         self.operations
             .lock()
@@ -264,6 +275,11 @@ pub async fn motion_preview(
     .await;
     state.finish_preview(generation);
     worker.map_err(|_| preview_error("Motion preview worker failed."))?
+}
+
+#[tauri::command]
+pub fn motion_preview_cancel(state: State<'_, MotionCommandState>) -> bool {
+    state.cancel_previews()
 }
 
 #[tauri::command]
@@ -1328,6 +1344,26 @@ mod tests {
         );
         state.finish_preview(older_generation);
         assert!(!state.has_active());
+    }
+
+    #[test]
+    fn preview_cancel_only_cancels_preview_tokens() {
+        let temp = tempfile::tempdir().unwrap();
+        let bridge = Arc::new(TauriMotionBridge::new(AppCore::new(), temp.path()));
+        let admission = crate::updater::InstallAdmissionGate::default();
+        let state = MotionCommandState::new(bridge, admission);
+        let (generation, preview) = state.begin_preview().unwrap();
+
+        assert!(state.cancel_previews());
+        assert!(preview.is_cancelled());
+        assert!(
+            state.has_active(),
+            "worker retains its lease until it exits"
+        );
+
+        state.finish_preview(generation);
+        assert!(!state.has_active());
+        assert!(!state.cancel_previews());
     }
 
     #[test]

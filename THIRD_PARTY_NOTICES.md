@@ -7,6 +7,7 @@ OpenTake includes the following CodeMirror packages for the Motion Studio source
 | `codemirror` | `6.0.2` | [https://github.com/codemirror/basic-setup](https://github.com/codemirror/basic-setup) | MIT | `web/node_modules/codemirror/LICENSE` |
 | `@codemirror/lang-html` | `6.4.12` | [https://code.haverbeke.berlin/codemirror/lang-html](https://code.haverbeke.berlin/codemirror/lang-html) | MIT | `web/node_modules/@codemirror/lang-html/LICENSE` |
 | `@codemirror/lang-css` | `6.3.1` | [https://github.com/codemirror/lang-css](https://github.com/codemirror/lang-css) | MIT | `web/node_modules/@codemirror/lang-css/LICENSE` |
+| `@codemirror/state` | `6.7.1` | [https://github.com/codemirror/state](https://github.com/codemirror/state) | MIT | `web/node_modules/@codemirror/state/LICENSE` |
 | `@codemirror/theme-one-dark` | `6.1.3` | [https://github.com/codemirror/theme-one-dark](https://github.com/codemirror/theme-one-dark) | MIT | `web/node_modules/@codemirror/theme-one-dark/LICENSE` |
 
 ## License text

@@ -38,6 +38,13 @@ import type {
   MattingModelStatus,
   MotionTrackingRegion,
   MotionTrackingResult,
+  MotionDocument,
+  MotionDocumentCreateRequest,
+  MotionDocumentHashRequest,
+  MotionDocumentPatchRequest,
+  MotionDocumentSummary,
+  MotionPreviewRequest,
+  MotionPreviewResponse,
   GenerateMatteResult,
   RemoveObjectResult,
   MatchColorResult,
@@ -70,6 +77,9 @@ import type {
 export const isTauri =
   typeof window !== "undefined" &&
   "__TAURI_INTERNALS__" in (window as unknown as Record<string, unknown>);
+
+let browserProjectEpoch = 0;
+let browserProjectPath: string | null = null;
 
 type InvokeFn = <T>(cmd: string, args?: Record<string, unknown>) => Promise<T>;
 type ListenFn = (
@@ -245,8 +255,8 @@ export async function getTimeline(): Promise<RuntimeTimelineSnapshot> {
   if (invokeImpl) return invokeImpl<RuntimeTimelineSnapshot>("get_timeline");
   return {
     ...fallback.getTimeline(),
-    projectEpoch: 0,
-    projectPath: null,
+    projectEpoch: browserProjectEpoch,
+    projectPath: browserProjectPath,
     compatibilityReadOnly: false,
     compatibilityBlockers: [],
   };
@@ -314,10 +324,13 @@ export async function projectNew(path: string | null = null): Promise<RuntimeTim
     return invokeImpl<RuntimeTimelineSnapshot>("project_new", { path });
   }
   fallback.reset();
+  resetBrowserMotionDocument();
+  browserProjectEpoch += 1;
+  browserProjectPath = path;
   return {
     ...fallback.getTimeline(),
-    projectEpoch: 0,
-    projectPath: null,
+    projectEpoch: browserProjectEpoch,
+    projectPath: browserProjectPath,
     compatibilityReadOnly: false,
     compatibilityBlockers: [],
   };
@@ -326,10 +339,14 @@ export async function projectNew(path: string | null = null): Promise<RuntimeTim
 export async function projectOpen(path: string): Promise<RuntimeTimelineSnapshot> {
   await ensureTauri();
   if (invokeImpl) return invokeImpl<RuntimeTimelineSnapshot>("project_open", { path });
+  fallback.reset();
+  resetBrowserMotionDocument();
+  browserProjectEpoch += 1;
+  browserProjectPath = path;
   return {
     ...fallback.getTimeline(),
-    projectEpoch: 0,
-    projectPath: null,
+    projectEpoch: browserProjectEpoch,
+    projectPath: browserProjectPath,
     compatibilityReadOnly: false,
     compatibilityBlockers: [],
   };
@@ -650,6 +667,129 @@ export interface MotionCommit {
 export async function motionCapability(): Promise<boolean> {
   await ensureTauri();
   if (invokeImpl) return invokeImpl<boolean>("motion_capability");
+  return false;
+}
+
+const BROWSER_MOTION_HTML = `<main class="motion-stage">
+  <p class="motion-kicker">Motion Studio</p>
+  <h1>让创意动起来</h1>
+  <p class="motion-subtitle">Real HTML · Real CSS · Real motion</p>
+</main>
+`;
+const BROWSER_MOTION_CSS = `html, body { width: 100%; height: 100%; margin: 0; background: #111214; color: #f7f7f5; }
+.motion-stage { display: grid; align-content: center; width: 100%; height: 100%; padding: 10%; }
+h1 { animation: title-in 1.2s both; }
+@keyframes title-in { from { opacity: 0; transform: translateY(48px); } to { opacity: 1; transform: none; } }
+`;
+let browserMotionRevision = 1;
+let browserMotionDocument: MotionDocument | null = null;
+
+function resetBrowserMotionDocument(): void {
+  browserMotionRevision = 1;
+  browserMotionDocument = null;
+}
+
+function browserRevisionHash(): string {
+  return browserMotionRevision.toString(16).padStart(64, "0");
+}
+
+function createBrowserMotionDocument(): MotionDocument {
+  browserMotionDocument = {
+    summary: {
+      id: "00000000-0000-4000-8000-000000000001",
+      title: "Motion Studio",
+      revisionHash: browserRevisionHash(),
+      updatedAt: Date.now(),
+    },
+    html: BROWSER_MOTION_HTML,
+    css: BROWSER_MOTION_CSS,
+    parameters: {},
+  };
+  return structuredClone(browserMotionDocument);
+}
+
+export async function motionDocumentList(): Promise<MotionDocumentSummary[]> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<MotionDocumentSummary[]>("motion_document_list");
+  return browserMotionDocument ? [structuredClone(browserMotionDocument.summary)] : [];
+}
+
+export async function motionDocumentCreate(
+  request: MotionDocumentCreateRequest,
+): Promise<MotionDocument> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<MotionDocument>("motion_document_create", { request });
+  return createBrowserMotionDocument();
+}
+
+export async function motionDocumentRead(documentId: string): Promise<MotionDocument> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<MotionDocument>("motion_document_read", { documentId });
+  if (!browserMotionDocument || browserMotionDocument.summary.id !== documentId) {
+    throw new Error("Motion Studio document could not be read");
+  }
+  return structuredClone(browserMotionDocument);
+}
+
+export async function motionDocumentHash(
+  request: MotionDocumentHashRequest,
+): Promise<string> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<string>("motion_document_hash", { request });
+  if (!browserMotionDocument || browserMotionDocument.summary.id !== request.documentId) {
+    throw new Error("Motion Studio document could not be read");
+  }
+  if (browserMotionDocument.summary.revisionHash !== request.baselineHash) {
+    throw new Error("motion document revision conflict");
+  }
+  return (browserMotionRevision + 1).toString(16).padStart(64, "0");
+}
+
+export async function motionDocumentPatch(
+  request: MotionDocumentPatchRequest,
+): Promise<MotionDocument> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<MotionDocument>("motion_document_patch", { request });
+  if (!browserMotionDocument || browserMotionDocument.summary.id !== request.documentId) {
+    throw new Error("Motion Studio document could not be read");
+  }
+  if (browserMotionDocument.summary.revisionHash !== request.baselineHash) {
+    throw new Error("motion document revision conflict");
+  }
+  const edit = request.edits.length === 1 ? request.edits[0] : undefined;
+  if (!edit || edit.start !== 0) throw new Error("browser Motion Studio accepts full-source edits");
+  browserMotionRevision += 1;
+  browserMotionDocument = {
+    ...browserMotionDocument,
+    summary: {
+      ...browserMotionDocument.summary,
+      revisionHash: request.expectedResultHash,
+      updatedAt: Date.now(),
+    },
+    ...(request.file === "index.html" ? { html: edit.replacement } : { css: edit.replacement }),
+  };
+  return structuredClone(browserMotionDocument);
+}
+
+export async function motionPreview(request: MotionPreviewRequest): Promise<MotionPreviewResponse> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<MotionPreviewResponse>("motion_preview", { request });
+  if (!browserMotionDocument || browserMotionDocument.summary.revisionHash !== request.revisionHash) {
+    throw new Error("Motion Studio document changed; reload before previewing");
+  }
+  return {
+    revisionHash: request.revisionHash,
+    frame: request.frame,
+    // A valid transparent 1×1 PNG keeps the browser-only shell deterministic.
+    pngDataUrl:
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+2uVHAAAAAElFTkSuQmCC",
+    diagnostics: [],
+  };
+}
+
+export async function motionPreviewCancel(): Promise<boolean> {
+  await ensureTauri();
+  if (invokeImpl) return invokeImpl<boolean>("motion_preview_cancel");
   return false;
 }
 

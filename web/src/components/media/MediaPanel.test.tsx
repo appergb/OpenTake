@@ -42,6 +42,13 @@ vi.mock("../../lib/api", () => ({
   onSearchModelProgress: vi.fn().mockResolvedValue(() => {}),
   onSearchIndexProgress: vi.fn().mockResolvedValue(() => {}),
   searchQuery: vi.fn().mockResolvedValue({ moments: [], spoken: [], files: [] }),
+  motionDocumentList: vi.fn().mockResolvedValue([]),
+  motionDocumentCreate: vi.fn(),
+  motionDocumentRead: vi.fn(),
+  motionDocumentHash: vi.fn(),
+  motionDocumentPatch: vi.fn(),
+  motionPreview: vi.fn(),
+  motionPreviewCancel: vi.fn().mockResolvedValue(false),
 }));
 
 vi.mock("../../lib/asset", () => ({

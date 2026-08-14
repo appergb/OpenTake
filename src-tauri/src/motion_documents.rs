@@ -80,6 +80,16 @@ pub struct MotionDocumentPatchRequest {
     pub expected_result_hash: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MotionDocumentHashRequest {
+    pub document_id: String,
+    pub file: String,
+    pub baseline_hash: String,
+    #[serde(default)]
+    pub edits: Vec<MotionTextReplacement>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct MotionCatalog {
@@ -278,6 +288,40 @@ impl MotionDocumentStore {
         }
     }
 
+    /// Computes the exact prospective revision using the stored parameter JSON.
+    /// The renderer boundary must not reconstruct serde JSON bytes in JavaScript.
+    #[allow(dead_code)]
+    pub fn hash_patch(&self, request: MotionDocumentHashRequest) -> Result<String, String> {
+        let authority = self.capture_authority()?;
+        self.hash_patch_for_authority(authority, request)
+    }
+
+    fn hash_patch_for_authority(
+        &self,
+        authority: ProjectAssetAuthority,
+        request: MotionDocumentHashRequest,
+    ) -> Result<String, String> {
+        validate_document_id(&request.document_id)?;
+        let _operation = self.lock_operation()?;
+        let _bundle_publication = self.core.lock_project_bundle_publication();
+        let _identity_lease = self.core.lock_project_identity_workflow();
+        let project = AuthorizedProjectRoot::open_expected(&self.core, authority)?;
+        let root = motion_root(&project.root, false)?
+            .ok_or_else(|| "motion document was not found".to_string())?;
+        let catalog = read_catalog(&root)?;
+        let current_entry = catalog
+            .documents
+            .get(&request.document_id)
+            .ok_or_else(|| "motion document was not found".to_string())?;
+        let current = read_document(&root, current_entry)?;
+        if current.summary.revision_hash != request.baseline_hash {
+            return Err("motion document revision conflict".into());
+        }
+        let (html, css) = prospective_sources(&current, &request.file, request.edits)?;
+        project.ensure_current(&self.core)?;
+        revision_hash(&html, &css, &current.parameters)
+    }
+
     /// Synchronous embedding API; see [`Self::list`].
     #[allow(dead_code)]
     pub fn save_patch(
@@ -294,13 +338,6 @@ impl MotionDocumentStore {
         request: MotionDocumentPatchRequest,
     ) -> Result<MotionDocument, String> {
         validate_document_id(&request.document_id)?;
-        let editable = EditableFile::parse(&request.file)?;
-        if request.edits.is_empty() {
-            return Err("motion document patch requires at least one edit".into());
-        }
-        if request.edits.len() > MAX_PATCH_EDITS {
-            return Err("motion document patch has too many edits".into());
-        }
         let _operation = self.lock_operation()?;
         let _bundle_publication = self.core.lock_project_bundle_publication();
         let _identity_lease = self.core.lock_project_identity_workflow();
@@ -318,24 +355,7 @@ impl MotionDocumentStore {
             return Err("motion document revision conflict".into());
         }
 
-        let (html, css) = match editable {
-            EditableFile::Html => (
-                normalize_line_endings(&apply_replacements(
-                    &current.html,
-                    request.edits,
-                    MAX_SOURCE_BYTES,
-                )?),
-                current.css.clone(),
-            ),
-            EditableFile::Css => (
-                current.html.clone(),
-                normalize_line_endings(&apply_replacements(
-                    &current.css,
-                    request.edits,
-                    MAX_SOURCE_BYTES,
-                )?),
-            ),
-        };
+        let (html, css) = prospective_sources(&current, &request.file, request.edits)?;
         let computed = revision_hash(&html, &css, &current.parameters)?;
         if computed != request.expected_result_hash {
             return Err("motion document expected result hash did not match".into());
@@ -660,6 +680,30 @@ fn apply_replacements(
     Ok(result)
 }
 
+fn prospective_sources(
+    current: &MotionDocument,
+    file: &str,
+    edits: Vec<MotionTextReplacement>,
+) -> Result<(String, String), String> {
+    let editable = EditableFile::parse(file)?;
+    if edits.is_empty() {
+        return Err("motion document patch requires at least one edit".into());
+    }
+    if edits.len() > MAX_PATCH_EDITS {
+        return Err("motion document patch has too many edits".into());
+    }
+    match editable {
+        EditableFile::Html => Ok((
+            normalize_line_endings(&apply_replacements(&current.html, edits, MAX_SOURCE_BYTES)?),
+            current.css.clone(),
+        )),
+        EditableFile::Css => Ok((
+            current.html.clone(),
+            normalize_line_endings(&apply_replacements(&current.css, edits, MAX_SOURCE_BYTES)?),
+        )),
+    }
+}
+
 fn normalize_line_endings(source: &str) -> String {
     source.replace("\r\n", "\n").replace('\r', "\n")
 }
@@ -782,6 +826,18 @@ pub async fn motion_document_read(
     let authority = state.capture_authority()?;
     let store = Arc::clone(state.inner());
     tauri::async_runtime::spawn_blocking(move || store.read_for_authority(authority, &document_id))
+        .await
+        .map_err(|error| format!("motion document worker failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn motion_document_hash(
+    state: State<'_, Arc<MotionDocumentStore>>,
+    request: MotionDocumentHashRequest,
+) -> Result<String, String> {
+    let authority = state.capture_authority()?;
+    let store = Arc::clone(state.inner());
+    tauri::async_runtime::spawn_blocking(move || store.hash_patch_for_authority(authority, request))
         .await
         .map_err(|error| format!("motion document worker failed: {error}"))?
 }

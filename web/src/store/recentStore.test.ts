@@ -14,6 +14,13 @@ vi.mock("../lib/api", () => ({
   projectSave: mocks.projectSave,
   homeProjectsSync: mocks.homeProjectsSync,
   homeProjectRegister: mocks.homeProjectRegister,
+  motionDocumentList: vi.fn().mockResolvedValue([]),
+  motionDocumentCreate: vi.fn(),
+  motionDocumentRead: vi.fn(),
+  motionDocumentHash: vi.fn(),
+  motionDocumentPatch: vi.fn(),
+  motionPreview: vi.fn(),
+  motionPreviewCancel: vi.fn().mockResolvedValue(false),
 }));
 
 vi.mock("../components/preview/nativePlaybackSession", () => ({

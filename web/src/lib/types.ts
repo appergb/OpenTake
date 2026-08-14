@@ -41,6 +41,71 @@ export interface ExternalMcpPairingReceipt {
   bearerToken: string;
 }
 
+export type MotionDocumentFile = "index.html" | "styles.css";
+
+export interface MotionDocumentSummary {
+  id: string;
+  title: string;
+  revisionHash: string;
+  updatedAt: number;
+}
+
+export interface MotionDocument {
+  summary: MotionDocumentSummary;
+  html: string;
+  css: string;
+  parameters: Record<string, unknown>;
+}
+
+export interface MotionDocumentCreateRequest {
+  title: string | null;
+}
+
+export interface MotionTextReplacement {
+  /** UTF-8 byte offset; CodeMirror positions are converted before IPC. */
+  start: number;
+  /** UTF-8 byte offset; CodeMirror positions are converted before IPC. */
+  end: number;
+  replacement: string;
+}
+
+export interface MotionDocumentPatchRequest {
+  documentId: string;
+  file: MotionDocumentFile;
+  baselineHash: string;
+  edits: MotionTextReplacement[];
+  expectedResultHash: string;
+}
+
+export type MotionDocumentHashRequest = Omit<MotionDocumentPatchRequest, "expectedResultHash">;
+
+export interface MotionPublishParameters {
+  width: number;
+  height: number;
+  fps: number;
+  durationFrames: number;
+}
+
+export interface MotionPreviewRequest extends MotionPublishParameters {
+  documentId: string;
+  revisionHash: string;
+  frame: number;
+}
+
+export interface MotionPreviewDiagnostic {
+  severity: "error" | "warning";
+  message: string;
+  line?: number;
+  column?: number;
+}
+
+export interface MotionPreviewResponse {
+  revisionHash: string;
+  frame: number;
+  pngDataUrl: string;
+  diagnostics: MotionPreviewDiagnostic[];
+}
+
 export interface Transition {
   fromClipId: string;
   toClipId: string;

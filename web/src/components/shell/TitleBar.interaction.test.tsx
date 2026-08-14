@@ -29,6 +29,13 @@ vi.mock("../../lib/api", () => ({
   exportSubtitles: mocks.exportSubtitles,
   exportXmeml: mocks.exportXmeml,
   getDefaultProjectDir: mocks.getDefaultProjectDir,
+  motionDocumentList: vi.fn().mockResolvedValue([]),
+  motionDocumentCreate: vi.fn(),
+  motionDocumentRead: vi.fn(),
+  motionDocumentHash: vi.fn(),
+  motionDocumentPatch: vi.fn(),
+  motionPreview: vi.fn(),
+  motionPreviewCancel: vi.fn().mockResolvedValue(false),
 }));
 
 vi.mock("../../lib/dialog", () => ({

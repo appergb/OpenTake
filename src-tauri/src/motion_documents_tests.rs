@@ -52,6 +52,57 @@ fn replace_html(document: &MotionDocument, html: &str) -> MotionDocumentPatchReq
 }
 
 #[test]
+fn computes_a_prospective_hash_from_the_authoritative_document_without_mutating_it() {
+    let (_temp, core, _project) = saved_core("hash-preview");
+    let store = MotionDocumentStore::new(core);
+    let original = create_document(&store);
+    let replacement = "<main>hash preview</main>";
+    let request = MotionDocumentHashRequest {
+        document_id: original.summary.id.clone(),
+        file: "index.html".to_string(),
+        baseline_hash: original.summary.revision_hash.clone(),
+        edits: vec![MotionTextReplacement {
+            start: 0,
+            end: original.html.len(),
+            replacement: replacement.to_string(),
+        }],
+    };
+
+    let hash = store
+        .hash_patch(request)
+        .expect("compute prospective hash from stored parameters");
+
+    assert_eq!(
+        hash,
+        revision_hash(replacement, &original.css, &original.parameters).unwrap()
+    );
+    assert_eq!(
+        store
+            .read(&original.summary.id)
+            .expect("document unchanged"),
+        original
+    );
+}
+
+#[test]
+fn authoritative_parameter_encoding_preserves_integral_floats_and_unicode_key_order() {
+    let parameters = BTreeMap::from([
+        ("\u{10000}".to_string(), Value::String("astral".to_string())),
+        ("\u{e000}".to_string(), Value::String("bmp".to_string())),
+        ("number".to_string(), Value::from(1.0)),
+    ]);
+
+    assert_eq!(
+        String::from_utf8(serde_json::to_vec(&parameters).unwrap()).unwrap(),
+        "{\"number\":1.0,\"\":\"bmp\",\"𐀀\":\"astral\"}"
+    );
+    assert_eq!(
+        revision_hash("<main></main>", "body{}", &parameters).unwrap(),
+        "3e4f96493c6a3345ec570f156af652e9a5457d126798c507d8793a7cf74b1c10"
+    );
+}
+
+#[test]
 fn creates_visible_bilingual_template_and_lists_it() {
     let (_temp, core, _project) = saved_core("template");
     let store = MotionDocumentStore::new(core);

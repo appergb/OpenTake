@@ -3,6 +3,7 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { useEditorUiStore } from "../../store/uiStore";
 
 vi.mock("../../i18n", () => ({
   useT: () => (key: string) => key,
@@ -19,6 +20,7 @@ describe("MotionStudio semantic shell", () => {
   afterEach(async () => cleanup?.());
 
   it("exposes independent file, editor, preview, inspector, and timeline landmarks", async () => {
+    useEditorUiStore.setState({ view: "motion" });
     const container = document.createElement("div");
     document.body.append(container);
     const root = createRoot(container);
@@ -40,7 +42,9 @@ describe("MotionStudio semantic shell", () => {
       container.querySelector('figure[role="region"][aria-label="motionStudio.preview"]'),
       "missing preview landmark",
     ).not.toBeNull();
-    expect(container.textContent).toContain("motionStudio.visibleStarterTitle");
-    expect(container.textContent).toContain("motionStudio.visibleStarterSubtitle");
+    await act(async () => {
+      await vi.waitFor(() => expect(container.textContent).toContain("让创意动起来"));
+    });
+    expect(container.textContent).toContain("Real HTML · Real CSS · Real motion");
   });
 });
