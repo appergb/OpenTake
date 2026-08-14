@@ -4,6 +4,11 @@ import { DICTS } from "../../i18n/dict";
 
 const titleBarSource = readFileSync(new URL("./TitleBar.tsx", import.meta.url), "utf8");
 const viewMenuSource = readFileSync(new URL("./ViewMenu.tsx", import.meta.url), "utf8");
+const tauriConfig = JSON.parse(
+  readFileSync(new URL("../../../../src-tauri/tauri.conf.json", import.meta.url), "utf8"),
+) as {
+  app: { windows: Array<{ trafficLightPosition?: { x: number; y: number } }> };
+};
 
 describe("TitleBar alignment", () => {
   it("does not manually offset buttons with top: -2 (lets flex alignItems center do the work)", () => {
@@ -33,6 +38,20 @@ describe("TitleBar alignment", () => {
 
   it("keeps the titlebar-safe-left padding reserved for macOS traffic lights", () => {
     expect(titleBarSource).toContain("var(--titlebar-safe-left)");
+  });
+
+  it("vertically centers the native macOS traffic lights on the 38px icon plane", () => {
+    const trafficLights = tauriConfig.app.windows[0]?.trafficLightPosition;
+    const titleBarGeometry = titleBarSource.match(
+      /data-tauri-drag-region\s+style=\{\{\s+height:\s*(\d+),([\s\S]*?)padding:/,
+    );
+
+    expect(titleBarGeometry).not.toBeNull();
+    const titleBarHeight = Number(titleBarGeometry![1]);
+    expect(titleBarGeometry![2]).toContain('alignItems: "center"');
+    expect(titleBarSource.match(/width:\s*26,\s*height:\s*26,/g)).toHaveLength(5);
+    expect(trafficLights).toEqual({ x: 18, y: 12 });
+    expect(trafficLights!.y + 14 / 2).toBe(titleBarHeight / 2);
   });
 });
 
