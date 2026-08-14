@@ -248,7 +248,7 @@ impl MotionDocumentStore {
         self.read_for_authority(authority, document_id)
     }
 
-    fn read_for_authority(
+    pub(crate) fn read_for_authority(
         &self,
         authority: ProjectAssetAuthority,
         document_id: &str,
@@ -268,6 +268,14 @@ impl MotionDocumentStore {
         let document = read_document(&root, entry)?;
         project.ensure_current(&self.core)?;
         Ok(document)
+    }
+
+    pub(crate) fn ensure_authority(&self, authority: &ProjectAssetAuthority) -> Result<(), String> {
+        if self.core.project_asset_authority_matches(authority) {
+            Ok(())
+        } else {
+            Err("current project changed before document result".to_string())
+        }
     }
 
     /// Synchronous embedding API; see [`Self::list`].

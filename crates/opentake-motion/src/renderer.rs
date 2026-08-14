@@ -78,6 +78,16 @@ pub fn deterministic_clock_script() -> &'static str {
   var current = 0;
   var listeners = [];
   var randomState = 0x6d2b79f5;
+  function pinAnimations(seconds) {
+    if (!document.getAnimations) return;
+    var animations = document.getAnimations();
+    for (var i = 0; i < animations.length; i++) {
+      try {
+        animations[i].pause();
+        animations[i].currentTime = seconds * 1000;
+      } catch (e) { /* a detached animation may disappear while seeking */ }
+    }
+  }
   try { Date.now = function () { return Math.round(current * 1000); }; } catch (e) {}
   try {
     Object.defineProperty(performance, 'now', {
@@ -110,11 +120,15 @@ pub fn deterministic_clock_script() -> &'static str {
           });
         }
       } catch (e) { /* timeline may be read-only; listeners still fire */ }
+      pinAnimations(seconds);
       var pending = [];
       for (var i = 0; i < listeners.length; i++) {
         try { pending.push(Promise.resolve(listeners[i](seconds))); } catch (e) {}
       }
       await Promise.all(pending);
+      // A seek listener may create a CSS/Web Animation. Freeze those at the
+      // same exact playhead before the compositor is allowed to paint.
+      pinAnimations(seconds);
     },
     // Authors register frame callbacks: OpenTake.onSeek(t => { ... }).
     onSeek: function (fn) { if (typeof fn === 'function') listeners.push(fn); }
@@ -485,12 +499,12 @@ impl HeadlessChromiumRenderer {
         format!("data:text/html;charset=utf-8,{encoded}")
     }
 
-    /// The plan of per-frame virtual-time stamps the backend will seek through:
-    /// `[0/fps, 1/fps, ..., (n-1)/fps]`. Pure helper that documents and tests the
-    /// time grid without launching anything.
+    /// The plan of per-frame virtual-time stamps the backend will seek through,
+    /// beginning at `start_frame / fps`. Pure helper that documents and tests
+    /// the time grid without launching anything.
     pub fn frame_time_grid(req: &MotionRenderRequest) -> Vec<f64> {
         (0..req.duration_frames)
-            .map(|i| i as f64 / req.fps as f64)
+            .map(|i| (req.start_frame + i) as f64 / req.fps as f64)
             .collect()
     }
 
@@ -5546,6 +5560,9 @@ mod tests {
         assert!(s.contains("seek"));
         assert!(s.contains("currentTime"));
         assert!(s.contains("onSeek"));
+        assert!(s.contains("document.getAnimations"));
+        assert!(s.contains("animations[i].pause()"));
+        assert!(s.contains("animations[i].currentTime = seconds * 1000"));
     }
 
     #[test]

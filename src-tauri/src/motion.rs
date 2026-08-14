@@ -5,21 +5,24 @@
 //! PNG frame sequence with the bundled FFmpeg, then asks `AppCore` to register
 //! and place/replace the video in one durable undo transaction.
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine as _;
 use opentake_agent::mcp::motion::{
     AddMotionRequest, EditMotionRequest, MotionBridge, MotionBridgeError, MotionBridgeErrorKind,
     MotionCommit, MotionOutputMetadata, MotionSourceRequest,
 };
-use opentake_core::{AppCore, MotionPlacement, ProbedMedia};
+use opentake_core::{AppCore, MotionPlacement, ProbedMedia, ProjectAssetAuthority};
 use opentake_domain::{GenerationInput, GenerationJobStatus};
 use opentake_motion::{
-    HeadlessChromiumRenderer, MotionCache, MotionCancellationToken, MotionError,
-    MotionRenderRequest, MotionSource, RenderedClip, SandboxPolicy,
+    limits, read_single_preview_png, HeadlessChromiumRenderer, MotionCache,
+    MotionCancellationToken, MotionDocumentSource, MotionError, MotionRenderRequest, MotionSource,
+    MotionSourceDiagnostic, RenderedClip, SandboxPolicy,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -50,12 +53,24 @@ pub enum MotionProgress {
 #[derive(Clone)]
 pub struct MotionCommandState {
     bridge: Arc<TauriMotionBridge>,
-    active: Arc<Mutex<Option<ActiveMotionCommand>>>,
+    operations: Arc<Mutex<MotionOperations>>,
     admission: crate::updater::InstallAdmissionGate,
+}
+
+#[derive(Default)]
+struct MotionOperations {
+    active_render: Option<ActiveMotionCommand>,
+    next_preview_generation: u64,
+    active_previews: BTreeMap<u64, ActiveMotionPreview>,
 }
 
 struct ActiveMotionCommand {
     cancel: opentake_media::MediaCancelToken,
+    _admission: crate::updater::ActivityLease,
+}
+
+struct ActiveMotionPreview {
+    cancel: MotionCancellationToken,
     _admission: crate::updater::ActivityLease,
 }
 
@@ -66,22 +81,22 @@ impl MotionCommandState {
     ) -> Self {
         Self {
             bridge,
-            active: Arc::new(Mutex::new(None)),
+            operations: Arc::new(Mutex::new(MotionOperations::default())),
             admission,
         }
     }
 
     fn begin(&self) -> Result<opentake_media::MediaCancelToken, String> {
         let admission = self.admission.begin_activity()?;
-        let mut active = self
-            .active
+        let mut operations = self
+            .operations
             .lock()
             .map_err(|_| "motion command state is unavailable".to_string())?;
-        if active.is_some() {
+        if operations.active_render.is_some() || !operations.active_previews.is_empty() {
             return Err("another motion render is already running".into());
         }
         let cancel = opentake_media::MediaCancelToken::new();
-        *active = Some(ActiveMotionCommand {
+        operations.active_render = Some(ActiveMotionCommand {
             cancel: cancel.clone(),
             _admission: admission,
         });
@@ -89,27 +104,67 @@ impl MotionCommandState {
     }
 
     fn finish(&self) {
-        if let Ok(mut active) = self.active.lock() {
-            *active = None;
+        if let Ok(mut operations) = self.operations.lock() {
+            operations.active_render = None;
+        }
+    }
+
+    fn begin_preview(&self) -> Result<(u64, MotionCancellationToken), String> {
+        let admission = self.admission.begin_activity()?;
+        let mut operations = self
+            .operations
+            .lock()
+            .map_err(|_| "motion command state is unavailable".to_string())?;
+        if operations.active_render.is_some() {
+            return Err("another motion render is already running".into());
+        }
+        for active in operations.active_previews.values() {
+            active.cancel.cancel();
+        }
+        operations.next_preview_generation = operations.next_preview_generation.wrapping_add(1);
+        if operations.next_preview_generation == 0 {
+            operations.next_preview_generation = 1;
+        }
+        let generation = operations.next_preview_generation;
+        let cancel = MotionCancellationToken::new();
+        operations.active_previews.insert(
+            generation,
+            ActiveMotionPreview {
+                cancel: cancel.clone(),
+                _admission: admission,
+            },
+        );
+        Ok((generation, cancel))
+    }
+
+    fn finish_preview(&self, generation: u64) {
+        if let Ok(mut operations) = self.operations.lock() {
+            operations.active_previews.remove(&generation);
         }
     }
 
     fn cancel(&self) -> bool {
-        self.active
-            .lock()
-            .ok()
-            .and_then(|active| active.as_ref().map(|command| command.cancel.clone()))
-            .map(|cancel| {
-                cancel.cancel();
-                true
-            })
-            .unwrap_or(false)
+        let Ok(operations) = self.operations.lock() else {
+            return false;
+        };
+        let mut cancelled = false;
+        if let Some(active) = &operations.active_render {
+            active.cancel.cancel();
+            cancelled = true;
+        }
+        for active in operations.active_previews.values() {
+            active.cancel.cancel();
+            cancelled = true;
+        }
+        cancelled
     }
 
     pub fn has_active(&self) -> bool {
-        self.active
+        self.operations
             .lock()
-            .map(|active| active.is_some())
+            .map(|operations| {
+                operations.active_render.is_some() || !operations.active_previews.is_empty()
+            })
             .unwrap_or(true)
     }
 
@@ -145,9 +200,70 @@ pub struct MotionEditCommand {
     pub params: Option<Map<String, Value>>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MotionPreviewRequest {
+    pub document_id: String,
+    pub revision_hash: String,
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub duration_frames: u32,
+    pub frame: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MotionPreviewDiagnostic {
+    pub severity: &'static str,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub column: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MotionPreviewResponse {
+    pub revision_hash: String,
+    pub frame: u32,
+    pub png_data_url: String,
+    pub diagnostics: Vec<MotionPreviewDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MotionPreviewError {
+    pub message: String,
+    pub diagnostics: Vec<MotionPreviewDiagnostic>,
+}
+
 #[tauri::command]
 pub fn motion_capability(state: State<'_, MotionCommandState>) -> bool {
     state.bridge.can_render_motion()
+}
+
+#[tauri::command]
+pub async fn motion_preview(
+    state: State<'_, MotionCommandState>,
+    documents: State<'_, Arc<crate::motion_documents::MotionDocumentStore>>,
+    request: MotionPreviewRequest,
+) -> Result<MotionPreviewResponse, MotionPreviewError> {
+    let authority = documents.capture_authority().map_err(|_| {
+        preview_error("Save the project before previewing a Motion Studio document.")
+    })?;
+    let (generation, cancellation) = state
+        .begin_preview()
+        .map_err(|message| preview_error(&message))?;
+    let bridge = Arc::clone(&state.bridge);
+    let documents = Arc::clone(documents.inner());
+    let worker = tauri::async_runtime::spawn_blocking(move || {
+        render_document_preview(&bridge, &documents, authority, request, &cancellation)
+    })
+    .await;
+    state.finish_preview(generation);
+    worker.map_err(|_| preview_error("Motion preview worker failed."))?
 }
 
 #[tauri::command]
@@ -223,6 +339,146 @@ pub async fn motion_edit(
 #[tauri::command]
 pub fn motion_cancel(state: State<'_, MotionCommandState>) -> bool {
     state.cancel()
+}
+
+fn render_document_preview(
+    bridge: &TauriMotionBridge,
+    documents: &crate::motion_documents::MotionDocumentStore,
+    authority: ProjectAssetAuthority,
+    request: MotionPreviewRequest,
+    cancellation: &MotionCancellationToken,
+) -> Result<MotionPreviewResponse, MotionPreviewError> {
+    let (render_request, revision_hash) =
+        prepare_document_preview(documents, authority.clone(), &request)?;
+    let rendered = bridge
+        .renderer
+        .render_with_cancellation(&render_request, cancellation)
+        .map_err(map_preview_motion_error)?;
+    finish_document_preview(
+        documents,
+        authority,
+        request.frame,
+        revision_hash,
+        rendered,
+        cancellation,
+    )
+}
+
+fn finish_document_preview(
+    documents: &crate::motion_documents::MotionDocumentStore,
+    authority: ProjectAssetAuthority,
+    frame: u32,
+    revision_hash: String,
+    rendered: RenderedClip,
+    cancellation: &MotionCancellationToken,
+) -> Result<MotionPreviewResponse, MotionPreviewError> {
+    ensure_preview_active(cancellation)?;
+    let png = read_single_preview_png(&rendered).map_err(map_preview_motion_error)?;
+    ensure_preview_active(cancellation)?;
+    documents
+        .ensure_authority(&authority)
+        .map_err(|_| preview_error("The project changed before the preview completed."))?;
+    ensure_preview_active(cancellation)?;
+    let png_data_url = format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(png)
+    );
+    ensure_preview_active(cancellation)?;
+    Ok(MotionPreviewResponse {
+        revision_hash,
+        frame,
+        png_data_url,
+        diagnostics: Vec::new(),
+    })
+}
+
+fn ensure_preview_active(cancellation: &MotionCancellationToken) -> Result<(), MotionPreviewError> {
+    if cancellation.is_cancelled() {
+        Err(preview_error("Motion preview was cancelled."))
+    } else {
+        Ok(())
+    }
+}
+
+fn prepare_document_preview(
+    documents: &crate::motion_documents::MotionDocumentStore,
+    authority: ProjectAssetAuthority,
+    request: &MotionPreviewRequest,
+) -> Result<(MotionRenderRequest, String), MotionPreviewError> {
+    if request.duration_frames == 0
+        || request.duration_frames > limits::MAX_FRAMES
+        || request.frame >= request.duration_frames
+    {
+        return Err(preview_error(
+            "Preview frame must be inside the bounded document duration.",
+        ));
+    }
+    let document = documents
+        .read_for_authority(authority, &request.document_id)
+        .map_err(|_| preview_error("Motion Studio document could not be read."))?;
+    if document.summary.revision_hash != request.revision_hash {
+        return Err(preview_error(
+            "Motion Studio document changed; reload before previewing.",
+        ));
+    }
+    let source = MotionDocumentSource::new(document.html, document.css)
+        .inline_document()
+        .map_err(preview_source_error)?;
+    let render_request = MotionRenderRequest::new(
+        MotionSource::code(source),
+        request.fps,
+        1,
+        request.width,
+        request.height,
+    )
+    .with_start_frame(request.frame)
+    .with_transparent(true);
+    render_request
+        .validate()
+        .map_err(map_preview_motion_error)?;
+    Ok((render_request, document.summary.revision_hash))
+}
+
+fn preview_source_error(error: MotionSourceDiagnostic) -> MotionPreviewError {
+    MotionPreviewError {
+        message: "Motion Studio source contains unsupported active content.".to_string(),
+        diagnostics: vec![MotionPreviewDiagnostic {
+            severity: "error",
+            message: error.message,
+            line: Some(error.line),
+            column: Some(error.column),
+        }],
+    }
+}
+
+fn map_preview_motion_error(error: MotionError) -> MotionPreviewError {
+    match error {
+        MotionError::Cancelled => preview_error("Motion preview was cancelled."),
+        MotionError::RendererUnavailable(_) => {
+            preview_error("Motion preview requires the packaged Chromium renderer.")
+        }
+        MotionError::InvalidSource(_)
+        | MotionError::InvalidRequest(_)
+        | MotionError::UnknownTemplate(_)
+        | MotionError::Manifest(_)
+        | MotionError::Sandbox(_) => preview_error("Motion preview request is invalid."),
+        MotionError::Timeout(_) => preview_error("Motion preview exceeded its time budget."),
+        MotionError::RenderFailed(_) | MotionError::Io(_) => {
+            preview_error("Motion preview could not be rendered.")
+        }
+    }
+}
+
+fn preview_error(message: &str) -> MotionPreviewError {
+    MotionPreviewError {
+        message: message.to_string(),
+        diagnostics: vec![MotionPreviewDiagnostic {
+            severity: "error",
+            message: message.to_string(),
+            line: None,
+            column: None,
+        }],
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -923,6 +1179,25 @@ fn io_motion_error(error: std::io::Error) -> MotionBridgeError {
 mod tests {
     use super::*;
 
+    fn saved_document() -> (
+        tempfile::TempDir,
+        crate::motion_documents::MotionDocumentStore,
+        crate::motion_documents::MotionDocument,
+    ) {
+        let temp = tempfile::tempdir().expect("create preview fixture parent");
+        let project = temp.path().join("preview.opentake");
+        let core = AppCore::new();
+        core.save_project(Some(project))
+            .expect("save preview fixture project");
+        let store = crate::motion_documents::MotionDocumentStore::new(core);
+        let document = store
+            .create(crate::motion_documents::MotionDocumentCreateRequest {
+                title: Some("片头预览".to_string()),
+            })
+            .expect("create preview fixture document");
+        (temp, store, document)
+    }
+
     fn output_metadata() -> MotionOutputMetadata {
         MotionOutputMetadata {
             renderer: "motion-canvas".into(),
@@ -987,5 +1262,107 @@ mod tests {
             state.begin().err().unwrap(),
             "app update installation is in progress"
         );
+    }
+
+    #[test]
+    fn preview_preparation_is_bound_to_the_exact_document_revision_and_frame() {
+        let (_temp, store, document) = saved_document();
+        let authority = store
+            .capture_authority()
+            .expect("capture project authority");
+        let request = MotionPreviewRequest {
+            document_id: document.summary.id.clone(),
+            revision_hash: document.summary.revision_hash.clone(),
+            width: 640,
+            height: 360,
+            fps: 30,
+            duration_frames: 90,
+            frame: 42,
+        };
+
+        let (render, revision) =
+            prepare_document_preview(&store, authority.clone(), &request).unwrap();
+        assert_eq!(revision, document.summary.revision_hash);
+        assert_eq!(render.start_frame, 42);
+        assert_eq!(render.duration_frames, 1);
+        assert_eq!((render.width, render.height, render.fps), (640, 360, 30));
+        let MotionSource::Code { html_css_js } = render.source else {
+            panic!("document preview must compile to a self-contained source");
+        };
+        assert!(html_css_js.contains("让创意动起来"));
+        assert!(html_css_js.contains("@keyframes"));
+        assert!(html_css_js.contains("script-src 'none'"));
+        assert!(!html_css_js.contains("<script"));
+
+        let mut stale = request;
+        stale.revision_hash = "0".repeat(64);
+        let error = prepare_document_preview(&store, authority, &stale)
+            .expect_err("stale editor content must never be previewed");
+        assert!(error.message.contains("changed"));
+        assert_eq!(error.diagnostics.len(), 1);
+        assert_eq!(error.diagnostics[0].line, None);
+        assert_eq!(error.diagnostics[0].column, None);
+    }
+
+    #[test]
+    fn newer_preview_cancels_but_does_not_forget_the_older_worker() {
+        let temp = tempfile::tempdir().unwrap();
+        let bridge = Arc::new(TauriMotionBridge::new(AppCore::new(), temp.path()));
+        let admission = crate::updater::InstallAdmissionGate::default();
+        let state = MotionCommandState::new(bridge, admission);
+
+        let (older_generation, older) = state.begin_preview().unwrap();
+        let (newer_generation, newer) = state.begin_preview().unwrap();
+        assert!(older.is_cancelled());
+        assert!(!newer.is_cancelled());
+        assert!(state.has_active());
+        assert!(matches!(
+            state.begin(),
+            Err(message) if message == "another motion render is already running"
+        ));
+
+        state.finish_preview(newer_generation);
+        assert!(
+            state.has_active(),
+            "the superseded worker must retain its updater lease until it exits"
+        );
+        state.finish_preview(older_generation);
+        assert!(!state.has_active());
+    }
+
+    #[test]
+    fn cancelled_preview_cannot_publish_a_completed_png_response() {
+        use opentake_motion::{MotionRenderer, StubRenderer};
+
+        let (_temp, store, document) = saved_document();
+        let authority = store.capture_authority().expect("capture authority");
+        let request = MotionPreviewRequest {
+            document_id: document.summary.id.clone(),
+            revision_hash: document.summary.revision_hash.clone(),
+            width: 64,
+            height: 48,
+            fps: 30,
+            duration_frames: 30,
+            frame: 5,
+        };
+        let (render_request, revision_hash) =
+            prepare_document_preview(&store, authority.clone(), &request).unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let rendered = StubRenderer::new(MotionCache::new(cache.path()))
+            .render(&render_request)
+            .unwrap();
+        let cancellation = MotionCancellationToken::new();
+        cancellation.cancel();
+
+        let error = finish_document_preview(
+            &store,
+            authority,
+            request.frame,
+            revision_hash,
+            rendered,
+            &cancellation,
+        )
+        .expect_err("a superseded response must fail even after rendering completed");
+        assert!(error.message.contains("cancelled"));
     }
 }

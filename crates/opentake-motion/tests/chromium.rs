@@ -32,7 +32,8 @@ mod live {
 
     use opentake_motion::{
         HeadlessChromiumRenderer, MotionCache, MotionCancellationToken, MotionClipSource,
-        MotionError, MotionRenderRequest, MotionRenderer, MotionSource, SandboxPolicy,
+        MotionDocumentSource, MotionError, MotionRenderRequest, MotionRenderer, MotionSource,
+        SandboxPolicy,
     };
     use opentake_render::{DecodedFrame, FrameProvider};
 
@@ -215,6 +216,53 @@ mod live {
             live_profiles(),
             profiles_before,
             "dropping the renderer must remove its reusable Chromium profile"
+        );
+    }
+
+    pub(super) fn preview_frame_probe() {
+        let Some(browser_path) = HeadlessChromiumRenderer::find_browser() else {
+            eprintln!("skipping live preview probe: no supported Chromium binary");
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let renderer = HeadlessChromiumRenderer::new(
+            MotionCache::new(root.path()),
+            SandboxPolicy::offline_with_timeout(Duration::from_secs(60)),
+        )
+        .with_browser_path(browser_path);
+        let document = MotionDocumentSource::new(
+            r#"<main><div id="tile"></div><h1>让创意动起来</h1><p>Real Motion</p></main>"#,
+            r#"html,body,main{margin:0;width:100%;height:100%;background:#111} #tile{position:absolute;left:4px;top:8px;width:16px;height:16px;background:#7c5cff;animation:move 1s linear both}@keyframes move{from{transform:translateX(0)}to{transform:translateX(20px)}} h1,p{color:white}"#,
+        )
+        .inline_document()
+        .unwrap();
+        let request = MotionRenderRequest::new(MotionSource::code(document.clone()), 10, 1, 64, 48)
+            .with_transparent(false)
+            .with_start_frame(5);
+        let first = renderer.render(&request).unwrap();
+        let first_pixels = image::open(&first.frames[0]).unwrap().to_rgba8();
+        std::fs::remove_dir_all(renderer.cache().dir_for(&request)).unwrap();
+        let second = renderer.render(&request).unwrap();
+        let second_pixels = image::open(&second.frames[0]).unwrap().to_rgba8();
+        assert_eq!(
+            first_pixels, second_pixels,
+            "same preview frame must be exact"
+        );
+
+        let beginning = MotionRenderRequest::new(MotionSource::code(document), 10, 1, 64, 48)
+            .with_transparent(false)
+            .with_start_frame(0);
+        let beginning = renderer.render(&beginning).unwrap();
+        let beginning_pixels = image::open(&beginning.frames[0]).unwrap().to_rgba8();
+        let differing_channels = beginning_pixels
+            .as_raw()
+            .iter()
+            .zip(first_pixels.as_raw())
+            .filter(|(left, right)| left != right)
+            .count();
+        assert!(
+            differing_channels > 128,
+            "two animation frames need a meaningful visible difference, got {differing_channels} channels"
         );
     }
 
@@ -858,6 +906,13 @@ fn host_wrapper_context_csp_and_guard_probe() {
 fn consecutive_cache_misses_reuse_one_chromium_session() {
     let _live_test_guard = live_test_guard();
     live::browser_pool_reuses_session_probe();
+}
+
+#[cfg(feature = "chromium")]
+#[test]
+fn preview_frame_is_deterministic_and_visibly_advances() {
+    let _live_test_guard = live_test_guard();
+    live::preview_frame_probe();
 }
 
 #[cfg(feature = "chromium")]

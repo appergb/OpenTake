@@ -414,6 +414,7 @@ pub fn run() {
             generation::generation_cancel,
             generation::generation_retry,
             motion::motion_capability,
+            motion::motion_preview,
             motion::motion_add,
             motion::motion_edit,
             motion::motion_cancel,
