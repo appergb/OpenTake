@@ -3,7 +3,10 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { ChatMessage } from "../../lib/types";
+import {
+  MAX_CHAT_IMAGE_BASE64_CHARS,
+  type ChatMessage,
+} from "../../lib/types";
 import { AssistantTurn, ConversationMessage } from "./AgentPanel";
 
 vi.mock("../../i18n", () => ({
@@ -111,9 +114,8 @@ describe("AssistantTurn", () => {
     expect(triggers).toHaveLength(2);
     expect(triggers[0].getAttribute("aria-expanded")).toBe("false");
     expect(triggers[0].getAttribute("aria-controls")).toBeTruthy();
-    expect(triggers[0].querySelector('[role="status"]')?.textContent).toBe(
-      "agent.toolRunning",
-    );
+    expect(document.getElementById(triggers[0].getAttribute("aria-describedby")!)?.textContent)
+      .toBe("agent.toolRunning");
 
     await act(async () => triggers[0].click());
     expect(triggers[0].getAttribute("aria-expanded")).toBe("true");
@@ -146,7 +148,8 @@ describe("AssistantTurn", () => {
     const activity = container.querySelector<HTMLElement>("[data-tool-activity]");
     const trigger = activity?.querySelector<HTMLButtonElement>("button");
     expect(activity?.dataset.status).toBe("error");
-    expect(trigger?.querySelector('[role="status"]')?.textContent).toBe("agent.toolFailed");
+    expect(document.getElementById(trigger?.getAttribute("aria-describedby") ?? "")?.textContent)
+      .toBe("agent.toolFailed");
     await act(async () => trigger?.click());
     expect(container.textContent).toContain("timeline locked");
   });
@@ -186,6 +189,51 @@ describe("AssistantTurn", () => {
     await act(async () => trigger.click());
     expect(document.getElementById(trigger.getAttribute("aria-controls")!)).toBeNull();
     expect(document.activeElement).toBe(trigger);
+  });
+
+  it("keeps live status outside the disclosure button and closes on Escape without bubbling", async () => {
+    const parentKeyDown = vi.fn();
+    await act(async () => root.render(
+      <div onKeyDown={parentKeyDown}>
+        <AssistantTurn message={assistant()} />
+      </div>,
+    ));
+    const trigger = container.querySelector<HTMLButtonElement>("[data-tool-activity-trigger]")!;
+    const statusId = trigger.getAttribute("aria-describedby");
+
+    expect(statusId).toBeTruthy();
+    expect(trigger.querySelector('[role="status"]')).toBeNull();
+    expect(document.getElementById(statusId!)?.getAttribute("role")).toBe("status");
+    await act(async () => trigger.click());
+    trigger.focus();
+    await act(async () => {
+      trigger.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(document.activeElement).toBe(trigger);
+    expect(parentKeyDown).not.toHaveBeenCalled();
+  });
+
+  it("rejects raster image payloads above the shared chat image ceiling", async () => {
+    await render(assistant({
+      content: "",
+      toolCalls: [],
+      blocks: [{
+        type: "toolResult",
+        toolUseId: "oversized-tool",
+        content: [{
+          kind: "image",
+          mediaType: "image/png",
+          base64: "A".repeat(MAX_CHAT_IMAGE_BASE64_CHARS + 4),
+        }],
+      }],
+    }));
+
+    const trigger = container.querySelector<HTMLButtonElement>("button")!;
+    await act(async () => trigger.click());
+    expect(container.querySelector("img")).toBeNull();
+    expect(container.textContent).toContain("agent.toolImageUnavailable");
   });
 
   it("renders native tool-message blocks instead of their flattened compatibility content", async () => {

@@ -76,6 +76,13 @@
   line-height: 1.5;
 }
 
+.agent-tool-activity__summary {
+  display: flex;
+  min-inline-size: 0;
+  align-items: baseline;
+  gap: var(--space-xs);
+}
+
 .agent-tool-activity__trigger {
   display: inline-flex;
   min-block-size: 24px;

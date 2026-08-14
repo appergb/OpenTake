@@ -95,3 +95,53 @@ Concurrent Rust core/project/render, Tauri commands/home, audit artifacts, and
 other task files were not staged, changed, or reverted.
 
 Commit target: `feat(agent): render tools inline in continuous replies`
+
+## Review fix round 1 — authoritative re-sync
+
+- Added `chat_history_authoritative`: a gap re-sync now waits for the exact
+  project/session turn to cross its terminal event boundary, without retaining
+  the turn-registry mutex across an async suspension, and only then reads the
+  durable history. Project replacement wakes the waiter and fails closed on
+  identity revalidation.
+- Added project-generation and per-session version gates. A late startup
+  `chat_sessions` response or authoritative re-sync cannot overwrite a session
+  touched while the request was in flight, including an inactive session.
+- Added atomic `resetProject(epoch, path)`, which clears all project-scoped
+  histories, drafts, sequence poison, re-sync state, versions, and tombstones
+  on a real identity change while preserving selection and composer state for
+  an ordinary same-project panel remount.
+- Validated all `chat_history`, `chat_history_authoritative`, and
+  `chat_sessions` responses before they reach the store. Raster base64 is
+  bounded by the shared `MAX_CHAT_IMAGE_BASE64_CHARS` ceiling at both decode
+  and render boundaries.
+- Tool disclosure status is now a live sibling described by the trigger;
+  Escape closes the disclosure, stops propagation, and retains trigger focus.
+- Deleted the dead `MotionPanel` implementation/test and its obsolete
+  translation strings.
+
+Review RED was observed before each production fix: active-turn gaps installed
+stale persisted history, startup snapshots overwrote touched inactive sessions,
+project replacement retained same-ID state, the disclosure lacked the required
+Escape/live-region relationship, oversized raster data rendered, and the dead
+Motion panel remained reachable on disk.
+
+Final GREEN verification:
+
+- Focused Agent/store/API command-contract: 4 files, 64/64 tests passed.
+- Rust `chat::tests`: 23/23 passed, including the exact terminal-boundary wait.
+- Full Web suite: 144 files, 1313/1313 tests passed.
+- `cargo clippy -p opentake-tauri --lib -- -D warnings` passed.
+- `cargo build -p opentake-tauri` passed.
+- `pnpm -C web build` passed (`tsc -b` and Vite production build).
+- `git diff --check` passed.
+
+The existing Vite ineffective-dynamic-import and >500 kB chunk warnings, plus
+the existing Rust `block v0.1.6` future-incompatibility notice, remain
+non-failing and are outside Task 3.
+
+Review-fix scope additionally owns `src-tauri/src/chat.rs`,
+`src-tauri/src/lib.rs`, `web/src/lib/api.ts`, `web/src/lib/types.ts`,
+`web/src/store/chatStore.ts` and its test, and the two deleted MotionPanel
+files. Concurrent editor audit artifacts were preserved and not staged.
+
+Review-fix commit target: `fix(agent): make conversation resync authoritative`

@@ -1,6 +1,14 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { decodeChatStreamEvent } from "../lib/api";
-import type { AgentContentBlock, ChatMessage } from "../lib/types";
+import {
+  decodeChatHistorySnapshot,
+  decodeChatSessionsSnapshot,
+  decodeChatStreamEvent,
+} from "../lib/api";
+import {
+  MAX_CHAT_IMAGE_BASE64_CHARS,
+  type AgentContentBlock,
+  type ChatMessage,
+} from "../lib/types";
 import {
   MAX_CHAT_BLOCK_INDEX,
   MAX_CHAT_DELETED_SESSIONS,
@@ -84,6 +92,10 @@ function resetStore() {
     resyncSessionOrder: [],
     deletedSessionIds: {},
     deletedSessionOrder: [],
+    projectEpoch: null,
+    projectPath: null,
+    projectGeneration: 0,
+    sessionVersions: {},
     composerDraft: null,
   });
 }
@@ -103,6 +115,98 @@ function deltaPayload(overrides: Record<string, unknown> = {}) {
 
 describe("chatStore ordered session streams", () => {
   beforeEach(resetStore);
+
+  it("clears every project-scoped namespace when the same session id moves to a new project", () => {
+    const store = useChatStore.getState();
+    store.resetProject(sessionA, 7, "/tmp/A.opentake");
+    store.beginMessage(sessionA, "message-a");
+    store.appendBlockDelta(sessionA, "message-a", 1, 0, "gap");
+    store.deleteSession(sessionB);
+    store.setComposerDraft("project A draft");
+
+    expect(store.resetProject(sessionA, 8, "/tmp/B.opentake")).toBe(true);
+    const moved = useChatStore.getState();
+    expect(moved.sessionId).toBe(sessionA);
+    expect(moved.projectEpoch).toBe(8);
+    expect(moved.projectPath).toBe("/tmp/B.opentake");
+    expect(moved.sessionMessages).toEqual({});
+    expect(moved.drafts).toEqual({});
+    expect(moved.blockedMessageKeys).toEqual({});
+    expect(moved.historyResyncRequests).toEqual({});
+    expect(moved.resyncingSessionIds).toEqual({});
+    expect(moved.deletedSessionIds).toEqual({});
+    expect(moved.sessionVersions).toEqual({});
+    expect(moved.composerDraft).toBeNull();
+  });
+
+  it("preserves selected session and composer when resetProject sees an ordinary same-project remount", () => {
+    const store = useChatStore.getState();
+    store.resetProject(sessionA, 7, "/tmp/A.opentake");
+    store.setMessagesForSession(sessionB, [assistantMessage("saved", [{ type: "text", text: "keep" }])]);
+    store.reset(sessionB);
+    store.setComposerDraft("keep this draft");
+
+    expect(store.resetProject("replacement-id", 7, "/tmp/A.opentake")).toBe(false);
+    const remounted = useChatStore.getState();
+    expect(remounted.sessionId).toBe(sessionB);
+    expect(remounted.messages[0].content).toBe("keep");
+    expect(remounted.composerDraft).toBe("keep this draft");
+  });
+
+  it("installs a startup snapshot only when that session was untouched in the same load generation", () => {
+    const store = useChatStore.getState();
+    store.resetProject(sessionA, 7, "/tmp/A.opentake");
+    const generation = useChatStore.getState().projectGeneration;
+    const versions = { ...useChatStore.getState().sessionVersions };
+    store.beginMessage(sessionB, "live-inactive");
+    store.appendBlockDelta(sessionB, "live-inactive", 0, 0, "new live reply");
+
+    expect(store.installSessionSnapshot(
+      sessionB,
+      [assistantMessage("stale", [{ type: "text", text: "old persisted reply" }])],
+      generation,
+      versions[sessionB] ?? 0,
+    )).toBe(false);
+    expect(useChatStore.getState().sessionMessages[sessionB][0].content).toBe("new live reply");
+    expect(store.installSessionSnapshot(
+      sessionA,
+      [assistantMessage("saved", [{ type: "text", text: "safe snapshot" }])],
+      generation,
+      versions[sessionA] ?? 0,
+    )).toBe(true);
+    expect(useChatStore.getState().sessionMessages[sessionA][0].content).toBe("safe snapshot");
+  });
+
+  it("validates bounded history and session snapshots before they can reach the store", () => {
+    const valid = assistantMessage("saved", [{ type: "text", text: "safe" }]);
+    const oversized = toolResultMessage("tool-image", "tool-1", {
+      content: "image",
+      blocks: [{
+        type: "toolResult",
+        toolUseId: "tool-1",
+        content: [{
+          kind: "image",
+          mediaType: "image/png",
+          base64: "A".repeat(MAX_CHAT_IMAGE_BASE64_CHARS + 4),
+        }],
+      }],
+    });
+
+    expect(decodeChatHistorySnapshot([valid])).toEqual([valid]);
+    expect(decodeChatHistorySnapshot([oversized])).toBeNull();
+    expect(decodeChatSessionsSnapshot([{
+      id: sessionA,
+      messages: [oversized],
+      createdAt: 1,
+      isOpen: true,
+    }])).toBeNull();
+    expect(decodeChatSessionsSnapshot([{
+      id: sessionA,
+      messages: [valid],
+      createdAt: 1,
+      isOpen: true,
+    }])?.[0].messages).toEqual([valid]);
+  });
 
   it("keeps text, tool, and following text in authoritative sequence order", () => {
     const store = useChatStore.getState();

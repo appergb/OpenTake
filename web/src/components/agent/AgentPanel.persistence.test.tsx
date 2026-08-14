@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiMocks = vi.hoisted(() => ({
   chatHistory: vi.fn(),
+  chatHistoryAuthoritative: vi.fn(),
   chatSessionSetOpen: vi.fn(),
   chatSessions: vi.fn(),
   chatSend: vi.fn(),
@@ -31,6 +32,7 @@ vi.mock("../../lib/api", () => ({
   isTauri: true,
   chatCancel: vi.fn(async () => {}),
   chatHistory: apiMocks.chatHistory,
+  chatHistoryAuthoritative: apiMocks.chatHistoryAuthoritative,
   chatSend: apiMocks.chatSend,
   chatSessionSetOpen: apiMocks.chatSessionSetOpen,
   chatSessions: apiMocks.chatSessions,
@@ -69,6 +71,10 @@ beforeEach(() => {
     resyncSessionOrder: [],
     deletedSessionIds: {},
     deletedSessionOrder: [],
+    projectEpoch: null,
+    projectPath: null,
+    projectGeneration: 0,
+    sessionVersions: {},
     composerDraft: null,
   });
   localStorage.clear();
@@ -109,11 +115,13 @@ beforeEach(() => {
     return apiMocks.unDone;
   });
   apiMocks.chatHistory.mockReset();
+  apiMocks.chatHistoryAuthoritative.mockReset();
   apiMocks.chatSessionSetOpen.mockReset();
   apiMocks.chatSessions.mockReset();
   apiMocks.chatSend.mockReset();
   apiMocks.chatSend.mockResolvedValue(undefined);
   apiMocks.chatHistory.mockResolvedValue([]);
+  apiMocks.chatHistoryAuthoritative.mockResolvedValue([]);
   apiMocks.chatSessionSetOpen.mockImplementation(
     async (sessionId: string, isOpen: boolean) => ({
       id: sessionId,
@@ -393,7 +401,7 @@ describe("AgentPanel project sessions", () => {
       await Promise.resolve();
     });
 
-    expect(apiMocks.chatHistory).not.toHaveBeenCalled();
+    expect(apiMocks.chatHistoryAuthoritative).not.toHaveBeenCalled();
     expect(useChatStore.getState().sessionId).toBe("chat-second");
     expect(useChatStore.getState().messages.map((message) => message.content)).toEqual([
       "Second edit",
@@ -636,9 +644,164 @@ describe("AgentPanel project sessions", () => {
     expect(container?.querySelector('button[aria-label="agent.send"]')).not.toBeNull();
   });
 
+  it("waits for an authoritative terminal history after a gap and installs it once", async () => {
+    let resolveAuthoritative: (messages: Array<Record<string, unknown>>) => void = () => {};
+    apiMocks.chatHistory.mockResolvedValueOnce([
+      { id: "m1", role: "user", content: "persisted", toolCalls: [], createdAt: 1 },
+    ]);
+    apiMocks.chatHistoryAuthoritative.mockReturnValueOnce(new Promise((resolve) => {
+      resolveAuthoritative = resolve;
+    }));
+    await act(async () => {
+      root?.render(<AgentPanel />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      apiMocks.deltaHandler?.({
+        projectEpoch: 41,
+        projectPath: "/tmp/Current.opentake",
+        sessionId: "chat-restored",
+        messageId: "assistant-live",
+        sequence: 0,
+        blockIndex: 0,
+        delta: "partial live reply",
+      });
+      apiMocks.toolHandler?.({
+        projectEpoch: 41,
+        projectPath: "/tmp/Current.opentake",
+        sessionId: "chat-restored",
+        messageId: "assistant-live",
+        sequence: 2,
+        blockIndex: 1,
+        block: { type: "toolUse", id: "gap", name: "inspect_timeline", input: {} },
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(apiMocks.chatHistory).not.toHaveBeenCalled();
+    expect(apiMocks.chatHistoryAuthoritative).toHaveBeenCalledOnce();
+    expect(useChatStore.getState().messages.at(-1)?.content).toBe("partial live reply");
+
+    const terminal = {
+      id: "assistant-live",
+      role: "assistant",
+      content: "final persisted reply",
+      toolCalls: [],
+      blocks: [{ type: "text", text: "final persisted reply" }],
+      createdAt: 9,
+    };
+    await act(async () => {
+      apiMocks.doneHandler?.({
+        projectEpoch: 41,
+        projectPath: "/tmp/Current.opentake",
+        sessionId: "chat-restored",
+        messageId: "assistant-live",
+        sequence: 1,
+        message: terminal,
+      });
+      resolveAuthoritative([
+        { id: "m1", role: "user", content: "persisted", toolCalls: [], createdAt: 1 },
+        terminal,
+      ]);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(useChatStore.getState().messages.at(-1)).toEqual(terminal);
+    expect(apiMocks.chatHistoryAuthoritative).toHaveBeenCalledOnce();
+    expect(useChatStore.getState().takeHistoryResyncRequest()).toBeNull();
+  });
+
+  it("does not let a late startup snapshot overwrite a touched inactive session", async () => {
+    let resolveSessions: (sessions: Array<Record<string, unknown>>) => void = () => {};
+    apiMocks.chatSessions.mockReturnValueOnce(new Promise((resolve) => {
+      resolveSessions = resolve;
+    }));
+    await act(async () => {
+      root?.render(<AgentPanel />);
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      apiMocks.deltaHandler?.({
+        projectEpoch: 41,
+        projectPath: "/tmp/Current.opentake",
+        sessionId: "chat-second",
+        messageId: "assistant-new",
+        sequence: 0,
+        blockIndex: 0,
+        delta: "new inactive reply",
+      });
+      resolveSessions([
+        {
+          id: "chat-restored",
+          messages: [{ id: "m1", role: "user", content: "persisted", toolCalls: [], createdAt: 1 }],
+          createdAt: 1,
+          isOpen: true,
+        },
+        {
+          id: "chat-second",
+          messages: [{ id: "old", role: "assistant", content: "old snapshot", toolCalls: [], createdAt: 1 }],
+          createdAt: 2,
+          isOpen: true,
+        },
+      ]);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(useChatStore.getState().sessionMessages["chat-second"].at(-1)?.content).toBe(
+      "new inactive reply",
+    );
+    const secondTab = Array.from(container?.querySelectorAll('[role="tab"]') ?? [])[1] as
+      | HTMLButtonElement
+      | undefined;
+    await act(async () => secondTab?.click());
+    expect(useChatStore.getState().messages.at(-1)?.content).toBe("new inactive reply");
+  });
+
+  it("atomically clears prior project chat state before a same-id replacement snapshot arrives", async () => {
+    await act(async () => {
+      root?.render(<AgentPanel />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(useChatStore.getState().sessionMessages["chat-restored"]).toBeDefined();
+
+    let resolveReplacement: (sessions: Array<Record<string, unknown>>) => void = () => {};
+    apiMocks.chatSessions.mockReturnValueOnce(new Promise((resolve) => {
+      resolveReplacement = resolve;
+    }));
+    await act(async () => {
+      useProjectStore.setState({
+        projectEpoch: 42,
+        projectPath: "/tmp/Replacement.opentake",
+      });
+      await Promise.resolve();
+    });
+
+    expect(useChatStore.getState().sessionMessages).toEqual({});
+    await act(async () => {
+      resolveReplacement([{
+        id: "chat-restored",
+        messages: [{ id: "b1", role: "user", content: "project B", toolCalls: [], createdAt: 1 }],
+        createdAt: 1,
+        isOpen: true,
+      }]);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(useChatStore.getState().messages.map((message) => message.content)).toEqual([
+      "project B",
+    ]);
+  });
+
   it("applies server identities and sequences, then reloads malformed or gapped history once", async () => {
     let resolveHistory: (messages: Array<Record<string, unknown>>) => void = () => {};
-    apiMocks.chatHistory.mockReturnValueOnce(new Promise((resolve) => {
+    apiMocks.chatHistoryAuthoritative.mockReturnValueOnce(new Promise((resolve) => {
       resolveHistory = resolve;
     }));
     await act(async () => {
@@ -688,8 +851,8 @@ describe("AgentPanel project sessions", () => {
       await Promise.resolve();
     });
 
-    expect(apiMocks.chatHistory).toHaveBeenCalledTimes(1);
-    expect(apiMocks.chatHistory).toHaveBeenCalledWith(
+    expect(apiMocks.chatHistoryAuthoritative).toHaveBeenCalledTimes(1);
+    expect(apiMocks.chatHistoryAuthoritative).toHaveBeenCalledWith(
       "chat-restored",
       41,
       "/tmp/Current.opentake",
@@ -705,7 +868,7 @@ describe("AgentPanel project sessions", () => {
       });
       await Promise.resolve();
     });
-    expect(apiMocks.chatHistory).toHaveBeenCalledTimes(1);
+    expect(apiMocks.chatHistoryAuthoritative).toHaveBeenCalledTimes(1);
 
     const authoritative = [
       { id: "m1", role: "user", content: "persisted", toolCalls: [], createdAt: 1 },
@@ -804,7 +967,7 @@ describe("AgentPanel project sessions", () => {
       await Promise.resolve();
     });
 
-    expect(apiMocks.chatHistory).toHaveBeenCalledOnce();
+    expect(apiMocks.chatHistoryAuthoritative).toHaveBeenCalledOnce();
     expect(textarea.disabled).toBe(false);
   });
 
@@ -833,7 +996,7 @@ describe("AgentPanel project sessions", () => {
       await Promise.resolve();
     });
 
-    expect(apiMocks.chatHistory).not.toHaveBeenCalled();
+    expect(apiMocks.chatHistoryAuthoritative).not.toHaveBeenCalled();
   });
 
   it("removes the Agent-local Chat/Motion switch without consulting a stored mode", async () => {

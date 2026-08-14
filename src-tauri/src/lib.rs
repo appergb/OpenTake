@@ -440,6 +440,7 @@ pub fn run() {
             codex::codex_logout,
             chat::chat_send,
             chat::chat_history,
+            chat::chat_history_authoritative,
             chat::chat_sessions,
             chat::chat_session_set_open,
             chat::chat_cancel,

@@ -75,6 +75,7 @@ struct TurnCancel {
     requested: Arc<AtomicBool>,
     media: opentake_media::MediaCancelToken,
     phase: Mutex<TurnPhase>,
+    terminal: tokio::sync::watch::Sender<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,10 +87,12 @@ enum TurnPhase {
 
 impl TurnCancel {
     fn new() -> Self {
+        let (terminal, _) = tokio::sync::watch::channel(false);
         Self {
             requested: Arc::new(AtomicBool::new(false)),
             media: opentake_media::MediaCancelToken::new(),
             phase: Mutex::new(TurnPhase::Running),
+            terminal,
         }
     }
 
@@ -117,6 +120,22 @@ impl TurnCancel {
         *phase = TurnPhase::Finalizing;
         true
     }
+
+    fn mark_terminal(&self) {
+        self.terminal.send_replace(true);
+    }
+
+    async fn wait_terminal(&self) {
+        let mut terminal = self.terminal.subscribe();
+        if *terminal.borrow() {
+            return;
+        }
+        while terminal.changed().await.is_ok() {
+            if *terminal.borrow() {
+                return;
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -129,6 +148,11 @@ struct TurnRegistry {
 enum TurnFinalization {
     Committed,
     Cancelled,
+}
+
+enum AuthoritativeHistoryState {
+    Wait(Arc<TurnCancel>),
+    Ready(Vec<ChatMessage>),
 }
 
 #[derive(Clone)]
@@ -315,6 +339,7 @@ impl ChatState {
                         && project_dir.as_ref() == Some(&key.project_dir);
                     if !current {
                         cancel.request();
+                        cancel.mark_terminal();
                     }
                     current
                 });
@@ -453,21 +478,17 @@ impl ChatState {
         owner: &Arc<TurnCancel>,
         session: ChatSession,
     ) -> Result<TurnFinalization, String> {
-        let mut turns = self.turns.lock().map_err(|e| e.to_string())?;
+        let turns = self.turns.lock().map_err(|e| e.to_string())?;
         let owns_turn = turns
             .running
             .get(key)
             .is_some_and(|registered| Arc::ptr_eq(registered, owner));
         if !owns_turn || turns.transition_depth > 0 || !owner.begin_finalization() {
-            if owns_turn {
-                turns.running.remove(key);
-            }
             return Ok(TurnFinalization::Cancelled);
         }
 
         let _identity = self.core.lock_project_identity_workflow();
         let persisted = self.put_project_session_with_identity_held(project, session);
-        turns.running.remove(key);
         persisted?;
         Ok(TurnFinalization::Committed)
     }
@@ -522,8 +543,58 @@ impl ChatState {
 
     fn release_turn(&self, key: &SessionKey) {
         if let Ok(mut turns) = self.turns.lock() {
-            turns.running.remove(key);
+            if let Some(owner) = turns.running.remove(key) {
+                owner.mark_terminal();
+            }
         }
+    }
+
+    fn complete_turn(&self, key: &SessionKey, owner: &Arc<TurnCancel>) {
+        if let Ok(mut turns) = self.turns.lock() {
+            let owns_turn = turns
+                .running
+                .get(key)
+                .is_some_and(|registered| Arc::ptr_eq(registered, owner));
+            if owns_turn {
+                turns.running.remove(key);
+                owner.mark_terminal();
+            }
+        }
+    }
+
+    async fn authoritative_project_history(
+        &self,
+        expected_project_epoch: u64,
+        expected_project_path: &str,
+        session_id: &str,
+    ) -> Result<Vec<ChatMessage>, String> {
+        let project = self.project_context_for(expected_project_epoch, expected_project_path)?;
+        let key = project.key(session_id);
+        loop {
+            match self.authoritative_history_state(&project, &key, session_id)? {
+                AuthoritativeHistoryState::Wait(owner) => {
+                    owner.wait_terminal().await;
+                    self.ensure_project_context(&project)?;
+                }
+                AuthoritativeHistoryState::Ready(messages) => return Ok(messages),
+            }
+        }
+    }
+
+    fn authoritative_history_state(
+        &self,
+        project: &ChatProjectContext,
+        key: &SessionKey,
+        session_id: &str,
+    ) -> Result<AuthoritativeHistoryState, String> {
+        // Exclude a new turn only for this synchronous authoritative read. No
+        // runtime mutex escapes this helper or crosses an async suspension.
+        let turns = self.turns.lock().map_err(|e| e.to_string())?;
+        if let Some(owner) = turns.running.get(key).cloned() {
+            return Ok(AuthoritativeHistoryState::Wait(owner));
+        }
+        let messages = self.take_project_session(project, session_id)?.messages;
+        Ok(AuthoritativeHistoryState::Ready(messages))
     }
 }
 
@@ -1105,6 +1176,7 @@ pub async fn chat_send(
                     });
                 }
             }
+            state_clone.complete_turn(&session_key, &turn_owner);
             return;
         }
 
@@ -1169,6 +1241,27 @@ pub fn chat_history(
 ) -> Result<Vec<ChatMessage>, String> {
     let project = state.project_context_for(expected_project_epoch, &expected_project_path)?;
     Ok(state.take_project_session(&project, &session_id)?.messages)
+}
+
+/// Return only a terminal durable snapshot. If this exact project/session has
+/// an active turn, wait for its terminal event boundary without holding the
+/// turn registry mutex across the async suspension.
+#[tauri::command]
+pub async fn chat_history_authoritative(
+    state: State<'_, ChatState>,
+    session_id: String,
+    expected_project_epoch: u64,
+    expected_project_path: String,
+) -> Result<Vec<ChatMessage>, String> {
+    state
+        .inner()
+        .clone()
+        .authoritative_project_history(
+            expected_project_epoch,
+            &expected_project_path,
+            &session_id,
+        )
+        .await
 }
 
 /// `chat_sessions`: newest-first persistent conversations for the project.
@@ -2091,6 +2184,76 @@ mod tests {
         let persisted = state.take_project_session(&project, "commit-wins").unwrap();
         assert_eq!(persisted.messages.len(), 2);
         assert_eq!(persisted.messages[1].content, "committed");
+    }
+
+    #[test]
+    fn authoritative_history_waits_until_the_exact_session_terminal_boundary() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let temp = tempfile::tempdir().unwrap();
+            let core = AppCore::new();
+            let project_path = temp.path().join("Project.opentake");
+            core.save_project(Some(project_path.clone())).unwrap();
+            let state = ChatState::new(
+                core,
+                temp.path().join("no-workflows"),
+                temp.path().join("chat-cache"),
+                temp.path().join("chat-models"),
+            );
+            let project = state.project_context().unwrap();
+            let mut session = ChatSession::new("chat-authoritative");
+            session.messages.push(ChatMessage::user("request"));
+            state.put_project_session(&project, session.clone()).unwrap();
+            let owner = Arc::new(TurnCancel::new());
+            let key = project.key(&session.id);
+            let _turn_admission = state
+                .reserve_turn(key.clone(), owner.clone())
+                .unwrap();
+
+            let expected_path = project_path.to_string_lossy().into_owned();
+            let session_id = session.id.clone();
+            let mut history = Box::pin(state.authoritative_project_history(
+                project.project_epoch,
+                &expected_path,
+                &session_id,
+            ));
+            assert!(tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                history.as_mut(),
+            )
+            .await
+            .is_err());
+
+            session
+                .messages
+                .push(ChatMessage::assistant("final reply", Vec::new()));
+            assert_eq!(
+                state
+                    .finalize_project_turn(&project, &key, &owner, session)
+                    .unwrap(),
+                TurnFinalization::Committed,
+            );
+            assert!(tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                history.as_mut(),
+            )
+            .await
+            .is_err(), "durable commit alone must not precede the terminal event");
+
+            state.complete_turn(&key, &owner);
+            let messages = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                history,
+            )
+            .await
+            .expect("authoritative history must wake after terminal completion")
+            .unwrap();
+            assert_eq!(messages.len(), 2);
+            assert_eq!(messages[1].content, "final reply");
+        });
     }
 
     #[test]

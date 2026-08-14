@@ -1588,6 +1588,70 @@ export function isBoundedTerminalChatMessage(
   return isBoundedAssistantChatMessage(value, expectedId) || isBoundedToolChatMessage(value, expectedId);
 }
 
+function isBoundedTextChatMessage(value: unknown): value is ChatMessage {
+  if (!isPlainDataRecord(value)) return false;
+  const message = value;
+  const budget = { remaining: MAX_CHAT_JSON_NODES };
+  if (
+    !takeShapeNode(budget, 0) ||
+    !isBoundedChatId(message.id) ||
+    (message.role !== "user" && message.role !== "system") ||
+    typeof message.content !== "string" ||
+    message.content.length > MAX_CHAT_MESSAGE_CHARS ||
+    !isDenseDataArray(message.toolCalls) ||
+    message.toolCalls.length !== 0 ||
+    !isDenseDataArray(message.blocks) ||
+    message.blocks.length > MAX_CHAT_BLOCK_INDEX + 1 ||
+    !message.blocks.every((block) => isAgentContentBlockShape(block, budget, 1)) ||
+    typeof message.createdAt !== "number" ||
+    !Number.isSafeInteger(message.createdAt) ||
+    message.createdAt < 0 ||
+    message.toolCallId !== undefined ||
+    message.toolIsError !== undefined ||
+    canonicalizeBoundedChatEvent(message) === null
+  ) {
+    return false;
+  }
+  const blocks = message.blocks as AgentContentBlock[];
+  return blocks.every((block) => block.type === "text") &&
+    message.content === blocks.map((block) => block.type === "text" ? block.text : "").join("");
+}
+
+export function isBoundedStoredChatMessage(value: unknown): value is ChatMessage {
+  if (!isPlainDataRecord(value) || !isBoundedChatId(value.id)) return false;
+  return isBoundedTerminalChatMessage(value, value.id) || isBoundedTextChatMessage(value);
+}
+
+export function isBoundedChatHistorySnapshot(value: unknown): value is ChatMessage[] {
+  return isDenseDataArray(value) &&
+    value.length <= MAX_CHAT_JSON_NODES &&
+    value.every(isBoundedStoredChatMessage) &&
+    canonicalizeBoundedChatEvent(value) !== null;
+}
+
+function isBoundedChatSessionSnapshot(value: unknown): value is ChatSession {
+  if (!isPlainDataRecord(value)) return false;
+  return isBoundedChatId(value.id) &&
+    isBoundedChatHistorySnapshot(value.messages) &&
+    typeof value.createdAt === "number" &&
+    Number.isSafeInteger(value.createdAt) &&
+    value.createdAt >= 0 &&
+    typeof value.isOpen === "boolean" &&
+    (value.provider === undefined ||
+      (typeof value.provider === "string" && value.provider.length <= MAX_CHAT_STREAM_ID_LENGTH)) &&
+    (value.model === undefined ||
+      (typeof value.model === "string" && value.model.length <= MAX_CHAT_STREAM_ID_LENGTH));
+}
+
+export function isBoundedChatSessionsSnapshot(value: unknown): value is ChatSession[] {
+  return isDenseDataArray(value) &&
+    value.length <= MAX_CHAT_RETAINED_SESSION_SNAPSHOT_COUNT &&
+    value.every(isBoundedChatSessionSnapshot) &&
+    canonicalizeBoundedChatEvent(value) !== null;
+}
+
+const MAX_CHAT_RETAINED_SESSION_SNAPSHOT_COUNT = 128;
+
 // MARK: - AI generation audit log (mirror of opentake_project::gen_log,
 // camelCase; optional fields are omitted on the wire when absent)
 

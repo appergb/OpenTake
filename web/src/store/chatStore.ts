@@ -58,6 +58,9 @@ interface ChatDraft {
 }
 
 interface ChatStoreState {
+  projectEpoch: number | null;
+  projectPath: string | null;
+  projectGeneration: number;
   sessionId: string;
   /** Derived mirror for the currently selected session only. */
   messages: ChatMessage[];
@@ -74,6 +77,7 @@ interface ChatStoreState {
   resyncSessionOrder: string[];
   deletedSessionIds: Record<string, true>;
   deletedSessionOrder: string[];
+  sessionVersions: Record<string, number>;
   composerDraft: string | null;
   setComposerDraft: (draft: string | null) => void;
   pushUser: (text: string) => void;
@@ -105,7 +109,14 @@ interface ChatStoreState {
   takeHistoryResyncRequest: () => ChatHistoryResyncRequest | null;
   setMessages: (messages: ChatMessage[]) => void;
   setMessagesForSession: (sessionId: string, messages: ChatMessage[]) => void;
+  installSessionSnapshot: (
+    sessionId: string,
+    messages: ChatMessage[],
+    projectGeneration: number,
+    expectedSessionVersion: number,
+  ) => boolean;
   deleteSession: (sessionId: string) => void;
+  resetProject: (sessionId: string, projectEpoch: number, projectPath: string | null) => boolean;
   reset: (sessionId: string) => void;
   /** Beta 4 compatibility aliases. New event handlers use the methods above. */
   beginStream: (id: string) => void;
@@ -131,6 +142,13 @@ function isSequence(value: unknown): value is number {
 
 function touch(order: string[], value: string): string[] {
   return [...order.filter((candidate) => candidate !== value), value];
+}
+
+function touchedSessionVersions(state: ChatStoreState, sessionId: string): Record<string, number> {
+  return {
+    ...state.sessionVersions,
+    [sessionId]: (state.sessionVersions[sessionId] ?? 0) + 1,
+  };
 }
 
 function deriveAssistantFields(message: ChatMessage, blocks: AgentContentBlock[]): ChatMessage {
@@ -184,6 +202,7 @@ function selectedView(state: ChatStoreState) {
 
 function removeSessionState(state: ChatStoreState, sessionId: string): void {
   delete state.sessionMessages[sessionId];
+  delete state.sessionVersions[sessionId];
   delete state.historyResyncRequests[sessionId];
   delete state.resyncingSessionIds[sessionId];
   state.sessionOrder = state.sessionOrder.filter((candidate) => candidate !== sessionId);
@@ -215,6 +234,7 @@ function reconcile(input: ChatStoreState): ChatStoreState {
     resyncSessionOrder: [...input.resyncSessionOrder],
     deletedSessionIds: { ...input.deletedSessionIds },
     deletedSessionOrder: [...input.deletedSessionOrder],
+    sessionVersions: { ...input.sessionVersions },
   };
 
   state.sessionOrder = state.sessionOrder.filter(
@@ -300,6 +320,7 @@ function stopMessage(
   const firstResyncForSession = !state.resyncingSessionIds[sessionId];
   return reconcile({
     ...state,
+    sessionVersions: touchedSessionVersions(state, sessionId),
     blockedMessageKeys,
     blockedMessageOrder,
     resyncingSessionIds: firstResyncForSession
@@ -389,6 +410,7 @@ function withUpdatedMessage(
   const key = draftKey(sessionId, messageId);
   return reconcile({
     ...state,
+    sessionVersions: touchedSessionVersions(state, sessionId),
     sessionMessages: { ...state.sessionMessages, [sessionId]: nextMessages },
     sessionOrder: touch(state.sessionOrder, sessionId),
     drafts: { ...state.drafts, [key]: draft },
@@ -396,7 +418,44 @@ function withUpdatedMessage(
   });
 }
 
+function installSessionMessages(
+  state: ChatStoreState,
+  sessionId: string,
+  messages: ChatMessage[],
+): ChatStoreState {
+  const drafts = Object.fromEntries(
+    Object.entries(state.drafts).filter(([, draft]) => draft.sessionId !== sessionId),
+  );
+  const draftOrder = state.draftOrder.filter((key) => drafts[key] !== undefined);
+  const blockedMessageKeys = Object.fromEntries(
+    Object.entries(state.blockedMessageKeys).filter(([key]) => !key.startsWith(`${sessionId}\u0000`)),
+  ) as Record<string, true>;
+  const blockedMessageOrder = state.blockedMessageOrder.filter(
+    (key) => blockedMessageKeys[key] !== undefined,
+  );
+  const resyncingSessionIds = { ...state.resyncingSessionIds };
+  delete resyncingSessionIds[sessionId];
+  const historyResyncRequests = { ...state.historyResyncRequests };
+  delete historyResyncRequests[sessionId];
+  return reconcile({
+    ...state,
+    sessionMessages: { ...state.sessionMessages, [sessionId]: messages },
+    sessionOrder: touch(state.sessionOrder, sessionId),
+    sessionVersions: touchedSessionVersions(state, sessionId),
+    drafts,
+    draftOrder,
+    blockedMessageKeys,
+    blockedMessageOrder,
+    resyncingSessionIds,
+    resyncSessionOrder: state.resyncSessionOrder.filter((candidate) => candidate !== sessionId),
+    historyResyncRequests,
+  });
+}
+
 export const useChatStore = create<ChatStoreState>((set, get) => ({
+  projectEpoch: null,
+  projectPath: null,
+  projectGeneration: 0,
   sessionId: newSessionId(),
   messages: [],
   streaming: false,
@@ -412,6 +471,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
   resyncSessionOrder: [],
   deletedSessionIds: {},
   deletedSessionOrder: [],
+  sessionVersions: {},
   composerDraft: null,
   setComposerDraft: (composerDraft) => set({ composerDraft }),
 
@@ -426,6 +486,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     };
     return reconcile({
       ...state,
+      sessionVersions: touchedSessionVersions(state, state.sessionId),
       sessionMessages: {
         ...state.sessionMessages,
         [state.sessionId]: [...(state.sessionMessages[state.sessionId] ?? []), message],
@@ -453,6 +514,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     };
     return reconcile({
       ...state,
+      sessionVersions: touchedSessionVersions(state, sessionId),
       sessionMessages: { ...state.sessionMessages, [sessionId]: [...messages, message] },
       sessionOrder: touch(state.sessionOrder, sessionId),
       drafts: {
@@ -597,6 +659,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         nextMessages[index] = first;
         return reconcile({
           ...state,
+          sessionVersions: touchedSessionVersions(state, state.sessionId),
           sessionMessages: { ...state.sessionMessages, [state.sessionId]: nextMessages },
           sessionOrder: touch(state.sessionOrder, state.sessionId),
           drafts: {
@@ -643,6 +706,7 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
       nextMessages[index] = message;
       return reconcile({
         ...state,
+        sessionVersions: touchedSessionVersions(state, sessionId),
         sessionMessages: { ...state.sessionMessages, [sessionId]: nextMessages },
         sessionOrder: touch(state.sessionOrder, sessionId),
         drafts: {
@@ -677,37 +741,25 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
 
   setMessagesForSession: (sessionId, messages) => set((state) => {
     if (!isBoundedChatId(sessionId) || state.deletedSessionIds[sessionId]) return state;
-    const drafts = Object.fromEntries(
-      Object.entries(state.drafts).filter(([, draft]) => draft.sessionId !== sessionId),
-    );
-    const draftOrder = state.draftOrder.filter((key) => drafts[key] !== undefined);
-    const blockedMessageKeys = Object.fromEntries(
-      Object.entries(state.blockedMessageKeys).filter(([key]) => !key.startsWith(`${sessionId}\u0000`)),
-    ) as Record<string, true>;
-    const blockedMessageOrder = state.blockedMessageOrder.filter(
-      (key) => blockedMessageKeys[key] !== undefined,
-    );
-    const resyncingSessionIds = { ...state.resyncingSessionIds };
-    delete resyncingSessionIds[sessionId];
-    const historyResyncRequests = { ...state.historyResyncRequests };
-    delete historyResyncRequests[sessionId];
-    const deletedSessionIds = { ...state.deletedSessionIds };
-    delete deletedSessionIds[sessionId];
-    return reconcile({
-      ...state,
-      sessionMessages: { ...state.sessionMessages, [sessionId]: messages },
-      sessionOrder: touch(state.sessionOrder, sessionId),
-      drafts,
-      draftOrder,
-      blockedMessageKeys,
-      blockedMessageOrder,
-      resyncingSessionIds,
-      resyncSessionOrder: state.resyncSessionOrder.filter((candidate) => candidate !== sessionId),
-      historyResyncRequests,
-      deletedSessionIds,
-      deletedSessionOrder: state.deletedSessionOrder.filter((candidate) => candidate !== sessionId),
-    });
+    return installSessionMessages(state, sessionId, messages);
   }),
+
+  installSessionSnapshot: (sessionId, messages, projectGeneration, expectedSessionVersion) => {
+    let installed = false;
+    set((state) => {
+      if (
+        !isBoundedChatId(sessionId) ||
+        state.deletedSessionIds[sessionId] ||
+        state.projectGeneration !== projectGeneration ||
+        (state.sessionVersions[sessionId] ?? 0) !== expectedSessionVersion
+      ) {
+        return state;
+      }
+      installed = true;
+      return installSessionMessages(state, sessionId, messages);
+    });
+    return installed;
+  },
 
   deleteSession: (sessionId) => set((state) => {
     if (!isBoundedChatId(sessionId)) return state;
@@ -719,6 +771,46 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     removeSessionState(next, sessionId);
     return reconcile(next);
   }),
+
+  resetProject: (sessionId, projectEpoch, projectPath) => {
+    if (
+      !isBoundedChatId(sessionId) ||
+      !Number.isSafeInteger(projectEpoch) ||
+      projectEpoch < 0 ||
+      (projectPath !== null && (projectPath.length === 0 || projectPath.length > 4096))
+    ) {
+      return false;
+    }
+    let changed = false;
+    set((state) => {
+      if (state.projectEpoch === projectEpoch && state.projectPath === projectPath) return state;
+      changed = true;
+      const projectGeneration = state.projectGeneration >= Number.MAX_SAFE_INTEGER
+        ? 1
+        : state.projectGeneration + 1;
+      return reconcile({
+        ...state,
+        projectEpoch,
+        projectPath,
+        projectGeneration,
+        sessionId,
+        sessionMessages: {},
+        sessionOrder: [],
+        sessionVersions: {},
+        drafts: {},
+        draftOrder: [],
+        blockedMessageKeys: {},
+        blockedMessageOrder: [],
+        historyResyncRequests: {},
+        resyncingSessionIds: {},
+        resyncSessionOrder: [],
+        deletedSessionIds: {},
+        deletedSessionOrder: [],
+        composerDraft: null,
+      });
+    });
+    return changed;
+  },
 
   reset: (sessionId) => set((state) => {
     if (!isBoundedChatId(sessionId)) return state;

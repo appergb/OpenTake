@@ -15,6 +15,8 @@ import {
   canonicalizeBoundedChatEvent,
   isBoundedAgentContentBlock,
   isBoundedChatId,
+  isBoundedChatHistorySnapshot,
+  isBoundedChatSessionsSnapshot,
   isBoundedTerminalChatMessage,
 } from "./types";
 import type {
@@ -2103,12 +2105,35 @@ export async function chatHistory(
   expectedProjectPath: string,
 ): Promise<ChatMessage[]> {
   await ensureTauri();
-  if (invokeImpl)
-    return invokeImpl<ChatMessage[]>("chat_history", {
+  if (invokeImpl) {
+    const snapshot = await invokeImpl<unknown>("chat_history", {
       sessionId,
       expectedProjectEpoch,
       expectedProjectPath,
     });
+    const decoded = decodeChatHistorySnapshot(snapshot);
+    if (!decoded) throw new Error("invalid Agent chat history snapshot");
+    return decoded;
+  }
+  return [];
+}
+
+export async function chatHistoryAuthoritative(
+  sessionId: string,
+  expectedProjectEpoch: number,
+  expectedProjectPath: string,
+): Promise<ChatMessage[]> {
+  await ensureTauri();
+  if (invokeImpl) {
+    const snapshot = await invokeImpl<unknown>("chat_history_authoritative", {
+      sessionId,
+      expectedProjectEpoch,
+      expectedProjectPath,
+    });
+    const decoded = decodeChatHistorySnapshot(snapshot);
+    if (!decoded) throw new Error("invalid authoritative Agent chat history snapshot");
+    return decoded;
+  }
   return [];
 }
 
@@ -2117,12 +2142,24 @@ export async function chatSessions(
   expectedProjectPath: string,
 ): Promise<ChatSession[]> {
   await ensureTauri();
-  if (invokeImpl)
-    return invokeImpl<ChatSession[]>("chat_sessions", {
+  if (invokeImpl) {
+    const snapshot = await invokeImpl<unknown>("chat_sessions", {
       expectedProjectEpoch,
       expectedProjectPath,
     });
+    const decoded = decodeChatSessionsSnapshot(snapshot);
+    if (!decoded) throw new Error("invalid Agent chat sessions snapshot");
+    return decoded;
+  }
   return [];
+}
+
+export function decodeChatHistorySnapshot(value: unknown): ChatMessage[] | null {
+  return isBoundedChatHistorySnapshot(value) ? value : null;
+}
+
+export function decodeChatSessionsSnapshot(value: unknown): ChatSession[] | null {
+  return isBoundedChatSessionsSnapshot(value) ? value : null;
 }
 
 export async function chatSessionSetOpen(

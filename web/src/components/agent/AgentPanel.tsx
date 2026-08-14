@@ -19,7 +19,7 @@ import {
 import { useT } from "../../i18n";
 import {
   chatCancel,
-  chatHistory,
+  chatHistoryAuthoritative,
   chatSend,
   chatSessionSetOpen,
   chatSessions,
@@ -30,7 +30,12 @@ import {
   type ChatStreamDecodeFailure,
   type ChatStreamIdentity,
 } from "../../lib/api";
-import type { AgentContentBlock, ChatMessage, ChatSession } from "../../lib/types";
+import {
+  MAX_CHAT_IMAGE_BASE64_CHARS,
+  type AgentContentBlock,
+  type ChatMessage,
+  type ChatSession,
+} from "../../lib/types";
 import { useSettingsStore } from "../../store/settingsStore";
 import { mintSessionId, useChatStore } from "../../store/chatStore";
 import { useEditorUiStore } from "../../store/uiStore";
@@ -58,7 +63,9 @@ export function AgentPanel() {
   const takeHistoryResyncRequest = useChatStore((state) => state.takeHistoryResyncRequest);
   const historyResyncRequests = useChatStore((state) => state.historyResyncRequests);
   const setMessagesForSession = useChatStore((state) => state.setMessagesForSession);
+  const installSessionSnapshot = useChatStore((state) => state.installSessionSnapshot);
   const deleteSession = useChatStore((state) => state.deleteSession);
+  const resetProject = useChatStore((state) => state.resetProject);
   const reset = useChatStore((state) => state.reset);
   const composerDraft = useChatStore((state) => state.composerDraft);
   const setComposerDraft = useChatStore((state) => state.setComposerDraft);
@@ -125,6 +132,10 @@ export function AgentPanel() {
       return event.projectEpoch === project.projectEpoch && event.projectPath === project.projectPath;
     };
     const begin = (event: ChatStreamIdentity) => {
+      const chat = useChatStore.getState();
+      if (chat.projectEpoch !== event.projectEpoch || chat.projectPath !== event.projectPath) {
+        resetProject(mintSessionId(), event.projectEpoch, event.projectPath);
+      }
       resyncProjectRef.current[event.sessionId] = {
         projectEpoch: event.projectEpoch,
         projectPath: event.projectPath,
@@ -181,7 +192,7 @@ export function AgentPanel() {
       disposed = true;
       unsubscribers.splice(0).forEach((unsubscribe) => unsubscribe());
     };
-  }, [appendBlockDelta, beginMessage, finalize, requestHistoryResync, upsertBlock]);
+  }, [appendBlockDelta, beginMessage, finalize, requestHistoryResync, resetProject, upsertBlock]);
 
   useEffect(() => {
     if (!projectPath || Object.keys(historyResyncRequests).length === 0) return;
@@ -197,7 +208,10 @@ export function AgentPanel() {
     }
     const loadingEpoch = requestProject?.projectEpoch ?? projectEpoch;
     const loadingPath = requestProject?.projectPath ?? projectPath;
-    void chatHistory(request.sessionId, loadingEpoch, loadingPath)
+    const chat = useChatStore.getState();
+    const loadingGeneration = chat.projectGeneration;
+    const loadingSessionVersion = chat.sessionVersions[request.sessionId] ?? 0;
+    void chatHistoryAuthoritative(request.sessionId, loadingEpoch, loadingPath)
       .then((history) => {
         const project = useProjectStore.getState();
         if (
@@ -207,7 +221,13 @@ export function AgentPanel() {
         ) {
           return;
         }
-        setMessagesForSession(request.sessionId, history);
+        const installed = installSessionSnapshot(
+          request.sessionId,
+          history,
+          loadingGeneration,
+          loadingSessionVersion,
+        );
+        if (!installed) return;
         updateSessions((current) => current.map((session) =>
           session.id === request.sessionId ? { ...session, messages: history } : session,
         ));
@@ -215,23 +235,33 @@ export function AgentPanel() {
       .catch(() => {});
   }, [
     historyResyncRequests,
+    installSessionSnapshot,
     projectEpoch,
     projectPath,
-    setMessagesForSession,
     takeHistoryResyncRequest,
   ]);
 
   useEffect(() => {
-    const previousSessionId = useChatStore.getState().sessionId;
+    const previousChat = useChatStore.getState();
+    const sameProject = previousChat.projectEpoch === projectEpoch &&
+      previousChat.projectPath === projectPath;
+    const previousSessionId = sameProject ? previousChat.sessionId : null;
     const freshSessionId = mintSessionId();
-    resyncProjectRef.current = {};
-    setPendingSessionId(null);
-    reset(freshSessionId);
+    const projectChanged = resetProject(freshSessionId, projectEpoch, projectPath);
+    if (projectChanged) {
+      resyncProjectRef.current = {};
+      setPendingSessionId(null);
+      inputRef.current = "";
+      setInput("");
+    }
     commitSessions([]);
     if (!isTauri || !projectPath) return;
     let disposed = false;
     const loadingEpoch = projectEpoch;
     const loadingPath = projectPath;
+    const loadingChat = useChatStore.getState();
+    const loadingGeneration = loadingChat.projectGeneration;
+    const loadingSessionVersions = { ...loadingChat.sessionVersions };
     void chatSessions(loadingEpoch, loadingPath)
       .then((projectSessions) => {
         if (disposed) return;
@@ -240,22 +270,32 @@ export function AgentPanel() {
         if (
           project.projectEpoch !== loadingEpoch ||
           project.projectPath !== loadingPath ||
-          chat.sessionId !== freshSessionId ||
-          chat.messages.length !== 0 ||
-          chat.streaming
+          chat.projectGeneration !== loadingGeneration
         ) {
           return;
         }
         const openSessions = projectSessions.filter((session) => session.isOpen !== false);
-        commitSessions(openSessions);
-        openSessions.forEach((session) => setMessagesForSession(session.id, session.messages));
-        const latest = openSessions.find((session) => session.id === previousSessionId) ??
-          openSessions[0];
+        const mergedSessions = openSessions.map((session) => {
+          installSessionSnapshot(
+            session.id,
+            session.messages,
+            loadingGeneration,
+            loadingSessionVersions[session.id] ?? 0,
+          );
+          return {
+            ...session,
+            messages: useChatStore.getState().sessionMessages[session.id] ?? session.messages,
+          };
+        });
+        commitSessions(mergedSessions);
+        const latest = mergedSessions.find((session) => session.id === previousSessionId) ??
+          mergedSessions[0];
         if (latest) {
           reset(latest.id);
         } else {
+          const emptySessionId = useChatStore.getState().sessionId;
           const optimistic: ChatSession = {
-            id: freshSessionId,
+            id: emptySessionId,
             messages: [],
             createdAt: Date.now(),
             isOpen: true,
@@ -265,7 +305,7 @@ export function AgentPanel() {
             if (disposed) return;
             try {
               const created = await chatSessionSetOpen(
-                freshSessionId,
+                emptySessionId,
                 true,
                 loadingEpoch,
                 loadingPath,
@@ -275,11 +315,11 @@ export function AgentPanel() {
               if (
                 currentProject.projectEpoch === loadingEpoch &&
                 currentProject.projectPath === loadingPath &&
-                useChatStore.getState().sessionId === freshSessionId
+                useChatStore.getState().sessionId === emptySessionId
               ) {
                 updateSessions((current) =>
                   current.map((session) =>
-                    session.id === freshSessionId ? created : session,
+                    session.id === emptySessionId ? created : session,
                   ),
                 );
               }
@@ -294,7 +334,7 @@ export function AgentPanel() {
     return () => {
       disposed = true;
     };
-  }, [projectEpoch, projectPath, reset, setMessagesForSession]);
+  }, [installSessionSnapshot, projectEpoch, projectPath, reset, resetProject]);
 
   useEffect(() => {
     updateSessions((current) =>
@@ -830,6 +870,8 @@ export function InlineToolActivity({
   const [open, setOpen] = useState(false);
   const reactId = useId();
   const disclosureId = `agent-tool-${reactId.replace(/:/g, "")}`;
+  const statusId = `${disclosureId}-status`;
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const isError = block.isError === true;
   const pending = block.type === "toolUse" && block.result === undefined && !isError;
   const status = isError ? "error" : pending ? "running" : "complete";
@@ -851,30 +893,42 @@ export function InlineToolActivity({
       data-agent-block-type={block.type}
       data-status={status}
       data-tool-activity
+      onKeyDown={(event) => {
+        if (event.key !== "Escape" || !open) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setOpen(false);
+        triggerRef.current?.focus();
+      }}
     >
-      <button
-        type="button"
-        aria-controls={disclosureId}
-        aria-expanded={open}
-        aria-label={`${label}: ${statusLabel}`}
-        data-tool-activity-trigger
-        onClick={() => setOpen((value) => !value)}
-        className="agent-tool-activity__trigger"
-      >
-        {open
-          ? <ChevronDown aria-hidden="true" size={12} />
-          : <ChevronRight aria-hidden="true" size={12} />}
-        <Wrench aria-hidden="true" size={12} />
-        <span className="agent-tool-activity__name">{label}</span>
+      <div className="agent-tool-activity__summary">
+        <button
+          type="button"
+          aria-controls={disclosureId}
+          aria-describedby={statusId}
+          aria-expanded={open}
+          aria-label={label}
+          data-tool-activity-trigger
+          onClick={() => setOpen((value) => !value)}
+          className="agent-tool-activity__trigger"
+          ref={triggerRef}
+        >
+          {open
+            ? <ChevronDown aria-hidden="true" size={12} />
+            : <ChevronRight aria-hidden="true" size={12} />}
+          <Wrench aria-hidden="true" size={12} />
+          <span className="agent-tool-activity__name">{label}</span>
+        </button>
         <span
           aria-atomic="true"
           aria-live="polite"
           className="agent-tool-activity__status"
+          id={statusId}
           role="status"
         >
           {statusLabel}
         </span>
-      </button>
+      </div>
       <Reveal id={disclosureId} open={open} role="group">
         <div className="agent-tool-activity__details">
           {block.type === "toolUse"
@@ -931,6 +985,7 @@ function safeRasterDataUri(mediaType: string, base64: string): string | null {
   if (
     !SAFE_RASTER_MEDIA_TYPES.has(normalizedMediaType) ||
     base64.length === 0 ||
+    base64.length > MAX_CHAT_IMAGE_BASE64_CHARS ||
     !BASE64_PATTERN.test(base64)
   ) {
     return null;
