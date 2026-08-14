@@ -732,9 +732,20 @@ impl ProjectMediaCapability {
     pub(crate) fn sync_media_directory(&self) -> Result<(), String> {
         #[cfg(unix)]
         {
+            use cap_std::fs::OpenOptionsExt;
+
+            // cap-std retains traversed directories with O_PATH on Linux.
+            // That handle is suitable for capability traversal but fsync(2)
+            // rejects it with EBADF, so reopen the exact retained directory
+            // through the capability before flushing its directory entry.
+            let mut options = OpenOptions::new();
+            options
+                .read(true)
+                .follow(FollowSymlinks::No)
+                .custom_flags(libc::O_DIRECTORY);
             self.media
-                .try_clone()
-                .and_then(|directory| directory.into_std_file().sync_all())
+                .open_with(".", &options)
+                .and_then(|directory| directory.sync_all())
                 .map_err(|error| format!("project media directory could not be synced: {error}"))
         }
         #[cfg(not(unix))]
@@ -1650,6 +1661,27 @@ mod tests {
 
         assert!(!capability.matches_namespace().unwrap());
         assert!(retained_projects.join("ParentSwap.opentake/media").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_media_capability_syncs_through_a_readable_directory_handle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = tmp.path().join("DurableMedia.opentake");
+        std::fs::create_dir(&bundle).unwrap();
+        let capability = ProjectMediaCapability::open(&bundle, true).unwrap();
+        let mut leaf = capability.create_import(Path::new("motion.mp4")).unwrap();
+        leaf.file_mut().write_all(b"motion bytes").unwrap();
+        leaf.file().sync_all().unwrap();
+
+        capability
+            .sync_media_directory()
+            .expect("capability-relative directory fsync must accept Linux O_PATH roots");
+
+        assert_eq!(
+            std::fs::read(bundle.join("media/motion.mp4")).unwrap(),
+            b"motion bytes"
+        );
     }
 
     #[test]
