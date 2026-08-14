@@ -377,6 +377,16 @@ impl ProjectRoot {
         )
     }
 
+    /// Copy project-local Motion Studio sources during complete-bundle
+    /// publication through retained no-follow roots.
+    pub fn copy_motion_documents_to(&self, destination: &ProjectRoot) -> Result<()> {
+        self.copy_directory_component_to(
+            destination,
+            crate::layout::MOTION_DOCUMENTS_DIR,
+            "motion-documents-copy",
+        )
+    }
+
     /// Preserve the optional project cover across complete-bundle publication.
     pub(crate) fn copy_thumbnail_to(&self, destination: &ProjectRoot) -> Result<()> {
         if let Some(bytes) = self.read_optional(crate::layout::THUMBNAIL_FILE)? {

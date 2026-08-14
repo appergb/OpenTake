@@ -18,8 +18,9 @@
 //! snapshot, then write atomically": each JSON component is written to a
 //! sibling temp file and renamed into place, so a crash never leaves a
 //! half-written `project.json`. `save` owns only the JSON components (and the
-//! thumbnail when held); it never creates or deletes `media/` or
-//! `chat-sessions/`, which the media and agent layers manage out-of-band.
+//! thumbnail when held); it never creates or deletes `media/`,
+//! `chat-sessions/`, or `motion-documents/`, which their owning layers manage
+//! out-of-band.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -395,6 +396,7 @@ impl Project {
         if let Some(source) = media_source {
             source.copy_media_to(publisher.stage())?;
             source.copy_chat_sessions_to(publisher.stage())?;
+            source.copy_motion_documents_to(publisher.stage())?;
             if preserve_thumbnail {
                 source.copy_thumbnail_to(publisher.stage())?;
             }
@@ -421,6 +423,7 @@ impl Project {
         encoded.write_to(publisher.stage())?;
         media_source.copy_media_to(publisher.stage())?;
         media_source.copy_chat_sessions_to(publisher.stage())?;
+        media_source.copy_motion_documents_to(publisher.stage())?;
         if preserve_thumbnail {
             media_source.copy_thumbnail_to(publisher.stage())?;
         }
@@ -452,6 +455,7 @@ impl Project {
             .stage()
             .write_new_media_leaf(media_leaf, media_byte_size, media)?;
         media_source.copy_chat_sessions_to(publisher.stage())?;
+        media_source.copy_motion_documents_to(publisher.stage())?;
         if preserve_thumbnail {
             media_source.copy_thumbnail_to(publisher.stage())?;
         }
@@ -880,6 +884,40 @@ mod tests {
         assert_eq!(
             fs::read(target.join("chat-sessions/chat-1.json")).unwrap(),
             br#"{"id":"chat-1","messages":[]}"#
+        );
+    }
+
+    #[test]
+    fn complete_publish_carries_motion_documents_across_save_as() {
+        let tmp = TmpDir::new("complete-motion-documents");
+        let source = tmp.path().join("Source.opentake");
+        let target = tmp.path().join("Target.opentake");
+        let project = Project::new(&source);
+        project.save().unwrap();
+        fs::create_dir_all(source.join("motion-documents/rev-document")).unwrap();
+        fs::write(
+            source.join("motion-documents/catalog.json"),
+            br#"{"schemaVersion":1,"documents":{}}"#,
+        )
+        .unwrap();
+        fs::write(
+            source.join("motion-documents/rev-document/index.html"),
+            b"<main>Motion Studio</main>",
+        )
+        .unwrap();
+        let source_root = ProjectRoot::open(&source).unwrap();
+
+        project
+            .publish_complete_to(&target, Some(&source_root))
+            .expect("Save As must carry project-local motion documents");
+
+        assert_eq!(
+            fs::read(target.join("motion-documents/catalog.json")).unwrap(),
+            br#"{"schemaVersion":1,"documents":{}}"#
+        );
+        assert_eq!(
+            fs::read(target.join("motion-documents/rev-document/index.html")).unwrap(),
+            b"<main>Motion Studio</main>"
         );
     }
 

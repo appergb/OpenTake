@@ -39,6 +39,9 @@ pub const LUTS_DIR: &str = "luts";
 /// migration of old `.palmier` bundles is ever needed (not done here).
 pub const CHAT_SESSIONS_DIR: &str = "chat-sessions";
 
+/// `motion-documents/` — project-local HTML/CSS Motion Studio sources.
+pub const MOTION_DOCUMENTS_DIR: &str = "motion-documents";
+
 /// Absolute path to `project.json` inside `bundle`.
 pub fn timeline_path(bundle: &Path) -> PathBuf {
     bundle.join(TIMELINE_FILE)
@@ -72,4 +75,9 @@ pub fn luts_dir(bundle: &Path) -> PathBuf {
 /// Absolute path to the `chat-sessions/` directory inside `bundle`.
 pub fn chat_sessions_dir(bundle: &Path) -> PathBuf {
     bundle.join(CHAT_SESSIONS_DIR)
+}
+
+/// Absolute path to the `motion-documents/` directory inside `bundle`.
+pub fn motion_documents_dir(bundle: &Path) -> PathBuf {
+    bundle.join(MOTION_DOCUMENTS_DIR)
 }

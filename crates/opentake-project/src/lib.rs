@@ -17,7 +17,8 @@
 //! ├── generation-log.json  # GenerationLog (AI generation audit, optional)
 //! ├── thumbnail.jpg        # cover image (optional)
 //! ├── media/               # project-internal media (.project relative paths)
-//! └── chat-sessions/       # agent chat history, one <session>.json each
+//! ├── chat-sessions/       # agent chat history, one <session>.json each
+//! └── motion-documents/    # Motion Studio HTML/CSS sources
 //! ```
 //!
 //! ## What this crate provides

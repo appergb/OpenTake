@@ -30,6 +30,7 @@ mod lut;
 mod mcp;
 mod media;
 pub mod motion;
+mod motion_documents;
 // Public for the same reason as `export`: integration acceptance drives the
 // standalone compositing path against a generated project snapshot.
 pub mod render;
@@ -243,8 +244,11 @@ pub fn run() {
                     "global library unavailable: could not resolve app data directory: {error}"
                 )),
             };
+            let motion_document_store =
+                Arc::new(motion_documents::MotionDocumentStore::new(core.clone()));
 
             app.manage(core);
+            app.manage(motion_document_store);
             app.manage(commands::ProjectLifecycleCoordinator::default());
             app.manage(generation_bridge);
             let motion_state =
@@ -413,6 +417,10 @@ pub fn run() {
             motion::motion_add,
             motion::motion_edit,
             motion::motion_cancel,
+            motion_documents::motion_document_list,
+            motion_documents::motion_document_create,
+            motion_documents::motion_document_read,
+            motion_documents::motion_document_patch,
             advanced::matting_model_status,
             advanced::download_matting_model,
             advanced::cancel_matting_model_download,

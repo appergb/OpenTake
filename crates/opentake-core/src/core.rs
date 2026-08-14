@@ -30,7 +30,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard};
 
 use opentake_domain::{
     ClipType, GenerationInput, MediaAsset, MediaManifest, MediaManifestEntry, MediaProxy, Timeline,
@@ -364,6 +364,7 @@ impl DeferredCoreEvents {
 pub struct AppCore {
     session: Arc<Mutex<CoreSessionSlot>>,
     project_identity_workflow: Arc<RwLock<()>>,
+    project_bundle_publication: Arc<Mutex<()>>,
     project_identity_transition: Arc<Mutex<Vec<ProjectIdentityTransitionListener>>>,
     events: EventBus,
     deps: Arc<CoreDeps>,
@@ -393,6 +394,7 @@ impl AppCore {
                 editor: EditorSession::new_project(),
             })),
             project_identity_workflow: Arc::new(RwLock::new(())),
+            project_bundle_publication: Arc::new(Mutex::new(())),
             project_identity_transition: Arc::new(Mutex::new(Vec::new())),
             events: EventBus::new(),
             deps: Arc::new(deps),
@@ -531,6 +533,16 @@ impl AppCore {
     pub fn lock_project_identity_workflow(&self) -> RwLockReadGuard<'_, ()> {
         self.project_identity_workflow
             .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Serialize publications that replace a complete project bundle with
+    /// project-local component commits. Both classes of writer must hold this
+    /// gate before they snapshot or publish bundle contents, otherwise a full
+    /// replacement can silently discard a just-published component revision.
+    pub fn lock_project_bundle_publication(&self) -> MutexGuard<'_, ()> {
+        self.project_bundle_publication
+            .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
@@ -1159,6 +1171,7 @@ impl AppCore {
         mutate: impl FnOnce(&mut EditorSession, &dyn IdGen) -> Result<T>,
         persist: impl FnOnce(&mut EditorSession) -> Result<PathBuf>,
     ) -> Result<T> {
+        let bundle_publication = self.lock_project_bundle_publication();
         let (value, count, written) = {
             let mut session = self.lock();
             ensure_project_identity(&session, expected_project_epoch, expected_project_dir)?;
@@ -1176,6 +1189,9 @@ impl AppCore {
                 }
             }
         };
+        // Event subscribers may synchronously re-enter project component
+        // stores, so publication locks must be released before broadcasting.
+        drop(bundle_publication);
         self.events.emit(&CoreEvent::MediaChanged {
             project_epoch: expected_project_epoch,
             count,
@@ -2431,6 +2447,81 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(2))
             .expect("replacement proceeds after workflow releases identity");
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn bundle_publication_gate_blocks_complete_generation_replacement() {
+        let bundle = project_bundle("generation-publication-gate");
+        let core = AppCore::new();
+        core.open_project(&bundle).unwrap();
+        let snapshot = core.runtime_snapshot();
+        let publication = core.lock_project_bundle_publication();
+        let replacement = core.clone();
+        let destination = bundle.clone();
+        let (started, entered) = std::sync::mpsc::channel();
+        let (sent, received) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started.send(()).unwrap();
+            let result = replacement.persist_generation_mutation_using(
+                snapshot.project_epoch,
+                &destination,
+                |_editor, _ids| Ok(()),
+                |_editor| Ok(destination.clone()),
+            );
+            sent.send(result).unwrap();
+        });
+
+        entered
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(received
+            .recv_timeout(std::time::Duration::from_millis(50))
+            .is_err());
+        drop(publication);
+        received
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("generation replacement proceeds after publication gate releases")
+            .unwrap();
+        worker.join().unwrap();
+        let _ = std::fs::remove_dir_all(bundle);
+    }
+
+    #[test]
+    fn generation_events_reenter_bundle_publication_after_commit_without_deadlock() {
+        let bundle = project_bundle("generation-publication-reentry");
+        let core = AppCore::new();
+        core.open_project(&bundle).unwrap();
+        let snapshot = core.runtime_snapshot();
+        let reentrant = core.clone();
+        let (event_sent, event_received) = std::sync::mpsc::channel();
+        core.subscribe(move |event| {
+            if matches!(event, CoreEvent::ProjectSaved { .. }) {
+                let _publication = reentrant.lock_project_bundle_publication();
+                event_sent.send(()).unwrap();
+            }
+        });
+        let worker_core = core.clone();
+        let destination = bundle.clone();
+        let (done_sent, done_received) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let result = worker_core.persist_generation_mutation_using(
+                snapshot.project_epoch,
+                &destination,
+                |_editor, _ids| Ok(()),
+                |_editor| Ok(destination.clone()),
+            );
+            done_sent.send(result).unwrap();
+        });
+
+        event_received
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("subscriber can re-enter publication after commit");
+        done_received
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("generation publication completes")
+            .unwrap();
+        worker.join().unwrap();
+        let _ = std::fs::remove_dir_all(bundle);
     }
 
     #[test]
