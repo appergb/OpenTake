@@ -46,6 +46,27 @@ function assistantMessage(
   };
 }
 
+function toolResultMessage(
+  id: string,
+  toolUseId = "tool-1",
+  overrides: Partial<ChatMessage> = {},
+): ChatMessage {
+  return {
+    id,
+    role: "tool",
+    content: "{\"ok\":true}",
+    toolCalls: [],
+    blocks: [{
+      type: "toolResult",
+      toolUseId,
+      content: [{ kind: "text", text: "ok" }],
+    }],
+    createdAt: 1,
+    toolCallId: toolUseId,
+    ...overrides,
+  };
+}
+
 function resetStore() {
   useChatStore.setState({
     sessionId: sessionA,
@@ -110,6 +131,72 @@ describe("chatStore ordered session streams", () => {
       { type: "text", text: "samesamelater" },
     ]);
     expect(useChatStore.getState().takeHistoryResyncRequest()).toBeNull();
+  });
+
+  it("canonicalizes distinct Unicode keys by code unit instead of locale collation", () => {
+    const firstInput = { "é": 1, "e\u0301": 2 };
+    const reorderedInput = { "e\u0301": 2, "é": 1 };
+    const store = useChatStore.getState();
+    store.beginMessage(sessionA, "message-a");
+    store.upsertBlock(sessionA, "message-a", 0, 0, {
+      type: "toolUse",
+      id: "tool-a",
+      name: "inspect_timeline",
+      input: firstInput,
+    });
+    store.appendBlockDelta(sessionA, "message-a", 1, 1, "later");
+    store.upsertBlock(sessionA, "message-a", 0, 0, {
+      type: "toolUse",
+      id: "tool-a",
+      name: "inspect_timeline",
+      input: reorderedInput,
+    });
+
+    expect(useChatStore.getState().takeHistoryResyncRequest()).toBeNull();
+    expect(useChatStore.getState().messages[0].blocks?.at(-1)).toEqual({
+      type: "text",
+      text: "later",
+    });
+  });
+
+  it("rejects a sparse retry that collided in the old canonical hash", () => {
+    const store = useChatStore.getState();
+    store.beginMessage(sessionA, "message-a");
+    store.upsertBlock(sessionA, "message-a", 0, 0, {
+      type: "toolResult",
+      toolUseId: "tool-a",
+      content: [],
+    });
+    store.upsertBlock(sessionA, "message-a", 0, 0, {
+      type: "toolResult",
+      toolUseId: "tool-a",
+      content: new Array(1),
+    });
+
+    expect(useChatStore.getState().takeHistoryResyncRequest()).toMatchObject({
+      sessionId: sessionA,
+      messageId: "message-a",
+      reason: "invalid_block",
+    });
+  });
+
+  it("rejects a sequence gap before reading the terminal payload", () => {
+    const store = useChatStore.getState();
+    store.beginMessage(sessionA, "message-a");
+    let payloadReads = 0;
+    const terminal = {
+      id: "message-a",
+      get role() {
+        payloadReads += 1;
+        throw new Error("terminal payload should not be read for a sequence gap");
+      },
+    } as unknown as ChatMessage;
+
+    expect(() => store.finalize(sessionA, "message-a", 2, terminal)).not.toThrow();
+    expect(payloadReads).toBe(0);
+    expect(useChatStore.getState().takeHistoryResyncRequest()).toMatchObject({
+      reason: "sequence_gap",
+    });
   });
 
   it("poisons a reused sequence when its event kind, block index, or payload conflicts", () => {
@@ -274,6 +361,17 @@ describe("chatStore ordered session streams", () => {
     expect(state.messages).toEqual([final]);
   });
 
+  it("replaces a tool-result draft with its exact terminal tool message", () => {
+    const store = useChatStore.getState();
+    const final = toolResultMessage("tool-message", "tool-a");
+    store.beginMessage(sessionA, "tool-message");
+    store.upsertBlock(sessionA, "tool-message", 0, 0, final.blocks![0]);
+    store.finalize(sessionA, "tool-message", 1, final);
+
+    expect(useChatStore.getState().messages).toEqual([final]);
+    expect(useChatStore.getState().streaming).toBe(false);
+  });
+
   it("fails the legacy finalize overload closed when the message id is not exact", () => {
     const store = useChatStore.getState();
     store.beginMessage(sessionA, "message-a");
@@ -412,6 +510,106 @@ describe("chatStore ordered session streams", () => {
         blockIndex: 0,
         delta: "hello",
       },
+    });
+  });
+
+  it("rejects sparse arrays and other non-JSON tool payloads", () => {
+    const sparseContent = new Array(1);
+    const invalidBlocks: unknown[] = [
+      { type: "toolResult", toolUseId: "tool-a", content: sparseContent },
+      { type: "toolUse", id: "tool-a", name: "inspect_timeline", input: new Array(1) },
+      { type: "toolUse", id: "tool-a", name: "inspect_timeline", input: new Date(0) },
+    ];
+
+    invalidBlocks.forEach((block) => {
+      expect(decodeChatStreamEvent("chat_tool_call", {
+        ...deltaPayload(),
+        delta: undefined,
+        block,
+      })).toEqual({
+        ok: false,
+        failure: {
+          eventName: "chat_tool_call",
+          reason: "invalid_block",
+          sessionId: sessionA,
+          messageId: "message-a",
+        },
+      });
+    });
+  });
+
+  it("rejects image blocks whose aggregate event payload exceeds one MiB", () => {
+    const image = { kind: "image" as const, base64: "x".repeat(600_000), mediaType: "image/png" };
+    expect(decodeChatStreamEvent("chat_tool_call", {
+      ...deltaPayload(),
+      delta: undefined,
+      block: {
+        type: "toolResult",
+        toolUseId: "tool-a",
+        content: [image, image],
+      },
+    })).toEqual({
+      ok: false,
+      failure: {
+        eventName: "chat_tool_call",
+        reason: "invalid_block",
+        sessionId: sessionA,
+        messageId: "message-a",
+      },
+    });
+  });
+
+  it("strictly decodes a terminal tool-result message", () => {
+    const message = toolResultMessage("message-a", "tool-a");
+    expect(decodeChatStreamEvent("chat_done", {
+      ...deltaPayload(),
+      delta: undefined,
+      blockIndex: undefined,
+      sequence: 1,
+      message,
+    })).toEqual({
+      ok: true,
+      event: {
+        type: "done",
+        projectEpoch: 7,
+        projectPath: "/tmp/project.opentake",
+        sessionId: sessionA,
+        messageId: "message-a",
+        sequence: 1,
+        message,
+      },
+    });
+  });
+
+  it("rejects malformed tool terminals and tool-only fields on assistants", () => {
+    const validTool = toolResultMessage("message-a", "tool-a");
+    const validAssistant = assistantMessage("message-a", [{ type: "text", text: "done" }]);
+    const invalidMessages = [
+      { ...validTool, blocks: [] },
+      { ...validTool, blocks: [{ type: "text", text: "wrong role" }] },
+      { ...validTool, toolCallId: "tool-b" },
+      { ...validTool, toolCalls: [{ id: "tool-a", name: "inspect_timeline", args: {} }] },
+      { ...validTool, toolIsError: true },
+      { ...validAssistant, toolCallId: "tool-a" },
+      { ...validAssistant, blocks: [{ type: "toolResult", toolUseId: "tool-a", content: [{ kind: "text", text: "wrong role" }] }] },
+    ];
+
+    invalidMessages.forEach((message) => {
+      expect(decodeChatStreamEvent("chat_done", {
+        ...deltaPayload(),
+        delta: undefined,
+        blockIndex: undefined,
+        sequence: 1,
+        message,
+      })).toEqual({
+        ok: false,
+        failure: {
+          eventName: "chat_done",
+          reason: "invalid_message",
+          sessionId: sessionA,
+          messageId: "message-a",
+        },
+      });
     });
   });
 

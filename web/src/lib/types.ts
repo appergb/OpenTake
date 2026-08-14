@@ -1168,8 +1168,9 @@ export const MAX_CHAT_STREAM_ID_LENGTH = 512;
 export const MAX_CHAT_BLOCK_INDEX = 511;
 export const MAX_CHAT_DELTA_CHARS = 32_768;
 export const MAX_CHAT_EVENT_SEQUENCE = 1_000_000;
+export const MAX_CHAT_EVENT_BYTES = 1_048_576;
 export const MAX_CHAT_MESSAGE_CHARS = 1_048_576;
-export const MAX_CHAT_IMAGE_BASE64_CHARS = 16_777_216;
+export const MAX_CHAT_IMAGE_BASE64_CHARS = MAX_CHAT_EVENT_BYTES;
 export const MAX_CHAT_JSON_DEPTH = 24;
 export const MAX_CHAT_JSON_NODES = 8_192;
 
@@ -1226,106 +1227,311 @@ function hasOwn(value: object, property: string): boolean {
   return Object.prototype.hasOwnProperty.call(value, property);
 }
 
+function isPlainDataRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  try {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return false;
+    return Reflect.ownKeys(value).every((key) => {
+      if (typeof key !== "string") return false;
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      return descriptor?.enumerable === true && hasOwn(descriptor, "value");
+    });
+  } catch {
+    return false;
+  }
+}
+
+function isDenseDataArray(value: unknown): value is unknown[] {
+  if (!Array.isArray(value)) return false;
+  try {
+    if (Reflect.ownKeys(value).length !== value.length + 1) return false;
+    for (let index = 0; index < value.length; index += 1) {
+      const key = String(index);
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || descriptor.enumerable !== true || !hasOwn(descriptor, "value")) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function codeUnitCompare(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function boundedUtf8ByteLength(value: string, remaining: number): number | null {
+  let bytes = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x7f) bytes += 1;
+    else if (code <= 0x7ff) bytes += 2;
+    else if (code >= 0xd800 && code <= 0xdbff && index + 1 < value.length) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        bytes += 4;
+        index += 1;
+      } else {
+        bytes += 3;
+      }
+    } else {
+      bytes += 3;
+    }
+    if (bytes > remaining) return null;
+  }
+  return bytes;
+}
+
+class BoundedCanonicalWriter {
+  private readonly chunks: string[] = [];
+  private bytes = 0;
+
+  append(value: string): boolean {
+    const byteLength = boundedUtf8ByteLength(value, MAX_CHAT_EVENT_BYTES - this.bytes);
+    if (byteLength === null) return false;
+    this.bytes += byteLength;
+    this.chunks.push(value);
+    return true;
+  }
+
+  finish(): string {
+    return this.chunks.join("");
+  }
+}
+
+function appendJsonString(writer: BoundedCanonicalWriter, value: string): boolean {
+  if (!writer.append("\"")) return false;
+  let chunk = "";
+  const flush = (): boolean => {
+    if (chunk.length === 0) return true;
+    const accepted = writer.append(chunk);
+    chunk = "";
+    return accepted;
+  };
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    let encoded: string;
+    if (code === 0x22) encoded = "\\\"";
+    else if (code === 0x5c) encoded = "\\\\";
+    else if (code === 0x08) encoded = "\\b";
+    else if (code === 0x09) encoded = "\\t";
+    else if (code === 0x0a) encoded = "\\n";
+    else if (code === 0x0c) encoded = "\\f";
+    else if (code === 0x0d) encoded = "\\r";
+    else if (code < 0x20 || (code >= 0xd800 && code <= 0xdfff)) {
+      const next = index + 1 < value.length ? value.charCodeAt(index + 1) : -1;
+      if (code >= 0xd800 && code <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) {
+        encoded = value.slice(index, index + 2);
+        index += 1;
+      } else {
+        encoded = `\\u${code.toString(16).padStart(4, "0")}`;
+      }
+    } else encoded = value[index];
+    if (chunk.length + encoded.length > 4_096 && !flush()) return false;
+    chunk += encoded;
+  }
+  return flush() && writer.append("\"");
+}
+
+function canonicalizeBoundedChatValue(
+  value: unknown,
+  allowUndefinedProperties: boolean,
+): string | null {
+  const writer = new BoundedCanonicalWriter();
+  let remainingNodes = MAX_CHAT_JSON_NODES;
+  const ancestors = new WeakSet<object>();
+
+  const visit = (candidate: unknown, depth: number): boolean => {
+    remainingNodes -= 1;
+    if (remainingNodes < 0 || depth > MAX_CHAT_JSON_DEPTH) return false;
+    if (candidate === null) return writer.append("null");
+    if (typeof candidate === "string") return appendJsonString(writer, candidate);
+    if (typeof candidate === "boolean") return writer.append(candidate ? "true" : "false");
+    if (typeof candidate === "number") {
+      return Number.isFinite(candidate) && writer.append(JSON.stringify(candidate));
+    }
+    if (Array.isArray(candidate)) {
+      if (!isDenseDataArray(candidate) || ancestors.has(candidate) || !writer.append("[")) return false;
+      ancestors.add(candidate);
+      for (let index = 0; index < candidate.length; index += 1) {
+        if ((index > 0 && !writer.append(",")) || !visit(candidate[index], depth + 1)) {
+          ancestors.delete(candidate);
+          return false;
+        }
+      }
+      ancestors.delete(candidate);
+      return writer.append("]");
+    }
+    if (!isPlainDataRecord(candidate) || ancestors.has(candidate) || !writer.append("{")) return false;
+    ancestors.add(candidate);
+    const entries = Object.entries(candidate)
+      .filter(([, item]) => item !== undefined || !allowUndefinedProperties)
+      .sort(([left], [right]) => codeUnitCompare(left, right));
+    let emitted = 0;
+    for (const [key, item] of entries) {
+      if (item === undefined) {
+        ancestors.delete(candidate);
+        return false;
+      }
+      if (
+        (emitted > 0 && !writer.append(",")) ||
+        !appendJsonString(writer, key) ||
+        !writer.append(":") ||
+        !visit(item, depth + 1)
+      ) {
+        ancestors.delete(candidate);
+        return false;
+      }
+      emitted += 1;
+    }
+    ancestors.delete(candidate);
+    return writer.append("}");
+  };
+
+  try {
+    return visit(value, 0) ? writer.finish() : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Collision-free canonical JSON retained for exact retry comparison. */
+export function canonicalizeBoundedChatEvent(value: unknown): string | null {
+  return canonicalizeBoundedChatValue(value, true);
+}
+
 export function isBoundedChatId(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= MAX_CHAT_STREAM_ID_LENGTH;
 }
 
-export function isBoundedChatJson(value: unknown): boolean {
-  let remaining = MAX_CHAT_JSON_NODES;
-  const visit = (candidate: unknown, depth: number): boolean => {
-    remaining -= 1;
-    if (remaining < 0 || depth > MAX_CHAT_JSON_DEPTH) return false;
-    if (candidate === null || typeof candidate === "boolean") return true;
-    if (typeof candidate === "string") return candidate.length <= MAX_CHAT_MESSAGE_CHARS;
-    if (typeof candidate === "number") return Number.isFinite(candidate);
-    if (Array.isArray(candidate)) {
-      return candidate.length <= MAX_CHAT_JSON_NODES && candidate.every((item) => visit(item, depth + 1));
-    }
-    if (typeof candidate !== "object") return false;
-    const entries = Object.entries(candidate as Record<string, unknown>);
-    return entries.length <= MAX_CHAT_JSON_NODES && entries.every(
-      ([key, item]) => key.length <= MAX_CHAT_STREAM_ID_LENGTH && visit(item, depth + 1),
-    );
-  };
-  return visit(value, 0);
+interface ChatShapeBudget {
+  remaining: number;
 }
 
-export function isBoundedChatToolCall(value: unknown): value is ChatToolCall {
-  if (typeof value !== "object" || value === null) return false;
-  const toolCall = value as Record<string, unknown>;
-  return isBoundedChatId(toolCall.id) &&
-    isBoundedChatId(toolCall.name) &&
-    hasOwn(toolCall, "args") &&
-    isBoundedChatJson(toolCall.args) &&
-    (toolCall.result === undefined || isBoundedChatJson(toolCall.result)) &&
-    (toolCall.isError === undefined || typeof toolCall.isError === "boolean");
+function takeShapeNode(budget: ChatShapeBudget, depth: number): boolean {
+  budget.remaining -= 1;
+  return budget.remaining >= 0 && depth <= MAX_CHAT_JSON_DEPTH;
 }
 
-export function isBoundedAgentContentBlock(value: unknown): value is AgentContentBlock {
-  if (typeof value !== "object" || value === null) return false;
-  const block = value as Record<string, unknown>;
-  if (block.type === "text") {
-    return typeof block.text === "string" && block.text.length <= MAX_CHAT_MESSAGE_CHARS;
+function isChatJsonShape(value: unknown, budget: ChatShapeBudget, depth: number): boolean {
+  if (!takeShapeNode(budget, depth)) return false;
+  if (value === null || typeof value === "boolean") return true;
+  if (typeof value === "string") return value.length <= MAX_CHAT_MESSAGE_CHARS;
+  if (typeof value === "number") return Number.isFinite(value);
+  if (Array.isArray(value)) {
+    return isDenseDataArray(value) &&
+      value.length <= MAX_CHAT_JSON_NODES &&
+      value.every((item) => isChatJsonShape(item, budget, depth + 1));
   }
-  if (block.type === "toolUse") {
-    return isBoundedChatId(block.id) &&
-      isBoundedChatId(block.name) &&
-      hasOwn(block, "input") &&
-      isBoundedChatJson(block.input) &&
-      (block.result === undefined || isBoundedChatJson(block.result)) &&
-      (block.isError === undefined || typeof block.isError === "boolean");
+  if (!isPlainDataRecord(value)) return false;
+  const entries = Object.entries(value);
+  return entries.length <= MAX_CHAT_JSON_NODES && entries.every(
+    ([key, item]) => key.length <= MAX_CHAT_STREAM_ID_LENGTH && isChatJsonShape(item, budget, depth + 1),
+  );
+}
+
+function isChatToolCallShape(
+  value: unknown,
+  budget: ChatShapeBudget,
+  depth: number,
+): value is ChatToolCall {
+  if (!takeShapeNode(budget, depth) || !isPlainDataRecord(value)) return false;
+  return isBoundedChatId(value.id) &&
+    isBoundedChatId(value.name) &&
+    hasOwn(value, "args") &&
+    isChatJsonShape(value.args, budget, depth + 1) &&
+    (value.result === undefined || isChatJsonShape(value.result, budget, depth + 1)) &&
+    (value.isError === undefined || typeof value.isError === "boolean");
+}
+
+function isAgentContentBlockShape(
+  value: unknown,
+  budget: ChatShapeBudget,
+  depth: number,
+): value is AgentContentBlock {
+  if (!takeShapeNode(budget, depth) || !isPlainDataRecord(value)) return false;
+  if (value.type === "text") {
+    return typeof value.text === "string" && value.text.length <= MAX_CHAT_MESSAGE_CHARS;
+  }
+  if (value.type === "toolUse") {
+    return isBoundedChatId(value.id) &&
+      isBoundedChatId(value.name) &&
+      hasOwn(value, "input") &&
+      isChatJsonShape(value.input, budget, depth + 1) &&
+      (value.result === undefined || isChatJsonShape(value.result, budget, depth + 1)) &&
+      (value.isError === undefined || typeof value.isError === "boolean");
   }
   if (
-    block.type !== "toolResult" ||
-    !isBoundedChatId(block.toolUseId) ||
-    !Array.isArray(block.content) ||
-    block.content.length > 64 ||
-    (block.isError !== undefined && typeof block.isError !== "boolean")
+    value.type !== "toolResult" ||
+    !isBoundedChatId(value.toolUseId) ||
+    !isDenseDataArray(value.content) ||
+    value.content.length > 64 ||
+    (value.isError !== undefined && typeof value.isError !== "boolean")
   ) {
     return false;
   }
-  return block.content.every((content) => {
-    if (typeof content !== "object" || content === null) return false;
-    const item = content as Record<string, unknown>;
-    return (item.kind === "text" &&
-      typeof item.text === "string" &&
-      item.text.length <= MAX_CHAT_MESSAGE_CHARS) ||
-      (item.kind === "image" &&
-        typeof item.base64 === "string" &&
-        item.base64.length <= MAX_CHAT_IMAGE_BASE64_CHARS &&
-        typeof item.mediaType === "string" &&
-        item.mediaType.length > 0 &&
-        item.mediaType.length <= 128);
+  return value.content.every((content) => {
+    if (!takeShapeNode(budget, depth + 1) || !isPlainDataRecord(content)) return false;
+    return (content.kind === "text" &&
+      typeof content.text === "string" &&
+      content.text.length <= MAX_CHAT_MESSAGE_CHARS) ||
+      (content.kind === "image" &&
+        typeof content.base64 === "string" &&
+        content.base64.length <= MAX_CHAT_IMAGE_BASE64_CHARS &&
+        typeof content.mediaType === "string" &&
+        content.mediaType.length > 0 &&
+        content.mediaType.length <= 128);
   });
+}
+
+export function isBoundedChatJson(value: unknown): boolean {
+  return isChatJsonShape(value, { remaining: MAX_CHAT_JSON_NODES }, 0) &&
+    canonicalizeBoundedChatValue(value, false) !== null;
+}
+
+export function isBoundedChatToolCall(value: unknown): value is ChatToolCall {
+  return isChatToolCallShape(value, { remaining: MAX_CHAT_JSON_NODES }, 0) &&
+    canonicalizeBoundedChatEvent(value) !== null;
+}
+
+export function isBoundedAgentContentBlock(value: unknown): value is AgentContentBlock {
+  return isAgentContentBlockShape(value, { remaining: MAX_CHAT_JSON_NODES }, 0) &&
+    canonicalizeBoundedChatEvent(value) !== null;
 }
 
 export function isBoundedAssistantChatMessage(
   value: unknown,
   expectedId: string,
 ): value is ChatMessage {
-  if (typeof value !== "object" || value === null) return false;
-  const message = value as Record<string, unknown>;
+  if (!isPlainDataRecord(value)) return false;
+  const message = value;
+  const budget = { remaining: MAX_CHAT_JSON_NODES };
   if (
+    !takeShapeNode(budget, 0) ||
     message.id !== expectedId ||
     !isBoundedChatId(message.id) ||
     message.role !== "assistant" ||
     typeof message.content !== "string" ||
     message.content.length > MAX_CHAT_MESSAGE_CHARS ||
     !Array.isArray(message.toolCalls) ||
+    !isDenseDataArray(message.toolCalls) ||
     message.toolCalls.length > MAX_CHAT_BLOCK_INDEX + 1 ||
-    !message.toolCalls.every(isBoundedChatToolCall) ||
-    !Array.isArray(message.blocks) ||
+    !message.toolCalls.every((toolCall) => isChatToolCallShape(toolCall, budget, 1)) ||
+    !isDenseDataArray(message.blocks) ||
     message.blocks.length > MAX_CHAT_BLOCK_INDEX + 1 ||
-    !message.blocks.every(isBoundedAgentContentBlock) ||
+    !message.blocks.every((block) => isAgentContentBlockShape(block, budget, 1)) ||
     typeof message.createdAt !== "number" ||
     !Number.isSafeInteger(message.createdAt) ||
     message.createdAt < 0 ||
-    (message.toolCallId !== undefined && !isBoundedChatId(message.toolCallId)) ||
-    (message.toolIsError !== undefined && typeof message.toolIsError !== "boolean")
+    message.toolCallId !== undefined ||
+    message.toolIsError !== undefined ||
+    canonicalizeBoundedChatEvent(message) === null
   ) {
     return false;
   }
   const blocks = message.blocks as AgentContentBlock[];
+  if (blocks.some((block) => block.type === "toolResult")) return false;
   const content = blocks.flatMap((block) => block.type === "text" ? [block.text] : []).join("");
   const toolBlocks = blocks.filter(
     (block): block is Extract<AgentContentBlock, { type: "toolUse" }> => block.type === "toolUse",
@@ -1336,6 +1542,51 @@ export function isBoundedAssistantChatMessage(
     toolBlocks.every((block, index) =>
       block.id === toolCalls[index].id && block.name === toolCalls[index].name,
     );
+}
+
+export function isBoundedToolChatMessage(
+  value: unknown,
+  expectedId: string,
+): value is ChatMessage {
+  if (!isPlainDataRecord(value)) return false;
+  const message = value;
+  const budget = { remaining: MAX_CHAT_JSON_NODES };
+  if (
+    !takeShapeNode(budget, 0) ||
+    message.id !== expectedId ||
+    !isBoundedChatId(message.id) ||
+    message.role !== "tool" ||
+    typeof message.content !== "string" ||
+    message.content.length > MAX_CHAT_MESSAGE_CHARS ||
+    !isDenseDataArray(message.toolCalls) ||
+    message.toolCalls.length !== 0 ||
+    !isDenseDataArray(message.blocks) ||
+    message.blocks.length === 0 ||
+    message.blocks.length > MAX_CHAT_BLOCK_INDEX + 1 ||
+    !message.blocks.every((block) => isAgentContentBlockShape(block, budget, 1)) ||
+    typeof message.createdAt !== "number" ||
+    !Number.isSafeInteger(message.createdAt) ||
+    message.createdAt < 0 ||
+    !isBoundedChatId(message.toolCallId) ||
+    (message.toolIsError !== undefined && typeof message.toolIsError !== "boolean") ||
+    canonicalizeBoundedChatEvent(message) === null
+  ) {
+    return false;
+  }
+  const toolCallId = message.toolCallId;
+  const toolIsError = message.toolIsError ?? false;
+  return (message.blocks as AgentContentBlock[]).every((block) =>
+    block.type === "toolResult" &&
+    block.toolUseId === toolCallId &&
+    (block.isError ?? false) === toolIsError,
+  );
+}
+
+export function isBoundedTerminalChatMessage(
+  value: unknown,
+  expectedId: string,
+): value is ChatMessage {
+  return isBoundedAssistantChatMessage(value, expectedId) || isBoundedToolChatMessage(value, expectedId);
 }
 
 // MARK: - AI generation audit log (mirror of opentake_project::gen_log,

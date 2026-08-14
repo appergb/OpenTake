@@ -12,9 +12,10 @@ import {
   MAX_CHAT_BLOCK_INDEX,
   MAX_CHAT_DELTA_CHARS,
   MAX_CHAT_EVENT_SEQUENCE,
+  canonicalizeBoundedChatEvent,
   isBoundedAgentContentBlock,
-  isBoundedAssistantChatMessage,
   isBoundedChatId,
+  isBoundedTerminalChatMessage,
 } from "./types";
 import type {
   AccountInfo,
@@ -2043,7 +2044,11 @@ export function decodeChatStreamEvent(
     if (typeof raw.delta !== "string" || raw.delta.length > MAX_CHAT_DELTA_CHARS) {
       return { ok: false, failure: { eventName, reason: "invalid_block", sessionId, messageId } };
     }
-    return { ok: true, event: { type: "blockDelta", ...identity, blockIndex: raw.blockIndex, delta: raw.delta } };
+    const event: ChatDelta = { type: "blockDelta", ...identity, blockIndex: raw.blockIndex, delta: raw.delta };
+    if (canonicalizeBoundedChatEvent(event) === null) {
+      return { ok: false, failure: { eventName, reason: "invalid_block", sessionId, messageId } };
+    }
+    return { ok: true, event };
   }
   if (eventName === "chat_tool_call") {
     if (!boundedBlockIndex(raw.blockIndex)) {
@@ -2052,12 +2057,25 @@ export function decodeChatStreamEvent(
     if (!isBoundedAgentContentBlock(raw.block)) {
       return { ok: false, failure: { eventName, reason: "invalid_block", sessionId, messageId } };
     }
-    return { ok: true, event: { type: "blockUpsert", ...identity, blockIndex: raw.blockIndex, block: raw.block } };
+    const event: ChatBlockUpsertEvent = {
+      type: "blockUpsert",
+      ...identity,
+      blockIndex: raw.blockIndex,
+      block: raw.block,
+    };
+    if (canonicalizeBoundedChatEvent(event) === null) {
+      return { ok: false, failure: { eventName, reason: "invalid_block", sessionId, messageId } };
+    }
+    return { ok: true, event };
   }
-  if (!isBoundedAssistantChatMessage(raw.message, messageId)) {
+  if (!isBoundedTerminalChatMessage(raw.message, messageId)) {
     return { ok: false, failure: { eventName, reason: "invalid_message", sessionId, messageId } };
   }
-  return { ok: true, event: { type: "done", ...identity, message: raw.message } };
+  const event: ChatDoneEvent = { type: "done", ...identity, message: raw.message };
+  if (canonicalizeBoundedChatEvent(event) === null) {
+    return { ok: false, failure: { eventName, reason: "invalid_message", sessionId, messageId } };
+  }
+  return { ok: true, event };
 }
 
 export async function chatSend(

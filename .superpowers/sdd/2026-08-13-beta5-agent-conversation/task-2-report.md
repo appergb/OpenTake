@@ -57,6 +57,23 @@ Branch: `release/v1.0.0-beta.5`
 - Added focused regressions for delayed identical text, cross-kind/index/payload
   conflicts, and an exact retry outside the bounded replay window.
 
+## Review fix round 3 — bounded exact canonical replay
+
+- Replaced the two 32-bit hashes with the collision-free canonical event text.
+  Canonicalization uses deterministic UTF-16 code-unit key order, rejects
+  sparse arrays and non-JSON containers, and streams into a writer that aborts
+  above the 1 MiB aggregate event limit. Image content uses the same individual
+  ceiling, and each draft retains at most 64 entries and 1 MiB of canonical
+  replay text in total.
+- Split sequence-address preflight from payload comparison. Gaps and events
+  older than the retained window now fail closed before deep payload validation
+  or canonical construction; only a current event or a retained retry pays the
+  bounded canonicalization cost.
+- Extended terminal decoding and exact final replacement to Rust `role: "tool"`
+  messages. Tool terminals require non-empty `toolResult` blocks, an empty
+  `toolCalls` list, exact `toolCallId`/`toolUseId` identity, and aligned error
+  state. Assistant terminals continue to reject tool-only blocks and fields.
+
 ## TDD and verification
 
 The initial Task 2 RED was 8 failing reducer/decoder tests. For the first
@@ -65,14 +82,18 @@ production code and produced 15 failures / 3 passes. Failures covered all newly
 requested sequence, identity, deep-validation, and retention behaviors. For
 review fix round 2, the three retry-window regressions were added before the
 production change; the focused suite then produced 2 failures / 18 passes,
-covering delayed exact retry and conflicting sequence reuse.
+covering delayed exact retry and conflicting sequence reuse. Round 3 initially
+produced 7 failures / 21 passes across the new bounded-canonical and tool
+terminal cases; the corrected sparse-collision fixture was also run alone and
+failed with the old implementation silently treating it as a retry.
 
 GREEN verification on the final tree:
 
 - `pnpm -C web exec vitest run src/store/chatStore.test.ts --reporter=verbose`
-  — 20/20 focused tests passed.
+  — 28/28 focused tests passed.
 - `pnpm -C web test -- src/store/chatStore.test.ts`
-  — 1277/1278 tests passed. The sole integration failure is the expected Task 3
+  — the earlier round-2 full run passed 1277/1278 tests. Its sole integration
+  failure was the expected Task 3
   migration point: `AgentPanel.persistence.test.tsx` still expects legacy
   `finalize(message)` to append an unaddressed Done event. The reviewed store
   now deliberately fails that overload closed unless it exactly matches an

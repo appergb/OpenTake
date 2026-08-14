@@ -8,10 +8,12 @@ import { create } from "zustand";
 import {
   MAX_CHAT_BLOCK_INDEX as BLOCK_INDEX_LIMIT,
   MAX_CHAT_DELTA_CHARS,
+  MAX_CHAT_EVENT_BYTES,
   MAX_CHAT_EVENT_SEQUENCE,
+  canonicalizeBoundedChatEvent,
   isBoundedAgentContentBlock,
-  isBoundedAssistantChatMessage,
   isBoundedChatId,
+  isBoundedTerminalChatMessage,
   type AgentContentBlock,
   type ChatMessage,
   type ChatToolCall,
@@ -24,6 +26,7 @@ export const MAX_CHAT_DELETED_SESSIONS = 128;
 const MAX_CHAT_BLOCKED_MESSAGES = 128;
 const MAX_CHAT_RESYNC_SESSIONS = 32;
 const MAX_CHAT_REPLAY_FINGERPRINTS = 64;
+const MAX_CHAT_REPLAY_CANONICAL_CHARS = MAX_CHAT_EVENT_BYTES;
 
 export type ChatHistoryResyncReason =
   | "block_gap"
@@ -124,35 +127,6 @@ function isBlockIndex(value: unknown): value is number {
 
 function isSequence(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= MAX_CHAT_EVENT_SEQUENCE;
-}
-
-function canonicalJson(value: unknown): string {
-  if (value === null) return "null";
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    return JSON.stringify(value);
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map((item) => item === undefined ? "null" : canonicalJson(item)).join(",")}]`;
-  }
-  if (typeof value === "object") {
-    const entries = Object.entries(value as Record<string, unknown>)
-      .filter(([, item]) => item !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right));
-    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`).join(",")}}`;
-  }
-  return "null";
-}
-
-function eventFingerprint(value: unknown): string {
-  const canonical = canonicalJson(value);
-  let first = 0x811c9dc5;
-  let second = 0x9e3779b9;
-  for (let index = 0; index < canonical.length; index += 1) {
-    const code = canonical.charCodeAt(index);
-    first = Math.imul(first ^ code, 0x01000193);
-    second = Math.imul(second ^ code, 0x85ebca6b);
-  }
-  return `${canonical.length}:${(first >>> 0).toString(16)}:${(second >>> 0).toString(16)}`;
 }
 
 function touch(order: string[], value: string): string[] {
@@ -343,18 +317,27 @@ function stopMessage(
   });
 }
 
-type SequenceDecision = "apply" | "retry" | ChatHistoryResyncReason;
+type SequenceAddressDecision = "apply" | "compare" | ChatHistoryResyncReason;
 
-function sequenceDecision(
+function sequenceAddressDecision(
   draft: ChatDraft,
   sequence: number,
-  fingerprint: string,
-): SequenceDecision {
+): SequenceAddressDecision {
   if (!draft.finalized && sequence === draft.nextSequence) return "apply";
   if (sequence > draft.nextSequence) return "sequence_gap";
   const previous = draft.eventFingerprints[String(sequence)];
   if (previous === undefined) return "sequence_out_of_order";
-  return previous === fingerprint ? "retry" : "sequence_conflict";
+  return "compare";
+}
+
+function sequencePayloadDecision(
+  draft: ChatDraft,
+  sequence: number,
+  fingerprint: string,
+  addressDecision: "apply" | "compare",
+): "apply" | "retry" | "sequence_conflict" {
+  if (addressDecision === "apply") return "apply";
+  return draft.eventFingerprints[String(sequence)] === fingerprint ? "retry" : "sequence_conflict";
 }
 
 function advanceDraft(
@@ -368,9 +351,19 @@ function advanceDraft(
     [sequence]: fingerprint,
   };
   const fingerprintOrder = [...draft.fingerprintOrder.filter((value) => value !== sequence), sequence];
-  while (fingerprintOrder.length > MAX_CHAT_REPLAY_FINGERPRINTS) {
+  let retainedChars = fingerprintOrder.reduce(
+    (total, retainedSequence) => total + (eventFingerprints[String(retainedSequence)]?.length ?? 0),
+    0,
+  );
+  while (
+    fingerprintOrder.length > MAX_CHAT_REPLAY_FINGERPRINTS ||
+    retainedChars > MAX_CHAT_REPLAY_CANONICAL_CHARS
+  ) {
     const expired = fingerprintOrder.shift();
-    if (expired !== undefined) delete eventFingerprints[String(expired)];
+    if (expired !== undefined) {
+      retainedChars -= eventFingerprints[String(expired)]?.length ?? 0;
+      delete eventFingerprints[String(expired)];
+    }
   }
   return {
     ...draft,
@@ -490,14 +483,19 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     if (state.deletedSessionIds[sessionId] || state.blockedMessageKeys[key]) return state;
     const draft = state.drafts[key];
     if (!draft) return stopMessage(state, sessionId, messageId, "missing_draft");
-    const fingerprint = eventFingerprint({
+    const addressDecision = sequenceAddressDecision(draft, sequence);
+    if (addressDecision !== "apply" && addressDecision !== "compare") {
+      return stopMessage(state, sessionId, messageId, addressDecision);
+    }
+    const fingerprint = canonicalizeBoundedChatEvent({
       type: "blockDelta",
       sessionId,
       messageId,
       blockIndex,
       delta,
     });
-    const decision = sequenceDecision(draft, sequence, fingerprint);
+    if (fingerprint === null) return stopMessage(state, sessionId, messageId, "invalid_block");
+    const decision = sequencePayloadDecision(draft, sequence, fingerprint, addressDecision);
     if (decision === "retry") return state;
     if (decision !== "apply") return stopMessage(state, sessionId, messageId, decision);
     const messages = state.sessionMessages[sessionId];
@@ -528,19 +526,24 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
     }
     if (!isSequence(sequence)) return stopMessage(state, sessionId, messageId, "invalid_sequence");
     if (!isBlockIndex(blockIndex)) return stopMessage(state, sessionId, messageId, "invalid_block_index");
-    if (!isBoundedAgentContentBlock(block)) return stopMessage(state, sessionId, messageId, "invalid_block");
     const key = draftKey(sessionId, messageId);
     if (state.deletedSessionIds[sessionId] || state.blockedMessageKeys[key]) return state;
     const draft = state.drafts[key];
     if (!draft) return stopMessage(state, sessionId, messageId, "missing_draft");
-    const fingerprint = eventFingerprint({
+    const addressDecision = sequenceAddressDecision(draft, sequence);
+    if (addressDecision !== "apply" && addressDecision !== "compare") {
+      return stopMessage(state, sessionId, messageId, addressDecision);
+    }
+    if (!isBoundedAgentContentBlock(block)) return stopMessage(state, sessionId, messageId, "invalid_block");
+    const fingerprint = canonicalizeBoundedChatEvent({
       type: "blockUpsert",
       sessionId,
       messageId,
       blockIndex,
       block,
     });
-    const decision = sequenceDecision(draft, sequence, fingerprint);
+    if (fingerprint === null) return stopMessage(state, sessionId, messageId, "invalid_block");
+    const decision = sequencePayloadDecision(draft, sequence, fingerprint, addressDecision);
     if (decision === "retry") return state;
     if (decision !== "apply") return stopMessage(state, sessionId, messageId, decision);
     const messages = state.sessionMessages[sessionId];
@@ -576,19 +579,20 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         }
         const key = draftKey(state.sessionId, messageId);
         const draft = state.drafts[key];
-        if (!draft || !isBoundedAssistantChatMessage(first, messageId)) {
+        if (!draft || !isBoundedTerminalChatMessage(first, messageId)) {
           return stopMessage(state, state.sessionId, messageId, draft ? "invalid_message" : "missing_draft");
         }
         const messages = state.sessionMessages[state.sessionId];
         const index = messages?.findIndex((message) => message.id === messageId) ?? -1;
         if (!messages || index < 0) return stopMessage(state, state.sessionId, messageId, "missing_draft");
         const sequence = draft.nextSequence;
-        const fingerprint = eventFingerprint({
+        const fingerprint = canonicalizeBoundedChatEvent({
           type: "done",
           sessionId: state.sessionId,
           messageId,
           message: first,
         });
+        if (fingerprint === null) return stopMessage(state, state.sessionId, messageId, "invalid_message");
         const nextMessages = messages.slice();
         nextMessages[index] = first;
         return reconcile({
@@ -616,15 +620,20 @@ export const useChatStore = create<ChatStoreState>((set, get) => ({
         return stopMessage(state, sessionId, messageId, "message_identity_mismatch");
       }
       if (!isSequence(sequence)) return stopMessage(state, sessionId, messageId, "invalid_sequence");
-      if (!isBoundedAssistantChatMessage(message, messageId)) {
-        return stopMessage(state, sessionId, messageId, "invalid_message");
-      }
       const key = draftKey(sessionId, messageId);
       if (state.deletedSessionIds[sessionId] || state.blockedMessageKeys[key]) return state;
       const draft = state.drafts[key];
       if (!draft) return stopMessage(state, sessionId, messageId, "missing_draft");
-      const fingerprint = eventFingerprint({ type: "done", sessionId, messageId, message });
-      const decision = sequenceDecision(draft, sequence, fingerprint);
+      const addressDecision = sequenceAddressDecision(draft, sequence);
+      if (addressDecision !== "apply" && addressDecision !== "compare") {
+        return stopMessage(state, sessionId, messageId, addressDecision);
+      }
+      if (!isBoundedTerminalChatMessage(message, messageId)) {
+        return stopMessage(state, sessionId, messageId, "invalid_message");
+      }
+      const fingerprint = canonicalizeBoundedChatEvent({ type: "done", sessionId, messageId, message });
+      if (fingerprint === null) return stopMessage(state, sessionId, messageId, "invalid_message");
+      const decision = sequencePayloadDecision(draft, sequence, fingerprint, addressDecision);
       if (decision === "retry") return state;
       if (decision !== "apply") return stopMessage(state, sessionId, messageId, decision);
       const messages = state.sessionMessages[sessionId];
