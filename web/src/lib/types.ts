@@ -1574,11 +1574,10 @@ export function isBoundedToolChatMessage(
     return false;
   }
   const toolCallId = message.toolCallId;
-  const toolIsError = message.toolIsError ?? false;
   return (message.blocks as AgentContentBlock[]).every((block) =>
     block.type === "toolResult" &&
     block.toolUseId === toolCallId &&
-    (block.isError ?? false) === toolIsError,
+    block.isError === message.toolIsError,
   );
 }
 

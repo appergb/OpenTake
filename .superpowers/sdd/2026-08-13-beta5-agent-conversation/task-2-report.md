@@ -74,6 +74,14 @@ Branch: `release/v1.0.0-beta.5`
   `toolCalls` list, exact `toolCallId`/`toolUseId` identity, and aligned error
   state. Assistant terminals continue to reject tool-only blocks and fields.
 
+## Review fix round 4 — exact optional tool error state
+
+- Matched Rust's `Option<bool>` terminal contract by comparing each
+  `toolResult.isError` directly with `message.toolIsError`. An omitted marker is
+  no longer treated as equivalent to an explicit `false` marker.
+- Added regressions for both asymmetric cases. Terminals with both markers
+  omitted and terminals with both markers explicitly `false` remain valid.
+
 ## TDD and verification
 
 The initial Task 2 RED was 8 failing reducer/decoder tests. For the first
@@ -85,12 +93,14 @@ production change; the focused suite then produced 2 failures / 18 passes,
 covering delayed exact retry and conflicting sequence reuse. Round 3 initially
 produced 7 failures / 21 passes across the new bounded-canonical and tool
 terminal cases; the corrected sparse-collision fixture was also run alone and
-failed with the old implementation silently treating it as a retry.
+failed with the old implementation silently treating it as a retry. Round 4's
+two optional-error mismatch regressions both failed against the coalescing
+validator while the 28 existing/aligned cases passed.
 
 GREEN verification on the final tree:
 
 - `pnpm -C web exec vitest run src/store/chatStore.test.ts --reporter=verbose`
-  — 28/28 focused tests passed.
+  — 30/30 focused tests passed.
 - `pnpm -C web test -- src/store/chatStore.test.ts`
   — the earlier round-2 full run passed 1277/1278 tests. Its sole integration
   failure was the expected Task 3

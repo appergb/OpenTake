@@ -560,7 +560,51 @@ describe("chatStore ordered session streams", () => {
   });
 
   it("strictly decodes a terminal tool-result message", () => {
-    const message = toolResultMessage("message-a", "tool-a");
+    const messages = [
+      toolResultMessage("message-a", "tool-a"),
+      toolResultMessage("message-a", "tool-a", {
+        blocks: [{
+          type: "toolResult",
+          toolUseId: "tool-a",
+          content: [{ kind: "text", text: "ok" }],
+          isError: false,
+        }],
+        toolIsError: false,
+      }),
+    ];
+
+    messages.forEach((message) => {
+      expect(decodeChatStreamEvent("chat_done", {
+        ...deltaPayload(),
+        delta: undefined,
+        blockIndex: undefined,
+        sequence: 1,
+        message,
+      })).toEqual({
+        ok: true,
+        event: {
+          type: "done",
+          projectEpoch: 7,
+          projectPath: "/tmp/project.opentake",
+          sessionId: sessionA,
+          messageId: "message-a",
+          sequence: 1,
+          message,
+        },
+      });
+    });
+  });
+
+  it("rejects a tool terminal when only the block explicitly marks success", () => {
+    const message = toolResultMessage("message-a", "tool-a", {
+      blocks: [{
+        type: "toolResult",
+        toolUseId: "tool-a",
+        content: [{ kind: "text", text: "ok" }],
+        isError: false,
+      }],
+    });
+
     expect(decodeChatStreamEvent("chat_done", {
       ...deltaPayload(),
       delta: undefined,
@@ -568,15 +612,34 @@ describe("chatStore ordered session streams", () => {
       sequence: 1,
       message,
     })).toEqual({
-      ok: true,
-      event: {
-        type: "done",
-        projectEpoch: 7,
-        projectPath: "/tmp/project.opentake",
+      ok: false,
+      failure: {
+        eventName: "chat_done",
+        reason: "invalid_message",
         sessionId: sessionA,
         messageId: "message-a",
-        sequence: 1,
-        message,
+      },
+    });
+  });
+
+  it("rejects a tool terminal when only the message explicitly marks success", () => {
+    const message = toolResultMessage("message-a", "tool-a", {
+      toolIsError: false,
+    });
+
+    expect(decodeChatStreamEvent("chat_done", {
+      ...deltaPayload(),
+      delta: undefined,
+      blockIndex: undefined,
+      sequence: 1,
+      message,
+    })).toEqual({
+      ok: false,
+      failure: {
+        eventName: "chat_done",
+        reason: "invalid_message",
+        sessionId: sessionA,
+        messageId: "message-a",
       },
     });
   });
