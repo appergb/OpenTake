@@ -69,6 +69,7 @@ APPROVED_STEP_IDENTITIES = {
         "name:Validate Windows and release workflow contracts",
         "name:Provisioner unit tests",
         "name:Install locked Web dependencies",
+        "name:Validate Web dependency licenses",
         "name:Rust formatting",
         "name:Rust workspace clippy",
         "name:Rust workspace tests",
@@ -183,6 +184,7 @@ APPROVED_COMPLEX_RUN_SHA256 = {
     ("quality", "Test and reproduce Motion Canvas runner"): "8bcd55de9b045f9d7be6343163a5422cba0ab545f7844da50ca1a7c8623fe640",
     ("quality", "Validate Windows and release workflow contracts"): "76d3d0db11222f5121e5b404470296695c8cfea0b4e41f0c3a1d853612331e7d",
     ("quality", "Provisioner unit tests"): "f57d4d7d6df403d573d31bbda02589804109596040c2cefcca60f3e9352e891a",
+    ("quality", "Validate Web dependency licenses"): "5b914e6aaddab4c9ca0ac03ff0cc03d23b44fc3d66621b8c9fa5eeac07a5cfcd",
     ("quality", "Live playback transport integration"): "461f79546009551e5e7adbf50f869abb9449c2ae7666a66a425c7cd3c24acea9",
     ("quality", "Reassert exact source after quality gates"): "953657d26d2eda8490c18e7030c66ddb19aba64a5c8b19808da9a853fd1bfdd2",
     ("macos_arm64", "Assert exact checked-out SHA"): "ff0b148eecdf8603712586a6c4a05e752df0b36b5c97a366760f6cba10e58ddd",
@@ -220,7 +222,7 @@ APPROVED_COMPLEX_RUN_SHA256 = {
 
 APPROVED_JOB_SHA256 = {
     "validate": "ce61e176161ab7ec892d92ed9cf1a3e379c6b5f7b5781bf1addc4f29379a85b2",
-    "quality": "867c5ef99873d9cea9e2cf5500f3d2b5b1759bc20b8a63b771785e1081dd0e35",
+    "quality": "d0078d8cd49919be4a1f71f1208c0d05369282c13f5ae5c38142063d648816c2",
     "macos_arm64": "1785d765c96278190c25e312c9e610070619e17b7b2b0d922f0bd234501df525",
     "windows_x64": "63bd70d85e40a3f1177e9059d4674d7f93d4502181fc378f7706e839af953378",
     "publish": "ea3fe6d18a94c0850d3ac7f21c4e23fb8fcf572189f77f659e5b34eab776bd85",
@@ -1578,6 +1580,8 @@ def validate_workflow(workflow: str) -> list[str]:
         ("Live playback transport integration", ("cargo", "test", "-p", "opentake-tauri", "--features", "playback-engine", "--test", "playback_transport_integration", "--", "--test-threads=1")),
         ("Minimal-feature Tauri clippy", ("cargo", "clippy", "-p", "opentake-tauri", "--no-default-features", "--all-targets", "--", "-D", "warnings")),
         ("Install locked Web dependencies", ("pnpm", "-C", "web", "install", "--frozen-lockfile")),
+        ("Validate Web dependency licenses", ("python3", "-B", "-m", "unittest", "discover", "-s", "scripts", "-p", "test_check_license_inventory.py")),
+        ("Validate Web dependency licenses", ("python3", "-B", "scripts/check_license_inventory.py")),
         ("Web editor behavior suite", ("pnpm", "-C", "web", "test")),
         ("Web production build", ("pnpm", "-C", "web", "build")),
     )
@@ -1585,6 +1589,18 @@ def validate_workflow(workflow: str) -> list[str]:
     quality_ok = quality_ok and all(
         _has_command(_structured_step(quality, step_name), command)
         for step_name, command in quality_commands
+    )
+    license_step = _structured_step(quality, "Validate Web dependency licenses")
+    quality_ok = quality_ok and _has_code_lines(
+        license_step,
+        (
+            'case "$OPENTAKE_EXPECTED_RELEASE_VERSION" in',
+            "1.0.0-beta.5)",
+            "python3 -B -m unittest discover -s scripts -p 'test_check_license_inventory.py'",
+            "python3 -B scripts/check_license_inventory.py",
+            "1.0.0-beta.4)",
+            'node -e \'const d=require("./web/package.json").dependencies??{}; if(Object.keys(d).some((name)=>name==="codemirror"||name.startsWith("@codemirror/"))) process.exit(1)\'',
+        ),
     )
     system_deps = _structured_step(quality, "Install system deps (ffmpeg + Tauri/GTK)")
     quality_ok = quality_ok and _has_command(

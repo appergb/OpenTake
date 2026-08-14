@@ -41,6 +41,12 @@ CODEMIRROR_PACKAGES = {
         copyright="Copyright (C) 2018-2021 by Marijn Haverbeke <marijn@haverbeke.berlin> and others",
         license_sha256="05c6130cda97e7600ca91427a41e8a065efcf82365fc0293e7de80faec494c07",
     ),
+    "@codemirror/state": PackageContract(
+        version="6.7.1",
+        repository="https://code.haverbeke.berlin/codemirror/state",
+        copyright="Copyright (C) 2018-2021 by Marijn Haverbeke <marijn@haverbeke.berlin> and others",
+        license_sha256="05c6130cda97e7600ca91427a41e8a065efcf82365fc0293e7de80faec494c07",
+    ),
     "@codemirror/theme-one-dark": PackageContract(
         version="6.1.3",
         repository="https://github.com/codemirror/theme-one-dark",
@@ -132,6 +138,15 @@ def validate_inventory(repository_root: Path = REPOSITORY_ROOT) -> list[str]:
     dependencies = package_json.get("dependencies")
     if not isinstance(dependencies, dict):
         dependencies = {}
+    direct_codemirror = {
+        package
+        for package in dependencies
+        if package == "codemirror" or package.startswith("@codemirror/")
+    }
+    if direct_codemirror != set(CODEMIRROR_PACKAGES):
+        errors.append(
+            "direct CodeMirror dependency set must exactly match the license contract"
+        )
 
     node_modules = repository_root / "web" / "node_modules"
     package_records = _top_level_section(lockfile, "packages")

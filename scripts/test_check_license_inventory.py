@@ -14,6 +14,7 @@ EXPECTED_PACKAGES = {
     "codemirror": "6.0.2",
     "@codemirror/lang-html": "6.4.12",
     "@codemirror/lang-css": "6.3.1",
+    "@codemirror/state": "6.7.1",
     "@codemirror/theme-one-dark": "6.1.3",
 }
 LICENSE_TEXT = """MIT License
@@ -114,7 +115,7 @@ def _write_valid_fixture(root: Path) -> None:
 
 
 class LicenseInventoryTests(unittest.TestCase):
-    def test_contract_requires_the_exact_four_direct_packages(self) -> None:
+    def test_contract_requires_the_exact_five_direct_packages(self) -> None:
         self.assertEqual(
             EXPECTED_PACKAGES,
             {
@@ -122,6 +123,19 @@ class LicenseInventoryTests(unittest.TestCase):
                 for package, contract in inventory.CODEMIRROR_PACKAGES.items()
             },
         )
+
+    def test_ci_and_release_workflows_run_the_fail_closed_inventory(self) -> None:
+        commands = (
+            "python3 -B -m unittest discover -s scripts -p 'test_check_license_inventory.py'",
+            "python3 -B scripts/check_license_inventory.py",
+        )
+        for workflow in ("ci.yml", "release.yml"):
+            with self.subTest(workflow=workflow):
+                document = (
+                    REPOSITORY_ROOT / ".github" / "workflows" / workflow
+                ).read_text(encoding="utf-8")
+                for command in commands:
+                    self.assertIn(command, document)
 
     def test_repository_inventory_is_valid(self) -> None:
         self.assertEqual([], inventory.validate_inventory(REPOSITORY_ROOT))
@@ -181,6 +195,19 @@ class LicenseInventoryTests(unittest.TestCase):
                 inventory.validate_inventory(root),
             )
 
+    def test_unregistered_direct_codemirror_dependency_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_valid_fixture(root)
+            package_json_path = root / "web" / "package.json"
+            package_json = json.loads(package_json_path.read_text(encoding="utf-8"))
+            package_json["dependencies"]["@codemirror/view"] = "6.43.8"
+            package_json_path.write_text(json.dumps(package_json), encoding="utf-8")
+            self.assertIn(
+                "direct CodeMirror dependency set must exactly match the license contract",
+                inventory.validate_inventory(root),
+            )
+
     def test_missing_package_or_snapshot_record_is_rejected(self) -> None:
         for section, record, expected in (
             (
@@ -226,6 +253,36 @@ class LicenseInventoryTests(unittest.TestCase):
             license_path.write_text("MIT License\n", encoding="utf-8")
             self.assertIn(
                 "installed codemirror LICENSE does not match its published license",
+                inventory.validate_inventory(root),
+            )
+
+    def test_state_repository_and_notice_drift_are_rejected(self) -> None:
+        package = "@codemirror/state"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_valid_fixture(root)
+            package_dir = root / "web" / "node_modules" / "@codemirror" / "state"
+            manifest_path = package_dir / "package.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["repository"]["url"] = "https://github.com/codemirror/state.git"
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            self.assertIn(
+                "installed @codemirror/state repository does not match the official source",
+                inventory.validate_inventory(root),
+            )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _write_valid_fixture(root)
+            contract = inventory.CODEMIRROR_PACKAGES[package]
+            notices_path = root / "THIRD_PARTY_NOTICES.md"
+            notices = notices_path.read_text(encoding="utf-8")
+            notices_path.write_text(
+                notices.replace(_notice_row(package, contract), "", 1),
+                encoding="utf-8",
+            )
+            self.assertIn(
+                "@codemirror/state@6.7.1 third-party notice is missing",
                 inventory.validate_inventory(root),
             )
 

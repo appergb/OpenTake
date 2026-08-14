@@ -1874,6 +1874,38 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             mutated, "quality pins Ruby Psych before the release validator"
         )
 
+    def test_quality_runs_web_license_inventory_fail_closed(self) -> None:
+        step = (
+            "      - name: Validate Web dependency licenses\n"
+            "        run: |\n"
+            "          set -euo pipefail\n"
+            "          case \"$OPENTAKE_EXPECTED_RELEASE_VERSION\" in\n"
+            "            1.0.0-beta.5)\n"
+            "              python3 -B -m unittest discover -s scripts -p 'test_check_license_inventory.py'\n"
+            "              python3 -B scripts/check_license_inventory.py\n"
+            "              ;;\n"
+            "            1.0.0-beta.4)\n"
+            "              node -e 'const d=require(\"./web/package.json\").dependencies??{}; if(Object.keys(d).some((name)=>name===\"codemirror\"||name.startsWith(\"@codemirror/\"))) process.exit(1)'\n"
+            "              ;;\n"
+            "            *)\n"
+            "              exit 1\n"
+            "              ;;\n"
+            "          esac\n"
+        )
+        self.assertIn(step, WORKFLOW)
+        self.assert_rejected(
+            WORKFLOW.replace(step, "", 1),
+            "approved release step sets",
+        )
+        self.assert_rejected(
+            WORKFLOW.replace(
+                "            1.0.0-beta.4)\n",
+                "            1.0.0-beta.3)\n",
+                1,
+            ),
+            "approved release run templates",
+        )
+
     def test_duplicate_yaml_mapping_key_is_rejected(self) -> None:
         mutated = self.mutate(
             "name: Release\n\n",
