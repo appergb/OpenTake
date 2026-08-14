@@ -200,3 +200,33 @@ three failures are confined to `opentake-motion/tests/chromium.rs` and do not
 exercise the Task 3 chat/Web changes.
 
 Round 2 commit target: `fix(agent): bind resync to exact turn snapshot`
+
+## Final independent review — rejected authoritative request recovery
+
+- Replaced the empty authoritative-history rejection handler with a
+  mount-independent retry schedule. The request carries a bounded retry attempt
+  and is requeued after exponential backoff from 250 ms to a 4 s ceiling.
+- Requeue still passes through the store's exact project-generation,
+  resyncing-session, and deleted-session guards. A project reset clears the
+  poison and makes an old timer a no-op; an ordinary panel unmount does not own
+  or discard the project-scoped repair.
+- Added a component regression that rejects the first authoritative request,
+  verifies there is no immediate retry loop and the composer remains locked,
+  unmounts/remounts the panel, advances the retry clock, and observes the exact
+  terminal snapshot installation and poison cleanup.
+- Updated the chat test bridge for the concurrent cancellable timeline-capture
+  trait signature; this is test-only plumbing with no chat behavior change.
+
+The regression was observed RED before production changes: after 5 seconds of
+virtual time the authoritative API still had only one call and the resync state
+remained poisoned. Final verification:
+
+- Focused Agent conversation/persistence/store: 3 files, 68/68 tests passed.
+- Full Web suite: 144 files, 1318/1318 tests passed.
+- `pnpm -C web build` passed (`tsc -b` and Vite production build).
+- Rust `chat::tests`: 24/24 passed.
+- `cargo clippy -p opentake-tauri --lib -- -D warnings` passed.
+- `cargo build -p opentake-tauri` passed.
+- Owned-file `git diff --check` passed.
+
+Final-review commit target: `fix(agent): retry failed history resync`

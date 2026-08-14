@@ -771,6 +771,81 @@ describe("AgentPanel project sessions", () => {
     expect(useChatStore.getState().resyncingSessionIds["chat-restored"]).toBeUndefined();
   });
 
+  it("retries a rejected authoritative request after unmount and remount without spinning", async () => {
+    vi.useFakeTimers();
+    try {
+      const authoritative = [{
+        id: "final-after-retry",
+        role: "assistant",
+        content: "terminal retry snapshot",
+        toolCalls: [],
+        blocks: [{ type: "text", text: "terminal retry snapshot" }],
+        createdAt: 10,
+      }];
+      apiMocks.chatHistoryAuthoritative
+        .mockRejectedValueOnce(new Error("authoritative history unavailable"))
+        .mockResolvedValueOnce(authoritative);
+      await act(async () => {
+        root?.render(<AgentPanel />);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      await act(async () => {
+        apiMocks.deltaHandler?.({
+          projectEpoch: 41,
+          projectPath: "/tmp/Current.opentake",
+          sessionId: "chat-restored",
+          messageId: "assistant-gap",
+          sequence: 0,
+          blockIndex: 0,
+          delta: "partial",
+        });
+        apiMocks.deltaHandler?.({
+          projectEpoch: 41,
+          projectPath: "/tmp/Current.opentake",
+          sessionId: "chat-restored",
+          messageId: "assistant-gap",
+          sequence: 2,
+          blockIndex: 0,
+          delta: "gap",
+        });
+        await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(apiMocks.chatHistoryAuthoritative).toHaveBeenCalledOnce();
+      expect(useChatStore.getState().resyncingSessionIds["chat-restored"]).toBe(true);
+      expect(container?.querySelector<HTMLTextAreaElement>("textarea")?.disabled).toBe(true);
+
+      await act(async () => root?.unmount());
+      root = null;
+      apiMocks.chatSessions.mockReturnValueOnce(new Promise(() => {}));
+      root = createRoot(container!);
+      await act(async () => {
+        root?.render(<AgentPanel />);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(
+        apiMocks.chatHistoryAuthoritative,
+        "a permanent failure must not cause an immediate retry loop",
+      ).toHaveBeenCalledOnce();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(apiMocks.chatHistoryAuthoritative).toHaveBeenCalledTimes(2);
+      expect(useChatStore.getState().sessionMessages["chat-restored"]).toEqual(authoritative);
+      expect(useChatStore.getState().resyncingSessionIds["chat-restored"]).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("requeues a CAS-rejected re-sync and resumes it after remount", async () => {
     let resolveStale: (messages: Array<Record<string, unknown>>) => void = () => {};
     apiMocks.chatHistoryAuthoritative.mockReturnValueOnce(new Promise((resolve) => {

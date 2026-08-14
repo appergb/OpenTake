@@ -46,6 +46,7 @@ export interface ChatHistoryResyncRequest {
   sessionId: string;
   messageId?: string;
   reason: ChatHistoryResyncReason;
+  retryAttempt?: number;
 }
 
 interface ChatDraft {

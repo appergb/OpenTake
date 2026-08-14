@@ -43,6 +43,9 @@ import { useProjectStore } from "../../store/projectStore";
 import { Reveal } from "../ui/Reveal";
 
 const NO_KEY_HINT = /Settings|设置|API key/i;
+const HISTORY_RESYNC_RETRY_BASE_MS = 250;
+const HISTORY_RESYNC_RETRY_MAX_MS = 4_000;
+const HISTORY_RESYNC_RETRY_MAX_EXPONENT = 4;
 
 export function AgentPanel() {
   const t = useT();
@@ -240,7 +243,21 @@ export function AgentPanel() {
           session.id === request.sessionId ? { ...session, messages: history } : session,
         ));
       })
-      .catch(() => {});
+      .catch(() => {
+        const retryAttempt = Math.min(
+          (request.retryAttempt ?? 0) + 1,
+          HISTORY_RESYNC_RETRY_MAX_EXPONENT + 1,
+        );
+        const retryDelay = Math.min(
+          HISTORY_RESYNC_RETRY_BASE_MS * (2 ** (retryAttempt - 1)),
+          HISTORY_RESYNC_RETRY_MAX_MS,
+        );
+        // Re-sync belongs to the project-scoped store, not this panel mount.
+        // The store action rejects stale projects and deleted session identities.
+        window.setTimeout(() => {
+          rescheduleHistoryResync({ ...request, retryAttempt }, loadingGeneration);
+        }, retryDelay);
+      });
   }, [
     historyResyncRequests,
     installSessionSnapshot,

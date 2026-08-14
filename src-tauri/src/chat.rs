@@ -1388,6 +1388,7 @@ mod tests {
         fn capture_timeline_result(
             &self,
             _request: &opentake_agent::mcp::media_bridge::TimelineResultCaptureRequest,
+            _cancel: &opentake_media::MediaCancelToken,
         ) -> Result<
             opentake_agent::tools::result::Block,
             opentake_agent::mcp::media_bridge::BridgeError,
