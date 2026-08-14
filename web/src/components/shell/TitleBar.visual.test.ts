@@ -40,18 +40,20 @@ describe("TitleBar alignment", () => {
     expect(titleBarSource).toContain("var(--titlebar-safe-left)");
   });
 
-  it("vertically centers the native macOS traffic lights on the 38px icon plane", () => {
+  it("uses the packaged-app calibrated macOS traffic-light offset", () => {
     const trafficLights = tauriConfig.app.windows[0]?.trafficLightPosition;
     const titleBarGeometry = titleBarSource.match(
       /data-tauri-drag-region\s+style=\{\{\s+height:\s*(\d+),([\s\S]*?)padding:/,
     );
 
     expect(titleBarGeometry).not.toBeNull();
-    const titleBarHeight = Number(titleBarGeometry![1]);
+    expect(Number(titleBarGeometry![1])).toBe(38);
     expect(titleBarGeometry![2]).toContain('alignItems: "center"');
     expect(titleBarSource.match(/width:\s*26,\s*height:\s*26,/g)).toHaveLength(5);
-    expect(trafficLights).toEqual({ x: 18, y: 12 });
-    expect(trafficLights!.y + 14 / 2).toBe(titleBarHeight / 2);
+    // The packaged y=12 candidate measured a 10px AX center against the Web
+    // controls' 18.5px center. y=21 is the calibrated candidate; the separate
+    // packaged-image gate must still prove the final deviation is <= 1px.
+    expect(trafficLights).toEqual({ x: 18, y: 21 });
   });
 });
 
