@@ -147,83 +147,19 @@ fn file_matches_name(root: &Dir, name: &str, expected: &File) -> Result<bool, St
     Ok(expected == current)
 }
 
-#[cfg(not(windows))]
 fn replace_catalog_file(
     root: &Dir,
     _temp: &File,
     temp_name: &str,
     target: &str,
 ) -> std::io::Result<()> {
+    // Keep the replacement capability-relative on every platform. In
+    // particular, cap-std's Windows implementation resolves the two retained
+    // directory handles and delegates to `std::fs::rename`, whose Windows
+    // backend requests replacement of an existing destination. Passing a
+    // cap-std directory handle as FILE_RENAME_INFO::RootDirectory directly is
+    // rejected with ERROR_INVALID_PARAMETER on Windows Server 2022.
     root.rename(temp_name, root, target)
-}
-
-#[cfg(windows)]
-fn replace_catalog_file(
-    root: &Dir,
-    temp: &File,
-    _temp_name: &str,
-    target: &str,
-) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FileRenameInfo, SetFileInformationByHandle, FILE_RENAME_INFO, FILE_RENAME_INFO_0,
-    };
-
-    let wide = std::ffi::OsStr::new(target)
-        .encode_wide()
-        .collect::<Vec<_>>();
-    if wide.is_empty() || wide.contains(&0) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "motion document catalog target is invalid",
-        ));
-    }
-    let file_name_bytes = wide
-        .len()
-        .checked_mul(std::mem::size_of::<u16>())
-        .and_then(|size| u32::try_from(size).ok())
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "target too long"))?;
-    let info_size = std::mem::size_of::<FILE_RENAME_INFO>()
-        .checked_add(file_name_bytes as usize)
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "rename allocation overflow",
-            )
-        })?;
-    const _: () =
-        assert!(std::mem::align_of::<usize>() >= std::mem::align_of::<FILE_RENAME_INFO>());
-    let word_size = std::mem::size_of::<usize>();
-    let mut storage = vec![0_usize; info_size.div_ceil(word_size)];
-    let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
-    // SAFETY: storage is aligned and sized for the native header plus target;
-    // both retained handles remain alive for the synchronous call.
-    let replaced = unsafe {
-        (*info).Anonymous = FILE_RENAME_INFO_0 {
-            ReplaceIfExists: true,
-        };
-        (*info).RootDirectory = root.as_raw_handle();
-        (*info).FileNameLength = file_name_bytes;
-        std::ptr::copy_nonoverlapping(
-            wide.as_ptr(),
-            std::ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
-            wide.len(),
-        );
-        SetFileInformationByHandle(
-            temp.as_raw_handle(),
-            FileRenameInfo,
-            info.cast(),
-            u32::try_from(info_size).map_err(|_| {
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, "rename buffer too large")
-            })?,
-        )
-    };
-    if replaced == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
 }
 
 pub(super) fn read_bounded_file(
@@ -278,9 +214,20 @@ pub(super) fn read_bounded_utf8(
 pub(super) fn sync_directory(directory: &Dir) -> Result<(), String> {
     #[cfg(unix)]
     {
+        use cap_std::fs::OpenOptionsExt;
+
+        // cap-std intentionally retains ambient and traversed directories with
+        // O_PATH on Linux. Such a descriptor preserves the capability but
+        // rejects fsync with EBADF, so reopen the same directory through that
+        // capability as an ordinary read-only directory descriptor first.
+        let mut options = OpenOptions::new();
+        options
+            .read(true)
+            .follow(FollowSymlinks::No)
+            .custom_flags(libc::O_DIRECTORY);
         directory
-            .try_clone()
-            .and_then(|directory| directory.into_std_file().sync_all())
+            .open_with(".", &options)
+            .and_then(|directory| directory.sync_all())
             .map_err(|error| format!("motion document directory could not be synced: {error}"))
     }
     #[cfg(not(unix))]

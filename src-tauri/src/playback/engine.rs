@@ -934,14 +934,18 @@ mod tests {
                 .expect("pause reaches render thread"),
             73
         );
-        let returned_before_render_release = result_rx.try_recv().is_ok();
+        // Give the caller thread a bounded scheduling window. An immediate
+        // try_recv races the caller's result send against the render fixture's
+        // pause_seen send and flakes under loaded CI runners even though
+        // `pause` has already returned without waiting for the render reply.
+        let returned_before_render_release = result_rx.recv_timeout(Duration::from_secs(1));
         release_pause
             .send(())
             .expect("release synthetic inflight render");
         caller.join().expect("join pause caller");
 
         assert!(
-            returned_before_render_release,
+            matches!(returned_before_render_release, Ok(Ok(()))),
             "pause must acknowledge after enqueueing, not after the slow render finishes"
         );
     }
