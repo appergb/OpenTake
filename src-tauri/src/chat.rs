@@ -604,6 +604,44 @@ impl MessageEventSequence {
     }
 }
 
+fn terminal_message_is_allowed(expected_id: &str, message: &ChatMessage) -> bool {
+    if message.id != expected_id {
+        return false;
+    }
+    match message.role {
+        opentake_agent::chat::Role::Assistant => {
+            message.tool_call_id.is_none()
+                && message.tool_is_error.is_none()
+                && message.blocks.iter().all(|block| {
+                    matches!(
+                        block,
+                        AgentContentBlock::Text { .. } | AgentContentBlock::ToolUse { .. }
+                    )
+                })
+        }
+        opentake_agent::chat::Role::Tool => {
+            let Some(tool_call_id) = message.tool_call_id.as_deref() else {
+                return false;
+            };
+            !tool_call_id.is_empty()
+                && message.tool_calls.is_empty()
+                && !message.blocks.is_empty()
+                && message.blocks.iter().all(|block| {
+                    matches!(
+                        block,
+                        AgentContentBlock::ToolResult {
+                            tool_use_id,
+                            is_error,
+                            ..
+                        } if tool_use_id == tool_call_id
+                            && *is_error == message.tool_is_error
+                    )
+                })
+        }
+        opentake_agent::chat::Role::System | opentake_agent::chat::Role::User => false,
+    }
+}
+
 /// Adapt `AppHandle::emit` to the loop's [`EmitLoop`] trait. Each loop event
 /// becomes a Tauri event the front end listens for.
 struct AppEmitter {
@@ -706,6 +744,9 @@ impl EmitLoop for AppEmitter {
                 sequence,
                 message,
             } => {
+                if !terminal_message_is_allowed(&message_id, &message) {
+                    return;
+                }
                 if !self.accept_sequence(&message_id, sequence) {
                     return;
                 }
@@ -1400,6 +1441,62 @@ mod tests {
         assert_eq!(json["sequence"], 1);
         assert_eq!(json["message"]["role"], "assistant");
         assert_eq!(json["message"]["id"], json["messageId"]);
+    }
+
+    #[test]
+    fn terminal_contract_allows_only_matching_nonempty_tool_result_messages() {
+        let assistant = ChatMessage::assistant_with_id("assistant-1", "done", Vec::new());
+        assert!(terminal_message_is_allowed("assistant-1", &assistant));
+
+        let tool = ChatMessage::tool_result("call-1", serde_json::json!({"summary": "ok"}));
+        assert!(terminal_message_is_allowed(&tool.id, &tool));
+
+        let mut empty = tool.clone();
+        empty.blocks.clear();
+        assert!(!terminal_message_is_allowed(&empty.id, &empty));
+
+        let mut wrong_block = tool.clone();
+        wrong_block.blocks = vec![AgentContentBlock::Text { text: "ok".into() }];
+        assert!(!terminal_message_is_allowed(&wrong_block.id, &wrong_block));
+
+        let mut mismatched = tool.clone();
+        mismatched.tool_call_id = Some("call-other".into());
+        assert!(!terminal_message_is_allowed(&mismatched.id, &mismatched));
+
+        let mut mismatched_error = tool.clone();
+        mismatched_error.tool_is_error = Some(true);
+        assert!(!terminal_message_is_allowed(
+            &mismatched_error.id,
+            &mismatched_error,
+        ));
+
+        let mut assistant_with_tool_result = assistant;
+        assistant_with_tool_result.blocks = tool.blocks;
+        assert!(!terminal_message_is_allowed(
+            &assistant_with_tool_result.id,
+            &assistant_with_tool_result,
+        ));
+    }
+
+    #[test]
+    fn tool_done_payload_preserves_terminal_identity_and_sequence() {
+        let message = ChatMessage::tool_result("call-1", serde_json::json!({"summary": "ok"}));
+        let payload = DonePayload {
+            project_epoch: 7,
+            project_path: "/tmp/A.opentake".into(),
+            session_id: "sess-1".into(),
+            message_id: message.id.clone(),
+            sequence: 1,
+            message,
+        };
+
+        let json = serde_json::to_value(payload).unwrap();
+        assert_eq!(json["sequence"], 1);
+        assert_eq!(json["messageId"], json["message"]["id"]);
+        assert_eq!(json["message"]["role"], "tool");
+        assert_eq!(json["message"]["toolCallId"], "call-1");
+        assert_eq!(json["message"]["blocks"][0]["type"], "toolResult");
+        assert_eq!(json["message"]["blocks"][0]["toolUseId"], "call-1");
     }
 
     #[test]

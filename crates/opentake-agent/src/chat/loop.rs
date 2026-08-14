@@ -51,6 +51,35 @@ fn tool_result_message(
     ChatMessage::tool_result_blocks(tool_call_id, blocks, safe_result, result.is_error)
 }
 
+fn persist_tool_result_message(
+    session: &mut ChatSession,
+    session_id: &str,
+    emitter: &dyn EmitLoop,
+    message: ChatMessage,
+) {
+    debug_assert_eq!(message.role, crate::chat::session::Role::Tool);
+    debug_assert!(!message.blocks.is_empty());
+
+    let message_id = message.id.clone();
+    let mut sequence = EventSequence::default();
+    session.messages.push(message.clone());
+    for (block_index, block) in message.blocks.iter().cloned().enumerate() {
+        emitter.emit(LoopEvent::BlockUpsert {
+            session_id: session_id.to_string(),
+            message_id: message_id.clone(),
+            sequence: sequence.take(),
+            block_index,
+            block,
+        });
+    }
+    emitter.emit(LoopEvent::Done {
+        session_id: session_id.to_string(),
+        message_id,
+        sequence: sequence.take(),
+        message,
+    });
+}
+
 fn map_dispatch_join_error(error: tokio::task::JoinError) -> LlmError {
     tracing::error!(
         target: "opentake::chat::private",
@@ -590,16 +619,7 @@ impl ChatLoop {
                     });
                 }
                 let tool_result = tool_result_message(tc_id, &result, result_json);
-                if let Some(block) = tool_result.blocks.first().cloned() {
-                    emitter.emit(LoopEvent::BlockUpsert {
-                        session_id: sid.clone(),
-                        message_id: tool_result.id.clone(),
-                        sequence: 0,
-                        block_index: 0,
-                        block,
-                    });
-                }
-                session.messages.push(tool_result);
+                persist_tool_result_message(session, &sid, emitter, tool_result);
                 resolved.push(tc);
             }
 

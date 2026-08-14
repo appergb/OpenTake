@@ -325,6 +325,58 @@ fn tool_round_persists_assistant_before_tool_results() {
 }
 
 #[test]
+fn persisted_tool_result_emits_upsert_then_done_on_its_own_sequence() {
+    struct EventCollector {
+        events: Arc<Mutex<Vec<LoopEvent>>>,
+    }
+    impl EmitLoop for EventCollector {
+        fn emit(&self, event: LoopEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    let mut session = ChatSession::new("session-tool-result");
+    let message = ChatMessage::tool_result("call-1", serde_json::json!({"summary": "ok"}));
+    let message_id = message.id.clone();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let emitter = EventCollector {
+        events: events.clone(),
+    };
+
+    persist_tool_result_message(&mut session, "session-tool-result", &emitter, message);
+
+    assert_eq!(session.messages.len(), 1);
+    assert_eq!(session.messages[0].id, message_id);
+    assert_eq!(session.messages[0].role, crate::chat::Role::Tool);
+    let events = events.lock().unwrap();
+    assert!(matches!(
+        &events[..],
+        [
+            LoopEvent::BlockUpsert {
+                session_id,
+                message_id: upsert_id,
+                sequence: 0,
+                block_index: 0,
+                block: AgentContentBlock::ToolResult { tool_use_id, .. },
+            },
+            LoopEvent::Done {
+                session_id: done_session_id,
+                message_id: done_id,
+                sequence: 1,
+                message,
+            },
+        ] if session_id == "session-tool-result"
+            && done_session_id == session_id
+            && upsert_id == &message_id
+            && done_id == upsert_id
+            && message.id == message_id
+            && message.role == crate::chat::Role::Tool
+            && message.tool_call_id.as_deref() == Some("call-1")
+            && tool_use_id == "call-1"
+    ));
+}
+
+#[test]
 fn chat_tool_result_uses_shared_fail_closed_error_boundary() {
     let private = "quota exhausted for customer alice plan enterprise";
     let value = tool_result_for_model(&ToolResult::error(private));

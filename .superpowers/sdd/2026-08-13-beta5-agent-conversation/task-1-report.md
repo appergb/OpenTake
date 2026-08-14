@@ -115,3 +115,34 @@ Commit target: `fix(agent): reject incomplete provider streams`
 - `crates/opentake-agent/src/chat/loop/tests.rs`
 - `src-tauri/src/chat.rs`
 - this report
+
+## Cross-layer tool-result finalization follow-up
+
+Commit target: `fix(agent): finalize streamed tool result messages`
+
+### Result
+
+- Each normal-loop tool-result message is persisted and then emits its own ordered stream: one `BlockUpsert` per authoritative block beginning at sequence 0, followed immediately by `Done` at the next sequence (sequence 1 for the current single-block tool result) before the next assistant round.
+- The tool-result upsert and terminal event share the same session ID and message ID, and the terminal payload contains the exact persisted role=`tool` message.
+- Tauri admits a terminal role=`tool` only when `blocks` is non-empty, every block is `ToolResult`, every `toolUseId` matches the message `toolCallId`, block/message error markers match, and the legacy `toolCalls` list is empty. System/user terminal messages, tool-only fields on assistants, and tool-result blocks on assistants remain rejected.
+
+### RED evidence
+
+- The loop regression test first failed to compile because no persistence-and-finalization path existed; the production path only emitted `BlockUpsert { sequence: 0 }` and pushed the tool message.
+- The Tauri terminal-contract test first failed to compile because no role-aware terminal gate existed. A second RED run then showed that a mismatched message/block error marker was still accepted before the exact-match check was added.
+
+### Fresh verification
+
+- `cargo test -p opentake-agent 'chat::' -- --nocapture` — 61 passed, 0 failed.
+- `cargo test -p opentake-tauri 'chat::tests' --lib -- --nocapture` — 22 passed, 0 failed.
+- `cargo clippy -p opentake-agent --all-targets -- -D warnings` — passed.
+- `cargo clippy -p opentake-tauri --lib -- -D warnings` — passed (only Cargo's existing future-incompatibility notice for `block v0.1.6`).
+- Direct `rustfmt` on the three owned Rust chat files and owned-file `git diff --check` — passed.
+- The combined all-target clippy command was attempted and is blocked by the concurrent unowned change at `src-tauri/src/commands.rs:2997` (`clippy::field_reassign_with_default`). This follow-up did not modify that file.
+
+### Follow-up scope
+
+- `crates/opentake-agent/src/chat/loop.rs`
+- `crates/opentake-agent/src/chat/loop/tests.rs`
+- `src-tauri/src/chat.rs`
+- this report
