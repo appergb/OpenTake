@@ -786,6 +786,55 @@ export async function motionDocumentPatch(
   return structuredClone(browserMotionDocument);
 }
 
+export interface MotionDocumentChangedEvent {
+  projectEpoch: number;
+  projectPath: string;
+  summary: MotionDocumentSummary;
+}
+
+export async function onMotionDocumentChanged(
+  handler: (change: MotionDocumentChangedEvent) => void,
+): Promise<() => void> {
+  await ensureTauri();
+  if (!listenImpl) return () => {};
+  return listenImpl("motion_document_changed", (event) => {
+    if (typeof event.payload !== "object" || event.payload === null) return;
+    const payload = event.payload as Record<string, unknown>;
+    const summary = payload.summary;
+    if (
+      !Number.isSafeInteger(payload.projectEpoch) ||
+      Number(payload.projectEpoch) < 0 ||
+      typeof payload.projectPath !== "string" ||
+      payload.projectPath.length === 0 ||
+      typeof summary !== "object" ||
+      summary === null
+    ) return;
+    const candidate = summary as Record<string, unknown>;
+    if (
+      typeof candidate.id !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(candidate.id) ||
+      typeof candidate.title !== "string" ||
+      candidate.title.trim().length === 0 ||
+      Array.from(candidate.title).length > 120 ||
+      /[\u0000-\u001f\u007f]/.test(candidate.title) ||
+      typeof candidate.revisionHash !== "string" ||
+      !/^[0-9a-f]{64}$/.test(candidate.revisionHash) ||
+      !Number.isSafeInteger(candidate.updatedAt) ||
+      Number(candidate.updatedAt) <= 0
+    ) return;
+    handler({
+      projectEpoch: Number(payload.projectEpoch),
+      projectPath: payload.projectPath,
+      summary: {
+        id: candidate.id,
+        title: candidate.title,
+        revisionHash: candidate.revisionHash,
+        updatedAt: Number(candidate.updatedAt),
+      },
+    });
+  });
+}
+
 export async function motionPreview(request: MotionPreviewRequest): Promise<MotionPreviewResponse> {
   await ensureTauri();
   if (invokeImpl) return invokeImpl<MotionPreviewResponse>("motion_preview", { request });

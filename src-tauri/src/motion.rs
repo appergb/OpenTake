@@ -556,6 +556,52 @@ fn render_document_preview(
     )
 }
 
+/// Agent preview adapter. The MCP transport and project lifecycle own a
+/// MediaCancelToken, while Chromium uses MotionCancellationToken; this bridge
+/// mirrors cancellation for the complete render and joins its short monitor
+/// before returning.
+pub(crate) fn render_document_preview_for_agent(
+    bridge: &TauriMotionBridge,
+    documents: &crate::motion_documents::MotionDocumentStore,
+    authority: ProjectAssetAuthority,
+    request: MotionPreviewRequest,
+    cancel: &opentake_media::MediaCancelToken,
+) -> Result<MotionPreviewResponse, MotionPreviewError> {
+    struct CompletionSignal(Arc<AtomicBool>);
+    impl Drop for CompletionSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    let cancellation = MotionCancellationToken::new();
+    let complete = Arc::new(AtomicBool::new(false));
+    let completion_signal = CompletionSignal(complete.clone());
+    let monitor_complete = complete.clone();
+    let monitor_cancel = cancel.clone();
+    let monitor_motion = cancellation.clone();
+    let monitor = std::thread::Builder::new()
+        .name("motion-document-preview-cancel".into())
+        .spawn(move || {
+            while !monitor_complete.load(Ordering::Acquire) {
+                if monitor_cancel.is_cancelled() {
+                    monitor_motion.cancel();
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })
+        .map_err(|_| preview_error("Motion preview cancellation could not be initialized."))?;
+    let result = render_document_preview(bridge, documents, authority, request, &cancellation);
+    drop(completion_signal);
+    let _ = monitor.join();
+    if cancel.is_cancelled() {
+        Err(preview_error("Motion preview was cancelled."))
+    } else {
+        result
+    }
+}
+
 fn finish_document_preview(
     documents: &crate::motion_documents::MotionDocumentStore,
     authority: ProjectAssetAuthority,
@@ -631,7 +677,7 @@ fn prepare_document_preview(
     Ok((render_request, document.summary.revision_hash))
 }
 
-fn resolve_document_motion_source(
+pub(crate) fn resolve_document_motion_source(
     documents: &crate::motion_documents::MotionDocumentStore,
     authority: ProjectAssetAuthority,
     document_id: &str,

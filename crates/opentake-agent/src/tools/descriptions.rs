@@ -110,6 +110,18 @@ pub fn description(tool: ToolName) -> &'static str {
 
         ToolName::EditMotionGraphic => "Re-renders an existing OpenTake motion graphic as one durable undoable workflow while preserving its timeline clipId and placement. Pass the clipId and either replacement self-contained HTML/CSS/JS for a code-authored graphic or parameter overrides for a template-authored graphic. Ordinary video clips and unsupported source types are rejected with typed errors.",
 
+        ToolName::ListMotionDocuments => "Lists the current project's Motion Studio documents as bounded summaries with documentId, title, revisionHash, and updatedAt. No filesystem paths are exposed.",
+
+        ToolName::ReadMotionDocument => "Reads one exact Motion Studio document revision, including its real index.html, styles.css, parameters, and revisionHash. Call this before patching and use the returned revisionHash as baselineHash.",
+
+        ToolName::CreateMotionDocument => "Creates one project-confined Motion Studio document from the visible starter template and returns its complete HTML/CSS plus revisionHash. The title is optional.",
+
+        ToolName::PatchMotionDocument => "Applies bounded UTF-8 byte-range replacements to exactly index.html or styles.css. baselineHash is mandatory; a stale baseline returns a structured conflict without changing either file. Read the document again and explicitly reapply the intended change after a conflict.",
+
+        ToolName::PreviewMotionDocument => "Renders one bounded frame from the exact saved Motion Studio revision with the production Chromium renderer. Returns a PNG and diagnostics; it never changes the document or timeline.",
+
+        ToolName::PublishMotionDocument => "Publishes the exact saved Motion Studio revision through the production Chromium/FFmpeg atomic timeline path. Omit clipId and provide startFrame to add a clip; provide clipId and omit startFrame to replace that existing Motion clip. Returns committed clip/media ids and source revision.",
+
         ToolName::TrackMotion => "Analyzes a bounded source region and returns editable position keyframes that follow the subject. Defaults to preview-only; set apply=true only after reviewing confidence and samples. Applying is one undoable edit. The tool is advertised only when a production tracking backend is available.",
         ToolName::GenerateMatte => "Generates a frame-aligned reusable alpha matte for one clip without modifying the source asset. Defaults to preview-only and reports model/version/progress metadata. Applying the matte is one undoable edit. The tool is advertised only when an installed compatible model is available.",
         ToolName::RemoveObject => "Produces a non-destructive derivative for the selected mask and frame range. Defaults to preview-only; provider costs require costAuthorized=true. Apply imports and swaps the reviewed derivative as one undoable workflow. Cancellation or failure leaves media and timeline unchanged.",
@@ -722,6 +734,89 @@ pub fn input_schema(tool: ToolName) -> Value {
                 "params": {"type": "object", "description": "Template parameter overrides merged over current bindings. Only valid for a template-authored graphic.", "additionalProperties": {"oneOf": [{"type": "string"}, {"type": "number"}, {"type": "boolean"}]}}
             }),
             &["clipId"],
+        ),
+
+        ToolName::ListMotionDocuments => object(json!({}), &[]),
+
+        ToolName::ReadMotionDocument => object(
+            json!({
+                "documentId": {"type": "string", "format": "uuid", "description": "Motion Studio document id from list_motion_documents."}
+            }),
+            &["documentId"],
+        ),
+
+        ToolName::CreateMotionDocument => object(
+            json!({
+                "title": {"type": "string", "minLength": 1, "maxLength": 120, "description": "Optional visible document title."}
+            }),
+            &[],
+        ),
+
+        ToolName::PatchMotionDocument => object(
+            json!({
+                "documentId": {"type": "string", "format": "uuid"},
+                "file": {"type": "string", "enum": ["index.html", "styles.css"]},
+                "baselineHash": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "Exact revisionHash returned by read_motion_document."},
+                "edits": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 256,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "start": {"type": "integer", "minimum": 0, "description": "UTF-8 byte offset, inclusive."},
+                            "end": {"type": "integer", "minimum": 0, "description": "UTF-8 byte offset, exclusive."},
+                            "replacement": {"type": "string"}
+                        },
+                        "required": ["start", "end", "replacement"]
+                    }
+                }
+            }),
+            &["documentId", "file", "baselineHash", "edits"],
+        ),
+
+        ToolName::PreviewMotionDocument => object(
+            json!({
+                "documentId": {"type": "string", "format": "uuid"},
+                "revisionHash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "width": {"type": "integer", "minimum": 2, "maximum": 4096},
+                "height": {"type": "integer", "minimum": 2, "maximum": 4096},
+                "fps": {"type": "integer", "minimum": 1, "maximum": 120},
+                "durationFrames": {"type": "integer", "minimum": 1, "maximum": 3600},
+                "frame": {"type": "integer", "minimum": 0}
+            }),
+            &[
+                "documentId",
+                "revisionHash",
+                "width",
+                "height",
+                "fps",
+                "durationFrames",
+                "frame",
+            ],
+        ),
+
+        ToolName::PublishMotionDocument => object(
+            json!({
+                "documentId": {"type": "string", "format": "uuid"},
+                "revisionHash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "width": {"type": "integer", "minimum": 2, "maximum": 4096},
+                "height": {"type": "integer", "minimum": 2, "maximum": 4096},
+                "fps": {"type": "integer", "minimum": 1, "maximum": 120},
+                "durationFrames": {"type": "integer", "minimum": 1, "maximum": 3600},
+                "startFrame": {"type": "integer", "minimum": 0, "description": "Required for add; omit for edit."},
+                "trackIndex": {"type": "integer", "minimum": 0, "description": "Optional existing visual track for add."},
+                "clipId": {"type": "string", "description": "Existing Motion clip to replace; omit for add."}
+            }),
+            &[
+                "documentId",
+                "revisionHash",
+                "width",
+                "height",
+                "fps",
+                "durationFrames",
+            ],
         ),
 
         ToolName::TrackMotion => object(

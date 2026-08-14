@@ -209,6 +209,10 @@ pub fn run() {
                 cache_root.clone(),
                 models_dir.clone(),
             ));
+            let motion_document_app = app.handle().clone();
+            let motion_document_notify: mcp::MotionDocumentNotifier = Arc::new(move |change| {
+                let _ = motion_document_app.emit("motion_document_changed", change);
+            });
             let chat_state = chat::ChatState::new_with_capabilities(
                 core.clone(),
                 workflows_dir,
@@ -217,6 +221,7 @@ pub fn run() {
                 generation_bridge.clone(),
                 motion_bridge.clone(),
                 advanced_bridge.clone(),
+                motion_document_notify,
                 install_admission.clone(),
             );
             let external_mcp_state = match app.path().app_data_dir() {

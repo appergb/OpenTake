@@ -1806,6 +1806,24 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::Condvar;
 
+    struct CatalogMotionDocumentBridge;
+
+    impl crate::mcp::motion_documents::MotionDocumentBridge for CatalogMotionDocumentBridge {
+        fn can_edit_motion_documents(&self) -> bool {
+            true
+        }
+
+        fn admit(
+            &self,
+            _request: crate::mcp::motion_documents::MotionDocumentRequest,
+        ) -> Result<
+            Box<dyn crate::mcp::motion_documents::AdmittedMotionDocumentOperation>,
+            crate::mcp::motion_documents::MotionDocumentBridgeError,
+        > {
+            unreachable!("catalog inspection never admits an operation")
+        }
+    }
+
     struct TestHandle {
         core: AppCore,
     }
@@ -1838,6 +1856,49 @@ mod tests {
     fn server() -> McpServer {
         let registry = Arc::new(RwLock::new(PluginRegistry::with_builtins()));
         McpServer::new(Arc::new(TestHandle::new()), registry)
+    }
+
+    #[test]
+    fn motion_document_bridge_registers_exact_server_schemas() {
+        let registry = Arc::new(RwLock::new(PluginRegistry::with_builtins()));
+        let dispatcher = Arc::new(
+            Dispatcher::new(Arc::new(TestHandle::new()), registry)
+                .with_motion_document_bridge(Some(Arc::new(CatalogMotionDocumentBridge))),
+        );
+        let server = McpServer::from_gated_dispatcher(
+            dispatcher,
+            String::new(),
+            Arc::new(CountingGate::new(true)),
+            DispatchActivity::new(),
+            DispatchAdmission::new(),
+        );
+        let tools = server.tools();
+        for expected in ToolName::MOTION_DOCUMENTS {
+            assert!(
+                tools
+                    .iter()
+                    .any(|tool| tool.name.as_ref() == expected.as_str()),
+                "missing {}",
+                expected.as_str()
+            );
+        }
+        let patch = tools
+            .iter()
+            .find(|tool| tool.name.as_ref() == "patch_motion_document")
+            .expect("patch schema");
+        assert_eq!(
+            patch.input_schema.get("additionalProperties"),
+            Some(&Value::Bool(false))
+        );
+        assert_eq!(
+            patch.input_schema.get("required"),
+            Some(&serde_json::json!([
+                "documentId",
+                "file",
+                "baselineHash",
+                "edits"
+            ]))
+        );
     }
 
     struct CountingGate {

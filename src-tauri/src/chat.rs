@@ -225,6 +225,7 @@ impl ChatState {
             None,
             None,
             None,
+            None,
             crate::updater::InstallAdmissionGate::default(),
         )
     }
@@ -245,6 +246,7 @@ impl ChatState {
             None,
             None,
             None,
+            None,
             admission,
         )
     }
@@ -260,6 +262,7 @@ impl ChatState {
         generation_bridge: Arc<dyn GenerationBridge>,
         motion_bridge: Arc<dyn MotionBridge>,
         advanced_bridge: Arc<dyn AdvancedWorkflowBridge>,
+        motion_document_notify: crate::mcp::MotionDocumentNotifier,
         admission: crate::updater::InstallAdmissionGate,
     ) -> Self {
         Self::new_inner(
@@ -270,6 +273,7 @@ impl ChatState {
             Some(generation_bridge),
             Some(motion_bridge),
             Some(advanced_bridge),
+            Some(motion_document_notify),
             admission,
         )
     }
@@ -283,19 +287,28 @@ impl ChatState {
         generation_bridge: Option<Arc<dyn GenerationBridge>>,
         motion_bridge: Option<Arc<dyn MotionBridge>>,
         advanced_bridge: Option<Arc<dyn AdvancedWorkflowBridge>>,
+        motion_document_notify: Option<crate::mcp::MotionDocumentNotifier>,
         admission: crate::updater::InstallAdmissionGate,
     ) -> Self {
         let handle: Arc<dyn CoreHandle> = Arc::new(AppCoreHandle::new(core.clone()));
         let registry = Arc::new(RwLock::new(crate::mcp::build_registry(&workflows_dir)));
-        let bridge = crate::mcp::build_media_bridge(core.clone(), cache_root, models_dir);
-        let dispatcher = Arc::new(Dispatcher::with_all_capability_bridges(
-            handle,
-            registry.clone(),
-            Some(bridge),
-            generation_bridge,
-            motion_bridge,
-            advanced_bridge,
-        ));
+        let bridge = crate::mcp::build_media_bridge(core.clone(), cache_root.clone(), models_dir);
+        let motion_documents = crate::mcp::build_motion_document_bridge(
+            core.clone(),
+            cache_root,
+            motion_document_notify,
+        );
+        let dispatcher = Arc::new(
+            Dispatcher::with_all_capability_bridges(
+                handle,
+                registry.clone(),
+                Some(bridge),
+                generation_bridge,
+                motion_bridge,
+                advanced_bridge,
+            )
+            .with_motion_document_bridge(Some(motion_documents)),
+        );
         let store: Arc<dyn KeyStore> = Arc::new(KeyringStore::new());
         let sessions = Arc::new(Mutex::new(HashMap::new()));
         let turns = Arc::new(Mutex::new(TurnRegistry::default()));

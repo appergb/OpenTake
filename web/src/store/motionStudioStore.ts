@@ -10,7 +10,9 @@ import {
   onMotionProgress,
   motionPreview,
   motionPreviewCancel,
+  type MotionDocumentChangedEvent,
 } from "../lib/api";
+import { useProjectStore } from "./projectStore";
 import type {
   MotionDocument,
   MotionDocumentCreateRequest,
@@ -105,6 +107,7 @@ export interface MotionStudioState {
   publishCommit: MotionCommit | null;
   load: () => Promise<void>;
   selectDocument: (documentId: string) => Promise<void>;
+  refreshExternalDocument: (change: MotionDocumentChangedEvent) => Promise<void>;
   setActiveFile: (file: MotionDocumentFile) => void;
   updateSource: (source: string) => void;
   flushSave: () => Promise<void>;
@@ -188,6 +191,8 @@ export function createMotionStudioStore(
   let publishOperation = 0;
   let publishCompletion: Promise<MotionCommit> | null = null;
   let publishCancellationRequested = false;
+  let externalRefreshOperation = 0;
+  let pendingExternalChange: MotionDocumentChangedEvent | null = null;
   const sourceVersions: Record<MotionDocumentFile, number> = {
     "index.html": 0,
     "styles.css": 0,
@@ -210,6 +215,12 @@ export function createMotionStudioStore(
   };
 
   const store = create<MotionStudioState>((set, get) => {
+    const replayPendingExternalChange = () => {
+      const pending = pendingExternalChange;
+      pendingExternalChange = null;
+      if (pending) void get().refreshExternalDocument(pending);
+    };
+
     const scheduleSave = (delay = MOTION_SAVE_DEBOUNCE_MS) => {
       clearSaveTimer();
       saveTimer = setTimeout(() => {
@@ -350,6 +361,77 @@ export function createMotionStudioStore(
         } catch (error) {
           if (generation === loadGeneration) {
             set({ phase: "error", error: errorMessage(error), errorFile: null });
+          }
+        }
+      },
+
+      refreshExternalDocument: async (change) => {
+        const projectAtAdmission = useProjectStore.getState();
+        if (
+          projectAtAdmission.projectEpoch !== change.projectEpoch ||
+          projectAtAdmission.projectPath !== change.projectPath
+        ) return;
+        const { summary } = change;
+        set((state) => {
+          const present = state.documents.some((item) => item.id === summary.id);
+          return {
+            documents: present
+              ? state.documents.map((item) => item.id === summary.id ? summary : item)
+              : [summary, ...state.documents],
+          };
+        });
+        const current = get();
+        if (
+          current.document?.summary.id !== summary.id ||
+          current.document.summary.revisionHash === summary.revisionHash
+        ) return;
+        if (
+          current.savingFile ||
+          current.conflict ||
+          current.dirtyFiles["index.html"] ||
+          current.dirtyFiles["styles.css"]
+        ) {
+          return;
+        }
+        if (["validating", "rendering", "encoding", "committing"].includes(current.publishPhase)) {
+          pendingExternalChange = change;
+          return;
+        }
+        const operation = ++externalRefreshOperation;
+        const generation = loadGeneration;
+        const expectedRevision = current.document.summary.revisionHash;
+        const htmlVersion = sourceVersions["index.html"];
+        const cssVersion = sourceVersions["styles.css"];
+        try {
+          const remote = await backend.read(summary.id);
+          const latest = get();
+          const currentProject = useProjectStore.getState();
+          if (
+            operation !== externalRefreshOperation ||
+            generation !== loadGeneration ||
+            currentProject.projectEpoch !== change.projectEpoch ||
+            currentProject.projectPath !== change.projectPath ||
+            latest.document?.summary.id !== summary.id ||
+            latest.document.summary.revisionHash !== expectedRevision ||
+            latest.savingFile ||
+            latest.conflict ||
+            latest.dirtyFiles["index.html"] ||
+            latest.dirtyFiles["styles.css"] ||
+            sourceVersions["index.html"] !== htmlVersion ||
+            sourceVersions["styles.css"] !== cssVersion
+          ) return;
+          installDocument(remote, latest.documents.map((item) =>
+            item.id === remote.summary.id ? remote.summary : item,
+          ));
+        } catch (error) {
+          const currentProject = useProjectStore.getState();
+          if (
+            operation === externalRefreshOperation &&
+            generation === loadGeneration &&
+            currentProject.projectEpoch === change.projectEpoch &&
+            currentProject.projectPath === change.projectPath
+          ) {
+            set({ error: errorMessage(error), errorFile: null });
           }
         }
       },
@@ -766,6 +848,7 @@ export function createMotionStudioStore(
           publishCompletion = null;
           publishCancellationRequested = false;
           unlisten?.();
+          replayPendingExternalChange();
         }
       },
 
@@ -794,6 +877,8 @@ export function createMotionStudioStore(
         saveOperation += 1;
         conflictOperation += 1;
         publishOperation += 1;
+        externalRefreshOperation += 1;
+        pendingExternalChange = null;
         publishCancellationRequested = true;
         void backend.cancelPublish().catch(() => false);
         visibilityOperation += 1;

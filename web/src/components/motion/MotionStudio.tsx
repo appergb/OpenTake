@@ -9,6 +9,7 @@ import {
 import { useEditorUiStore } from "../../store/uiStore";
 import { useProjectStore } from "../../store/projectStore";
 import { forceRefresh } from "../../store/sync";
+import { onMotionDocumentChanged } from "../../lib/api";
 import { Icon } from "../ui/Icon";
 import { MotionCodeEditor } from "./MotionCodeEditor";
 import { MotionPreview } from "./MotionPreview";
@@ -40,6 +41,7 @@ export function MotionStudio({ store = useMotionStudioStore }: { store?: MotionS
   const resume = store((state) => state.resume);
   const resetProject = store((state) => state.resetProject);
   const selectDocument = store((state) => state.selectDocument);
+  const refreshExternalDocument = store((state) => state.refreshExternalDocument);
   const setActiveFile = store((state) => state.setActiveFile);
   const updateSource = store((state) => state.updateSource);
   const reloadConflict = store((state) => state.reloadConflict);
@@ -69,6 +71,21 @@ export function MotionStudio({ store = useMotionStudioStore }: { store?: MotionS
       });
     };
   }, [store]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void onMotionDocumentChanged((change) => {
+      if (!disposed) void refreshExternalDocument(change);
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [refreshExternalDocument]);
 
   useEffect(() => {
     if (appView !== "motion") {

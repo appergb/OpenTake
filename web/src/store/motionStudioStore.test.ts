@@ -8,6 +8,7 @@ import {
   createMotionStudioStore,
   type MotionStudioBackend,
 } from "./motionStudioStore";
+import { useProjectStore } from "./projectStore";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -79,7 +80,10 @@ function backend(overrides: Partial<MotionStudioBackend> = {}): MotionStudioBack
 }
 
 describe("Motion Studio store", () => {
-  beforeEach(() => vi.useFakeTimers());
+  beforeEach(() => {
+    vi.useFakeTimers();
+    useProjectStore.setState({ projectEpoch: 1, projectPath: "/tmp/A.opentake" });
+  });
 
   afterEach(() => {
     vi.useRealTimers();
@@ -103,6 +107,105 @@ describe("Motion Studio store", () => {
     await empty.getState().load();
     expect(emptyBackend.create).toHaveBeenCalledWith({ title: null });
     expect(empty.getState().html).toContain("让创意动起来");
+  });
+
+  it("installs an authoritative Agent revision into a clean open editor", async () => {
+    const remote: MotionDocument = {
+      ...starter,
+      summary: {
+        ...starter.summary,
+        revisionHash: "b".repeat(64),
+        updatedAt: 2,
+      },
+      html: "<main>Agent updated</main>\n",
+    };
+    const motionBackend = backend({
+      read: vi.fn().mockResolvedValueOnce(starter).mockResolvedValueOnce(remote),
+    });
+    const store = createMotionStudioStore(motionBackend);
+    await store.getState().load();
+
+    await store.getState().refreshExternalDocument({
+      projectEpoch: 1,
+      projectPath: "/tmp/A.opentake",
+      summary: remote.summary,
+    });
+
+    expect(store.getState()).toMatchObject({
+      document: { summary: { revisionHash: remote.summary.revisionHash } },
+      html: remote.html,
+      dirtyFiles: { "index.html": false, "styles.css": false },
+    });
+    expect(motionBackend.read).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not overwrite unsaved editor text when an Agent revision arrives", async () => {
+    const motionBackend = backend();
+    const store = createMotionStudioStore(motionBackend);
+    await store.getState().load();
+    store.getState().updateSource("<main>local unsaved</main>\n");
+    const summary = {
+      ...starter.summary,
+      revisionHash: "c".repeat(64),
+      updatedAt: 3,
+    };
+
+    await store.getState().refreshExternalDocument({
+      projectEpoch: 1,
+      projectPath: "/tmp/A.opentake",
+      summary,
+    });
+
+    expect(store.getState().html).toBe("<main>local unsaved</main>\n");
+    expect(store.getState().dirtyFiles["index.html"]).toBe(true);
+    expect(store.getState().documents[0]?.revisionHash).toBe(summary.revisionHash);
+    expect(motionBackend.read).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a delayed Agent revision emitted for a previous project", async () => {
+    const motionBackend = backend();
+    const store = createMotionStudioStore(motionBackend);
+    await store.getState().load();
+    const foreign = {
+      ...starter.summary,
+      id: "d5c1d57b-0d80-4e21-8d0e-dd6b7d990414",
+      revisionHash: "d".repeat(64),
+    };
+    useProjectStore.setState({ projectEpoch: 2, projectPath: "/tmp/B.opentake" });
+
+    await store.getState().refreshExternalDocument({
+      projectEpoch: 1,
+      projectPath: "/tmp/A.opentake",
+      summary: foreign,
+    });
+
+    expect(store.getState().documents).toEqual([starter.summary]);
+    expect(motionBackend.read).toHaveBeenCalledOnce();
+  });
+
+  it("does not install an Agent refresh that crosses a project reset", async () => {
+    const pending = deferred<MotionDocument>();
+    const motionBackend = backend({
+      read: vi.fn().mockResolvedValueOnce(starter).mockReturnValueOnce(pending.promise),
+    });
+    const store = createMotionStudioStore(motionBackend);
+    await store.getState().load();
+    const remote = {
+      ...starter,
+      summary: { ...starter.summary, revisionHash: "e".repeat(64), updatedAt: 4 },
+    };
+    const refresh = store.getState().refreshExternalDocument({
+      projectEpoch: 1,
+      projectPath: "/tmp/A.opentake",
+      summary: remote.summary,
+    });
+    useProjectStore.setState({ projectEpoch: 2, projectPath: "/tmp/B.opentake" });
+    store.getState().resetProject();
+    pending.resolve(remote);
+    await refresh;
+
+    expect(store.getState().documents).toEqual([]);
+    expect(store.getState().document).toBeNull();
   });
 
   it("debounces a full-source atomic patch and converts CodeMirror text to UTF-8 byte offsets", async () => {
@@ -604,6 +707,44 @@ describe("Motion Studio store", () => {
 
     await store.getState().cancelPublish();
     expect(motionBackend.cancelPublish).toHaveBeenCalledOnce();
+  });
+
+  it("installs a project-bound Agent revision after an active publish finishes", async () => {
+    const completion = deferred<Awaited<ReturnType<MotionStudioBackend["publish"]>>>();
+    const committed = await backend().publish({} as never);
+    const remote: MotionDocument = {
+      ...starter,
+      summary: { ...starter.summary, revisionHash: "9".repeat(64), updatedAt: 9 },
+      html: "<main>Agent revision after publish</main>\n",
+    };
+    const motionBackend = backend({
+      publish: vi.fn(() => completion.promise),
+      read: vi.fn().mockResolvedValueOnce(starter).mockResolvedValueOnce(remote),
+    });
+    const store = createMotionStudioStore(motionBackend);
+    await store.getState().load();
+    await vi.waitFor(() => expect(store.getState().previewPhase).toBe("ready"));
+    const publishing = store.getState().publish();
+    await vi.waitFor(() => expect(motionBackend.publish).toHaveBeenCalledOnce());
+
+    await store.getState().refreshExternalDocument({
+      projectEpoch: 1,
+      projectPath: "/tmp/A.opentake",
+      summary: remote.summary,
+    });
+    expect(store.getState().document?.summary.revisionHash).toBe(starter.summary.revisionHash);
+    expect(store.getState().documents[0]?.revisionHash).toBe(remote.summary.revisionHash);
+    expect(motionBackend.read).toHaveBeenCalledOnce();
+
+    completion.resolve(committed);
+    await publishing;
+    await vi.waitFor(() => expect(motionBackend.read).toHaveBeenCalledTimes(2));
+
+    expect(store.getState()).toMatchObject({
+      document: { summary: { revisionHash: remote.summary.revisionHash } },
+      html: remote.html,
+      dirtyFiles: { "index.html": false, "styles.css": false },
+    });
   });
 
   it("refuses to publish dirty, conflicting, or preview-invalid source", async () => {

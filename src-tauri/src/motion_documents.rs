@@ -180,7 +180,7 @@ impl MotionDocumentStore {
         self.list_for_authority(authority)
     }
 
-    fn list_for_authority(
+    pub(crate) fn list_for_authority(
         &self,
         authority: ProjectAssetAuthority,
     ) -> Result<Vec<MotionDocumentSummary>, String> {
@@ -215,10 +215,28 @@ impl MotionDocumentStore {
         self.create_for_authority(authority, request)
     }
 
-    fn create_for_authority(
+    pub(crate) fn create_for_authority(
         &self,
         authority: ProjectAssetAuthority,
         request: MotionDocumentCreateRequest,
+    ) -> Result<MotionDocument, String> {
+        self.create_for_authority_inner(authority, request, None)
+    }
+
+    pub(crate) fn create_for_authority_cancellable(
+        &self,
+        authority: ProjectAssetAuthority,
+        request: MotionDocumentCreateRequest,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<MotionDocument, String> {
+        self.create_for_authority_inner(authority, request, Some(cancel))
+    }
+
+    fn create_for_authority_inner(
+        &self,
+        authority: ProjectAssetAuthority,
+        request: MotionDocumentCreateRequest,
+        cancel: Option<&opentake_media::MediaCancelToken>,
     ) -> Result<MotionDocument, String> {
         let _operation = self.lock_operation()?;
         let _bundle_publication = self.core.lock_project_bundle_publication();
@@ -242,6 +260,10 @@ impl MotionDocumentStore {
             },
         );
         project.ensure_current(&self.core)?;
+        if cancel.is_some_and(opentake_media::MediaCancelToken::is_cancelled) {
+            cleanup_revision_directory(&root, &directory);
+            return Err("motion document create was cancelled".into());
+        }
         if let Err(error) = self.write_catalog(&root, &catalog) {
             if !error.committed {
                 cleanup_revision_directory(&root, &directory);
@@ -296,7 +318,7 @@ impl MotionDocumentStore {
         self.hash_patch_for_authority(authority, request)
     }
 
-    fn hash_patch_for_authority(
+    pub(crate) fn hash_patch_for_authority(
         &self,
         authority: ProjectAssetAuthority,
         request: MotionDocumentHashRequest,
@@ -332,10 +354,28 @@ impl MotionDocumentStore {
         self.save_patch_for_authority(authority, request)
     }
 
-    fn save_patch_for_authority(
+    pub(crate) fn save_patch_for_authority(
         &self,
         authority: ProjectAssetAuthority,
         request: MotionDocumentPatchRequest,
+    ) -> Result<MotionDocument, String> {
+        self.save_patch_for_authority_inner(authority, request, None)
+    }
+
+    pub(crate) fn save_patch_for_authority_cancellable(
+        &self,
+        authority: ProjectAssetAuthority,
+        request: MotionDocumentPatchRequest,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<MotionDocument, String> {
+        self.save_patch_for_authority_inner(authority, request, Some(cancel))
+    }
+
+    fn save_patch_for_authority_inner(
+        &self,
+        authority: ProjectAssetAuthority,
+        request: MotionDocumentPatchRequest,
+        cancel: Option<&opentake_media::MediaCancelToken>,
     ) -> Result<MotionDocument, String> {
         validate_document_id(&request.document_id)?;
         let _operation = self.lock_operation()?;
@@ -379,6 +419,10 @@ impl MotionDocumentStore {
             },
         );
         project.ensure_current(&self.core)?;
+        if cancel.is_some_and(opentake_media::MediaCancelToken::is_cancelled) {
+            cleanup_revision_directory(&root, &directory);
+            return Err("motion document patch was cancelled".into());
+        }
         if let Err(error) = self.write_catalog(&root, &catalog) {
             if !error.committed {
                 cleanup_revision_directory(&root, &directory);

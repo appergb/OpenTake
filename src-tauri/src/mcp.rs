@@ -44,12 +44,22 @@ use opentake_agent::mcp::media_bridge::{
     TimelineResultCaptureRequest, TranscriptSource, TranscriptSourceResult,
     IMPORT_BYTES_DECODED_MAX, TIMELINE_RESULT_IMAGE_BASE64_MAX,
 };
+use opentake_agent::mcp::motion::MotionBridge;
+use opentake_agent::mcp::motion_documents::{
+    AdmittedMotionDocumentOperation, MotionDocument as AgentMotionDocument, MotionDocumentBridge,
+    MotionDocumentBridgeError, MotionDocumentBridgeErrorKind,
+    MotionDocumentPreview as AgentMotionDocumentPreview,
+    MotionDocumentPublish as AgentMotionDocumentPublish,
+    MotionDocumentReference as AgentMotionDocumentReference, MotionDocumentRequest,
+    MotionDocumentResponse, MotionDocumentSummary as AgentMotionDocumentSummary,
+    MotionPreviewDiagnostic as AgentMotionPreviewDiagnostic,
+};
 use opentake_agent::mcp::server::{bind_ephemeral_gated, EphemeralMcpEndpoint, EphemeralMcpError};
 use opentake_agent::plugin::registry::PluginRegistry;
 use opentake_agent::tools::result::{Block, ToolResult};
 use opentake_core::{
     importable_clip_type, AppCore, CoreError, DeferredCoreEvents, ProbedMedia,
-    ProjectRuntimeSnapshot,
+    ProjectAssetAuthority, ProjectRuntimeSnapshot,
 };
 use opentake_domain::{ClipType, LutReference, MediaSource, TextStyle};
 use opentake_media::{decode_frame_at, decode_frames_at, FrameRequest, MediaEngine, RgbaFrame};
@@ -629,6 +639,453 @@ pub(crate) fn build_media_bridge(
     models_dir: PathBuf,
 ) -> Arc<dyn MediaBridge> {
     Arc::new(TauriMediaBridge::new(core, cache_root, models_dir))
+}
+
+pub(crate) fn build_motion_document_bridge(
+    core: AppCore,
+    cache_root: PathBuf,
+    notify: Option<MotionDocumentNotifier>,
+) -> Arc<dyn MotionDocumentBridge> {
+    let documents = Arc::new(crate::motion_documents::MotionDocumentStore::new(
+        core.clone(),
+    ));
+    let motion = Arc::new(crate::motion::TauriMotionBridge::new(
+        core.clone(),
+        cache_root,
+    ));
+    let active = Arc::new(Mutex::new(
+        HashMap::<u64, opentake_media::MediaCancelToken>::new(),
+    ));
+    let transition_active = active.clone();
+    core.subscribe_project_identity_transition(move |pending| {
+        if pending {
+            for cancel in transition_active
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .values()
+            {
+                cancel.cancel();
+            }
+        }
+    });
+    Arc::new(TauriMotionDocumentBridge {
+        documents,
+        motion,
+        active,
+        next_operation: Arc::new(AtomicU64::new(1)),
+        notify,
+    })
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MotionDocumentChange {
+    pub project_epoch: u64,
+    pub project_path: String,
+    pub summary: MotionDocumentChangeSummary,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MotionDocumentChangeSummary {
+    pub id: String,
+    pub title: String,
+    pub revision_hash: String,
+    pub updated_at: u64,
+}
+
+pub(crate) type MotionDocumentNotifier = Arc<dyn Fn(&MotionDocumentChange) + Send + Sync>;
+
+struct TauriMotionDocumentBridge {
+    documents: Arc<crate::motion_documents::MotionDocumentStore>,
+    motion: Arc<crate::motion::TauriMotionBridge>,
+    active: Arc<Mutex<HashMap<u64, opentake_media::MediaCancelToken>>>,
+    next_operation: Arc<AtomicU64>,
+    notify: Option<MotionDocumentNotifier>,
+}
+
+struct TauriMotionDocumentOperation {
+    authority: ProjectAssetAuthority,
+    request: MotionDocumentRequest,
+    documents: Arc<crate::motion_documents::MotionDocumentStore>,
+    motion: Arc<crate::motion::TauriMotionBridge>,
+    active: Arc<Mutex<HashMap<u64, opentake_media::MediaCancelToken>>>,
+    next_operation: Arc<AtomicU64>,
+    notify: Option<MotionDocumentNotifier>,
+}
+
+struct ActiveMotionDocumentPermit {
+    id: u64,
+    active: Arc<Mutex<HashMap<u64, opentake_media::MediaCancelToken>>>,
+}
+
+impl Drop for ActiveMotionDocumentPermit {
+    fn drop(&mut self) {
+        self.active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.id);
+    }
+}
+
+impl MotionDocumentBridge for TauriMotionDocumentBridge {
+    fn can_edit_motion_documents(&self) -> bool {
+        self.motion.can_render_motion()
+    }
+
+    fn admit(
+        &self,
+        request: MotionDocumentRequest,
+    ) -> Result<Box<dyn AdmittedMotionDocumentOperation>, MotionDocumentBridgeError> {
+        let authority = self
+            .documents
+            .capture_authority()
+            .map_err(map_motion_document_store_error)?;
+        Ok(Box::new(TauriMotionDocumentOperation {
+            authority,
+            request,
+            documents: self.documents.clone(),
+            motion: self.motion.clone(),
+            active: self.active.clone(),
+            next_operation: self.next_operation.clone(),
+            notify: self.notify.clone(),
+        }))
+    }
+}
+
+impl AdmittedMotionDocumentOperation for TauriMotionDocumentOperation {
+    fn execute(
+        self: Box<Self>,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<MotionDocumentResponse, MotionDocumentBridgeError> {
+        if cancel.is_cancelled() {
+            return Err(MotionDocumentBridgeError::new(
+                MotionDocumentBridgeErrorKind::Cancelled,
+                "Motion Studio operation was cancelled",
+            ));
+        }
+        let id = self.next_operation.fetch_add(1, Ordering::Relaxed);
+        self.active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id, cancel.clone());
+        let _permit = ActiveMotionDocumentPermit {
+            id,
+            active: self.active.clone(),
+        };
+        self.execute_inner(cancel)
+    }
+}
+
+impl TauriMotionDocumentOperation {
+    fn execute_inner(
+        &self,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<MotionDocumentResponse, MotionDocumentBridgeError> {
+        match &self.request {
+            MotionDocumentRequest::List => self
+                .documents
+                .list_for_authority(self.authority.clone())
+                .map(|items| {
+                    MotionDocumentResponse::Documents(
+                        items.into_iter().map(agent_motion_summary).collect(),
+                    )
+                })
+                .map_err(map_motion_document_store_error),
+            MotionDocumentRequest::Read { document_id } => self
+                .documents
+                .read_for_authority(self.authority.clone(), document_id)
+                .map(agent_motion_document)
+                .map(MotionDocumentResponse::Document)
+                .map_err(map_motion_document_store_error),
+            MotionDocumentRequest::Create { title } => self
+                .documents
+                .create_for_authority_cancellable(
+                    self.authority.clone(),
+                    crate::motion_documents::MotionDocumentCreateRequest {
+                        title: title.clone(),
+                    },
+                    cancel,
+                )
+                .map(agent_motion_document)
+                .map(|document| self.document_changed(document))
+                .map(MotionDocumentResponse::Document)
+                .map_err(map_motion_document_store_error),
+            MotionDocumentRequest::Patch(request) => self.patch(request, cancel),
+            MotionDocumentRequest::Preview(request) => self.preview(request, cancel),
+            MotionDocumentRequest::Publish(request) => self.publish(request, cancel),
+        }
+    }
+
+    fn patch(
+        &self,
+        request: &opentake_agent::mcp::motion_documents::MotionDocumentPatchRequest,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<MotionDocumentResponse, MotionDocumentBridgeError> {
+        let edits = request
+            .edits
+            .iter()
+            .map(|edit| crate::motion_documents::MotionTextReplacement {
+                start: edit.start,
+                end: edit.end,
+                replacement: edit.replacement.clone(),
+            })
+            .collect::<Vec<_>>();
+        let expected = match self.documents.hash_patch_for_authority(
+            self.authority.clone(),
+            crate::motion_documents::MotionDocumentHashRequest {
+                document_id: request.document_id.clone(),
+                file: request.file.clone(),
+                baseline_hash: request.baseline_hash.clone(),
+                edits: edits.clone(),
+            },
+        ) {
+            Ok(hash) => hash,
+            Err(error) if error.contains("revision conflict") => {
+                return Err(self.conflict(&request.document_id))
+            }
+            Err(error) => return Err(map_motion_document_store_error(error)),
+        };
+        if cancel.is_cancelled() {
+            return Err(MotionDocumentBridgeError::new(
+                MotionDocumentBridgeErrorKind::Cancelled,
+                "Motion Studio patch was cancelled",
+            ));
+        }
+        match self.documents.save_patch_for_authority_cancellable(
+            self.authority.clone(),
+            crate::motion_documents::MotionDocumentPatchRequest {
+                document_id: request.document_id.clone(),
+                file: request.file.clone(),
+                baseline_hash: request.baseline_hash.clone(),
+                edits,
+                expected_result_hash: expected,
+            },
+            cancel,
+        ) {
+            Ok(document) => Ok(MotionDocumentResponse::Document(
+                self.document_changed(agent_motion_document(document)),
+            )),
+            Err(error) if error.contains("revision conflict") => {
+                Err(self.conflict(&request.document_id))
+            }
+            Err(error) => Err(map_motion_document_store_error(error)),
+        }
+    }
+
+    fn document_changed(&self, document: AgentMotionDocument) -> AgentMotionDocument {
+        if let Some(notify) = &self.notify {
+            notify(&MotionDocumentChange {
+                project_epoch: self.authority.project_epoch,
+                project_path: self.authority.project_path.to_string_lossy().into_owned(),
+                summary: MotionDocumentChangeSummary {
+                    id: document.summary.document_id.clone(),
+                    title: document.summary.title.clone(),
+                    revision_hash: document.summary.revision_hash.clone(),
+                    updated_at: document.summary.updated_at,
+                },
+            });
+        }
+        document
+    }
+
+    fn conflict(&self, document_id: &str) -> MotionDocumentBridgeError {
+        let current = self
+            .documents
+            .read_for_authority(self.authority.clone(), document_id)
+            .ok()
+            .map(|document| document.summary.revision_hash);
+        MotionDocumentBridgeError::conflict(current)
+    }
+
+    fn preview(
+        &self,
+        request: &opentake_agent::mcp::motion_documents::MotionDocumentPreviewRequest,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<MotionDocumentResponse, MotionDocumentBridgeError> {
+        let response = crate::motion::render_document_preview_for_agent(
+            &self.motion,
+            &self.documents,
+            self.authority.clone(),
+            crate::motion::MotionPreviewRequest {
+                document_id: request.document_id.clone(),
+                revision_hash: request.revision_hash.clone(),
+                width: request.width,
+                height: request.height,
+                fps: request.fps,
+                duration_frames: request.duration_frames,
+                frame: request.frame,
+            },
+            cancel,
+        )
+        .map_err(map_motion_preview_error)?;
+        let png_base64 = response
+            .png_data_url
+            .strip_prefix("data:image/png;base64,")
+            .ok_or_else(|| {
+                MotionDocumentBridgeError::new(
+                    MotionDocumentBridgeErrorKind::RenderFailed,
+                    "Motion Studio preview returned an invalid image",
+                )
+            })?
+            .to_string();
+        Ok(MotionDocumentResponse::Preview(
+            AgentMotionDocumentPreview {
+                revision_hash: response.revision_hash,
+                frame: response.frame,
+                png_base64,
+                diagnostics: response
+                    .diagnostics
+                    .into_iter()
+                    .map(|diagnostic| AgentMotionPreviewDiagnostic {
+                        severity: diagnostic.severity.to_string(),
+                        message: diagnostic.message,
+                        line: diagnostic.line,
+                        column: diagnostic.column,
+                    })
+                    .collect(),
+            },
+        ))
+    }
+
+    fn publish(
+        &self,
+        request: &opentake_agent::mcp::motion_documents::MotionDocumentPublishRequest,
+        cancel: &opentake_media::MediaCancelToken,
+    ) -> Result<MotionDocumentResponse, MotionDocumentBridgeError> {
+        let source = crate::motion::resolve_document_motion_source(
+            &self.documents,
+            self.authority.clone(),
+            &request.document_id,
+            &request.revision_hash,
+        )
+        .map_err(map_motion_bridge_error)?;
+        let commit = if let Some(clip_id) = &request.clip_id {
+            self.motion.edit_document(
+                crate::motion::DocumentMotionEditRequest {
+                    clip_id: clip_id.clone(),
+                    source,
+                    project_authority: self.authority.clone(),
+                    width: request.width,
+                    height: request.height,
+                    fps: request.fps,
+                    duration_frames: request.duration_frames,
+                },
+                cancel,
+            )
+        } else {
+            self.motion.add_document(
+                crate::motion::DocumentMotionAddRequest {
+                    source,
+                    project_authority: self.authority.clone(),
+                    width: request.width,
+                    height: request.height,
+                    fps: request.fps,
+                    start_frame: request.start_frame.expect("validated at Agent boundary"),
+                    duration_frames: request.duration_frames,
+                    track_index: request.track_index,
+                },
+                cancel,
+            )
+        }
+        .map_err(map_motion_bridge_error)?;
+        let source_document = commit.source_document.ok_or_else(|| {
+            MotionDocumentBridgeError::new(
+                MotionDocumentBridgeErrorKind::RenderFailed,
+                "Motion Studio publish lost its source revision",
+            )
+        })?;
+        Ok(MotionDocumentResponse::Published(
+            AgentMotionDocumentPublish {
+                clip_id: commit.clip_id,
+                asset_id: commit.asset_id,
+                duration_frames: commit.output.duration_frames,
+                duration_seconds: commit.output.duration_seconds,
+                fps: commit.output.fps,
+                width: commit.output.width,
+                height: commit.output.height,
+                source_document: AgentMotionDocumentReference {
+                    document_id: source_document.document_id,
+                    revision_hash: source_document.revision_hash,
+                },
+            },
+        ))
+    }
+}
+
+fn agent_motion_summary(
+    summary: crate::motion_documents::MotionDocumentSummary,
+) -> AgentMotionDocumentSummary {
+    AgentMotionDocumentSummary {
+        document_id: summary.id,
+        title: summary.title,
+        revision_hash: summary.revision_hash,
+        updated_at: summary.updated_at,
+    }
+}
+
+fn agent_motion_document(document: crate::motion_documents::MotionDocument) -> AgentMotionDocument {
+    AgentMotionDocument {
+        summary: agent_motion_summary(document.summary),
+        html: document.html,
+        css: document.css,
+        parameters: document.parameters,
+    }
+}
+
+fn map_motion_document_store_error(error: String) -> MotionDocumentBridgeError {
+    let kind = if error.contains("revision conflict") {
+        MotionDocumentBridgeErrorKind::Conflict
+    } else if error.contains("not found") {
+        MotionDocumentBridgeErrorKind::ResourceNotFound
+    } else if error.contains("changed") || error.contains("cancel") {
+        MotionDocumentBridgeErrorKind::Cancelled
+    } else if error.contains("invalid")
+        || error.contains("must")
+        || error.contains("requires")
+        || error.contains("limit")
+    {
+        MotionDocumentBridgeErrorKind::InvalidArguments
+    } else {
+        MotionDocumentBridgeErrorKind::CapabilityUnavailable
+    };
+    MotionDocumentBridgeError::new(kind, error)
+}
+
+fn map_motion_preview_error(error: crate::motion::MotionPreviewError) -> MotionDocumentBridgeError {
+    let kind = if error.message.contains("cancel") || error.message.contains("project changed") {
+        MotionDocumentBridgeErrorKind::Cancelled
+    } else if error.message.contains("changed; reload") {
+        MotionDocumentBridgeErrorKind::Conflict
+    } else if error.message.contains("invalid") || error.message.contains("inside") {
+        MotionDocumentBridgeErrorKind::InvalidArguments
+    } else {
+        MotionDocumentBridgeErrorKind::RenderFailed
+    };
+    MotionDocumentBridgeError::new(kind, error.message)
+}
+
+fn map_motion_bridge_error(
+    error: opentake_agent::mcp::motion::MotionBridgeError,
+) -> MotionDocumentBridgeError {
+    let kind = match error.kind {
+        opentake_agent::mcp::motion::MotionBridgeErrorKind::InvalidArguments => {
+            MotionDocumentBridgeErrorKind::InvalidArguments
+        }
+        opentake_agent::mcp::motion::MotionBridgeErrorKind::ResourceNotFound => {
+            MotionDocumentBridgeErrorKind::ResourceNotFound
+        }
+        opentake_agent::mcp::motion::MotionBridgeErrorKind::CapabilityUnavailable => {
+            MotionDocumentBridgeErrorKind::CapabilityUnavailable
+        }
+        opentake_agent::mcp::motion::MotionBridgeErrorKind::Cancelled => {
+            MotionDocumentBridgeErrorKind::Cancelled
+        }
+        opentake_agent::mcp::motion::MotionBridgeErrorKind::RenderFailed => {
+            MotionDocumentBridgeErrorKind::RenderFailed
+        }
+    };
+    MotionDocumentBridgeError::new(kind, error.message)
 }
 
 /// The production [`MediaBridge`]: composites timeline frames on the GPU and
@@ -2696,6 +3153,129 @@ mod tests {
     #[test]
     fn documented_mcp_entrypoint_compiles() {
         let _entrypoint = spawn;
+    }
+
+    #[test]
+    fn motion_document_bridge_is_hash_safe_and_project_bound() {
+        let fixture = tempfile::tempdir().expect("motion bridge fixture");
+        let core = AppCore::new();
+        core.save_project(Some(fixture.path().join("A.opentake")))
+            .expect("save project A");
+        let notifications = Arc::new(Mutex::new(Vec::new()));
+        let captured = notifications.clone();
+        let bridge = build_motion_document_bridge(
+            core.clone(),
+            fixture.path().join("motion-cache"),
+            Some(Arc::new(move |summary| {
+                captured
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(summary.clone());
+            })),
+        );
+        assert!(bridge.can_edit_motion_documents());
+
+        let created = bridge
+            .admit(MotionDocumentRequest::Create {
+                title: Some("Agent co-edit".into()),
+            })
+            .expect("admit create")
+            .execute(&opentake_media::MediaCancelToken::new())
+            .expect("create document");
+        let MotionDocumentResponse::Document(created) = created else {
+            panic!("create returned wrong response");
+        };
+        let start = created.html.len();
+        let patched = bridge
+            .admit(MotionDocumentRequest::Patch(
+                opentake_agent::mcp::motion_documents::MotionDocumentPatchRequest {
+                    document_id: created.summary.document_id.clone(),
+                    file: "index.html".into(),
+                    baseline_hash: created.summary.revision_hash.clone(),
+                    edits: vec![
+                        opentake_agent::mcp::motion_documents::MotionTextReplacement {
+                            start,
+                            end: start,
+                            replacement: "\n<!-- 真实字符 -->".into(),
+                        },
+                    ],
+                },
+            ))
+            .expect("admit patch")
+            .execute(&opentake_media::MediaCancelToken::new())
+            .expect("patch document");
+        let MotionDocumentResponse::Document(patched) = patched else {
+            panic!("patch returned wrong response");
+        };
+        assert!(patched.html.contains("真实字符"));
+        assert_ne!(patched.summary.revision_hash, created.summary.revision_hash);
+        let notifications = notifications
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(notifications.len(), 2);
+        assert_eq!(
+            notifications
+                .last()
+                .map(|change| &change.summary.revision_hash),
+            Some(&patched.summary.revision_hash)
+        );
+        let project_a = core.runtime_snapshot();
+        assert_eq!(notifications[1].project_epoch, project_a.project_epoch);
+        assert_eq!(
+            notifications[1].project_path,
+            project_a
+                .project_dir
+                .expect("saved project path")
+                .to_string_lossy()
+        );
+        drop(notifications);
+
+        let stale = bridge
+            .admit(MotionDocumentRequest::Patch(
+                opentake_agent::mcp::motion_documents::MotionDocumentPatchRequest {
+                    document_id: created.summary.document_id.clone(),
+                    file: "styles.css".into(),
+                    baseline_hash: created.summary.revision_hash,
+                    edits: vec![
+                        opentake_agent::mcp::motion_documents::MotionTextReplacement {
+                            start: 0,
+                            end: 0,
+                            replacement: "/* stale */".into(),
+                        },
+                    ],
+                },
+            ))
+            .expect("admit stale patch")
+            .execute(&opentake_media::MediaCancelToken::new())
+            .expect_err("stale patch conflicts");
+        assert_eq!(stale.kind, MotionDocumentBridgeErrorKind::Conflict);
+        assert_eq!(
+            stale.current_revision_hash.as_deref(),
+            Some(patched.summary.revision_hash.as_str())
+        );
+
+        let admitted_a = bridge
+            .admit(MotionDocumentRequest::Read {
+                document_id: created.summary.document_id.clone(),
+            })
+            .expect("admit project A read");
+        core.save_project(Some(fixture.path().join("B.opentake")))
+            .expect("switch to project B");
+        let switched = admitted_a
+            .execute(&opentake_media::MediaCancelToken::new())
+            .expect_err("A operation cannot enter B");
+        assert_eq!(switched.kind, MotionDocumentBridgeErrorKind::Cancelled);
+
+        let listed_b = bridge
+            .admit(MotionDocumentRequest::List)
+            .expect("admit B list")
+            .execute(&opentake_media::MediaCancelToken::new())
+            .expect("list B");
+        let MotionDocumentResponse::Documents(listed_b) = listed_b else {
+            panic!("list returned wrong response");
+        };
+        assert_eq!(listed_b.len(), 1, "Save As preserves the document");
+        assert_eq!(listed_b[0].document_id, created.summary.document_id);
     }
 
     struct BlockingImportBridge {

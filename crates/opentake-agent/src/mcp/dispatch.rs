@@ -55,6 +55,11 @@ use crate::mcp::motion::{
     model_safe_commit, AddMotionRequest, EditMotionRequest, MotionBridge, MotionBridgeError,
     MotionBridgeErrorKind, MotionSourceRequest,
 };
+use crate::mcp::motion_documents::{
+    decode_request as decode_motion_document_request, result_from_error as motion_document_error,
+    result_from_operation as finish_motion_document_operation, AdmittedMotionDocumentOperation,
+    MotionDocumentBridge, MotionDocumentTool,
+};
 use crate::mcp::vision::VisionBridge;
 use crate::plugin::registry::PluginRegistry;
 use crate::signal::engine;
@@ -124,6 +129,10 @@ enum TimelineResultCompletion {
     None,
     Capture(TimelineResultCaptureRequest),
     Warning,
+    MotionDocument {
+        tool: ToolName,
+        operation: Box<dyn AdmittedMotionDocumentOperation>,
+    },
 }
 
 /// Resource class used by the HTTP MCP host before it starts blocking work.
@@ -152,6 +161,9 @@ pub(crate) fn dispatch_admission_class(name: &str, args: &Value) -> DispatchAdmi
         | ToolName::SmartReframe
         | ToolName::TightenSilences
         | ToolName::RemoveFillerWords => DispatchAdmissionClass::ReadOnly,
+        ToolName::ListMotionDocuments
+        | ToolName::ReadMotionDocument
+        | ToolName::PreviewMotionDocument => DispatchAdmissionClass::ReadOnly,
         ToolName::AutoCutToBeats => match args.get("write") {
             None | Some(Value::Bool(false)) => DispatchAdmissionClass::ReadOnly,
             Some(_) => DispatchAdmissionClass::Mutation,
@@ -187,6 +199,9 @@ pub(crate) fn dispatch_admission_class(name: &str, args: &Value) -> DispatchAdmi
         | ToolName::ApplyEffect
         | ToolName::AddMotionGraphic
         | ToolName::EditMotionGraphic
+        | ToolName::CreateMotionDocument
+        | ToolName::PatchMotionDocument
+        | ToolName::PublishMotionDocument
         | ToolName::TrackMotion
         | ToolName::GenerateMatte
         | ToolName::RemoveObject
@@ -216,6 +231,10 @@ pub struct Dispatcher {
     /// Deterministic render + atomic import/place host capability. Motion tools
     /// are discoverable only while this bridge reports production readiness.
     motion_bridge: Option<Arc<dyn MotionBridge>>,
+    /// Project-authorized HTML/CSS document editing and exact preview/publish.
+    /// Admission captures a host authority under the lifecycle gate; execution
+    /// is deferred until that gate releases its identity read lease.
+    motion_document_bridge: Option<Arc<dyn MotionDocumentBridge>>,
     /// Capability-gated advanced workflows. Each tool is discovered only when
     /// this bridge explicitly reports a production implementation for it.
     advanced_bridge: Option<Arc<dyn AdvancedWorkflowBridge>>,
@@ -290,6 +309,7 @@ impl Dispatcher {
             bridge,
             generation_bridge,
             motion_bridge,
+            motion_document_bridge: None,
             advanced_bridge,
             vision_bridge: None,
             agent_undo: Mutex::new(HashMap::new()),
@@ -302,6 +322,14 @@ impl Dispatcher {
     /// setter keeps every existing bridge constructor source-compatible.
     pub fn with_vision_bridge(mut self, vision_bridge: Option<Arc<dyn VisionBridge>>) -> Self {
         self.vision_bridge = vision_bridge;
+        self
+    }
+
+    pub fn with_motion_document_bridge(
+        mut self,
+        bridge: Option<Arc<dyn MotionDocumentBridge>>,
+    ) -> Self {
+        self.motion_document_bridge = bridge;
         self
     }
 
@@ -342,6 +370,12 @@ impl Dispatcher {
             .is_some_and(|bridge| bridge.can_render_motion())
     }
 
+    pub fn can_edit_motion_documents(&self) -> bool {
+        self.motion_document_bridge
+            .as_ref()
+            .is_some_and(|bridge| bridge.can_edit_motion_documents())
+    }
+
     pub fn advertised_tools(&self) -> Vec<ToolName> {
         let mut tools = ToolName::ALL.to_vec();
         if !self.has_media_bridge() {
@@ -352,6 +386,9 @@ impl Dispatcher {
         }
         if self.can_render_motion() {
             tools.extend(ToolName::MOTION);
+        }
+        if self.can_edit_motion_documents() {
+            tools.extend(ToolName::MOTION_DOCUMENTS);
         }
         if let Some(bridge) = &self.advanced_bridge {
             for tool in bridge.supported_tools() {
@@ -448,6 +485,35 @@ impl Dispatcher {
             ));
         }
 
+        // Motion Studio operations must acquire the host's publication lock in
+        // publication -> identity order. Admit against the exact project while
+        // the caller's lifecycle lease is still held, then execute from
+        // finish_dispatch after that lease is released.
+        if MotionDocumentTool::from_tool_name(tool).is_some() {
+            let request = match decode_motion_document_request(tool, &args) {
+                Ok(request) => request,
+                Err(error) => {
+                    return DispatchReceipt::complete(ToolResult::public_error(
+                        PublicErrorKind::InvalidArguments(tool),
+                        error.message,
+                    ))
+                }
+            };
+            let Some(bridge) = self.motion_document_bridge.as_ref() else {
+                return DispatchReceipt::complete(ToolResult::public_error(
+                    PublicErrorKind::CapabilityUnavailable(tool),
+                    "Motion Studio document host capability is unavailable",
+                ));
+            };
+            return match bridge.admit(request) {
+                Ok(operation) => DispatchReceipt {
+                    result: ToolResult::ok(""),
+                    timeline_result: TimelineResultCompletion::MotionDocument { tool, operation },
+                },
+                Err(error) => DispatchReceipt::complete(motion_document_error(tool, error)),
+            };
+        }
+
         // 2. Snapshot the pre-run state.
         let before = self.handle.timeline();
         let manifest = self.handle.media();
@@ -517,6 +583,9 @@ impl Dispatcher {
                 TimelineResultCompletion::Warning => {
                     insert_timeline_result_warning(&mut receipt.result);
                     return receipt.result;
+                }
+                TimelineResultCompletion::MotionDocument { tool, operation } => {
+                    return finish_motion_document_operation(tool, operation, cancel)
                 }
                 TimelineResultCompletion::Capture(request) => request,
             };
@@ -683,6 +752,14 @@ impl Dispatcher {
             | ToolName::UpscaleMedia => self.submit_generation(tool, args, cancel),
             ToolName::AddMotionGraphic => self.add_motion_graphic(args, cancel),
             ToolName::EditMotionGraphic => self.edit_motion_graphic(args, cancel),
+            ToolName::ListMotionDocuments
+            | ToolName::ReadMotionDocument
+            | ToolName::CreateMotionDocument
+            | ToolName::PatchMotionDocument
+            | ToolName::PreviewMotionDocument
+            | ToolName::PublishMotionDocument => Err(ToolError::new(
+                "Motion Studio document execution was not deferred",
+            )),
             ToolName::TrackMotion
             | ToolName::GenerateMatte
             | ToolName::RemoveObject
@@ -3058,6 +3135,14 @@ fn validate_tool_args(tool: ToolName, args: &Value) -> Result<(), ToolError> {
                 validate_motion_params(params, "params")?;
             }
         }
+        ToolName::ListMotionDocuments
+        | ToolName::ReadMotionDocument
+        | ToolName::CreateMotionDocument
+        | ToolName::PatchMotionDocument
+        | ToolName::PreviewMotionDocument
+        | ToolName::PublishMotionDocument => {
+            decode_motion_document_request(tool, args)?;
+        }
         ToolName::TrackMotion => {
             decode!(TrackMotionArgs);
             validate_required_object::<MotionRegionArg>(args, "region", "region")?;
@@ -4569,6 +4654,7 @@ mod tests {
     use opentake_domain::{ClipType, MediaManifestEntry, MediaSource, Track};
     use opentake_ops::command::EditResult;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
 
     use crate::mcp::core_handle::CoreHandle;
@@ -4664,6 +4750,70 @@ mod tests {
 
     fn dispatcher_with(handle: Arc<dyn CoreHandle>) -> Dispatcher {
         Dispatcher::new(handle, Arc::new(RwLock::new(PluginRegistry::new())))
+    }
+
+    struct DeferredDocumentBridge {
+        admitted: Arc<AtomicUsize>,
+        executed: Arc<AtomicUsize>,
+    }
+
+    struct DeferredDocumentOperation {
+        executed: Arc<AtomicUsize>,
+    }
+
+    impl AdmittedMotionDocumentOperation for DeferredDocumentOperation {
+        fn execute(
+            self: Box<Self>,
+            _cancel: &opentake_media::MediaCancelToken,
+        ) -> Result<
+            crate::mcp::motion_documents::MotionDocumentResponse,
+            crate::mcp::motion_documents::MotionDocumentBridgeError,
+        > {
+            self.executed.fetch_add(1, Ordering::SeqCst);
+            Ok(crate::mcp::motion_documents::MotionDocumentResponse::Documents(Vec::new()))
+        }
+    }
+
+    impl MotionDocumentBridge for DeferredDocumentBridge {
+        fn can_edit_motion_documents(&self) -> bool {
+            true
+        }
+
+        fn admit(
+            &self,
+            _request: crate::mcp::motion_documents::MotionDocumentRequest,
+        ) -> Result<
+            Box<dyn AdmittedMotionDocumentOperation>,
+            crate::mcp::motion_documents::MotionDocumentBridgeError,
+        > {
+            self.admitted.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(DeferredDocumentOperation {
+                executed: self.executed.clone(),
+            }))
+        }
+    }
+
+    #[test]
+    fn motion_document_execution_is_deferred_until_project_lease_is_released() {
+        let admitted = Arc::new(AtomicUsize::new(0));
+        let executed = Arc::new(AtomicUsize::new(0));
+        let dispatcher = dispatcher_with(Arc::new(TestHandle::new())).with_motion_document_bridge(
+            Some(Arc::new(DeferredDocumentBridge {
+                admitted: admitted.clone(),
+                executed: executed.clone(),
+            })),
+        );
+        let cancel = opentake_media::MediaCancelToken::new();
+        let receipt = dispatcher.dispatch_cancellable_deferred(
+            "list_motion_documents",
+            serde_json::json!({}),
+            &cancel,
+        );
+        assert_eq!(admitted.load(Ordering::SeqCst), 1);
+        assert_eq!(executed.load(Ordering::SeqCst), 0);
+        let result = dispatcher.finish_dispatch(receipt, &cancel);
+        assert!(!result.is_error, "{}", result.text_joined());
+        assert_eq!(executed.load(Ordering::SeqCst), 1);
     }
 
     #[test]

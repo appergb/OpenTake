@@ -61,6 +61,13 @@ pub enum ToolName {
     // --- OpenTake Motion Canvas graphics (docs/MOTION-GRAPHICS-PLUGIN.md, Issue #34) ---
     AddMotionGraphic,
     EditMotionGraphic,
+    // --- Project-confined Motion Studio authoring ---
+    ListMotionDocuments,
+    ReadMotionDocument,
+    CreateMotionDocument,
+    PatchMotionDocument,
+    PreviewMotionDocument,
+    PublishMotionDocument,
     // --- Advanced AI workflows (capability-gated by the desktop host) ---
     TrackMotion,
     GenerateMatte,
@@ -149,6 +156,12 @@ impl ToolName {
             ToolName::ApplyEffect => "apply_effect",
             ToolName::AddMotionGraphic => "add_motion_graphic",
             ToolName::EditMotionGraphic => "edit_motion_graphic",
+            ToolName::ListMotionDocuments => "list_motion_documents",
+            ToolName::ReadMotionDocument => "read_motion_document",
+            ToolName::CreateMotionDocument => "create_motion_document",
+            ToolName::PatchMotionDocument => "patch_motion_document",
+            ToolName::PreviewMotionDocument => "preview_motion_document",
+            ToolName::PublishMotionDocument => "publish_motion_document",
             ToolName::TrackMotion => "track_motion",
             ToolName::GenerateMatte => "generate_matte",
             ToolName::RemoveObject => "remove_object",
@@ -220,6 +233,17 @@ impl ToolName {
     /// all other hosts.
     pub const MOTION: [ToolName; 2] = [ToolName::AddMotionGraphic, ToolName::EditMotionGraphic];
 
+    /// Motion Studio document tools appended only while the host can capture
+    /// current-project authority and execute the typed document bridge.
+    pub const MOTION_DOCUMENTS: [ToolName; 6] = [
+        ToolName::ListMotionDocuments,
+        ToolName::ReadMotionDocument,
+        ToolName::CreateMotionDocument,
+        ToolName::PatchMotionDocument,
+        ToolName::PreviewMotionDocument,
+        ToolName::PublishMotionDocument,
+    ];
+
     /// Vision-analysis tools appended only by a host with a live frame-sampling
     /// / saliency backend. They remain known for strict compatibility parsing
     /// in all other hosts.
@@ -244,7 +268,7 @@ impl ToolName {
     /// hidden from discovery until a real backend exists. Keeping this set lets
     /// strict argument validation and compatibility tests cover future tools
     /// without advertising placeholder behavior to models.
-    pub const KNOWN: [ToolName; 54] = [
+    pub const KNOWN: [ToolName; 60] = [
         ToolName::GetTimeline,
         ToolName::GetMedia,
         ToolName::InspectMedia,
@@ -290,6 +314,12 @@ impl ToolName {
         ToolName::ApplyEffect,
         ToolName::AddMotionGraphic,
         ToolName::EditMotionGraphic,
+        ToolName::ListMotionDocuments,
+        ToolName::ReadMotionDocument,
+        ToolName::CreateMotionDocument,
+        ToolName::PatchMotionDocument,
+        ToolName::PreviewMotionDocument,
+        ToolName::PublishMotionDocument,
         ToolName::TrackMotion,
         ToolName::GenerateMatte,
         ToolName::RemoveObject,
@@ -358,9 +388,9 @@ mod tests {
     }
 
     #[test]
-    fn advertised_set_is_38_and_known_set_is_54() {
+    fn advertised_set_is_38_and_known_set_is_60() {
         assert_eq!(ToolName::ALL.len(), 38);
-        assert_eq!(ToolName::KNOWN.len(), 54);
+        assert_eq!(ToolName::KNOWN.len(), 60);
         assert!(ToolName::ALL
             .iter()
             .all(|tool| ToolName::KNOWN.contains(tool)));
@@ -444,6 +474,24 @@ mod tests {
         // ...and are NOT part of the 31 upstream tools.
         assert!(!ToolName::UPSTREAM.contains(&ToolName::AddMotionGraphic));
         assert!(!ToolName::UPSTREAM.contains(&ToolName::EditMotionGraphic));
+    }
+
+    #[test]
+    fn motion_document_tools_have_expected_wire_names() {
+        let expected = [
+            (ToolName::ListMotionDocuments, "list_motion_documents"),
+            (ToolName::ReadMotionDocument, "read_motion_document"),
+            (ToolName::CreateMotionDocument, "create_motion_document"),
+            (ToolName::PatchMotionDocument, "patch_motion_document"),
+            (ToolName::PreviewMotionDocument, "preview_motion_document"),
+            (ToolName::PublishMotionDocument, "publish_motion_document"),
+        ];
+        for (tool, wire) in expected {
+            assert_eq!(tool.as_str(), wire);
+            assert_eq!(ToolName::from_str(wire), Ok(tool));
+            assert!(!ToolName::ALL.contains(&tool));
+            assert!(!ToolName::UPSTREAM.contains(&tool));
+        }
     }
 
     #[test]
