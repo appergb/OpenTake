@@ -39,6 +39,8 @@ const zh: Dict = {
 
   // TitleBar
   "title.toggleAgent": "切换 Agent 面板",
+  "title.chat": "对话",
+  "title.primaryNavigation": "主导航",
   "title.export": "导出",
   "title.exportHint": "导出工程交换格式",
   "title.exportRenderVideo": "渲染为视频（MP4）",
@@ -75,6 +77,20 @@ const zh: Dict = {
   "title.home": "主页",
   "title.settings": "设置",
   "title.backHome": "返回主页",
+
+  // Motion Studio
+  "motionStudio.entry": "动效工作台",
+  "motionStudio.workspace": "动效工作台",
+  "motionStudio.files": "文件与模板",
+  "motionStudio.editor": "HTML 与 CSS 编辑器",
+  "motionStudio.preview": "动效预览",
+  "motionStudio.inspector": "参数检查器",
+  "motionStudio.timeline": "关键帧时间线",
+  "motionStudio.visibleStarterTitle": "让创意动起来",
+  "motionStudio.visibleStarterSubtitle": "Real HTML · Local CSS · Deterministic Frames",
+  "motionStudio.fileIndex": "index.html",
+  "motionStudio.fileStyles": "styles.css",
+  "motionStudio.previewPending": "预览将在文档加载后显示",
 
   // Export dialog (#112)
   "export.title": "导出视频",
@@ -1157,6 +1173,8 @@ const en: Dict = {
   "projectSettingsMismatch.match": "Match video",
 
   "title.toggleAgent": "Toggle Agent Panel",
+  "title.chat": "Chat",
+  "title.primaryNavigation": "Primary navigation",
   "title.export": "Export",
   "title.exportHint": "Export interchange formats",
   "title.exportRenderVideo": "Render to Video (MP4)",
@@ -1193,6 +1211,20 @@ const en: Dict = {
   "title.home": "Home",
   "title.settings": "Settings",
   "title.backHome": "Back to Home",
+
+  // Motion Studio
+  "motionStudio.entry": "Motion Studio",
+  "motionStudio.workspace": "Motion Studio workspace",
+  "motionStudio.files": "Files and templates",
+  "motionStudio.editor": "HTML and CSS editor",
+  "motionStudio.preview": "Motion preview",
+  "motionStudio.inspector": "Parameter inspector",
+  "motionStudio.timeline": "Keyframe timeline",
+  "motionStudio.visibleStarterTitle": "Make ideas move",
+  "motionStudio.visibleStarterSubtitle": "Real HTML · Local CSS · Deterministic Frames",
+  "motionStudio.fileIndex": "index.html",
+  "motionStudio.fileStyles": "styles.css",
+  "motionStudio.previewPending": "Preview appears after the document loads",
 
   "export.title": "Export Video",
   "export.format": "Format",

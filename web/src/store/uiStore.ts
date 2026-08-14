@@ -17,9 +17,9 @@ import type { ProjectSettingsTarget } from "../lib/projectSettings";
 import type { MotionTrackingRegion } from "../lib/types";
 
 export type Panel = "agent" | "media" | "preview" | "inspector" | "timeline";
-/** Top-level app view (SPEC: 启动先进主页). The editor is one of three views;
+/** Top-level app view (SPEC: 启动先进主页). The editor is one of four primary views;
  *  switching is in-app (no router) so editor state survives navigation. */
-export type AppView = "home" | "editor" | "settings" | "library";
+export type AppView = "home" | "editor" | "motion" | "settings" | "library";
 export type ToolMode = "pointer" | "razor";
 export type LayoutPreset = "default" | "media" | "vertical";
 export type SettingsPaneId =
@@ -69,6 +69,7 @@ export interface MotionTrackingSelection {
 
 const STORAGE_PREFIX = "opentake.ui.v1.";
 const LS = {
+  view: `${STORAGE_PREFIX}view`,
   layoutPreset: `${STORAGE_PREFIX}layoutPreset`,
   agentPanelVisible: `${STORAGE_PREFIX}agentPanelVisible`,
   mediaPanelVisible: `${STORAGE_PREFIX}mediaPanelVisible`,
@@ -80,6 +81,7 @@ const LS = {
 type UiStorageKey = (typeof LS)[keyof typeof LS];
 
 const LEGACY_LS: Record<UiStorageKey, string> = {
+  [LS.view]: "view",
   [LS.layoutPreset]: "layoutPreset",
   [LS.agentPanelVisible]: "agentPanelVisible",
   [LS.mediaPanelVisible]: "mediaPanelVisible",
@@ -87,6 +89,21 @@ const LEGACY_LS: Record<UiStorageKey, string> = {
   [LS.keyframesPanelVisible]: "keyframesPanelVisible",
   [LS.zoomScale]: "zoomScale",
 };
+
+function loadAppView(): AppView {
+  const stored = readPersisted(LS.view);
+  if (
+    stored.value !== "home" &&
+    stored.value !== "editor" &&
+    stored.value !== "motion" &&
+    stored.value !== "library"
+  ) {
+    if (stored.value !== null) discardPersisted(LS.view);
+    return "home";
+  }
+  if (stored.legacy) persist(LS.view, stored.value);
+  return stored.value;
+}
 
 function readPersisted(key: UiStorageKey): { value: string | null; legacy: boolean } {
   if (typeof localStorage === "undefined") return { value: null, legacy: false };
@@ -342,8 +359,15 @@ interface UiState {
 }
 
 export const createEditorUiStore = () => create<UiState>((set, get) => ({
-  view: "home",
-  setView: (view) => set({ view }),
+  view: loadAppView(),
+  setView: (view) => {
+    if (view === "home" || view === "editor" || view === "motion" || view === "library") {
+      persist(LS.view, view);
+    } else {
+      discardPersisted(LS.view);
+    }
+    set({ view });
+  },
   settingsOpen: false,
   setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
   settingsPane: "general",

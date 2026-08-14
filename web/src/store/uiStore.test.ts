@@ -1,7 +1,9 @@
+// @vitest-environment happy-dom
+
 import { beforeEach, describe, expect, it } from "vitest";
 import type { Timeline } from "../lib/types";
 import { useProjectStore } from "./projectStore";
-import { useEditorUiStore } from "./uiStore";
+import { createEditorUiStore, useEditorUiStore } from "./uiStore";
 
 const timeline: Timeline = {
   fps: 30,
@@ -50,6 +52,7 @@ const timeline: Timeline = {
 
 describe("timeline playback state", () => {
   beforeEach(() => {
+    localStorage.clear();
     useProjectStore.setState({ timeline, timelineVersion: 1 });
     useEditorUiStore.setState({
       currentFrame: 0,
@@ -58,6 +61,17 @@ describe("timeline playback state", () => {
       isScrubbing: false,
       previewMediaId: null,
     });
+  });
+
+  it("persists Motion Studio as a primary view and rejects an invalid persisted view", () => {
+    const first = createEditorUiStore();
+    first.getState().setView("motion");
+    expect(localStorage.getItem("opentake.ui.v1.view")).toBe("motion");
+    expect(createEditorUiStore().getState().view).toBe("motion");
+
+    localStorage.setItem("opentake.ui.v1.view", "not-a-real-view");
+    expect(createEditorUiStore().getState().view).toBe("home");
+    expect(localStorage.getItem("opentake.ui.v1.view")).toBeNull();
   });
 
   it("commits the active playhead frame immediately when pausing", () => {

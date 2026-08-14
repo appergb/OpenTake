@@ -83,25 +83,29 @@ afterEach(async () => {
 });
 
 describe("TitleBar Agent entry", () => {
-  it("renders the specified visible toggle and drives the persisted panel state", async () => {
+  it("opens Chat without discarding the existing panel state", async () => {
+    useEditorUiStore.setState({ view: "motion", agentPanelVisible: false });
     await act(async () => root?.render(<TitleBar />));
 
     const button = container?.querySelector<HTMLButtonElement>(
-      'button[aria-label="title.toggleAgent"]',
+      'button[aria-label="title.chat"]',
     );
     expect(button).not.toBeNull();
-    expect(button?.getAttribute("aria-pressed")).toBe("false");
+    expect(button?.hasAttribute("aria-pressed")).toBe(false);
+    expect(button?.hasAttribute("aria-current")).toBe(false);
     expect(button?.style.opacity).toBe("0.55");
     expect(button?.querySelector("[data-agent-gradient-icon]")).not.toBeNull();
 
     await act(async () => button?.click());
+    expect(useEditorUiStore.getState().view).toBe("editor");
     expect(useEditorUiStore.getState().agentPanelVisible).toBe(true);
-    expect(button?.getAttribute("aria-pressed")).toBe("true");
+    expect(button?.getAttribute("aria-current")).toBe("page");
     expect(button?.style.opacity).toBe("1");
     expect(localStorage.getItem("opentake.ui.v1.agentPanelVisible")).toBe("true");
 
     await act(async () => button?.click());
-    expect(useEditorUiStore.getState().agentPanelVisible).toBe(false);
+    expect(useEditorUiStore.getState().agentPanelVisible).toBe(true);
+    expect(button?.getAttribute("aria-current")).toBe("page");
   });
 
   it("keeps the View menu as a second working mouse entry", async () => {
@@ -122,6 +126,31 @@ describe("TitleBar Agent entry", () => {
 });
 
 describe("TitleBar navigation and video export controls", () => {
+  it("orders Home, Chat, Motion Studio, and Panel Management as 26px primary controls", async () => {
+    await act(async () => root?.render(<TitleBar />));
+    const navigation = container?.querySelector<HTMLElement>(
+      'nav[aria-label="title.primaryNavigation"]',
+    );
+    const controls = [...(navigation?.querySelectorAll<HTMLButtonElement>("button") ?? [])];
+    expect(controls.map((button) => button.getAttribute("aria-label"))).toEqual([
+      "title.backHome",
+      "title.chat",
+      "motionStudio.entry",
+      "view.menu",
+    ]);
+    expect(controls.every((button) => button.style.width === "26px")).toBe(true);
+    expect(controls.every((button) => button.style.height === "26px")).toBe(true);
+  });
+
+  it("opens Motion Studio as a first-level view", async () => {
+    await act(async () => root?.render(<TitleBar />));
+    const motion = container?.querySelector<HTMLButtonElement>(
+      'button[aria-label="motionStudio.entry"]',
+    );
+    await act(async () => motion?.click());
+    expect(useEditorUiStore.getState().view).toBe("motion");
+  });
+
   it("control-f52cc89817361a19 return from editor to Home", async () => {
     await act(async () => root?.render(<TitleBar />));
     const home = container?.querySelector<HTMLButtonElement>('button[aria-label="title.backHome"]');
