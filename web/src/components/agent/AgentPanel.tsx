@@ -1,16 +1,14 @@
 import {
   useEffect,
+  useId,
   useRef,
   useState,
   type CSSProperties,
   type KeyboardEvent,
-  type ReactNode,
 } from "react";
 import {
   ChevronDown,
   ChevronRight,
-  Clapperboard,
-  MessageSquare,
   Plus,
   Send,
   Settings as SettingsIcon,
@@ -21,6 +19,7 @@ import {
 import { useT } from "../../i18n";
 import {
   chatCancel,
+  chatHistory,
   chatSend,
   chatSessionSetOpen,
   chatSessions,
@@ -28,13 +27,15 @@ import {
   onChatDelta,
   onChatDone,
   onChatToolCall,
+  type ChatStreamDecodeFailure,
+  type ChatStreamIdentity,
 } from "../../lib/api";
-import type { ChatMessage, ChatSession, ChatToolCall } from "../../lib/types";
+import type { AgentContentBlock, ChatMessage, ChatSession } from "../../lib/types";
 import { useSettingsStore } from "../../store/settingsStore";
 import { mintSessionId, useChatStore } from "../../store/chatStore";
 import { useEditorUiStore } from "../../store/uiStore";
 import { useProjectStore } from "../../store/projectStore";
-import { MotionPanel } from "./MotionPanel";
+import { Reveal } from "../ui/Reveal";
 
 const NO_KEY_HINT = /Settings|设置|API key/i;
 
@@ -49,27 +50,47 @@ export function AgentPanel() {
   const messages = useChatStore((state) => state.messages);
   const streaming = useChatStore((state) => state.streaming);
   const pushUser = useChatStore((state) => state.pushUser);
-  const beginStream = useChatStore((state) => state.beginStream);
-  const appendDelta = useChatStore((state) => state.appendDelta);
-  const upsertToolCall = useChatStore((state) => state.upsertToolCall);
+  const beginMessage = useChatStore((state) => state.beginMessage);
+  const appendBlockDelta = useChatStore((state) => state.appendBlockDelta);
+  const upsertBlock = useChatStore((state) => state.upsertBlock);
   const finalize = useChatStore((state) => state.finalize);
-  const setMessages = useChatStore((state) => state.setMessages);
+  const requestHistoryResync = useChatStore((state) => state.requestHistoryResync);
+  const takeHistoryResyncRequest = useChatStore((state) => state.takeHistoryResyncRequest);
+  const historyResyncRequests = useChatStore((state) => state.historyResyncRequests);
+  const setMessagesForSession = useChatStore((state) => state.setMessagesForSession);
+  const deleteSession = useChatStore((state) => state.deleteSession);
   const reset = useChatStore((state) => state.reset);
   const composerDraft = useChatStore((state) => state.composerDraft);
   const setComposerDraft = useChatStore((state) => state.setComposerDraft);
 
   const [input, setInput] = useState("");
-  const [panelMode, setPanelMode] = useState<"chat" | "motion">("chat");
+  const [pendingSessionId, setPendingSessionId] = useState<string | null>(null);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const sessionsRef = useRef<ChatSession[]>([]);
+  const inputRef = useRef("");
+  const resyncProjectRef = useRef<Record<string, { projectEpoch: number; projectPath: string }>>({});
   const tabMutationRef = useRef<Promise<void>>(Promise.resolve());
   const scrollRef = useRef<HTMLDivElement>(null);
+  const mountedRef = useRef(true);
+  const interactionLocked = streaming || pendingSessionId === sessionId;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (composerDraft === null) return;
+    inputRef.current = composerDraft;
     setInput(composerDraft);
     setComposerDraft(null);
   }, [composerDraft, setComposerDraft]);
+
+  useEffect(() => () => {
+    setComposerDraft(inputRef.current || null);
+  }, [setComposerDraft]);
 
   function commitSessions(next: ChatSession[]) {
     sessionsRef.current = next;
@@ -89,47 +110,122 @@ export function AgentPanel() {
   }
 
   useEffect(() => {
-    let unDelta: () => void = () => {};
-    let unTool: () => void = () => {};
-    let unDone: () => void = () => {};
-    void (async () => {
-      unDelta = await onChatDelta((event) => {
-        if (
-          event.projectEpoch === useProjectStore.getState().projectEpoch &&
-          event.projectPath === useProjectStore.getState().projectPath &&
-          event.sessionId === useChatStore.getState().sessionId
-        ) {
-          appendDelta(event.delta);
-        }
-      });
-      unTool = await onChatToolCall((event) => {
-        if (
-          event.projectEpoch === useProjectStore.getState().projectEpoch &&
-          event.projectPath === useProjectStore.getState().projectPath &&
-          event.sessionId === useChatStore.getState().sessionId
-        ) {
-          upsertToolCall(event.toolCall);
-        }
-      });
-      unDone = await onChatDone((event) => {
-        if (
-          event.projectEpoch === useProjectStore.getState().projectEpoch &&
-          event.projectPath === useProjectStore.getState().projectPath &&
-          event.sessionId === useChatStore.getState().sessionId
-        ) {
-          finalize(event.message);
-        }
-      });
-    })();
-    return () => {
-      unDelta();
-      unTool();
-      unDone();
+    let disposed = false;
+    const unsubscribers: Array<() => void> = [];
+    const install = (subscription: Promise<() => void>) => {
+      void subscription
+        .then((unsubscribe) => {
+          if (disposed) unsubscribe();
+          else unsubscribers.push(unsubscribe);
+        })
+        .catch(() => {});
     };
-  }, [appendDelta, finalize, upsertToolCall]);
+    const matchesProject = (event: ChatStreamIdentity) => {
+      const project = useProjectStore.getState();
+      return event.projectEpoch === project.projectEpoch && event.projectPath === project.projectPath;
+    };
+    const begin = (event: ChatStreamIdentity) => {
+      resyncProjectRef.current[event.sessionId] = {
+        projectEpoch: event.projectEpoch,
+        projectPath: event.projectPath,
+      };
+      beginMessage(event.sessionId, event.messageId);
+      setPendingSessionId((current) => current === event.sessionId ? null : current);
+    };
+    const malformed = (failure: ChatStreamDecodeFailure) => {
+      if (!failure.sessionId) return;
+      const chat = useChatStore.getState();
+      const isKnownSession = failure.sessionId === chat.sessionId ||
+        sessionsRef.current.some((session) => session.id === failure.sessionId);
+      if (!isKnownSession) return;
+      const project = useProjectStore.getState();
+      if (project.projectPath) {
+        resyncProjectRef.current[failure.sessionId] = {
+          projectEpoch: project.projectEpoch,
+          projectPath: project.projectPath,
+        };
+      }
+      setPendingSessionId((current) => current === failure.sessionId ? null : current);
+      requestHistoryResync(failure.sessionId, failure.messageId, failure.reason);
+    };
+
+    install(onChatDelta((event) => {
+      if (!matchesProject(event)) return;
+      begin(event);
+      appendBlockDelta(
+        event.sessionId,
+        event.messageId,
+        event.sequence,
+        event.blockIndex,
+        event.delta,
+      );
+    }, malformed));
+    install(onChatToolCall((event) => {
+      if (!matchesProject(event)) return;
+      begin(event);
+      upsertBlock(
+        event.sessionId,
+        event.messageId,
+        event.sequence,
+        event.blockIndex,
+        event.block,
+      );
+    }, malformed));
+    install(onChatDone((event) => {
+      if (!matchesProject(event)) return;
+      begin(event);
+      finalize(event.sessionId, event.messageId, event.sequence, event.message);
+    }, malformed));
+
+    return () => {
+      disposed = true;
+      unsubscribers.splice(0).forEach((unsubscribe) => unsubscribe());
+    };
+  }, [appendBlockDelta, beginMessage, finalize, requestHistoryResync, upsertBlock]);
 
   useEffect(() => {
+    if (!projectPath || Object.keys(historyResyncRequests).length === 0) return;
+    const request = takeHistoryResyncRequest();
+    if (!request) return;
+    const requestProject = resyncProjectRef.current[request.sessionId];
+    delete resyncProjectRef.current[request.sessionId];
+    if (
+      requestProject &&
+      (requestProject.projectEpoch !== projectEpoch || requestProject.projectPath !== projectPath)
+    ) {
+      return;
+    }
+    const loadingEpoch = requestProject?.projectEpoch ?? projectEpoch;
+    const loadingPath = requestProject?.projectPath ?? projectPath;
+    void chatHistory(request.sessionId, loadingEpoch, loadingPath)
+      .then((history) => {
+        const project = useProjectStore.getState();
+        if (
+          !mountedRef.current ||
+          project.projectEpoch !== loadingEpoch ||
+          project.projectPath !== loadingPath
+        ) {
+          return;
+        }
+        setMessagesForSession(request.sessionId, history);
+        updateSessions((current) => current.map((session) =>
+          session.id === request.sessionId ? { ...session, messages: history } : session,
+        ));
+      })
+      .catch(() => {});
+  }, [
+    historyResyncRequests,
+    projectEpoch,
+    projectPath,
+    setMessagesForSession,
+    takeHistoryResyncRequest,
+  ]);
+
+  useEffect(() => {
+    const previousSessionId = useChatStore.getState().sessionId;
     const freshSessionId = mintSessionId();
+    resyncProjectRef.current = {};
+    setPendingSessionId(null);
     reset(freshSessionId);
     commitSessions([]);
     if (!isTauri || !projectPath) return;
@@ -152,10 +248,11 @@ export function AgentPanel() {
         }
         const openSessions = projectSessions.filter((session) => session.isOpen !== false);
         commitSessions(openSessions);
-        const latest = openSessions[0];
+        openSessions.forEach((session) => setMessagesForSession(session.id, session.messages));
+        const latest = openSessions.find((session) => session.id === previousSessionId) ??
+          openSessions[0];
         if (latest) {
           reset(latest.id);
-          setMessages(latest.messages);
         } else {
           const optimistic: ChatSession = {
             id: freshSessionId,
@@ -197,7 +294,7 @@ export function AgentPanel() {
     return () => {
       disposed = true;
     };
-  }, [projectEpoch, projectPath, reset, setMessages]);
+  }, [projectEpoch, projectPath, reset, setMessagesForSession]);
 
   useEffect(() => {
     updateSessions((current) =>
@@ -216,14 +313,14 @@ export function AgentPanel() {
 
   async function send() {
     const text = input.trim();
-    if (!text || streaming || !projectPath) return;
+    if (!text || interactionLocked || !projectPath) return;
     const sendingEpoch = projectEpoch;
     const sendingPath = projectPath;
     const sendingSessionId = sessionId;
+    inputRef.current = "";
     setInput("");
     pushUser(text);
-    const placeholderId = `assistant-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-    beginStream(placeholderId);
+    setPendingSessionId(sendingSessionId);
     try {
       await chatSend(sendingSessionId, text, provider, sendingEpoch, sendingPath);
     } catch (error) {
@@ -236,13 +333,20 @@ export function AgentPanel() {
       ) {
         return;
       }
-      finalize({
-        id: placeholderId,
+      const errorText = `⚠️ ${error instanceof Error ? error.message : String(error)}`;
+      const errorMessage: ChatMessage = {
+        id: `assistant-local-error-${Date.now()}`,
         role: "assistant",
-        content: `⚠️ ${error instanceof Error ? error.message : String(error)}`,
+        content: errorText,
         toolCalls: [],
+        blocks: [{ type: "text", text: errorText }],
         createdAt: Date.now(),
-      });
+      };
+      setMessagesForSession(
+        sendingSessionId,
+        [...(chat.sessionMessages[sendingSessionId] ?? []), errorMessage],
+      );
+      setPendingSessionId((current) => current === sendingSessionId ? null : current);
     }
   }
 
@@ -252,13 +356,14 @@ export function AgentPanel() {
   }
 
   function openSession(session: ChatSession) {
-    if (streaming || session.id === sessionId || !projectPath) return;
+    if (interactionLocked || session.id === sessionId || !projectPath) return;
+    const storedMessages = useChatStore.getState().sessionMessages[session.id];
+    if (!storedMessages) setMessagesForSession(session.id, session.messages);
     reset(session.id);
-    setMessages(session.messages);
   }
 
   function newChat() {
-    if (streaming || !projectPath) return;
+    if (interactionLocked || !projectPath) return;
     const openingEpoch = projectEpoch;
     const openingPath = projectPath;
     enqueueTabMutation(() => createNewChatNow(openingEpoch, openingPath));
@@ -299,7 +404,7 @@ export function AgentPanel() {
   }
 
   function closeChat(session: ChatSession) {
-    if (streaming || !projectPath) return;
+    if (interactionLocked || !projectPath) return;
     const closingEpoch = projectEpoch;
     const closingPath = projectPath;
     enqueueTabMutation(() => closeChatNow(session.id, closingEpoch, closingPath));
@@ -323,11 +428,13 @@ export function AgentPanel() {
       (candidate) => candidate.id !== closingSessionId,
     );
     commitSessions(remaining);
+    deleteSession(closingSessionId);
     if (closingSessionId !== useChatStore.getState().sessionId) return;
     const next = remaining[0];
     if (next) {
+      const storedMessages = useChatStore.getState().sessionMessages[next.id];
+      if (!storedMessages) setMessagesForSession(next.id, next.messages);
       reset(next.id);
-      setMessages(next.messages);
     } else {
       await createNewChatNow(closingEpoch, closingPath);
     }
@@ -361,12 +468,12 @@ export function AgentPanel() {
         }}
       >
         <span style={{ fontSize: "var(--fs-sm)", fontWeight: 600, color: "var(--text-primary)" }}>
-          {panelMode === "chat" ? t("agent.title") : t("motion.heading")}
+          {t("agent.title")}
         </span>
-        {panelMode === "chat" && <button
+        <button
           type="button"
           onClick={() => void newChat()}
-          disabled={streaming || !projectPath}
+          disabled={interactionLocked || !projectPath}
           title={t("agent.newTab")}
           aria-label={t("agent.newTab")}
           className="hover-area"
@@ -378,40 +485,13 @@ export function AgentPanel() {
             justifyContent: "center",
             borderRadius: "var(--radius-sm)",
             color: "var(--text-secondary)",
-            opacity: streaming || !projectPath ? 0.4 : 1,
+            opacity: interactionLocked || !projectPath ? 0.4 : 1,
           }}
         >
           <Plus size={14} />
-        </button>}
+        </button>
       </div>
 
-      <div
-        role="group"
-        aria-label={t("agent.modes")}
-        style={{
-          display: "grid",
-          gridTemplateColumns: "1fr 1fr",
-          gap: 3,
-          padding: "var(--space-xs) var(--space-sm)",
-          borderBottom: "var(--bw-hairline) solid var(--border-subtle)",
-          flexShrink: 0,
-        }}
-      >
-        <PanelModeButton
-          active={panelMode === "chat"}
-          label={t("agent.chatMode")}
-          icon={<MessageSquare size={13} />}
-          onClick={() => setPanelMode("chat")}
-        />
-        <PanelModeButton
-          active={panelMode === "motion"}
-          label={t("agent.motionMode")}
-          icon={<Clapperboard size={13} />}
-          onClick={() => setPanelMode("motion")}
-        />
-      </div>
-
-      {panelMode === "chat" ? <>
       <div
         role="tablist"
         aria-label={t("agent.tabs")}
@@ -443,7 +523,7 @@ export function AgentPanel() {
                 role="tab"
                 aria-selected={active}
                 aria-label={title}
-                disabled={streaming}
+                disabled={interactionLocked}
                 onClick={() => openSession(session)}
                 style={{
                   maxWidth: 120,
@@ -461,7 +541,7 @@ export function AgentPanel() {
               <button
                 type="button"
                 aria-label={`${t("agent.closeTab")} ${title}`}
-                disabled={streaming}
+                disabled={interactionLocked}
                 onClick={() => void closeChat(session)}
                 className="hover-area"
                 style={{
@@ -472,7 +552,7 @@ export function AgentPanel() {
                   justifyContent: "center",
                   borderRadius: "var(--radius-xs)",
                   color: "var(--text-muted)",
-                  opacity: streaming ? 0.4 : 1,
+                  opacity: interactionLocked ? 0.4 : 1,
                 }}
               >
                 <X size={11} />
@@ -507,10 +587,10 @@ export function AgentPanel() {
             {isTauri ? t("agent.empty") : t("agent.desktopOnly")}
           </div>
         )}
-        {messages.map((message) => (
-          <MessageRow
-            key={message.id}
-            message={message}
+        {groupConversationMessages(messages).map((turnMessages) => (
+          <ConversationMessage
+            key={turnMessages[0].id}
+            messages={turnMessages}
             onOpenSettings={() => setSettingsOpen(true)}
           />
         ))}
@@ -527,11 +607,16 @@ export function AgentPanel() {
         }}
       >
         <textarea
+          className="agent-composer__input"
           value={input}
-          onChange={(event) => setInput(event.target.value)}
+          onChange={(event) => {
+            inputRef.current = event.target.value;
+            setInput(event.target.value);
+          }}
           onKeyDown={onKeyDown}
           placeholder={t("agent.inputPlaceholder")}
-          disabled={!isTauri || streaming}
+          aria-label={t("agent.inputPlaceholder")}
+          disabled={!isTauri || interactionLocked}
           rows={1}
           style={{
             flex: 1,
@@ -545,15 +630,16 @@ export function AgentPanel() {
             background: "var(--bg-elevated)",
             minHeight: 34,
             maxHeight: 120,
-            outline: "none",
             opacity: !isTauri ? 0.6 : 1,
           }}
         />
-        {streaming ? (
+        {interactionLocked ? (
           <button
             type="button"
             onClick={cancel}
             title={t("agent.cancel")}
+            aria-label={t("agent.cancel")}
+            className="agent-composer__action"
             style={iconButtonStyle("var(--accent-spotlight)", "#fff")}
           >
             <Square size={14} />
@@ -564,6 +650,8 @@ export function AgentPanel() {
             onClick={() => void send()}
             disabled={!isTauri || !input.trim()}
             title={t("agent.send")}
+            aria-label={t("agent.send")}
+            className="agent-composer__action"
             style={{
               ...iconButtonStyle("var(--accent-primary)", "#111"),
               opacity: isTauri && input.trim() ? 1 : 0.4,
@@ -574,111 +662,50 @@ export function AgentPanel() {
           </button>
         )}
       </div>
-      </> : <MotionPanel />}
     </div>
-  );
-}
-
-function PanelModeButton({
-  active,
-  label,
-  icon,
-  onClick,
-}: {
-  active: boolean;
-  label: string;
-  icon: ReactNode;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      aria-pressed={active}
-      onClick={onClick}
-      style={{
-        height: 27,
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: 6,
-        borderRadius: "var(--radius-sm)",
-        background: active ? "var(--bg-elevated)" : "transparent",
-        color: active ? "var(--text-primary)" : "var(--text-muted)",
-        fontSize: "var(--fs-xs)",
-      }}
-    >
-      {icon}
-      {label}
-    </button>
   );
 }
 
 function sessionTitle(session: ChatSession, fallback: string): string {
   const firstUserMessage = session.messages.find(
-    (message) => message.role === "user" && message.content.trim().length > 0,
+    (message) => message.role === "user" && authoritativeMessageText(message).trim().length > 0,
   );
   if (!firstUserMessage) return fallback;
-  const compact = firstUserMessage.content.trim().replace(/\s+/g, " ");
+  const compact = authoritativeMessageText(firstUserMessage).trim().replace(/\s+/g, " ");
   return compact.length > 20 ? `${compact.slice(0, 20)}…` : compact;
 }
 
-function MessageRow({
-  message,
-  onOpenSettings,
-}: {
-  message: ChatMessage;
+type ConversationMessageProps = (
+  | { message: ChatMessage; messages?: never }
+  | { message?: never; messages: ChatMessage[] }
+) & {
   onOpenSettings: () => void;
-}) {
-  const t = useT();
-  const isUser = message.role === "user";
-  const isAssistant = message.role === "assistant";
-  const isTool = message.role === "tool";
-  const guided = isAssistant && NO_KEY_HINT.test(message.content);
+};
 
-  if (isTool) {
-    return (
-      <div
-        style={{
-          alignSelf: "center",
-          maxWidth: "80%",
-          fontSize: "var(--fs-xs)",
-          color: "var(--text-muted)",
-          background: "var(--bg-elevated)",
-          borderRadius: "var(--radius-sm)",
-          padding: "2px var(--space-sm)",
-        }}
-      >
-        {message.content.slice(0, 200)}
-      </div>
-    );
-  }
+export function ConversationMessage({
+  message,
+  messages,
+  onOpenSettings,
+}: ConversationMessageProps) {
+  const t = useT();
+  const turnMessages = messages ?? (message ? [message] : []);
+  const firstMessage = turnMessages[0];
+  if (!firstMessage) return null;
+  const isUser = turnMessages.length === 1 && firstMessage.role === "user";
+  const guided = turnMessages.some(
+    (candidate) => candidate.role === "assistant" &&
+      NO_KEY_HINT.test(authoritativeMessageText(candidate)),
+  );
 
   return (
     <div
-      style={{
-        alignSelf: isUser ? "flex-end" : "flex-start",
-        maxWidth: "88%",
-        display: "flex",
-        flexDirection: "column",
-        gap: "var(--space-xs)",
-      }}
+      className={`agent-message ${isUser ? "agent-message--user" : "agent-message--assistant"}`}
     >
-      <div
-        style={{
-          background: isUser ? "var(--accent-primary)" : "var(--bg-elevated)",
-          color: isUser ? "#111" : "var(--text-primary)",
-          borderRadius: "var(--radius-sm)",
-          padding: "var(--space-sm) var(--space-md)",
-          fontSize: "var(--fs-sm)",
-          lineHeight: 1.45,
-          whiteSpace: "pre-wrap",
-          wordBreak: "break-word",
-        }}
-      >
-        {message.content || (isAssistant && message.toolCalls.length > 0 ? "" : "…")}
-      </div>
-      {isAssistant &&
-        message.toolCalls.map((toolCall) => <ToolCallCard key={toolCall.id} toolCall={toolCall} />)}
+      {isUser
+        ? <div className="agent-message__user-surface">
+            {authoritativeMessageText(firstMessage)}
+          </div>
+        : <AssistantTurn messages={turnMessages} />}
       {guided && (
         <button
           type="button"
@@ -705,76 +732,210 @@ function MessageRow({
   );
 }
 
-function ToolCallCard({ toolCall }: { toolCall: ChatToolCall }) {
+function authoritativeMessageText(message: ChatMessage): string {
+  if (message.blocks === undefined) return message.content;
+  return message.blocks
+    .flatMap((block) => block.type === "text" ? [block.text] : [])
+    .join("");
+}
+
+function groupConversationMessages(messages: ChatMessage[]): ChatMessage[][] {
+  const groups: ChatMessage[][] = [];
+  messages.forEach((message) => {
+    const previous = groups[groups.length - 1];
+    if (message.role !== "user" && previous && previous[0].role !== "user") {
+      previous.push(message);
+    } else {
+      groups.push([message]);
+    }
+  });
+  return groups;
+}
+
+type ToolActivityBlock = Exclude<AgentContentBlock, { type: "text" }>;
+
+type AssistantTurnProps =
+  | { message: ChatMessage; messages?: never }
+  | { message?: never; messages: ChatMessage[] };
+
+export function AssistantTurn({ message, messages }: AssistantTurnProps) {
+  const turnMessages = messages ?? (message ? [message] : []);
+  const toolNames = new Map<string, string>();
+  turnMessages.forEach((candidate) => {
+    candidate.blocks?.forEach((block) => {
+      if (block.type === "toolUse") toolNames.set(block.id, block.name);
+    });
+  });
+  const entries = turnMessages.flatMap((candidate) => {
+    if (candidate.blocks !== undefined) {
+      return candidate.blocks.map((block, messageBlockIndex) => ({
+        block,
+        key: `${candidate.id}-${messageBlockIndex}`,
+      }));
+    }
+    const legacyBlocks: AgentContentBlock[] = [];
+    if (candidate.content) legacyBlocks.push({ type: "text", text: candidate.content });
+    legacyBlocks.push(...candidate.toolCalls.map((toolCall) => ({
+      type: "toolUse" as const,
+      id: toolCall.id,
+      name: toolCall.name,
+      input: toolCall.args,
+      result: toolCall.result,
+      isError: toolCall.isError,
+    })));
+    return legacyBlocks.map((block, messageBlockIndex) => ({
+      block,
+      key: `${candidate.id}-legacy-${messageBlockIndex}`,
+    }));
+  });
+
+  return (
+    <div className="agent-assistant-turn" data-assistant-turn>
+      {entries.map(({ block, key }, index) => {
+        if (block.type === "text") {
+          return (
+            <div
+              className="agent-assistant-turn__text"
+              data-agent-block-index={index}
+              data-agent-block-type="text"
+              key={key}
+            >
+              {block.text}
+            </div>
+          );
+        }
+        return (
+          <InlineToolActivity
+            block={block}
+            dataBlockIndex={index}
+            key={key}
+            toolName={block.type === "toolResult" ? toolNames.get(block.toolUseId) : undefined}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+export function InlineToolActivity({
+  block,
+  dataBlockIndex,
+  toolName,
+}: {
+  block: ToolActivityBlock;
+  dataBlockIndex?: number;
+  toolName?: string;
+}) {
   const t = useT();
   const [open, setOpen] = useState(false);
-  const isError = toolCall.isError === true;
-  const argsJson = JSON.stringify(toolCall.args, null, 2);
-  const resultJson =
-    toolCall.result == null ? "" : JSON.stringify(toolCall.result, null, 2);
+  const reactId = useId();
+  const disclosureId = `agent-tool-${reactId.replace(/:/g, "")}`;
+  const isError = block.isError === true;
+  const pending = block.type === "toolUse" && block.result === undefined && !isError;
+  const status = isError ? "error" : pending ? "running" : "complete";
+  const statusLabel = t(
+    status === "error"
+      ? "agent.toolFailed"
+      : status === "running"
+        ? "agent.toolRunning"
+        : "agent.toolComplete",
+  );
+  const label = block.type === "toolUse"
+    ? block.name
+    : toolName ?? t("agent.toolResult");
 
   return (
     <div
-      style={{
-        background: "var(--bg-elevated)",
-        border: `var(--bw-thin) solid ${
-          isError ? "var(--accent-danger, #ff6b6b)" : "var(--border-subtle)"
-        }`,
-        borderRadius: "var(--radius-sm)",
-        padding: "var(--space-xs) var(--space-sm)",
-        fontSize: "var(--fs-xs)",
-        alignSelf: "flex-start",
-        maxWidth: "100%",
-      }}
+      className="agent-tool-activity"
+      data-agent-block-index={dataBlockIndex}
+      data-agent-block-type={block.type}
+      data-status={status}
+      data-tool-activity
     >
       <button
         type="button"
+        aria-controls={disclosureId}
+        aria-expanded={open}
+        aria-label={`${label}: ${statusLabel}`}
+        data-tool-activity-trigger
         onClick={() => setOpen((value) => !value)}
-        style={{
-          background: "transparent",
-          border: "none",
-          cursor: "pointer",
-          color: isError ? "var(--accent-danger, #ff6b6b)" : "var(--text-primary)",
-          display: "flex",
-          alignItems: "center",
-          gap: 4,
-          padding: 0,
-          fontFamily: "inherit",
-          fontSize: "inherit",
-        }}
+        className="agent-tool-activity__trigger"
       >
-        {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-        <Wrench size={12} />
-        <span style={{ fontWeight: 600 }}>{toolCall.name}</span>
-        {toolCall.result == null && (
-          <span style={{ color: "var(--text-muted)", marginLeft: 4 }}>…</span>
-        )}
-      </button>
-      {open && (
-        <div
-          style={{
-            marginTop: "var(--space-xs)",
-            display: "flex",
-            flexDirection: "column",
-            gap: "var(--space-xs)",
-          }}
+        {open
+          ? <ChevronDown aria-hidden="true" size={12} />
+          : <ChevronRight aria-hidden="true" size={12} />}
+        <Wrench aria-hidden="true" size={12} />
+        <span className="agent-tool-activity__name">{label}</span>
+        <span
+          aria-atomic="true"
+          aria-live="polite"
+          className="agent-tool-activity__status"
+          role="status"
         >
-          <div>
-            <div style={{ color: "var(--text-muted)", marginBottom: 2 }}>{t("agent.toolArgs")}</div>
-            <pre style={preStyle}>{argsJson}</pre>
-          </div>
-          {resultJson && (
-            <div>
-              <div style={{ color: "var(--text-muted)", marginBottom: 2 }}>
-                {t("agent.toolResult")}
-              </div>
-              <pre style={preStyle}>{resultJson}</pre>
-            </div>
-          )}
+          {statusLabel}
+        </span>
+      </button>
+      <Reveal id={disclosureId} open={open} role="group">
+        <div className="agent-tool-activity__details">
+          {block.type === "toolUse"
+            ? <>
+                <ToolDetail label={t("agent.toolArgs")} value={prettyJson(block.input)} />
+                {block.result !== undefined && (
+                  <ToolDetail label={t("agent.toolResult")} value={prettyJson(block.result)} />
+                )}
+              </>
+            : block.content.map((content, index) => {
+                if (content.kind === "text") {
+                  return <ToolDetail key={index} label={t("agent.toolResult")} value={content.text} />;
+                }
+                const source = safeRasterDataUri(content.mediaType, content.base64);
+                return source
+                  ? <img
+                      alt={t("agent.toolImageAlt", { tool: label })}
+                      className="agent-tool-activity__image"
+                      key={index}
+                      src={source}
+                    />
+                  : <span className="agent-tool-activity__image-error" key={index}>
+                      {t("agent.toolImageUnavailable")}
+                    </span>;
+              })}
         </div>
-      )}
+      </Reveal>
     </div>
   );
+}
+
+function ToolDetail({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="agent-tool-activity__detail">
+      <div className="agent-tool-activity__detail-label">{label}</div>
+      <pre>{value}</pre>
+    </div>
+  );
+}
+
+function prettyJson(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+const SAFE_RASTER_MEDIA_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+
+function safeRasterDataUri(mediaType: string, base64: string): string | null {
+  const normalizedMediaType = mediaType.trim().toLowerCase();
+  if (
+    !SAFE_RASTER_MEDIA_TYPES.has(normalizedMediaType) ||
+    base64.length === 0 ||
+    !BASE64_PATTERN.test(base64)
+  ) {
+    return null;
+  }
+  return `data:${normalizedMediaType};base64,${base64}`;
 }
 
 function iconButtonStyle(background: string, color: string): CSSProperties {
@@ -792,17 +953,3 @@ function iconButtonStyle(background: string, color: string): CSSProperties {
     flexShrink: 0,
   };
 }
-
-const preStyle: CSSProperties = {
-  margin: 0,
-  padding: "var(--space-xs)",
-  background: "rgba(0, 0, 0, 0.18)",
-  borderRadius: "var(--radius-sm)",
-  fontSize: "var(--fs-xs)",
-  fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-  color: "var(--text-secondary)",
-  whiteSpace: "pre-wrap",
-  wordBreak: "break-word",
-  maxHeight: 200,
-  overflowY: "auto",
-};
