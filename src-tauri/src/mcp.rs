@@ -775,6 +775,7 @@ impl MediaBridge for TauriMediaBridge {
     fn capture_timeline_result(
         &self,
         request: &TimelineResultCaptureRequest,
+        cancel: &opentake_media::MediaCancelToken,
     ) -> Result<Block, BridgeError> {
         let expected = request
             .mutation
@@ -817,7 +818,6 @@ impl MediaBridge for TauriMediaBridge {
             fps: snapshot.timeline.fps,
             playhead_frame: crate::render::root_timeline_playhead(snapshot.project_epoch),
         };
-        let cancel = opentake_media::MediaCancelToken::new();
         let authority = crate::render::CompositeSourceAuthority::new(HashMap::new());
         let rendered = crate::render::render_timeline_result_png(
             &snapshot.timeline,
@@ -825,7 +825,7 @@ impl MediaBridge for TauriMediaBridge {
             &snapshot.project_dir,
             &self.render,
             input,
-            &cancel,
+            cancel,
             &authority,
         )
         .map_err(BridgeError::new)?;
@@ -2811,18 +2811,21 @@ mod tests {
             fixture.path().join("models"),
         );
         let block = bridge
-            .capture_timeline_result(&TimelineResultCaptureRequest {
-                timeline: snapshot.timeline,
-                mutation: TimelineMutationReceipt {
-                    visible_clip_count_before: 1,
-                    visible_clip_count_after: 0,
-                    committed_revision: Some(opentake_agent::mcp::core_handle::CoreRevision {
-                        project_epoch: snapshot.project_epoch,
-                        project_dir: snapshot.project_dir,
-                        timeline_version: snapshot.version,
-                    }),
+            .capture_timeline_result(
+                &TimelineResultCaptureRequest {
+                    timeline: snapshot.timeline,
+                    mutation: TimelineMutationReceipt {
+                        visible_clip_count_before: 1,
+                        visible_clip_count_after: 0,
+                        committed_revision: Some(opentake_agent::mcp::core_handle::CoreRevision {
+                            project_epoch: snapshot.project_epoch,
+                            project_dir: snapshot.project_dir,
+                            timeline_version: snapshot.version,
+                        }),
+                    },
                 },
-            })
+                &opentake_media::MediaCancelToken::new(),
+            )
             .expect("capture current empty timeline");
 
         let Block::Image { base64, media_type } = block else {
@@ -2864,8 +2867,44 @@ mod tests {
         );
 
         bridge
-            .capture_timeline_result(&request)
+            .capture_timeline_result(&request, &opentake_media::MediaCancelToken::new())
             .expect_err("stale project capture must fail closed");
+    }
+
+    #[test]
+    fn tauri_bridge_cancels_real_empty_png_capture_with_the_request_token() {
+        let fixture = tempfile::tempdir().unwrap();
+        let core = AppCore::new();
+        core.save_project(Some(fixture.path().join("Cancelled.opentake")))
+            .unwrap();
+        let snapshot = core.runtime_snapshot();
+        let bridge = TauriMediaBridge::new(
+            core,
+            fixture.path().join("cache"),
+            fixture.path().join("models"),
+        );
+        let cancel = opentake_media::MediaCancelToken::new();
+        cancel.cancel();
+
+        let error = bridge
+            .capture_timeline_result(
+                &TimelineResultCaptureRequest {
+                    timeline: snapshot.timeline,
+                    mutation: TimelineMutationReceipt {
+                        visible_clip_count_before: 1,
+                        visible_clip_count_after: 0,
+                        committed_revision: Some(opentake_agent::mcp::core_handle::CoreRevision {
+                            project_epoch: snapshot.project_epoch,
+                            project_dir: snapshot.project_dir,
+                            timeline_version: snapshot.version,
+                        }),
+                    },
+                },
+                &cancel,
+            )
+            .expect_err("the original canceled request token must stop PNG capture");
+
+        assert!(error.message.contains("cancel"), "{}", error.message);
     }
 
     #[test]

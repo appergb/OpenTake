@@ -367,10 +367,12 @@ pub trait MediaBridge: Send + Sync {
 
     /// Produce one bounded PNG content block for the exact committed timeline.
     /// The host owns compositing, encoding, retained source authority, and the
-    /// final project-revision check.
+    /// final project-revision check. `cancel` is the caller's original request
+    /// token and must be propagated to every blocking render operation.
     fn capture_timeline_result(
         &self,
         _request: &TimelineResultCaptureRequest,
+        _cancel: &MediaCancelToken,
     ) -> Result<Block, BridgeError> {
         Err(BridgeError::unavailable(
             "timeline result capture is not available in this build",

@@ -17,6 +17,32 @@ the successful edit, emits only the fixed warning `Timeline preview unavailable.
 and returns no image. Cancellation or a project/timeline revision change before
 or after capture also prevents image publication.
 
+## Independent-review fixes
+
+Three medium-severity findings across the final independent-review rounds were
+resolved in follow-up TDD cycles:
+
+- The original dispatch `MediaCancelToken` now crosses `finish_dispatch`, the
+  `MediaBridge` boundary, and the production Tauri bridge into
+  `render_timeline_result_png`. The post-render identity check remains in place,
+  and the dispatcher still performs its final cancellation/revision check before
+  publishing any image.
+- Authoritative visibility-probe errors are no longer collapsed through
+  `.ok()?`. The dispatch receipt records a distinct sanitized-warning state;
+  completion appends `Timeline preview unavailable.` immediately after the text
+  summary without rolling back the committed edit or exposing bridge details.
+  Unchanged timelines short-circuit before the probe so unrelated metadata or
+  workflow mutations do not receive a false preview warning.
+
+The follow-up RED evidence was:
+
+- the visibility regression committed the deletion but failed because no warning
+  block was present;
+- the production cancellation regression failed to compile because the bridge
+  contract accepted no request token;
+- the independent-review unchanged-timeline regression failed because a
+  non-visual mutation incorrectly received the preview warning.
+
 ## RED evidence
 
 The required tests were written before production implementation.
@@ -61,13 +87,13 @@ then perform a short final project check.
 ## Verification
 
 - `cargo check -p opentake-tauri` — passed.
-- Focused mutation tests — 10 passed, 0 failed. Covers last-visible deletion,
+- Focused mutation tests — 12 passed, 0 failed. Covers last-visible deletion,
   deletion leaving content, non-visual mutation, rollback, pre/during-capture
   cancellation, Undo, batch single capture with exact counts, stale revision,
-  and sanitized capture failure.
-- `cargo test -p opentake-agent mcp:: -- --nocapture` — 180 passed, 0 failed.
-- Tauri production bridge focused tests — 2 passed, 0 failed (real bounded PNG
-  and stale-project rejection).
+  sanitized capture failure, and sanitized visibility-probe failure.
+- `cargo test -p opentake-agent mcp:: -- --nocapture` — 184 passed, 0 failed.
+- Tauri production bridge focused tests — 3 passed, 0 failed (real bounded PNG,
+  request-token cancellation, and stale-project rejection).
 - Tauri live-project MCP gate focused tests — 4 passed, 0 failed.
 - `cargo test -p opentake-tauri --lib render::tests:: -- --nocapture` — 17
   passed, 0 failed, including the authoritative visibility and two Task 4
