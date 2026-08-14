@@ -122,6 +122,15 @@ fn main_window_capability_exposes_no_shell_or_filesystem_commands() {
             && !permission.starts_with("http:")
             && !permission.starts_with("process:")
     }));
+
+    assert!(
+        permissions.contains(&"core:window:allow-set-size"),
+        "Appearance settings must be allowed to resize the packaged main window"
+    );
+    assert!(
+        permissions.contains(&"core:window:allow-set-position"),
+        "Appearance settings must be allowed to recenter the packaged main window"
+    );
 }
 
 #[test]
