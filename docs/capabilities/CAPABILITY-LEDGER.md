@@ -18,7 +18,7 @@ skip_when:
   - 仅查看单个内部函数
 priority: must
 freshness_class: project
-last_verified: 2026-08-21T21:31:52+08:00
+last_verified: 2026-08-21T22:15:18+08:00
 owners:
   - OpenTake-generation
 source_of_truth:
@@ -45,7 +45,7 @@ tags:
 - Models、Timeline、Track、Clip、Keyframe、Transform、TextStyle：domain crate 已有实现，需继续做完整行为级枚举。
 - EditCommand、事务边界、undo/redo、split/trim/move/ripple：ops/core 已有上游对齐实现；`split_clip_distributes_keyframes_at_cut` 通过。
 - Inspector、字幕/转写/搜索、Agent/MCP、Motion Studio opaque MP4：代码和对应测试入口已存在；仍需安装版场景证据才能升级为 verified。
-- Motion Studio transparent alpha：Rust/Web 纵切已接通并通过全量自动化；当前包已安装，但 Mac 锁屏使透明发布开关和时间线导入的最新屏幕验收暂时不能执行。
+- Motion Studio transparent alpha：Rust/Web 纵切已接通并通过全量自动化；最新包已完成透明开关、发布进度和时间线落轨屏幕验收，透明导出文件/保存重开仍待。
 - Agent/MCP linked move parity：`move_clips` 现在和上游约定一致，显式 `toFrame` 会把 frame delta 传播到 linked A/V partner，track-only move 不传播；新增两条 dispatcher 回归测试。
 
 ## 首轮明确缺口
@@ -70,8 +70,8 @@ tags:
 - Rust：`DocumentMotionAddRequest.transparent` 已贯通到模板渲染、`MotionRenderRequest.with_transparent(true)`、ProRes 4444 `.mov` 编码和项目媒体落盘；title-card/lower-third 模板在透明模式下不填充不透明底色；编辑已有透明 Motion 时从 manifest provenance 保留 `.mov`/alpha 格式。
 - Manifest：`GenerationInput.transparent` 持久化为 `true`，`MediaManifestEntry::carries_straight_alpha()` 对透明 Motion 返回 `true`；既有 RVM matting provenance 规则保持不变。
 - Web/Agent：Motion Studio Inspector 新增“透明背景（ProRes 4444）”开关；预览请求保持原 schema，只有发布请求带 `transparent` 字段，切换项目时重置为关闭；Agent `add_motion_graphic` 和 `publish_motion_document` 的新增 clip 路径也接受透明发布，已有透明 clip 的文档编辑保留 alpha。
-- 自动化证据：`src-tauri/tests/motion_command.rs` 的透明发布集成测试验证 `.mov`、ProRes、64×36 尺寸、完全透明像素和半透明动画像素；Rust workspace 串行全量通过（Tauri 720 tests、Motion Chromium/integration、导出/播放等）；Web 全量 `151 files / 1413 tests`、Web build 通过。
-- 安装包：当前 `/Applications/OpenTake.app` 二进制 SHA-256 `d5f8aa4650e9096fd7d04e21a48c328e3f7b7077542149b09656ac8612d87ae7`，构建产物与安装包一致。Computer Use 重试仍返回 Mac locked，因此不把开关点击、透明发布后时间线预览和导出画面对拍标记为通过。
+- 自动化证据：`src-tauri/tests/motion_command.rs` 的透明发布集成测试验证 `.mov`、ProRes、64×36 尺寸、完全透明像素和半透明动画像素；Rust workspace 串行全量通过（Tauri 720 tests、Motion Chromium/integration、导出/播放等）；Web 全量 `151 files / 1414 tests`、Web build 通过。
+- 安装包：当前 `/Applications/OpenTake.app` 二进制 SHA-256 `918eac845be23b4e5a528154ea95fbe321b871ab33bedbb1e7b05e0160c9551b`，构建产物与安装包一致。最新包已通过透明开关/发布/落轨屏幕路径；透明导出文件和保存重开仍未完成。
 
 ## 上游 linked A/V parity 当前切片
 
@@ -163,3 +163,4 @@ tags:
 - `2026-08-21T21:21:26+08:00` — 将透明参数接入 Agent `publish_motion_document` 的新增 clip schema/host bridge；已有透明 Motion 的 document edit 仍需由旧 manifest provenance 保留 alpha，本轮随后补齐并用真实 FFmpeg integration 验证。
 - `2026-08-21T21:21:26+08:00` — 重新构建并安装包含 Agent Motion 透明参数的 app，当前二进制 SHA-256 `38c814f4…bc838`；Computer Use 仍因 Mac locked 无法执行最新包屏幕 smoke。
 - `2026-08-21T21:31:52+08:00` — alpha-preserving document edit 真实 FFmpeg integration 通过，重新构建并安装当前 app，二进制 SHA-256 `d5f8aa46…87ae7`；屏幕 smoke 仍因 Mac locked 阻塞。
+- `2026-08-21T22:15:18+08:00` — 最新包 `918eac84…9551b` 完成真实桌面 smoke：小屏/标准 Home、媒体预览 tab、播放到尾帧、分割/撤销、导出面板和 Motion 透明发布落轨；Option trim 坐标接口仍返回 `noWindowsAvailable`，透明导出/保存重开保持待验证。

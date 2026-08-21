@@ -27,7 +27,7 @@ skip_when:
   - 仅修改零 IO 的 domain 算法且不改变 UI 合同
 priority: must
 freshness_class: project
-last_verified: 2026-08-21T21:31:52+08:00
+last_verified: 2026-08-21T22:15:18+08:00
 owners:
   - OpenTake-generation
 source_of_truth:
@@ -59,8 +59,8 @@ tags:
 
 | 场景 | 期望 | 实际 | 状态 | 证据 |
 |---|---|---|---|---|
-| Home / 标准档 / 小屏 | 不超过工作区，内容有合理最大宽度 | 新构建标准档按 monitor workArea 裁剪到约 `1331×768`，无白边；标准档仍会铺满小屏工作区，Home 最近项目卡留白偏多但不溢出 | 通过（窗口）/部分（Home 内容密度） | `src-tauri/tauri.conf.json`；`web/src/store/settingsStore.ts`；Task 2 5 files / 50 tests；新构建 Computer Use 截图 |
-| 设置 → 外观 → 紧凑 | 窗口收缩且内容仍可操作 | 新构建首次启动/切换后约 `1066×666`，紧凑 radio 状态正确，Home/编辑器可见 | 通过 | `settingsStore` + Home/SplitPane/Settings 50 tests；新构建 Computer Use 紧凑档截图 |
+| Home / 标准档 / 小屏 | 不超过工作区，内容有合理最大宽度 | 最新包标准档 Home 截图无白边、卡片不溢出；标准档工作区完整可见 | 通过（窗口）/部分（Home 内容密度） | `src-tauri/tauri.conf.json`；`web/src/store/settingsStore.ts`；Task 2 5 files / 50 tests；最新包 Computer Use 截图 |
+| 设置 → 外观 → 紧凑 | 窗口收缩且内容仍可操作 | 最新包切换后约 `1066×666`，紧凑 radio 状态正确，Home、时间线、预览、Inspector 和 Motion Studio 均可见 | 通过 | `settingsStore` + Home/SplitPane/Settings 50 tests；最新包 Computer Use 紧凑档截图 |
 | Home → 设置 | 设置面板可见、可操作 | 复现时曾抓到 AX 已更新但截图未重绘；关闭/重开后及当前复测设置面板可见，判定为 Computer Use 重绘时序风险，不先当产品黑屏根因 | 部分 | 当前复测 AX + 设置截图 |
 
 ## 功能场景
@@ -78,14 +78,14 @@ tags:
 | Timeline | 播放/暂停 | 播放头从 0 推进到约 54，时间从 00:00:00 推进到约 00:01:24 | 通过 | 增加暂停/恢复/seek/尾帧证据 |
 | Timeline | 选中片段 | 选中 `sample-text-0` 后 Inspector 切换到文本属性 | 通过 | 补选区、拖拽、删除和 undo |
 | Timeline | 播放头处分割 | 初始在帧 0 或片段外尝试时无变化；补齐有效前置条件（选中 `sample-text-0`、播放头推进到帧 15）后成功新增片段、撤销变可用 | 通过（有效前置条件） | 新构建 app AX：分割后出现 UUID 片段；`cargo test -p opentake-ops split_clip_distributes_keyframes_at_cut` 通过 |
-| Timeline | 入点/出点范围与范围边缘 | `TimelineContainer` 已接入 Shift+标尺 range mark、已有范围 start/end 边缘命中与拖动、clip-edge/playhead snap、pointercancel 回滚和同帧清除；时间轴目录 8 files / 88 tests、tsc、Web build 通过；最终安装包 SHA-256 `03bdcef3…`。Computer Use 音频 QA 工程能显示 V1+A1 和波形，但当前 sky 坐标拖动返回 `noWindowsAvailable`，因此没有把范围拖动及 `Shift+Delete` 的实际工程 diff 算作通过 | 部分 | 需要可复现的安装版坐标拖动证据，并对删除前后 Timeline、Undo/Redo 做状态对拍 |
+| Timeline | 入点/出点范围与范围边缘 | `TimelineContainer` 已接入 Shift+标尺 range mark、已有范围 start/end 边缘命中与拖动、clip-edge/playhead snap、pointercancel 回滚和同帧清除；Option trim 改为只修剪主 clip，普通 trim 保持 linked propagation；Web 全量 151 files / 1414 tests 通过。最新包屏幕上已完成播放到尾帧、有效分割产生 V/A 两组片段、Undo 恢复；Option trim 坐标拖动仍被 sky 返回 `noWindowsAvailable`，未把它升级为屏幕通过 | 部分 | 继续补可复现的安装版 Option trim、范围删除和 Shift+Delete 状态对拍 |
 | Inspector | 文本属性 | 可读出 Welcome to OpenTake、字体、字号、颜色、对齐、阴影、关键帧 | 通过 | 补编辑后保存重开 |
 | Preview | 带音频 fixture 的导入/波形/seek/暂停 | `nested-timeline-compound-export-2026-07-31.mp4`：7.700s、H.264 1280×720/30fps/231帧 + AAC 48kHz 单声道；安装版出现 V1+A1、A1 波形和音频 Inspector，已操作起点/中点/终点 seek，连续暂停状态稳定 | 部分 | 实时听感级同步和最新 cleanup 包的导出复测仍待 |
 | Preview | compositor temporal 预览 | 最新安装版在 QA 工程中设置 `speed=1.5` 和曝光 `0.50` compositor 属性后不再出现 unsupported surface；画面可见，播放头可到尾帧，暂停后抓帧按钮保持可用；speed/reversed 的首次 native render、JPEG publication、source-frame 映射由 Rust integration tests 锁定 | 通过（代码/native/屏幕组合证据） | 预览与导出起/中/尾帧、音频同步和取消仍在后续闭环 |
 | Preview | 多素材 tabs | 打开 `audit-4k60-h264` 与 `export-h264-frame30` 后显示 Timeline/两个媒体 tab；关闭第二个回退第一个 | 通过 | 安装版 AX：两个 Close 按钮；Preview slice 4 files / 91 tests |
 | Agent | 面板入口 | Agent 面板、新建对话标签、输入框出现；发送按钮禁用 | 通过 | 不发送外部消息；补本地失败/取消路径 |
 | Motion | Studio 入口 | HTML/CSS 编辑器、预览、参数检查器、关键帧时间线出现；播放帧推进 | 通过（既有桌面证据） | 用最新包补发布、保存重开和导入时间线 |
-| Motion | 透明发布 | Rust/Web 已贯通透明模板→Chromium alpha→ProRes 4444 `.mov`→manifest straight-alpha provenance；Web 透明背景开关和发布请求测试通过；最新包已安装但 Computer Use 仍因 Mac 锁屏无法点击开关并完成时间线画面对拍 | 部分（代码/自动化通过） | 解锁后执行透明开关、发布、时间线预览/导出和保存重开四步状态对拍 |
+| Motion | 透明发布 | 最新包 Motion Studio Inspector 可见并可点击“透明背景（ProRes 4444）”；真实发布进度出现，完成后素材库新增 Motion Graphic、时间线新增 V2 片段，预览/Inspector 均可见；ProRes/alpha 由 Rust FFmpeg integration 验证 | 部分（代码/自动化/发布屏幕通过） | 继续补透明输出的屏幕导出文件、保存重开和 Option trim 后的完整时间线对拍 |
 | Export | 导出面板 | 导出视频面板可打开，格式/分辨率/取消/导出可见 | 通过 | 复制目标路径后完成导出并 ffprobe |
 | Export | temporal 视频实际导出 | 修复 SavePanel filters 后，原生 Save 按钮可用；H.264 temporal QA 导出成功，应用显示 3840×2160 / 160 帧，ffprobe 显示 H.264、60fps、2.666667s | 通过（H.264 视频） | H.265/ProRes、带音频/字幕、取消和 preview/export 像素对拍仍待矩阵化 |
 | Export | 带音频 H.264/AAC 实际导出 | 安装包 `03bdcef3…` 生成 `qa-h264-aac-export.mp4`；ffprobe：H.264 1280×720/30fps/231 帧、AAC 48kHz 单声道/362 包、7.700s；音视频均 `ffmpeg -xerror` 通过；源/导出首中尾 SSIM `0.999997 / 0.999997 / 1.000000` | 通过（一次真实 QA 包）/当前包部分 | 当前安装包已更新为 `40c21ce0…e7f08`（代码 `741ff07`），但 SavePanel/取消/最新包重跑仍待；H.265/ProRes、字幕和实时音画同步仍待 |
@@ -110,10 +110,9 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - 代码 review：首轮 F1（无 monitor fallback）、F2（fresh install 默认档位）、F3（Home 真实 DOM/CSS contract）、F4（Settings 高度 contract）均已在 review loop 收口；最终 scoped review 无新 Critical/Important。
 - App 构建：release `.app` 已生成并安装；DMG bundle 脚本因超过一分钟无输出被停止，DMG 不在本轮交付证据内。
 - 本轮主线 fresh verification：Preview/Store/Media 4 files / 91 tests passed；MediaActions/MediaPanel 2 files / 59 tests passed；`pnpm build` exit 0。
-- 全量 Web 串行门禁：151 files / 1412 tests passed；运行时使用已初始化 localStorage file 和单 worker，包含无选区 split/trim no-op 回归。
-- 本轮 alpha slice Web 串行门禁：`NODE_OPTIONS=--localstorage-file=/tmp/opentake-vitest-localstorage.json pnpm exec vitest run --pool=forks --maxWorkers=1` → 151 files / 1413 tests passed；`pnpm build` exit 0。
+- 全量 Web 串行门禁：`NODE_OPTIONS=--localstorage-file=/tmp/opentake-vitest-localstorage-option-trim.json pnpm exec vitest run --pool=forks --maxWorkers=1` → 151 files / 1414 tests passed；`pnpm build` exit 0。
 - Rust workspace：`cargo test --workspace --jobs 1 -- --test-threads=1` 与 `cargo fmt --all -- --check` 通过；本轮包含缺失媒体 Preview/Playback fail-closed、透明 Motion ProRes 4444 集成和 RenderLoop 集成测试。全 workspace clippy 仍被既有 `chunks_exact`/`chunks_exact_mut` lint 阻塞，当前输出涉及 `opentake-media`、`opentake-motion` 等旧模块；一次未限并发运行在 motion sandbox 180s 超时，单独串行重跑通过，保留为 GPU/Chromium 资源争用风险；仅保留明确标记为 ignored 的 real-device / optional fixture tests。
-- 最终 `.app`：`web/node_modules/.bin/tauri build --bundles app` exit 0；当前安装包 SHA-256 `d5f8aa4650e9096fd7d04e21a48c328e3f7b7077542149b09656ac8612d87ae7`，构建产物 hash 一致；本轮 Computer Use 屏幕 smoke 因 Mac 锁定 blocked，媒体 Preview tabs/小屏等桌面证据仍引用之前的已完成专项包，透明 Motion 开关/发布也未升级为桌面通过。
+- 最终 `.app`：`web/node_modules/.bin/tauri build --bundles app` exit 0；当前安装包 SHA-256 `918eac845be23b4e5a528154ea95fbe321b871ab33bedbb1e7b05e0160c9551b`，构建产物 hash 一致；最新包已完成 Home 小屏、媒体预览 tab、播放/尾帧、分割/撤销、导出面板和 Motion 透明发布屏幕 smoke；Option trim/range delete/实际导出文件仍待。
 
 ## Related Documents
 
@@ -140,3 +139,4 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - `2026-08-21T20:57:59+08:00` — 写回 `OT-MOTION-ALPHA` 首条透明发布纵切：ProRes 4444 `.mov`、alpha manifest provenance、Motion Studio 开关和 151/1413 Web + Rust workspace 全量证据；最新安装包 `7634979e…607f00`。Mac 锁屏仍阻塞透明发布桌面对拍。
 - `2026-08-21T21:21:26+08:00` — Agent Motion 文档新增透明发布参数，重新构建并安装最新 app `38c814f4…bc838`；Computer Use 再次返回 Mac locked，屏幕验收边界不变。
 - `2026-08-21T21:31:52+08:00` — alpha-preserving document edit 修复后重新构建并安装最新 app `d5f8aa46…87ae7`；真实 FFmpeg add→edit integration 通过，Computer Use 仍返回 Mac locked。
+- `2026-08-21T22:15:18+08:00` — 最新包 `918eac84…9551b` 解锁后完成真实桌面 smoke：紧凑/标准 Home、媒体预览 tab、播放到尾帧、有效分割与撤销、导出面板、Motion 透明开关和透明发布落轨均通过；Option trim 坐标操作返回 `noWindowsAvailable`，保留为未完成屏幕证据。

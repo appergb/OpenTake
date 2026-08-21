@@ -205,9 +205,9 @@
 
   当前结果：安装包 `03bdcef3…` 已真实生成 H.264/AAC 输出，ffprobe、双流 `ffmpeg -xerror` 和首/中/尾 SSIM `0.999997 / 0.999997 / 1.000000` 通过；`0bae80e` 补了普通输出失败清理和 external cancel，`a7d98d6` 补了最终输出 symlink/reparse identity 拒绝。export unit 70/70、media cancel 18/18、audio/video integration 5/5 和顺序 Rust workspace 全量通过；当前安装包 `40c21ce0…e7f08` 已重建，但 SavePanel/取消/最新包导出尚未重跑，因此本步骤保持 partial，H.265/ProRes/字幕仍待。
 
-  下一执行切片：Linked A/V Timeline Parity。对齐 `crates/opentake-ops/src/ops/linking.rs`、`trim.rs`、`move_clips.rs`、`ripple.rs`、`command.rs` 与 `web/src/components/timeline/TimelineContainer.tsx`、`web/src/lib/editActions.ts`、`web/src/hooks/useKeyboardShortcuts.ts`；先补 linked trim、Option trim only-main、linked move partner delta/track、ripple sync-lock/atomic collision、Shift+Delete Undo/Redo、无选区 split no-op 的模块化测试，再做安装版状态对拍。
+  下一执行切片：Linked A/V Timeline Parity。对齐 `crates/opentake-ops/src/ops/linking.rs`、`trim.rs`、`move_clips.rs`、`ripple.rs`、`command.rs` 与 `web/src/components/timeline/TimelineContainer.tsx`、`web/src/lib/editActions.ts`、`web/src/hooks/useKeyboardShortcuts.ts`；linked move Agent parity 和 Option trim only-main 已补齐并通过自动化，继续补 linked trim/ripple sync-lock/atomic collision、Shift+Delete Undo/Redo，再做安装版状态对拍。
 
-  已完成的首个 parity micro-slice：上游 `splitAtPlayhead`、`trimStartToPlayhead`、`trimEndToPlayhead` 在无选区时均为 no-op；提交 `f05bac8`、`478e1b4`，Web 全量 `151 files / 1412 tests` 通过。当前安装包 `de4cb52b…25405` 已重建，但 Computer Use 因 Mac 锁定未完成屏幕状态对拍；linked trim/move/ripple 的正向带音频对拍仍待。
+  已完成的 parity slices：上游 `splitAtPlayhead`、`trimStartToPlayhead`、`trimEndToPlayhead` 无选区 no-op；Agent `move_clips` linked partner delta；Timeline Option/Alt trim only-main（普通 trim 仍同步 linked group）。Web 全量当前 `151 files / 1414 tests` 通过。最新包屏幕已完成有效分割/撤销和播放到尾帧；Option trim 坐标操作返回 `noWindowsAvailable`，linked trim/ripple/Shift+Delete 的正向安装版对拍仍待。
 
   同期补齐缺失媒体错误边界：提交 `741ff07` 让普通 Preview、Playback Image/Text 和 RenderLoop 集成路径都返回显式 materialization error，不再发布黑帧；render 18、resolver 15、playback integration 8、Tauri lib 719 和顺序 workspace 全量通过。`6b31449` 收口导出 clippy 建议；全 workspace clippy 仍有既有 `chunks_exact` lint。当前安装包 `7ad988f3…a9799` 已重建，最新屏幕 smoke 仍因 Mac 锁定未完成。
 
@@ -268,7 +268,7 @@
 
   覆盖编辑、预览、发布视频、取消、结果校验、导入时间线、保存重开和预览/导出一致性。
 
-  当前进展（2026-08-21）：`OT-MOTION-ALPHA-1` 的首条代码纵切已完成：透明模板背景、Chromium alpha capture、ProRes 4444/`yuva444p10le` `.mov`、`GenerationInput.transparent` / straight-alpha manifest provenance，以及 Motion Studio 透明背景发布开关均已接通；Agent `publish_motion_document` 的新增 clip 路径也已接通 transparent 参数，已有透明 Motion 的 document edit 会按旧 manifest 保留 alpha。透明发布和透明 edit 都有真实 FFmpeg integration 覆盖；Rust workspace 串行全量、Web 全量 `151 files / 1413 tests` 与 `pnpm build` 通过，当前包 `d5f8aa46…87ae7` 已重建并安装。仍未勾选本步骤：Mac 锁屏阻塞最新包屏幕操作，透明开关→发布→时间线预览/导出→保存重开的桌面状态对拍未完成；opaque clip 在编辑时切换为透明仍不支持。
+  当前进展（2026-08-21）：`OT-MOTION-ALPHA-1` 的透明模板、Chromium alpha、ProRes 4444、manifest provenance、Motion Studio/Agent 发布开关、alpha-preserving edit 均已实现并有自动化/真实 FFmpeg 证据。最新包 `918eac84…9551b` 已完成透明开关、发布进度、时间线落轨和 Inspector/预览屏幕验收；Web 全量 `151 files / 1414 tests`、`pnpm build` 通过。仍未勾选本步骤：透明导出文件和保存重开屏幕对拍未完成；opaque clip 在编辑时切换为透明仍不支持。
 
 - [ ] **Step 5: 验证设置和帮助**
 
