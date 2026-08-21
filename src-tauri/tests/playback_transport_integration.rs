@@ -4,15 +4,27 @@
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
+use std::thread::sleep;
 use std::time::Duration;
 
+use opentake_domain::{
+    Clip, ClipType, MediaManifest, MediaManifestEntry, MediaSource, Timeline, Track,
+};
+use opentake_media::{decode_frame_at, FrameRequest};
 use opentake_render::DecodedFrame;
+use opentake_render::RenderSize;
 use opentake_tauri_lib::playback::session::PlaybackIdentity;
 use opentake_tauri_lib::playback::transport::PublicationGate;
-use opentake_tauri_lib::playback::{FrameSink, PreviewServer};
+use opentake_tauri_lib::playback::{
+    project_media, project_text, FrameSink, PreviewServer, RenderLoop,
+};
 
 const BOUNDARY: &[u8] = b"\r\n--opentake_mjpeg_boundary\r\n";
+const WARMUP_TRIES: usize = 200;
+const WARMUP_SLEEP: Duration = Duration::from_millis(10);
 
 struct HttpHead {
     status: u16,
@@ -31,6 +43,88 @@ fn port_of(endpoint: &str) -> u16 {
 fn start_server() -> Arc<PreviewServer> {
     tauri::async_runtime::block_on(PreviewServer::start())
         .expect("preview server must bind its loopback port")
+}
+
+fn ffmpeg_ready() -> bool {
+    Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+fn make_distinct_cfr_video(path: &Path, w: u32, h: u32, fps: u32, frames: u32) {
+    let output = Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc2=size={w}x{h}:rate={fps}"),
+            "-frames:v",
+            &frames.to_string(),
+            "-c:v",
+            "libx264",
+            "-g",
+            &frames.to_string(),
+            "-keyint_min",
+            &frames.to_string(),
+            "-sc_threshold",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-fps_mode",
+            "cfr",
+            "-y",
+        ])
+        .arg(path)
+        .output()
+        .expect("required ffmpeg must start for transport parity fixture");
+    assert!(
+        output.status.success(),
+        "generate transport parity fixture: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn external_entry(id: &str, path: &Path, w: i32, h: i32, fps: f64) -> MediaManifestEntry {
+    MediaManifestEntry {
+        id: id.into(),
+        name: format!("{id}.mp4"),
+        kind: ClipType::Video,
+        source: MediaSource::External {
+            absolute_path: path.to_string_lossy().into_owned(),
+        },
+        duration: 1.0,
+        generation_input: None,
+        source_width: Some(w),
+        source_height: Some(h),
+        source_fps: Some(fps),
+        has_audio: Some(false),
+        color: None,
+        proxy: None,
+        folder_id: None,
+        cached_remote_url: None,
+        cached_remote_url_expires_at: None,
+    }
+}
+
+fn try_render_loop(
+    timeline: Timeline,
+    manifest: &MediaManifest,
+    render_size: RenderSize,
+) -> Option<RenderLoop> {
+    let (sizes, media) = project_media(manifest, &None);
+    let text = project_text(&timeline);
+    match RenderLoop::new(timeline, media, text, sizes, render_size) {
+        Ok(render_loop) => Some(render_loop),
+        Err(error) if error.contains("no GPU device") => {
+            eprintln!("skip: no GPU adapter available ({error})");
+            None
+        }
+        Err(error) => panic!("render loop init failed: {error}"),
+    }
 }
 
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -111,6 +205,26 @@ fn solid_frame(width: u32, height: u32, rgb: [u8; 3]) -> DecodedFrame {
         rgba.extend_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
     }
     DecodedFrame::new(width, height, rgba, false)
+}
+
+fn render_until_matches(
+    render_loop: &mut RenderLoop,
+    target: i32,
+    expected_rgba: &[u8],
+    width: u32,
+    height: u32,
+) -> Option<DecodedFrame> {
+    for _ in 0..WARMUP_TRIES {
+        let frame = render_loop
+            .render_frame(target)
+            .expect("render target frame");
+        assert_eq!((frame.width, frame.height), (width, height));
+        if frame.rgba == expected_rgba {
+            return Some(frame);
+        }
+        sleep(WARMUP_SLEEP);
+    }
+    None
 }
 
 struct ChunkedReader {
@@ -290,4 +404,91 @@ fn stream_route_rejects_cross_origin() {
         "Origin: http://localhost.evil.example\r\n",
     );
     assert_eq!(head.status, 403);
+}
+
+#[test]
+fn frame_route_preserves_fractional_speed_publication_order_and_decodability() {
+    if !ffmpeg_ready() {
+        eprintln!("skip: ffmpeg not available");
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("fixture tempdir");
+    let src = dir.path().join("speed-15-cfr.mp4");
+    let (w, h, fps, frames) = (160u32, 90u32, 12u32, 12u32);
+    make_distinct_cfr_video(&src, w, h, fps, frames);
+
+    let mut timeline = Timeline::new();
+    timeline.fps = fps as i32;
+    let mut track = Track::new("t1", ClipType::Video);
+    let mut clip = Clip::new("clip-1", "asset-1", 0, 6);
+    clip.trim_start_frame = 2;
+    clip.speed = 1.5;
+    track.clips.push(clip);
+    timeline.tracks.push(track);
+
+    let mut manifest = MediaManifest::new();
+    manifest.entries.push(external_entry(
+        "asset-1", &src, w as i32, h as i32, fps as f64,
+    ));
+
+    let Some(mut render_loop) = try_render_loop(timeline, &manifest, RenderSize::new(w, h)) else {
+        return;
+    };
+
+    let server = start_server();
+    let port = port_of(&server.endpoint());
+    let identity = PlaybackIdentity::new(19, 27, "session-speed-15").unwrap();
+    let sink = server.sink(identity.clone(), PublicationGate::open());
+    let publication = sink.publication();
+    let targets = [(0, 2), (3, 7), (5, 10)];
+    let last_frame = targets.last().expect("terminal target").0;
+    let mut emitted = Vec::new();
+
+    for (target, source_frame) in targets {
+        let request = FrameRequest {
+            time_secs: source_frame as f64 / fps as f64,
+            max_size: (w, h),
+            tolerance_secs: 0.0,
+            apply_rotation: true,
+        };
+        let (_, expected) = decode_frame_at(&src, &request).expect("decode exact source frame");
+        let frame = render_until_matches(&mut render_loop, target, &expected.rgba, w, h)
+            .expect("render loop should converge to the planned source frame");
+        sink.push_frame(&frame);
+        let event = publication
+            .commit(target, last_frame)
+            .expect("commit staged playback frame");
+        let payload = serde_json::to_value(&event).expect("serialize playback publication");
+        let sequence = payload["sequence"]
+            .as_u64()
+            .expect("publication sequence is numeric");
+        let (head, jpeg) = finite_get(port, &frame_path(&identity, target, sequence), "");
+        assert_eq!(head.status, 200, "published frame {target} should resolve");
+        let image = image::load_from_memory(&jpeg).expect("decode published playback JPEG");
+        assert_eq!((image.width(), image.height()), (w, h));
+        emitted.push(payload);
+    }
+
+    assert_eq!(
+        emitted
+            .iter()
+            .map(|payload| payload["frame"].as_i64().expect("frame integer"))
+            .collect::<Vec<_>>(),
+        vec![0, 3, 5]
+    );
+    assert_eq!(
+        emitted
+            .iter()
+            .map(|payload| payload["sequence"].as_u64().expect("sequence integer"))
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(
+        emitted
+            .iter()
+            .map(|payload| payload["terminal"].as_bool().expect("terminal bool"))
+            .collect::<Vec<_>>(),
+        vec![false, false, true]
+    );
 }

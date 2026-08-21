@@ -526,6 +526,20 @@ fn source_frame_video_with_trim_and_speed() {
 }
 
 #[test]
+fn source_frame_video_with_trim_and_fractional_speed() {
+    let mut clip = video_clip("c0", 0, 6);
+    clip.trim_start_frame = 2;
+    clip.speed = 1.5;
+    let tl = single_video_timeline(clip);
+    let plan = build_render_plan(&tl, RS, &TestMetrics::default());
+    let cp = &plan.clip_plans[0];
+
+    assert_eq!(source_frame_index(cp, 0), 2);
+    assert_eq!(source_frame_index(cp, 3), 7);
+    assert_eq!(source_frame_index(cp, 5), 10);
+}
+
+#[test]
 fn source_frame_video_reversed_respects_trim_window() {
     let mut clip = video_clip("c0", 0, 20);
     clip.trim_start_frame = 10;
