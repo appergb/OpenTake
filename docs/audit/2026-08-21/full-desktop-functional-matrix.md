@@ -27,7 +27,7 @@ skip_when:
   - 仅修改零 IO 的 domain 算法且不改变 UI 合同
 priority: must
 freshness_class: project
-last_verified: 2026-08-21T19:32:27+08:00
+last_verified: 2026-08-21T19:48:03+08:00
 owners:
   - OpenTake-generation
 source_of_truth:
@@ -109,9 +109,9 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - 代码 review：首轮 F1（无 monitor fallback）、F2（fresh install 默认档位）、F3（Home 真实 DOM/CSS contract）、F4（Settings 高度 contract）均已在 review loop 收口；最终 scoped review 无新 Critical/Important。
 - App 构建：release `.app` 已生成并安装；DMG bundle 脚本因超过一分钟无输出被停止，DMG 不在本轮交付证据内。
 - 本轮主线 fresh verification：Preview/Store/Media 4 files / 91 tests passed；MediaActions/MediaPanel 2 files / 59 tests passed；`pnpm build` exit 0。
-- 全量 Web 串行门禁：151 files / 1410 tests passed；运行时使用已初始化 localStorage file 和单 worker。
+- 全量 Web 串行门禁：151 files / 1412 tests passed；运行时使用已初始化 localStorage file 和单 worker，包含无选区 split/trim no-op 回归。
 - Rust workspace：`cargo test --workspace --jobs 1 -- --test-threads=1` 与 `cargo fmt --all -- --check` 通过；一次未限并发运行在 motion sandbox 180s 超时，单独串行重跑通过，保留为 GPU/Chromium 资源争用风险；仅保留明确标记为 ignored 的 real-device / optional fixture tests。
-- 最终 `.app`：`web/node_modules/.bin/tauri build --bundles app` exit 0；当前安装包 SHA-256 `12e1db5490172ec5b74b71b517ea7277255269f6ab4e2e02b53c03a5fe9455d9`，对应提交 `a7d98d6`；媒体 Preview tabs 的桌面证据仍引用之前的专项包，最新包 UI 重跑未假装完成。
+- 最终 `.app`：`web/node_modules/.bin/tauri build --bundles app` exit 0；当前安装包 SHA-256 `de4cb52bf10020d0bf39c3a293fdd4f9b08e28ffccc0de57fe0afe1042425405`，对应提交 `478e1b4`；本轮 Computer Use 屏幕 smoke 因 Mac 锁定 blocked，媒体 Preview tabs/小屏等桌面证据仍引用之前的已完成专项包。
 
 ## Related Documents
 
@@ -132,3 +132,4 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - `2026-08-21T16:46:00+08:00` — 全量 Web 串行门禁更新为 151 files / 1410 tests passed；时间轴 range slice 仍保持 Ready、整体桌面 QA 仍为 partial。
 - `2026-08-21T17:46:17+08:00` — 写回带音频 H.264/AAC 安装版导出、ffprobe、完整解码和首中尾 SSIM；新增 export cleanup/external cancel 代码与 workspace 门禁。最新 cleanup 包的 SavePanel 复测仍记录为 partial，不把旧包成功静默升级。
 - `2026-08-21T19:32:27+08:00` — 写回 `a7d98d6` 的 symlink/reparse identity 防护、70 个 export 单测、顺序 workspace 全量门禁和最新安装包 `12e1db…9455d9`；并发 motion 超时保留为环境风险。
+- `2026-08-21T19:48:03+08:00` — 写回 `f05bac8`/`478e1b4` 的无选区 split/trim parity、Web 151/1412 全量门禁和最新安装包 `de4cb52b…25405`；Computer Use 因 Mac 锁定未完成屏幕 smoke。

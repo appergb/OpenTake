@@ -207,6 +207,8 @@
 
   下一执行切片：Linked A/V Timeline Parity。对齐 `crates/opentake-ops/src/ops/linking.rs`、`trim.rs`、`move_clips.rs`、`ripple.rs`、`command.rs` 与 `web/src/components/timeline/TimelineContainer.tsx`、`web/src/lib/editActions.ts`、`web/src/hooks/useKeyboardShortcuts.ts`；先补 linked trim、Option trim only-main、linked move partner delta/track、ripple sync-lock/atomic collision、Shift+Delete Undo/Redo、无选区 split no-op 的模块化测试，再做安装版状态对拍。
 
+  已完成的首个 parity micro-slice：上游 `splitAtPlayhead`、`trimStartToPlayhead`、`trimEndToPlayhead` 在无选区时均为 no-op；提交 `f05bac8`、`478e1b4`，Web 全量 `151 files / 1412 tests` 通过。当前安装包 `de4cb52b…25405` 已重建，但 Computer Use 因 Mac 锁定未完成屏幕状态对拍；linked trim/move/ripple 的正向带音频对拍仍待。
+
 ### Task 6: 收敛媒体、Inspector、字幕和项目生命周期
 
 **Files:**

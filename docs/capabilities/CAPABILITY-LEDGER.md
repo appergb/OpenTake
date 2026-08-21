@@ -18,7 +18,7 @@ skip_when:
   - 仅查看单个内部函数
 priority: must
 freshness_class: project
-last_verified: 2026-08-21T19:32:27+08:00
+last_verified: 2026-08-21T19:48:03+08:00
 owners:
   - OpenTake-generation
 source_of_truth:
@@ -52,7 +52,7 @@ tags:
 |---|---:|---|---|---|
 | `OT-WINDOW-SMALL-SCREEN` | P0 | verified | Tauri 安全初始尺寸 + monitor-aware standard/compact 裁剪 + Home/Editor min-size 回归 | 1066×666、1280×720、1331×768 contract 测试；安装版紧凑/标准切换与 Home/编辑器截图 |
 | `UP-MEDIA-IMPORT-AND-FOLDERS` | P0 | verified | 文件/文件夹导入、跳过 unsupported、relink 和预览均已通过安装版验收 | 新构建 app 中 MP4、PNG、双文件多选 Open 可用；导入数 1→3；文件夹导入出现目录并提示跳过 64；relink 恢复离线媒体 |
-| `UP-TIMELINE-UI` | P0 | partial | 已补 Shift+标尺范围标记、范围 start/end 边缘命中/拖动、标尺吸附、取消回滚、同帧清除和 PointerEvent 回归；继续补真实删除、撤销及拖拽对拍 | 新构建 app 选中 `sample-text-0`、播放头帧 15 后 `⌘K` 成功新增 UUID 片段并启用撤销；范围代码已由时间轴 8 files / 88 tests、tsc 和 Web build 锁定，最终包 `03bdcef3…` 已安装，坐标拖动仍待 |
+| `UP-TIMELINE-UI` | P0 | partial | 已补 Shift+标尺范围标记、范围 start/end 边缘命中/拖动、标尺吸附、取消回滚、同帧清除、PointerEvent 回归，以及上游 playhead split/trim 的无选区 no-op 语义；继续补真实删除、撤销及拖拽对拍 | 时间轴目录 8 files / 88 tests；linked slice 新增 command routing 2 个 no-selection 测试，Web 全量 151 files / 1412 tests；最新包 `de4cb52b…` 已安装但本轮屏幕重跑因 Mac 锁定 blocked |
 | `UP-PREVIEW-PLAYBACK` | P0 | partial | compositor temporal route、speed/reversed 原生帧映射和音频整轨解码已补齐；安装版与 preview/export 全面对拍仍继续 | preview/export 同帧语义、音画同步、取消和错误边界全部有证据后再升级 |
 | `UP-EXPORT` | P0 | partial | H.264/AAC、H.265、ProRes 422 和字幕命令已有实现；普通输出失败清理、external cancel 全链路、输出父目录/文件 identity 校验已补齐 | 70 个 export 单测、18 个 media cancel 测试、5 个 export integration 和顺序 Rust workspace 门禁通过；真实 H.264/AAC 文件及首中尾帧已有一次安装版证据，但最新包的 SavePanel、H.265/ProRes/字幕/取消仍待 |
 | `UP-PREVIEW-TABS` | P1 | verified | `previewTabIds + previewTabHistory + activeTabId`，含 legacy 归一和删除清理 | 安装版同时显示 Timeline/两个素材 tab；关闭第二个回退第一个；91 个定向测试通过 |
@@ -74,6 +74,7 @@ tags:
 - 带音频 fixture `nested-timeline-compound-export-2026-07-31.mp4` 已通过 `ffmpeg -xerror` 音视频解码；安装版出现 V1+A1、A1 波形和音频 Inspector，并完成起点/中点/终点 seek 与暂停稳定性检查。fixture 为 7.700s H.264 1280×720/30fps/231帧 + AAC 48kHz 单声道；独立实时听感级音画同步仍未完成。
 - 带音频导出真实证据：在安装包 `03bdcef36def17646c64e6c40978e26b6b675a5d90874e3264d93a0e3351ce2e` 中生成 `/private/tmp/opentake-audio-export-qa-YPhWaR/qa-h264-aac-export.mp4`；ffprobe 为 H.264 1280×720/30fps/231 帧 + AAC 48kHz 单声道/362 包/7.700s，视频和音频均通过 `ffmpeg -xerror`。源/导出首中尾 SSIM：`0.999997 / 0.999997 / 1.000000`，帧文件在 `/private/tmp/opentake-audio-frame-compare.M2Jvfu/`。这证明一次真实 preview-source/export 对拍，但不是听感级实时同步证据；cleanup 版最新包 `ca08edf97441ce3b3c69b5683a3b7383997371952490c8897021772e521eed64` 的 SavePanel 复测仍保持 partial。
 - 导出失败边界：`0bae80e` 增加 identity-safe 普通输出 guard、replacement race 测试、双 cancel source fail-closed；`a7d98d6` 再拒绝最终输出路径的 symlink/reparse identity，并新增替换为 symlink 的回归测试。当前 `export::tests` 70/70、`opentake-media` cancel 18/18、带音频 integration 5/5 通过。
+- 上游 playhead parity：`f05bac8` 修复无选区 `splitAtPlayhead` 不应发编辑请求，`478e1b4` 修复无选区 Q/W trim 不应发编辑请求；相关 Web 全量门禁 `151 files / 1412 tests` 通过。最新 app `de4cb52b…` 已构建并安装，但 Computer Use 因 Mac 锁定未能完成本轮屏幕 smoke。
 - 曾出现 AX 更新但截图未重绘的黑屏瞬间；关闭/重开后页面正常，后续以窗口重绘时序风险记录，不把瞬态截图直接等同于产品黑屏。
 
 ## 定向验证
@@ -138,3 +139,4 @@ tags:
 
 - `2026-08-21T10:06:00+08:00` — 写入首轮 UI 真机巡检和上游 parity audit；状态均保守记录为 implemented/partial/blocked。
 - `2026-08-21T19:32:27+08:00` — 修复最终输出 symlink/reparse identity 校验并通过 RED→GREEN 回归；顺序 Rust workspace 全量通过；重新构建并安装对应提交 `a7d98d6` 的 app，记录 SHA-256 `12e1db…9455d9`。并发 workspace motion 超时保留为环境风险。
+- `2026-08-21T19:48:03+08:00` — 对齐上游无选区 split/trim no-op（`f05bac8`、`478e1b4`），Web 全量更新为 151 files / 1412 tests；最新安装包 SHA-256 `de4cb52b…25405`。Computer Use 屏幕 smoke 因 Mac 锁定 blocked，未升级桌面证据。
