@@ -131,7 +131,7 @@
 
   截图、日志、ffprobe 摘要和测试命令按场景编号存放；敏感路径和凭据脱敏。
 
-  结果：首轮和第二轮 UI agent 报告已合并；窗口、项目生命周期、文件/文件夹/relink 导入、视频素材预览、播放/seek、有效分割/撤销、Inspector、设置、Preview tabs、导出面板和帮助均有证据；音频独立预览、全局素材库/Motion 的稳定截图、最终导出仍在后续矩阵。
+  结果：首轮和第二轮 UI agent 报告已合并；窗口、项目生命周期、文件/文件夹/relink 导入、视频素材预览、播放/seek、有效分割/撤销、Inspector、设置、Preview tabs、导出面板和帮助均有证据；媒体 folder/flat/grouped 三态、网格/列表密度、真实文件夹导航和音频导入/收藏子页也已在安装版验收；音频独立预览、全局素材库/Motion 的稳定截图、最终导出仍在后续矩阵。
 
 ### Task 4: 收敛 Models、EditCommand 和时间轴编辑 parity
 
