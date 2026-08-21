@@ -102,7 +102,13 @@ type DragState =
       /** Where the drag will land (existing track or a new track below). */
       dropTarget: DropTarget;
     }
-  | { kind: "trimLeft" | "trimRight"; hit: ClipHit; startTrim: number; deltaFrames: number }
+  | {
+      kind: "trimLeft" | "trimRight";
+      hit: ClipHit;
+      startTrim: number;
+      deltaFrames: number;
+      propagateToLinked: boolean;
+    }
   | { kind: "marquee"; startDocX: number; startDocY: number; curDocX: number; curDocY: number }
   | {
       kind: "audioVolumeKf";
@@ -435,6 +441,15 @@ export function clipSelectionForInteraction(
   if (modifiers.altKey && !already) return new Set([clipId]);
   if (!already) return group;
   return selectedClipIds;
+}
+
+/** Resolve the clips whose trim edge follows one timeline trim gesture. */
+export function trimParticipantIds(
+  timeline: Timeline,
+  clipId: string,
+  propagateToLinked: boolean,
+): Set<string> {
+  return propagateToLinked ? expandLinkGroup(timeline, new Set([clipId])) : new Set([clipId]);
 }
 
 /**
@@ -997,6 +1012,8 @@ export function TimelineContainer() {
         clipId: d.hit.clip.id,
         edge: d.kind === "trimLeft" ? "left" : "right",
         deltaFrames: d.deltaFrames,
+        propagateToLinked: d.propagateToLinked,
+        linkGroupId: d.hit.clip.linkGroupId,
       };
     } else if (d?.kind === "audioVolumeKf") {
       drag = {
@@ -1597,19 +1614,21 @@ export function TimelineContainer() {
             grabFrame: frameAt(docX, zoomScale),
             currentFrames: fadeHit.currentFrames,
           };
-        } else if (hit.region === "trimLeft" && !e.altKey) {
+        } else if (hit.region === "trimLeft") {
           dragRef.current = {
             kind: "trimLeft",
             hit,
             startTrim: hit.clip.trimStartFrame,
             deltaFrames: 0,
+            propagateToLinked: !e.altKey,
           };
-        } else if (hit.region === "trimRight" && !e.altKey) {
+        } else if (hit.region === "trimRight") {
           dragRef.current = {
             kind: "trimRight",
             hit,
             startTrim: hit.clip.trimEndFrame,
             deltaFrames: 0,
+            propagateToLinked: !e.altKey,
           };
         } else {
           const grabFrame = frameAt(docX, zoomScale);
@@ -2100,7 +2119,7 @@ export function TimelineContainer() {
         // Linked partners trim together (upstream commitTrim): apply the SAME
         // timeline-frame edge delta to every clip in the link group, each
         // converted to its own SOURCE-frame trim via round(delta*speed).
-        const groupIds = expandLinkGroup(timeline, new Set([d.hit.clip.id]));
+        const groupIds = trimParticipantIds(timeline, d.hit.clip.id, d.propagateToLinked);
         const edits = [...groupIds]
           .map((id) => {
             const loc = findClipLoc(timeline, id);

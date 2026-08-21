@@ -429,6 +429,23 @@ describe("accessibleClipRects", () => {
     expect(timelineContainerSource).not.toContain("selectClips(new Set([rect.clipId]))");
   });
 
+  it("propagates trim participants by default and isolates the lead with Option", () => {
+    const tl = timeline([
+      track("v1", [clip({ id: "video", mediaType: "video", linkGroupId: "pair" })]),
+      track("a1", [clip({ id: "audio", mediaType: "audio", linkGroupId: "pair" })], "audio"),
+    ]);
+
+    expect(
+      Array.from(timelineContainer.trimParticipantIds?.(tl, "video", true) ?? []).sort(),
+    ).toEqual(["audio", "video"]);
+    expect(
+      Array.from(timelineContainer.trimParticipantIds?.(tl, "video", false) ?? []),
+    ).toEqual(["video"]);
+    expect(timelineContainerSource).toContain("propagateToLinked: !e.altKey");
+    expect(timelineContainerSource).not.toContain('hit.region === "trimLeft" && !e.altKey');
+    expect(timelineContainerSource).not.toContain('hit.region === "trimRight" && !e.altKey');
+  });
+
   it("exposes button selection through the pressed state", () => {
     expect(timelineContainerSource).toContain("aria-pressed={selectedClipIds.has(rect.clipId)}");
     expect(timelineContainerSource).not.toContain("aria-selected={selectedClipIds.has(rect.clipId)}");
