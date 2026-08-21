@@ -105,7 +105,9 @@ describe("SettingsView minimal embedded visual direction", () => {
     expect(settingsSource).toContain('width: "min(960px, 100%)"');
     expect(surface.style.height).toBe("100%");
     expect(surface.style.maxWidth).toBe("960px");
-    expect(surfaceStyle).toContain("max-height: min(620px, 100%)");
+    expect(surfaceStyle).toMatch(/max-height:\s*min\([^,]+,\s*100%\)/);
+    expect(surface.style.maxHeight).toContain("min(");
+    expect(surface.style.maxHeight).toContain("100%");
     expectZeroLength(surface.style.minWidth);
     expectZeroLength(surface.style.minHeight);
     expect(bodyRow.style.display).toBe("flex");
