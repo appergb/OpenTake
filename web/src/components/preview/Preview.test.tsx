@@ -186,6 +186,24 @@ function timeline(tracks: Track[]): Timeline {
   return { fps: 30, width: 1920, height: 1080, settingsConfigured: true, tracks };
 }
 
+function temporalCompositorTimeline(): Timeline {
+  return timeline([
+    track({
+      id: "text-1",
+      type: "text",
+      clips: [
+        clip({
+          id: "text-remap",
+          mediaRef: "base",
+          mediaType: "text",
+          reversed: true,
+          speed: 1.5,
+        }),
+      ],
+    }),
+  ]);
+}
+
 describe("Preview timeline rendering", () => {
   beforeEach(() => {
     store.ui = {
@@ -336,8 +354,8 @@ describe("Preview timeline rendering", () => {
     store.timeline = timeline([
       track({
         id: "v1",
-        type: "text",
-        clips: [clip({ id: "text-clip", mediaRef: "base", mediaType: "text", reversed: true })],
+        type: "lottie",
+        clips: [clip({ id: "lottie-clip", mediaRef: "base", mediaType: "lottie" })],
       }),
     ]);
 
@@ -348,12 +366,35 @@ describe("Preview timeline rendering", () => {
     expect(html).not.toContain("<video");
   });
 
+  it("uses the native surface for a temporal compositor timeline when Rust is available", () => {
+    store.timeline = temporalCompositorTimeline();
+
+    const html = renderToStaticMarkup(<Preview />);
+
+    expect(html).not.toContain('data-testid="unsupported-playback-surface"');
+    expect(html).toContain('data-playback-surface="native"');
+    expect(html).not.toMatch(/aria-label="播放\/暂停 \(空格\)"[^>]*disabled/);
+    expect(html).not.toMatch(/aria-label="截取当前帧到素材库"[^>]*disabled/);
+  });
+
+  it("keeps the typed unsupported surface for a temporal compositor timeline when Rust is unavailable", () => {
+    store.playbackCapability = { checked: true, available: false, endpoint: null };
+    store.timeline = temporalCompositorTimeline();
+
+    const html = renderToStaticMarkup(<Preview />);
+
+    expect(html).toContain('data-testid="unsupported-playback-surface"');
+    expect(html).not.toContain('data-playback-surface="native"');
+    expect(html).toMatch(/aria-label="播放\/暂停 \(空格\)"[^>]*disabled/);
+    expect(html).toMatch(/aria-label="截取当前帧到素材库"[^>]*disabled/);
+  });
+
   it("disables play and capture for unsupported playback", () => {
     store.timeline = timeline([
       track({
         id: "v1",
-        type: "text",
-        clips: [clip({ id: "text-clip", mediaRef: "base", mediaType: "text", reversed: true })],
+        type: "lottie",
+        clips: [clip({ id: "lottie-clip", mediaRef: "base", mediaType: "lottie" })],
       }),
     ]);
 

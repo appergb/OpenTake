@@ -650,21 +650,27 @@ export function Preview() {
                     }
                   />
                 )}
-                <RustFrameBuffer
-                  event={nativeFrameEvent}
-                  endpoint={previewFrameEndpoint}
-                  projectEpoch={projectEpoch}
-                  timelineVersion={timelineVersion}
-                  engineDriving={playbackRoute.kind === "rust" && isPlaying}
-                  stillFrame={
-                    playbackRoute.kind !== "unsupported" && !isPlaying && !isScrubbing
-                      ? Math.max(0, Math.floor(activeFrame))
-                      : null
+                <div
+                  data-playback-surface={
+                    playbackRoute.kind === "rust" ? "native" : undefined
                   }
-                  requestCompositeStill={requestCompositeStill}
-                  cancelCompositeStill={cancelCompositeFrame}
-                  onTerminalFailure={() => pushToast(t("preview.terminalFrameFailed"))}
-                />
+                >
+                  <RustFrameBuffer
+                    event={nativeFrameEvent}
+                    endpoint={previewFrameEndpoint}
+                    projectEpoch={projectEpoch}
+                    timelineVersion={timelineVersion}
+                    engineDriving={playbackRoute.kind === "rust" && isPlaying}
+                    stillFrame={
+                      playbackRoute.kind !== "unsupported" && !isPlaying && !isScrubbing
+                        ? Math.max(0, Math.floor(activeFrame))
+                        : null
+                    }
+                    requestCompositeStill={requestCompositeStill}
+                    cancelCompositeStill={cancelCompositeFrame}
+                    onTerminalFailure={() => pushToast(t("preview.terminalFrameFailed"))}
+                  />
+                </div>
                 {/* Below-fit canvas outline (upstream PreviewContainerView.swift:
                     44-47: Rectangle stroke white @ Opacity.moderate=0.25 when
                     canvasZoom < 1.0, else invisible). pointer-events:none so it

@@ -211,6 +211,23 @@ function rustTimeline(overrides: Partial<Clip> = {}): Timeline {
   ]);
 }
 
+function temporalCompositorTimeline(): Timeline {
+  return timeline([
+    track({
+      id: "text-track",
+      type: "text",
+      clips: [
+        clip({
+          id: "text-remap",
+          mediaType: "text",
+          reversed: true,
+          speed: 1.5,
+        }),
+      ],
+    }),
+  ]);
+}
+
 describe("shouldSyncPausedMediaToFrame", () => {
   it("registers one listener before start across a StrictMode cleanup and remount", async () => {
     nativeApiHarness.deferred = true;
@@ -360,11 +377,11 @@ describe("shouldSyncPausedMediaToFrame", () => {
     expect(nativeApiHarness.unlistenCalls).toBe(1);
   });
 
-  it("uses the capability route as the final engine guard", async () => {
+  it("starts native playback for a temporal compositor timeline once the capability route resolves", async () => {
     useProjectStore.setState({
       projectEpoch: 4,
       timelineVersion: 7,
-      timeline: rustTimeline({ reversed: true }),
+      timeline: temporalCompositorTimeline(),
     });
     useEditorUiStore.setState({
       activeFrame: 0,
@@ -375,6 +392,32 @@ describe("shouldSyncPausedMediaToFrame", () => {
     });
 
     const root = await mountPlaybackHook();
+
+    expect(useEditorUiStore.getState().isPlaying).toBe(true);
+    expect(nativeApiHarness.playbackStart).toHaveBeenCalledTimes(1);
+    await unmountPlaybackHook(root);
+  });
+
+  it("stops transport instead of starting native playback when the temporal compositor capability is unavailable", async () => {
+    nativeApiHarness.getPreviewEndpoint.mockResolvedValue(null);
+    useProjectStore.setState({
+      projectEpoch: 4,
+      timelineVersion: 7,
+      timeline: temporalCompositorTimeline(),
+    });
+    useEditorUiStore.setState({
+      activeFrame: 0,
+      currentFrame: 0,
+      isPlaying: true,
+      isScrubbing: false,
+      rustEngineFailed: false,
+    });
+
+    const root = await mountPlaybackHook();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
 
     expect(useEditorUiStore.getState().isPlaying).toBe(false);
     expect(nativeApiHarness.playbackStart).not.toHaveBeenCalled();
