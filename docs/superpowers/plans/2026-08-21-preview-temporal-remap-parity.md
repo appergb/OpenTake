@@ -135,11 +135,11 @@
 - Modify: `docs/audit/2026-08-21/full-desktop-functional-matrix.md`
 - Modify: `docs/superpowers/plans/2026-08-21-opentake-full-ui-and-upstream-convergence.md`
 
-- [ ] **Step 1: Build and install the app**
+- [x] **Step 1: Build and install the app**
 
   Run `web/node_modules/.bin/tauri build --bundles app`, copy the generated `.app` to `/Applications/OpenTake.app`, and record the executable hash without including sidecar binaries.
 
-- [ ] **Step 2: Exercise the real temporal case with Computer Use**
+- [x] **Step 2: Exercise the real temporal case with Computer Use**
 
   Open a QA project containing a video clip with a compositor property and `speed=1.5`; verify the unsupported banner is absent, native playback advances, pause/resume works, scrub reaches the middle and tail, and capture remains enabled. Repeat with `reversed=true` if the fixture exposes it.
 
@@ -147,13 +147,15 @@
 
   Export the same QA timeline, inspect the output with ffprobe, and compare start/middle/end frames against the preview captures. Record any audio timing discrepancy as a separate partial capability rather than marking Preview verified.
 
-- [ ] **Step 4: Run final gates for this slice**
+- [x] **Step 4: Run final gates for this slice**
 
   Run the focused Web tests, serial Web suite with an explicit localStorage file, relevant Rust tests, `pnpm build`, `cargo fmt --all -- --check`, `git diff --check`, and JSON validation.
 
-- [ ] **Step 5: Write evidence and update status**
+- [x] **Step 5: Write evidence and update status**
 
   Mark only the proven portion in the ledger; keep `UP-PREVIEW-PLAYBACK` partial until temporal playback, audio timing, and preview/export frame evidence all pass. Update the desktop matrix with exact actions and results.
+
+**Current result:** temporal route/native/source-frame and installed-app screen checks pass; Step 3 remains open because this run did not produce a fresh preview-vs-export start/middle/end frame comparison or independent audio-sync evidence.
 
 ## Completion Conditions
 

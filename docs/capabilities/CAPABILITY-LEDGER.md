@@ -18,7 +18,7 @@ skip_when:
   - 仅查看单个内部函数
 priority: must
 freshness_class: project
-last_verified: 2026-08-21T13:12:31+08:00
+last_verified: 2026-08-21T14:51:41+08:00
 owners:
   - OpenTake-generation
 source_of_truth:
@@ -53,7 +53,7 @@ tags:
 | `OT-WINDOW-SMALL-SCREEN` | P0 | verified | Tauri 安全初始尺寸 + monitor-aware standard/compact 裁剪 + Home/Editor min-size 回归 | 1066×666、1280×720、1331×768 contract 测试；安装版紧凑/标准切换与 Home/编辑器截图 |
 | `UP-MEDIA-IMPORT-AND-FOLDERS` | P0 | verified | 文件/文件夹导入、跳过 unsupported、relink 和预览均已通过安装版验收 | 新构建 app 中 MP4、PNG、双文件多选 Open 可用；导入数 1→3；文件夹导入出现目录并提示跳过 64；relink 恢复离线媒体 |
 | `UP-TIMELINE-UI` | P0 | partial | 继续补齐真实选区、拖拽、删除和撤销；分割有效前置条件已验证 | 新构建 app 选中 `sample-text-0`、播放头帧 15 后 `⌘K` 成功新增 UUID 片段并启用撤销；其它时间轴操作仍待矩阵化 |
-| `UP-PREVIEW-PLAYBACK` | P0 | partial | 复制媒体 fixture 做暂停/恢复/seek/尾帧/导出对照 | preview/export 同帧语义，音画与错误边界可证 |
+| `UP-PREVIEW-PLAYBACK` | P0 | partial | compositor temporal route、speed/reversed 原生帧映射和音频整轨解码已补齐；安装版与 preview/export 全面对拍仍继续 | preview/export 同帧语义、音画同步、取消和错误边界全部有证据后再升级 |
 | `UP-PREVIEW-TABS` | P1 | verified | `previewTabIds + previewTabHistory + activeTabId`，含 legacy 归一和删除清理 | 安装版同时显示 Timeline/两个素材 tab；关闭第二个回退第一个；91 个定向测试通过 |
 | `UP-MEDIA-VIEW-MODES` | P1 | verified | folder/flat/grouped 三态投影、网格/列表密度、文件夹导航和音频导入入口已通过测试及安装版验收 | 搜索、选择、拖拽和预览沿用同一 MediaItem ID 链路，继续纳入后续模块化 QA |
 | `OT-MOTION-ALPHA` | P1 | partial | alpha-safe 输出和 render resolver | 透明 motion 覆盖底图、预览/导出一致 |
@@ -68,6 +68,7 @@ tags:
 - 首轮导入图片时选中后 Open 仍禁用，导入失败阻塞素材预览闭环；时间线分割在帧 0/片段外无变化，但在有效选区和帧 15 前置条件下已实测新增片段并启用撤销。
 - 本轮修复后，文件导入 MP4/PNG/双文件多选均能点 Open，导入后素材预览可见；文件夹导入成功出现目录并提示跳过 unsupported；relink 成功恢复离线媒体。
 - Preview tabs 已在安装版打开两个素材并验证关闭回退；当前 Preview/Media slice 的定向测试为 4 files / 91 tests passed。
+- Preview temporal parity 已补 route、native surface 和 source-frame rewind reset；安装版 QA 工程设置 `speed=1.5` + 曝光 compositor 属性后没有 unsupported surface，时间线可见、播放头可到尾帧、暂停后抓帧按钮可用。
 - 曾出现 AX 更新但截图未重绘的黑屏瞬间；关闭/重开后页面正常，后续以窗口重绘时序风险记录，不把瞬态截图直接等同于产品黑屏。
 
 ## 定向验证
@@ -94,11 +95,11 @@ tags:
 
 ## 当前未闭环的全量门禁
 
-- 全量 `NODE_OPTIONS=--localstorage-file=... pnpm test` 为 147/149 test files passed，2 个失败来自未改动的 `uiStore.persistence.test.ts` 和一次并行 localStorage 共享导致的 `TitleBar.interaction.test.tsx`；TitleBar 单文件重跑已 21/21，通过的 uiStore 单文件仍失败，需作为独立 Node 26/存储持久化问题处理。
+- 旧的并行 Web 门禁曾受 Node 26 共享 localStorage 影响；当前统一使用显式 localStorage 文件和单 worker，最新串行门禁已 150/150 files、1404/1404 tests 通过。
 - 文件导入定向回归：`mediaActions` + `MediaPanel` 为 2 files / 59 tests passed；Preview/媒体/Store 定向回归为 4 files / 91 tests passed；两条切片均已安装版验证。
 - 主线 fresh verification（2026-08-21 12:09 +08:00）：Preview/Store/Media 4 files / 91 tests passed；MediaActions/MediaPanel 2 files / 59 tests passed；`pnpm build` exit 0；仅保留既有 Vite chunk warnings。
-- 全量 Web 串行门禁（2026-08-21 12:20 +08:00）：`NODE_OPTIONS=--localstorage-file=/tmp/opentake-vitest-localstorage-serial-final.json pnpm exec vitest run --maxWorkers=1` → 149 files / 1391 tests passed；Node 26 并行共享 localStorage file 会产生假失败，因此本地门禁使用单 worker。
-- Rust workspace 门禁（2026-08-21 13:15 +08:00）：`cargo fmt --all -- --check` 通过；`cargo test --workspace` 在既有 `opentake-media` facade contract 失败，`facade_contract.rs:137` 的 1 秒 AAC fixture 解码后 PCM sample 数超出 `15_000..=16_500`，单独重跑仍失败。该失败未修改本轮前端媒体视图代码，保留为音频/预览长期缺口。
+- 全量 Web 串行门禁（2026-08-21 14:48 +08:00）：`NODE_OPTIONS=--localstorage-file=/tmp/opentake-vitest-localstorage-temporal-final.json pnpm exec vitest run --maxWorkers=1` → 150 files / 1404 tests passed。
+- Rust workspace 门禁（2026-08-21 14:48 +08:00）：`cargo test --workspace` 通过；新增/修复的 `opentake-media` full-track PCM、RenderPlan temporal 和 native playback tests 均通过。`cargo fmt --all -- --check` 同样通过。
 
 ## Media View Modes 新鲜验收证据
 
@@ -109,6 +110,13 @@ tags:
 - Preview token 修复：`tokenUsage.test.ts` 曾捕获未声明的 `--space-2xs`，已改为现有 `--space-xxs`；token、Preview、Store 48 tests 和 Web build 通过。
 - 最终原生包：`web/node_modules/.bin/tauri build --bundles app` exit 0，release `.app` 完成生成；最终包 Computer Use 再次验证两个媒体 Preview tabs、关闭回退和紧凑窗口。
 - `cargo tauri build` 的历史文档入口不可用（没有全局 cargo-tauri）；本轮使用项目本地 Tauri CLI。DMG 尾脚本仍需单独排查。
+
+## Preview Temporal Remap 新鲜验收证据
+
+- 代码提交：`a833764`（compositor temporal 路由）、`1013355`（多视频 temporal fail-closed）、`dafd5eb`（native Preview surface）、`3e124dc`（source frame 回退时 reset stream）。
+- Web：路由 16/16，Preview/engine 44/44，串行全量 150 files / 1404 tests，`pnpm build` 均通过。
+- Rust：`opentake-media` 432 tests + integration 通过；`opentake-render plan` 46 tests；native playback transport 8 tests；engine 11、transport 7 tests；workspace 全量通过。
+- 安装版：最新 `/Applications/OpenTake.app` SHA-256 `a2c53dd6589e20fa36d3613779206650937ecb5439829b7f85058a3466c66b84`。Computer Use 在临时 QA 工程中设置速度 `1.5x` 和曝光 `0.50`，时间线预览无 unsupported surface、画面可见、播放头可到尾帧、暂停后抓帧按钮可用；完整 preview/export 起中尾帧和音频对拍仍未完成。
 
 ## Related Documents
 

@@ -50,6 +50,8 @@ docs/
 
 当前 Preview 对齐切片：[Preview tabs parity plan](superpowers/plans/2026-08-21-preview-tabs-parity.md)。
 
+当前 Preview temporal parity 切片：[Preview temporal remap parity plan](superpowers/plans/2026-08-21-preview-temporal-remap-parity.md)。
+
 当前媒体导入切片：[File import dialog reliability plan](superpowers/plans/2026-08-21-file-import-dialog.md)。
 
 当前媒体视图切片：[Media view modes parity plan](superpowers/plans/2026-08-21-media-view-modes.md)。
