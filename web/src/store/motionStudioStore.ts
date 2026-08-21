@@ -94,6 +94,7 @@ export interface MotionStudioState {
   savingFile: MotionDocumentFile | null;
   conflict: MotionConflict | null;
   parameters: MotionPublishParameters;
+  transparent: boolean;
   frame: number;
   playing: boolean;
   previewPhase: MotionPreviewPhase;
@@ -116,6 +117,7 @@ export interface MotionStudioState {
   requestPreview: (sourceFile?: MotionDocumentFile) => Promise<void>;
   setFrame: (frame: number) => void;
   setParameter: (name: keyof MotionPublishParameters, value: number) => void;
+  setTransparent: (value: boolean) => void;
   play: () => void;
   pause: () => void;
   suspend: () => Promise<void>;
@@ -284,6 +286,7 @@ export function createMotionStudioStore(
       savingFile: null,
       conflict: null,
       parameters: { ...DEFAULT_PARAMETERS },
+      transparent: false,
       frame: 0,
       playing: false,
       previewPhase: "idle",
@@ -685,6 +688,8 @@ export function createMotionStudioStore(
         void get().requestPreview();
       },
 
+      setTransparent: (value) => set({ transparent: value }),
+
       play: () => {
         if (suspended || disposing) return;
         const state = get();
@@ -810,6 +815,7 @@ export function createMotionStudioStore(
             documentId,
             revisionHash,
             ...state.parameters,
+            transparent: state.transparent,
             startFrame: 0,
             trackIndex: undefined,
           });
@@ -896,6 +902,7 @@ export function createMotionStudioStore(
           dirtyFiles: { "index.html": false, "styles.css": false },
           savingFile: null,
           conflict: null,
+          transparent: false,
           playing: false,
           previewPhase: "idle",
           previewError: null,

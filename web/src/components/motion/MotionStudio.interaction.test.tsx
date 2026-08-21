@@ -278,10 +278,16 @@ describe("Motion Studio authoring workspace", () => {
 
     const publish = container.querySelector<HTMLButtonElement>('[data-motion-publish="true"]');
     expect(publish).not.toBeNull();
+    const transparent = container.querySelector<HTMLInputElement>('input[name="transparent"]');
+    expect(transparent).not.toBeNull();
+    expect(transparent!.checked).toBe(false);
+    await act(async () => transparent!.click());
+    expect(store.getState().transparent).toBe(true);
     await act(async () => publish!.click());
     await act(async () => vi.waitFor(() => expect(store.getState().publishPhase).toBe("complete")));
 
     expect(motionBackend.publish).toHaveBeenCalledOnce();
+    expect(motionBackend.publish).toHaveBeenCalledWith(expect.objectContaining({ transparent: true }));
     expect(useEditorUiStore.getState().view).toBe("editor");
     expect(useEditorUiStore.getState().selectedClipIds).toEqual(new Set(["published-clip"]));
   });

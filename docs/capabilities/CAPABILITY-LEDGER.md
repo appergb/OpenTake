@@ -18,7 +18,7 @@ skip_when:
   - 仅查看单个内部函数
 priority: must
 freshness_class: project
-last_verified: 2026-08-21T20:19:15+08:00
+last_verified: 2026-08-21T20:57:59+08:00
 owners:
   - OpenTake-generation
 source_of_truth:
@@ -45,6 +45,7 @@ tags:
 - Models、Timeline、Track、Clip、Keyframe、Transform、TextStyle：domain crate 已有实现，需继续做完整行为级枚举。
 - EditCommand、事务边界、undo/redo、split/trim/move/ripple：ops/core 已有上游对齐实现；`split_clip_distributes_keyframes_at_cut` 通过。
 - Inspector、字幕/转写/搜索、Agent/MCP、Motion Studio opaque MP4：代码和对应测试入口已存在；仍需安装版场景证据才能升级为 verified。
+- Motion Studio transparent alpha：Rust/Web 纵切已接通并通过全量自动化；当前包已安装，但 Mac 锁屏使透明发布开关和时间线导入的最新屏幕验收暂时不能执行。
 
 ## 首轮明确缺口
 
@@ -57,11 +58,19 @@ tags:
 | `UP-EXPORT` | P0 | partial | H.264/AAC、H.265、ProRes 422 和字幕命令已有实现；普通输出失败清理、external cancel 全链路、输出父目录/文件 identity 校验已补齐 | 70 个 export 单测、18 个 media cancel 测试、5 个 export integration 和顺序 Rust workspace 门禁通过；真实 H.264/AAC 文件及首中尾帧已有一次安装版证据，但最新包的 SavePanel、H.265/ProRes/字幕/取消仍待 |
 | `UP-PREVIEW-TABS` | P1 | verified | `previewTabIds + previewTabHistory + activeTabId`，含 legacy 归一和删除清理 | 安装版同时显示 Timeline/两个素材 tab；关闭第二个回退第一个；91 个定向测试通过 |
 | `UP-MEDIA-VIEW-MODES` | P1 | verified | folder/flat/grouped 三态投影、网格/列表密度、文件夹导航和音频导入入口已通过测试及安装版验收 | 搜索、选择、拖拽和预览沿用同一 MediaItem ID 链路，继续纳入后续模块化 QA |
-| `OT-MOTION-ALPHA` | P1 | partial | alpha-safe 输出和 render resolver | 透明 motion 覆盖底图、预览/导出一致 |
+| `OT-MOTION-ALPHA` | P1 | partial | Motion Studio 透明发布开关、ProRes 4444/yuva444p10le、manifest straight-alpha provenance | 透明 motion 覆盖底图、预览/导出一致，并完成安装版时间线导入对拍 |
 | `UP-ACCOUNT-CLOUD-BOUNDARY` | P0 | blocked | 先定义 BYOK/provider 替代还是追同构云契约，再补 capability gate | 未授权时不广告/不发送；有凭据时生成→媒体→落轨闭环 |
 | `UP-SETTINGS-TAXONOMY` | P2 | partial | 明确 models/agent/storage/general/account 语义映射 | 设置入口和上游语义一一可解释 |
 
 ## 真实 UI 证据摘要
+
+## OT-MOTION-ALPHA 当前纵切
+
+- Rust：`DocumentMotionAddRequest.transparent` 已贯通到模板渲染、`MotionRenderRequest.with_transparent(true)`、ProRes 4444 `.mov` 编码和项目媒体落盘；title-card/lower-third 模板在透明模式下不填充不透明底色。
+- Manifest：`GenerationInput.transparent` 持久化为 `true`，`MediaManifestEntry::carries_straight_alpha()` 对透明 Motion 返回 `true`；既有 RVM matting provenance 规则保持不变。
+- Web：Motion Studio Inspector 新增“透明背景（ProRes 4444）”开关；预览请求保持原 schema，只有发布请求带 `transparent` 字段，切换项目时重置为关闭。
+- 自动化证据：`src-tauri/tests/motion_command.rs` 的透明发布集成测试验证 `.mov`、ProRes、64×36 尺寸、完全透明像素和半透明动画像素；Rust workspace 串行全量通过（Tauri 720 tests、Motion Chromium/integration、导出/播放等）；Web 全量 `151 files / 1413 tests`、Web build 通过。
+- 安装包：当前 `/Applications/OpenTake.app` 二进制 SHA-256 `7634979ed3f29b2623c6dc630b34267b79e81b9129f2b4c3c48cc8dafa607f00`，构建产物与安装包一致。Computer Use 重试仍返回 Mac locked，因此不把开关点击、透明发布后时间线预览和导出画面对拍标记为通过。
 
 - 约 `1331×768`：标准窗口配置偏大，最近项目区域宽度控制弱。
 - 紧凑档约 `1066×666`：可见、可操作，当前切换行为通过。
@@ -106,7 +115,7 @@ tags:
 - 文件导入定向回归：`mediaActions` + `MediaPanel` 为 2 files / 59 tests passed；Preview/媒体/Store 定向回归为 4 files / 91 tests passed；两条切片均已安装版验证。
 - 主线 fresh verification（2026-08-21 12:09 +08:00）：Preview/Store/Media 4 files / 91 tests passed；MediaActions/MediaPanel 2 files / 59 tests passed；`pnpm build` exit 0；仅保留既有 Vite chunk warnings。
 - 全量 Web 串行门禁（2026-08-21 16:46 +08:00）：`NODE_OPTIONS=--localstorage-file=/tmp/opentake-vitest-localstorage-temporal-final.json pnpm -C web exec vitest run --maxWorkers=1` → 151 files / 1410 tests passed；使用新 localStorage 文件会触发既有 locale/异步测试状态假失败，已保留为运行约束。
-- Rust workspace 门禁（2026-08-21 20:19 +08:00）：`cargo test --workspace --jobs 1 -- --test-threads=1` 通过；包含缺失媒体 fail-closed、export cleanup/external cancel、symlink identity、H.264/AAC integration、full-track PCM、RenderPlan temporal、Motion Chromium 和 native playback tests。`cargo fmt --all -- --check` 同样通过。全 workspace clippy 仍被既有模块的 6 处 `chunks_exact` lint 阻塞；本次导出改动触发的两个 clippy 建议已在 `6b31449` 收口。此前未限并发的 workspace 运行曾出现一次 motion sandbox 180s 超时，单独串行重跑 4 次均通过，保留为并发 GPU/Chromium 资源争用风险，不作为代码绿证据。
+- Rust workspace 门禁（2026-08-21 20:19 +08:00）：`cargo test --workspace --jobs 1 -- --test-threads=1` 通过；包含缺失媒体 fail-closed、export cleanup/external cancel、symlink identity、H.264/AAC integration、full-track PCM、RenderPlan temporal、Motion Chromium 和 native playback tests。`cargo fmt --all -- --check` 同样通过。全 workspace clippy 仍被既有 `chunks_exact`/`chunks_exact_mut` lint 阻塞，当前输出涉及 `opentake-media`、`opentake-motion` 等旧模块；本次导出改动触发的两个 clippy 建议已在 `6b31449` 收口。此前未限并发的 workspace 运行曾出现一次 motion sandbox 180s 超时，单独串行重跑 4 次均通过，保留为并发 GPU/Chromium 资源争用风险，不作为代码绿证据。
 
 ## Media View Modes 新鲜验收证据
 
@@ -143,3 +152,4 @@ tags:
 - `2026-08-21T19:48:03+08:00` — 对齐上游无选区 split/trim no-op（`f05bac8`、`478e1b4`），Web 全量更新为 151 files / 1412 tests；最新安装包 SHA-256 `de4cb52b…25405`。Computer Use 屏幕 smoke 因 Mac 锁定 blocked，未升级桌面证据。
 - `2026-08-21T20:09:19+08:00` — 完成缺失媒体 Preview/Playback fail-closed（`741ff07`），补真实 RenderLoop 集成证据；顺序 workspace 全量通过，当前安装包 SHA-256 `40c21ce0…e7f08`。Mac 仍锁定，未升级屏幕证据。
 - `2026-08-21T20:19:15+08:00` — 复跑当前提交 `6b31449` 的顺序 workspace 全量、导出/播放集成和 app 构建；最新安装包 SHA-256 `7ad988f3…a9799`。全 workspace clippy 的既有 `chunks_exact` lint 仍单独记录，Mac 屏幕 smoke 仍未完成。
+- `2026-08-21T20:57:59+08:00` — 完成 `OT-MOTION-ALPHA` 首条 Rust/Web 纵切：透明模板→Chromium alpha→ProRes 4444 `.mov`→manifest provenance→Motion Studio 发布开关；Rust workspace 720 Tauri tests 与 Web 151/1413 全量通过，重新构建并安装包 SHA-256 `7634979e…607f00`。最新包屏幕验收仍因 Mac 锁屏阻塞，能力保持 partial。

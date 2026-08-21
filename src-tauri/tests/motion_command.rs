@@ -354,3 +354,87 @@ fn sandbox_progress_cancel_validated_mp4_result() {
         core.get_timeline().timeline
     );
 }
+
+#[test]
+fn transparent_motion_publishes_prores_alpha_and_marks_manifest() {
+    let root = tempfile::tempdir().unwrap();
+    let bundle = root.path().join("TransparentMotion.opentake");
+    let core = AppCore::new();
+    core.apply(EditCommand::SetTimelineSettings {
+        fps: 10,
+        width: 64,
+        height: 36,
+    })
+    .unwrap();
+    core.save_project(Some(bundle)).unwrap();
+
+    let bridge = TauriMotionBridge::new(core.clone(), root.path().join("cache"));
+    if !bridge.can_render_motion() {
+        eprintln!("SKIP: native Chromium/FFmpeg motion capability is unavailable");
+        return;
+    }
+
+    let added = bridge
+        .add(
+            AddMotionRequest {
+                source: MotionSourceRequest::Template {
+                    template_id: "lower-third.glass".into(),
+                    params: serde_json::from_value(serde_json::json!({
+                        "title": "Transparent",
+                        "subtitle": "OpenTake alpha",
+                        "accent": "#FF3366"
+                    }))
+                    .unwrap(),
+                },
+                start_frame: 0,
+                duration_frames: 4,
+                transparent: true,
+                track_index: None,
+            },
+            &opentake_media::MediaCancelToken::new(),
+        )
+        .expect("transparent motion publish");
+
+    assert_eq!(added.output.output_file, "output.mov");
+    let snapshot = core.runtime_snapshot();
+    let entry = snapshot
+        .media
+        .entries
+        .iter()
+        .find(|entry| entry.id == added.asset_id)
+        .expect("transparent motion manifest entry");
+    assert_eq!(
+        entry
+            .generation_input
+            .as_ref()
+            .and_then(|input| input.transparent),
+        Some(true)
+    );
+    assert!(entry.carries_straight_alpha());
+    let path = MediaResolver::new(&snapshot.media, snapshot.project_dir.as_deref())
+        .expected_path(&entry.id)
+        .unwrap();
+    let probe = opentake_media::probe(&path).expect("probe transparent motion output");
+    assert_eq!(probe.video_codec.as_deref(), Some("prores"));
+    assert_eq!((probe.width, probe.height), (Some(64), Some(36)));
+
+    let alpha = std::process::Command::new(opentake_media::ffmpeg_status::ffmpeg_path())
+        .args([
+            "-v",
+            "error",
+            "-i",
+            path.to_str().expect("UTF-8 transparent output path"),
+            "-vf",
+            "alphaextract",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "gray",
+            "pipe:1",
+        ])
+        .output()
+        .expect("decode transparent motion alpha");
+    assert!(alpha.status.success(), "decode alpha: {:?}", alpha.stderr);
+    assert!(alpha.stdout.iter().any(|value| *value == 0));
+    assert!(alpha.stdout.iter().any(|value| *value > 0 && *value < 255));
+}

@@ -258,6 +258,7 @@ pub struct DocumentMotionAddRequest {
     pub start_frame: i32,
     pub duration_frames: i32,
     pub track_index: Option<usize>,
+    pub transparent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -358,9 +359,6 @@ pub async fn motion_add(
                         .into(),
                 );
             }
-            if request.transparent {
-                return Err("Motion Studio publishing currently requires opaque MP4 output".into());
-            }
             Some((
                 documents.capture_authority()?,
                 document_id,
@@ -374,6 +372,7 @@ pub async fn motion_add(
                 request
                     .fps
                     .ok_or_else(|| "document publish requires fps".to_string())?,
+                request.transparent,
             ))
         }
         (None, None) => None,
@@ -405,7 +404,8 @@ pub async fn motion_add(
         }));
     let documents = Arc::clone(documents.inner());
     let worker = tauri::async_runtime::spawn_blocking(move || {
-        if let Some((authority, document_id, revision_hash, width, height, fps)) = document_request
+        if let Some((authority, document_id, revision_hash, width, height, fps, transparent)) =
+            document_request
         {
             let source = resolve_document_motion_source(
                 &documents,
@@ -423,6 +423,7 @@ pub async fn motion_add(
                     start_frame: request.start_frame,
                     duration_frames: request.duration_frames,
                     track_index: request.track_index,
+                    transparent,
                 },
                 &cancel,
             )
@@ -849,7 +850,7 @@ impl TauriMotionBridge {
                 document_source: Some(request.source),
                 expected_authority: Some(request.project_authority),
                 duration_frames: request.duration_frames,
-                transparent: false,
+                transparent: request.transparent,
                 render_dimensions: Some((request.width, request.height, request.fps)),
                 placement: MotionPlacement::Add {
                     start_frame: request.start_frame,
@@ -942,12 +943,6 @@ impl TauriMotionBridge {
     ) -> Result<(tempfile::TempDir, std::path::PathBuf, ProbedMedia, String), MotionBridgeError>
     {
         (self.progress)(MotionProgress::Validating);
-        if transparent {
-            return Err(MotionBridgeError::new(
-                MotionBridgeErrorKind::CapabilityUnavailable,
-                "The current MP4 motion path is opaque; transparent motion output is not supported yet.",
-            ));
-        }
         let snapshot = self.core.runtime_snapshot();
         snapshot.project_dir.as_ref().ok_or_else(|| {
             MotionBridgeError::new(
@@ -987,11 +982,11 @@ impl TauriMotionBridge {
                     )
                 })?
         } else {
-            source_document(stored_source, fps, width, height, frames)?
+            source_document(stored_source, fps, width, height, frames, transparent)?
         };
         let request =
             MotionRenderRequest::new(MotionSource::code(html), fps, frames, width, height)
-                .with_transparent(false);
+                .with_transparent(transparent);
         request.validate().map_err(map_motion_error)?;
         let render_cancel = MotionCancellationToken::new();
         if cancel.is_cancelled() {
@@ -1036,9 +1031,13 @@ impl TauriMotionBridge {
             .prefix("opentake-motion-")
             .tempdir()
             .map_err(io_motion_error)?;
-        let output = output_dir.path().join("output.mp4");
+        let output = output_dir.path().join(if transparent {
+            "output.mov"
+        } else {
+            "output.mp4"
+        });
         (self.progress)(MotionProgress::Encoding);
-        if let Err(error) = encode_frames(&rendered, &output, cancel) {
+        if let Err(error) = encode_frames(&rendered, &output, transparent, cancel) {
             let _ = std::fs::remove_file(&output);
             return Err(error);
         }
@@ -1133,7 +1132,11 @@ impl TauriMotionBridge {
             } else {
                 env!("CARGO_PKG_VERSION").into()
             },
-            output_file: "output.mp4".into(),
+            output_file: if transparent {
+                "output.mov".into()
+            } else {
+                "output.mp4".into()
+            },
             fps: probe
                 .fps
                 .unwrap_or_else(|| f64::from(snapshot.timeline.fps.max(1))),
@@ -1190,6 +1193,7 @@ impl TauriMotionBridge {
             ),
             provider: Some(MOTION_PROVIDER.into()),
             status: Some(GenerationJobStatus::Ready),
+            transparent: Some(transparent),
             ..GenerationInput::default()
         };
         (self.progress)(MotionProgress::Committing);
@@ -1212,7 +1216,11 @@ impl TauriMotionBridge {
             true,
         )
         .map_err(|error| MotionBridgeError::new(MotionBridgeErrorKind::RenderFailed, error))?;
-        let leaf_name = format!("motion-{}.mp4", uuid::Uuid::new_v4());
+        let leaf_name = format!(
+            "motion-{}.{}",
+            uuid::Uuid::new_v4(),
+            if transparent { "mov" } else { "mp4" }
+        );
         let mut published = project_media
             .create_import(std::path::Path::new(&leaf_name))
             .map_err(|error| MotionBridgeError::new(MotionBridgeErrorKind::RenderFailed, error))?;
@@ -1538,6 +1546,7 @@ fn source_document(
     width: u32,
     height: u32,
     frames: u32,
+    transparent: bool,
 ) -> Result<String, MotionBridgeError> {
     match source {
         StoredMotionSource::Code { code } => {
@@ -1559,7 +1568,7 @@ fn source_document(
         StoredMotionSource::Template {
             template_id,
             params,
-        } => template_document(template_id, params, fps, width, height, frames),
+        } => template_document(template_id, params, fps, width, height, frames, transparent),
         StoredMotionSource::Document { .. } => Err(MotionBridgeError::new(
             MotionBridgeErrorKind::InvalidArguments,
             "Motion Studio document source was not resolved",
@@ -1587,6 +1596,7 @@ fn template_document(
     width: u32,
     height: u32,
     frames: u32,
+    transparent: bool,
 ) -> Result<String, MotionBridgeError> {
     if !matches!(template_id, "title-card" | "lower-third.glass") {
         return Err(MotionBridgeError::new(
@@ -1615,7 +1625,12 @@ fn template_document(
     let title = js_string(&string_param("title", "OpenTake")?);
     let subtitle = js_string(&string_param("subtitle", "Motion Graphic")?);
     let accent = js_string(&string_param("accent", "#7C5CFF")?);
-    let background = js_string(&string_param("background", "#11131A")?);
+    let background_value = if transparent {
+        "transparent".to_owned()
+    } else {
+        string_param("background", "#11131A")?
+    };
+    let background = js_string(&background_value);
     if template_id == "title-card" {
         let config = serde_json::json!({
             "templateId": "title-card",
@@ -1623,7 +1638,11 @@ fn template_document(
                 "title": string_param("title", "OpenTake")?,
                 "subtitle": string_param("subtitle", "Motion Canvas")?,
                 "accent": string_param("accent", "#7C5CFF")?,
-                "background": string_param("background", "#11131A")?,
+                "background": if transparent {
+                    "transparent".to_owned()
+                } else {
+                    string_param("background", "#11131A")?
+                },
             },
             "durationSeconds": f64::from(frames) / f64::from(fps),
             "durationFrames": frames,
@@ -1639,7 +1658,12 @@ fn template_document(
                 "embedded Motion Canvas runner has an invalid configuration boundary",
             ));
         }
-        return Ok(runner.replacen("__OPENTAKE_MOTION_CONFIG_JSON__", &config, 1));
+        let runner = runner.replacen("__OPENTAKE_MOTION_CONFIG_JSON__", &config, 1);
+        return Ok(if transparent {
+            runner.replace("background:#11131a", "background:transparent")
+        } else {
+            runner
+        });
     }
     let lower_third = template_id == "lower-third.glass";
     Ok(format!(
@@ -1706,6 +1730,7 @@ fn js_string(value: &str) -> String {
 fn encode_frames(
     rendered: &RenderedClip,
     output: &std::path::Path,
+    transparent: bool,
     cancel: &opentake_media::MediaCancelToken,
 ) -> Result<(), MotionBridgeError> {
     let pattern = rendered
@@ -1719,22 +1744,21 @@ fn encode_frames(
             )
         })?
         .join("frame_%05d.png");
-    let mut child = Command::new(opentake_media::ffmpeg_status::ffmpeg_path())
+    let mut command = Command::new(opentake_media::ffmpeg_status::ffmpeg_path());
+    command
         .args(["-v", "error", "-nostdin", "-framerate"])
         .arg(rendered.fps.to_string())
         .arg("-i")
         .arg(pattern)
         .args(["-frames:v", &rendered.frames.len().to_string()])
-        .args([
-            "-an",
-            "-c:v",
-            "libx264",
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-            "-y",
-        ])
+        .args(["-an", "-c:v"]);
+    if transparent {
+        command.args(["prores_ks", "-profile:v", "4", "-pix_fmt", "yuva444p10le"]);
+    } else {
+        command.args(["libx264", "-pix_fmt", "yuv420p", "-movflags", "+faststart"]);
+    }
+    let mut child = command
+        .arg("-y")
         .arg(output)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1978,6 +2002,7 @@ mod tests {
                     start_frame: 0,
                     duration_frames: 30,
                     track_index: None,
+                    transparent: false,
                 },
                 &opentake_media::MediaCancelToken::new(),
             )
@@ -2024,6 +2049,7 @@ mod tests {
                     start_frame: 0,
                     duration_frames: 30,
                     track_index: None,
+                    transparent: false,
                 },
                 &opentake_media::MediaCancelToken::new(),
             )
@@ -2052,14 +2078,79 @@ mod tests {
             transparent: false,
         };
         let output = temp.path().join("output.mp4");
-        let error = encode_frames(&rendered, &output, &opentake_media::MediaCancelToken::new())
-            .expect_err("invalid renderer frames must make FFmpeg fail closed");
+        let error = encode_frames(
+            &rendered,
+            &output,
+            false,
+            &opentake_media::MediaCancelToken::new(),
+        )
+        .expect_err("invalid renderer frames must make FFmpeg fail closed");
         assert_eq!(error.kind, MotionBridgeErrorKind::RenderFailed);
         assert!(error.message.contains("FFmpeg failed"));
         assert!(
             !output.exists() || output.metadata().unwrap().len() == 0,
             "failed encoding must not leave a usable output"
         );
+    }
+
+    #[test]
+    fn transparent_encoding_uses_prores4444_and_preserves_alpha() {
+        if !opentake_media::ffmpeg_status::ffmpeg_available() {
+            eprintln!("SKIP: FFmpeg unavailable");
+            return;
+        }
+        let temp = tempfile::tempdir().expect("alpha motion tempdir");
+        let mut frames = Vec::new();
+        for index in 0..2 {
+            let path = temp.path().join(format!("frame_{index:05}.png"));
+            let image = image::RgbaImage::from_fn(4, 4, |x, _| {
+                image::Rgba([255, 20, 10, if x == 0 { 0 } else { 128 }])
+            });
+            image.save(&path).expect("write alpha PNG");
+            frames.push(path);
+        }
+        let rendered = RenderedClip {
+            content_hash: "a".repeat(64),
+            frames,
+            fps: 30,
+            width: 4,
+            height: 4,
+            transparent: true,
+        };
+        let output = temp.path().join("output.mov");
+        encode_frames(
+            &rendered,
+            &output,
+            true,
+            &opentake_media::MediaCancelToken::new(),
+        )
+        .expect("transparent frames encode");
+
+        let probe = opentake_media::probe(&output).expect("probe ProRes alpha output");
+        assert_eq!(probe.video_codec.as_deref(), Some("prores"));
+        assert_eq!(probe.width, Some(4));
+        assert_eq!(probe.height, Some(4));
+        let alpha = Command::new(opentake_media::ffmpeg_status::ffmpeg_path())
+            .args([
+                "-v",
+                "error",
+                "-i",
+                output.to_str().expect("UTF-8 output path"),
+                "-vf",
+                "alphaextract",
+                "-frames:v",
+                "1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "gray",
+                "pipe:1",
+            ])
+            .output()
+            .expect("decode alpha plane");
+        assert!(alpha.status.success(), "decode alpha: {:?}", alpha.stderr);
+        assert!(alpha.stdout.iter().any(|value| *value == 0));
+        assert!(alpha.stdout.iter().any(|value| *value > 0 && *value < 255));
     }
 
     #[test]

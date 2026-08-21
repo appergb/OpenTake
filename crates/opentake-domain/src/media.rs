@@ -129,6 +129,10 @@ pub struct GenerationInput {
     /// Video-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generate_audio: Option<bool>,
+    /// Whether the generated media carries straight alpha that must be
+    /// premultiplied exactly once before compositing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transparent: Option<bool>,
     #[serde(
         rename = "referenceImageURLs",
         default,
@@ -253,7 +257,9 @@ impl MediaManifestEntry {
     /// to request one premultiplication before blending.
     pub fn carries_straight_alpha(&self) -> bool {
         self.generation_input.as_ref().is_some_and(|input| {
-            input.provider.as_deref() == Some("opentake-matting") && input.model.starts_with("rvm-")
+            input.transparent == Some(true)
+                || (input.provider.as_deref() == Some("opentake-matting")
+                    && input.model.starts_with("rvm-"))
         })
     }
 }
@@ -786,6 +792,29 @@ mod tests {
         let json = serde_json::to_string(&gi).unwrap();
         assert!(!json.contains("imageURLs"));
         assert!(!json.contains("voice"));
+    }
+
+    #[test]
+    fn motion_transparent_generation_input_marks_straight_alpha() {
+        let entry: MediaManifestEntry = serde_json::from_value(serde_json::json!({
+            "id": "motion-alpha",
+            "name": "motion.mov",
+            "type": "video",
+            "source": {"external": {"absolutePath": "/tmp/motion.mov"}},
+            "duration": 1.0,
+            "generationInput": {
+                "prompt": "{}",
+                "model": "opentake.motion-v1",
+                "duration": 30,
+                "aspectRatio": "16:9",
+                "provider": "opentake-motion",
+                "transparent": true,
+                "status": "ready"
+            }
+        }))
+        .expect("transparent motion manifest entry");
+
+        assert!(entry.carries_straight_alpha());
     }
 
     // --- MediaManifestEntry ---
