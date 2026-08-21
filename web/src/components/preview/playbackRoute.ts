@@ -99,32 +99,17 @@ export function resolveTimelinePlaybackRoute(
     (item) => item.reversed || item.speedChanged,
   );
 
-  if (needsRust) {
-    for (const item of capabilities) {
-      if (item.reversed) {
-        reasons.push({ code: "composited-reverse", clipId: item.clip.id });
-      }
-      if (item.speedChanged) {
-        reasons.push({
-          code: "composited-speed",
-          clipId: item.clip.id,
-          speed: item.clip.speed,
-        });
-      }
-    }
-  }
-
   if (reasons.length > 0) return { kind: "unsupported", reasons };
   if (!needsRust) {
     // A single ordinary video track stays on the low-overhead WebKit route.
     // Multiple video tracks need the native compositor for deterministic
-    // decode/layer parity; an explicit WebKit decode error also retries the
-    // exact revision through FFmpeg. Temporal remapping stays on WebKit until
-    // native reverse/speed parity exists.
+    // decode/layer parity, even with temporal remapping. An explicit WebKit
+    // decode error retries the exact revision through FFmpeg, but ordinary
+    // single-video reverse/speed playback stays on WebKit.
     if (
+      (requiresNativeVideoStack || !hasTemporalRemapping) &&
       (requiresNativeVideoStack || runtime.forceRust === true) &&
       hasVideo &&
-      !hasTemporalRemapping &&
       runtime.rustAvailable &&
       runtime.rustEnabled
     ) {
