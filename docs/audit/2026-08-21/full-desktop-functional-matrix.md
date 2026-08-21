@@ -84,7 +84,7 @@ tags:
 | Preview | compositor temporal 预览 | 最新安装版在 QA 工程中设置 `speed=1.5` 和曝光 `0.50` compositor 属性后不再出现 unsupported surface；画面可见，播放头可到尾帧，暂停后抓帧按钮保持可用；speed/reversed 的首次 native render、JPEG publication、source-frame 映射由 Rust integration tests 锁定 | 通过（代码/native/屏幕组合证据） | 预览与导出起/中/尾帧、音频同步和取消仍在后续闭环 |
 | Preview | 多素材 tabs | 打开 `audit-4k60-h264` 与 `export-h264-frame30` 后显示 Timeline/两个媒体 tab；关闭第二个回退第一个 | 通过 | 安装版 AX：两个 Close 按钮；Preview slice 4 files / 91 tests |
 | Agent | 面板、对话标签和本地边界 | Agent 面板可打开；新建/关闭对话标签成功；无配置通道时输入框存在但发送按钮禁用；用 `⌘⌥A` 可收起并恢复编辑器布局 | 通过（入口/本地边界） | 不发送外部消息；MCP 握手、失败/取消、真实工具调用仍待 |
-| Subtitles | 字幕入口与缺失模型边界 | 字幕页可打开，来源/样式/位置/翻译同意项均可见；点击生成字幕后明确提示需下载约 141 MB 的 multilingual 转写模型，并提供“下载模型”入口；未同意外部 Provider 时翻译按钮保持禁用 | 通过（入口/失败边界） | 模型下载、转写结果编辑、SRT/VTT 导出和翻译真实闭环仍待 |
+| Subtitles | 字幕入口与导出 | 字幕页可打开，来源/样式/位置/翻译同意项均可见；点击生成字幕后明确提示需下载约 141 MB 的 multilingual 转写模型，并提供“下载模型”入口；未同意外部 Provider 时翻译按钮保持禁用；domain 字幕格式 16/16、Tauri 实际 SRT/VTT 写文件 5/5、Captions/TitleBar 前端 10/10 通过 | 部分（入口/失败边界/代码自动化） | Mac 解锁后补模型下载、转写结果编辑和安装版 SavePanel SRT/VTT 导出屏幕证据；翻译真实闭环仍受 provider 凭据边界限制 |
 | Motion | Studio 入口 | HTML/CSS 编辑器、预览、参数检查器、关键帧时间线出现；播放帧推进 | 通过（既有桌面证据） | 用最新包补发布、保存重开和导入时间线 |
 | Motion | 透明发布与透明导出 | Motion Studio Inspector 可点击“透明背景（ProRes 4444）”；真实发布进度出现，完成后素材库新增 Motion Graphic、时间线新增 V2 片段，预览/Inspector 均可见；QA 工程内真实媒体叶子为 ProRes 4444 `ap4h` / `yuva444p12le`，90 帧/3.000s；新增导出面板 `ProRes 4444 透明 / .mov`，Rust GPU/FFmpeg integration 验证透明清屏、ProRes、alpha 平面 0→非零；manifest 的 `transparent: true` 与项目媒体引用一致 | 部分（发布屏幕/文件通过；透明专用导出屏幕因 Mac 锁屏待复验） | 解锁后补透明专用导出 SavePanel/状态/文件屏幕对拍；opaque clip 编辑时切换透明仍待 |
 | Export | 导出面板 | 导出视频面板可打开，格式/分辨率/取消/导出可见 | 通过 | 复制目标路径后完成导出并 ffprobe |
@@ -92,7 +92,7 @@ tags:
 | Export | 带音频 H.264/AAC 实际导出 | 最新包 `918eac84…9551b` 通过 SavePanel 导出 `/private/tmp/opentake-audio-desktop-qa-L8Nvwh/opentake-latest-smoke.mp4`；ffprobe：H.264 1280×720/30fps/231 帧、AAC 48kHz 单声道/362 包、7.700s；完整 `ffmpeg -xerror` 通过 | 通过（最新包） | H.265/ProRes、字幕、取消和实时音画同步仍待矩阵化 |
 | Export | 带音频 H.265/HEVC 实际导出 | 最新包 `893b6ed0…d0ba` 通过视频导出面板选择 `H.265 / .mp4`，SavePanel 保存 `/private/tmp/opentake-audio-desktop-qa-L8Nvwh/audio-preview-export-qa.mp4`；ffprobe：HEVC `hev1` Main、1280×720/30fps/231 帧、AAC 48kHz/362 包、7.700s；完整 `ffmpeg -xerror` 通过；安装版状态显示“导出完成 · 1280×720 · 231 帧” | 通过（屏幕/文件） | 取消、首中尾帧对拍和实时音画同步仍待 |
 | Export | 带音频 ProRes 422 HQ 实际导出 | 最新包选择 `ProRes 422 / .mov` 后 SavePanel 保存 `/private/tmp/opentake-audio-desktop-qa-L8Nvwh/audio-preview-export-qa.mov`；ffprobe：ProRes HQ `apch`、`yuv422p10le`、1280×720/30fps/231 帧、PCM `sowt` 16-bit、7.700s；完整 `ffmpeg -xerror` 通过；应用返回编辑器 | 通过（屏幕/文件） | 透明 ProRes 4444 专用导出、取消和首中尾帧对拍仍待 |
-| Export | 失败/取消输出清理 | `0bae80e` 增加普通输出 identity-safe guard、replacement race、双 cancel source fail-closed；`a7d98d6` 增加 symlink/reparse 最终路径拒绝；export unit 72/72、media cancel 18/18、audio/video integration 6/6，顺序 workspace 全量通过 | 通过（代码/测试） | 仍需最新安装包触发一次取消并确认 UI toast/文件清理 |
+| Export | 失败/取消输出清理 | `0bae80e` 增加普通输出 identity-safe guard、replacement race、双 cancel source fail-closed；`a7d98d6` 增加 symlink/reparse 最终路径拒绝；export unit 72/72、media cancel 18/18、audio/video integration 6/6，顺序 workspace 全量通过 | 部分（代码/自动化） | Mac 解锁后仍需最新安装包触发一次取消，确认 UI toast 和部分输出文件清理；不把自动化取消证据当成桌面交互证据 |
 | Help | 菜单 | 快捷键/MCP 说明可展开；教程/反馈显示 Beta 禁用 | 通过 | 记录禁用原因和可用边界 |
 | Library | 全局素材库 | AX 可读分类、搜索、排序；部分截图曾未重绘，当前复测仍需重复 | 部分 | 在窗口修复后重跑可见性和空态 |
 
@@ -114,8 +114,8 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - App 构建：release `.app` 已生成并安装；DMG bundle 脚本因超过一分钟无输出被停止，DMG 不在本轮交付证据内。
 - 本轮主线 fresh verification：Preview/Store/Media 4 files / 91 tests passed；MediaActions/MediaPanel 2 files / 59 tests passed；`pnpm build` exit 0。
 - 全量 Web 串行门禁：`NODE_OPTIONS=--localstorage-file=/tmp/opentake-vitest-range-refresh-full.json pnpm exec vitest run --pool=forks --maxWorkers=1` → 151 files / 1415 tests passed；`pnpm build` exit 0。
-- Rust workspace：`cargo test --workspace --jobs 1 -- --test-threads=1` 与 `cargo fmt --all -- --check` 通过；本轮包含缺失媒体 Preview/Playback fail-closed、透明 Motion ProRes 4444 集成和 RenderLoop 集成测试。全 workspace clippy 仍被既有 `chunks_exact`/`chunks_exact_mut` lint 阻塞，当前输出涉及 `opentake-media`、`opentake-motion` 等旧模块；一次未限并发运行在 motion sandbox 180s 超时，单独串行重跑通过，保留为 GPU/Chromium 资源争用风险；仅保留明确标记为 ignored 的 real-device / optional fixture tests。
-- 最终 `.app`：`web/node_modules/.bin/tauri build --bundles app` exit 0；当前安装包 SHA-256 `3ce3c1d04fd28e5b9f98e056788112513e82ae4d46e13bdc462dc55af16c7eef`；最新包已完成 Home 小屏、媒体预览 tab、播放/尾帧、分割/撤销、范围删除/Undo、H.264/H.265/ProRes 422 导出面板和 Motion 透明发布屏幕 smoke；透明 ProRes 4444 屏幕、Option trim、字幕/取消导出仍待。
+- Rust workspace：`cargo test --workspace --jobs 1 -- --test-threads=1` 与 `cargo fmt --all -- --check` 通过；本轮包含缺失媒体 Preview/Playback fail-closed、透明 Motion ProRes 4444 集成和 RenderLoop 集成测试。字幕定向门禁 `cargo test -p opentake-domain subtitle_export` 为 16/16，`cargo test -p opentake-tauri subtitle_export_tests -- --nocapture` 为 5/5。全 workspace clippy 仍被既有 `chunks_exact`/`chunks_exact_mut` lint 阻塞，当前输出涉及 `opentake-media`、`opentake-motion` 等旧模块；一次未限并发运行在 motion sandbox 180s 超时，单独串行重跑通过，保留为 GPU/Chromium 资源争用风险；仅保留明确标记为 ignored 的 real-device / optional fixture tests。
+- 最终 `.app`：`web/node_modules/.bin/tauri build --bundles app` exit 0；当前安装包 SHA-256 `3ce3c1d04fd28e5b9f98e056788112513e82ae4d46e13bdc462dc55af16c7eef`；最新包已完成 Home 小屏、媒体预览 tab、播放/尾帧、分割/撤销、范围删除/Undo、H.264/H.265/ProRes 422 导出面板和 Motion 透明发布屏幕 smoke；透明 ProRes 4444 屏幕、Option trim、字幕 SavePanel/模型下载和取消导出仍待。
 
 ## Related Documents
 
@@ -150,3 +150,4 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - `2026-08-21T23:09:09+08:00` — 最新安装包 `893b6ed0…d0ba` 完成范围删除屏幕对拍：I/O 标记全范围后再选 V1 锚点，Shift+Backspace 删除 V1/A1 并保留 Motion，预览时长和播放头同步到 3.000s，Undo 恢复三条轨道；同步刷新新增 playhead clamp，Web 全量更新为 151 files / 1415 tests。
 - `2026-08-21T23:19:12+08:00` — 最新安装包完成 H.265/AAC 与 ProRes 422 HQ/PCM 的 SavePanel 导出和文件级复核：HEVC `hev1` 与 ProRes `apch` 均通过完整 `ffmpeg -xerror`；透明 ProRes 4444、字幕和取消导出仍保持待验证。
 - `2026-08-21T23:47:02+08:00` — 新增透明 ProRes 4444 导出纵切：前端暴露 `ProRes 4444 透明 / .mov`，Rust 将透明 codec 映射到 `yuva444` + alpha 清屏；Rust workspace 722 tests、导出 integration 6/6、Web 151/1416 通过。最新包 `3ce3c1d0…c7eef` 已安装，但 Computer Use 当前被 Mac 锁屏阻塞，透明导出屏幕证据保留 partial。
+- `2026-08-22T00:06:00+08:00` — 复跑字幕纵切：domain 16/16、Tauri 实际 SRT/VTT 写文件 5/5、Captions/TitleBar 前端 10/10 通过；字幕能力保持“代码/自动化通过，安装版模型下载与 SavePanel 导出屏幕待解锁”。同时将导出取消状态明确区分为“代码/自动化通过，最新安装版 UI toast/清理仍待”。
