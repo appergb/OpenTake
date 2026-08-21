@@ -40,6 +40,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use opentake_core::{
     importable_clip_type, AppCore, CommittedMediaImport, CoreError, DeferredCoreEvents,
     DerivedStemProvenance, PreparedMediaFolderRef, PreparedMediaImportOp, ProbedMedia,
+    SUPPORTED_LOTTIE_EXTENSIONS,
 };
 use opentake_domain::{
     AudioDenoise, Clip, ClipType, DenoiseMode, GenerationInput, GenerationJobStatus,
@@ -1212,6 +1213,43 @@ pub(crate) fn probe_media(engine: &MediaEngine, path: &Path) -> ProbedMedia {
         .unwrap_or_default()
 }
 
+pub(crate) fn is_lottie_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            SUPPORTED_LOTTIE_EXTENSIONS
+                .iter()
+                .any(|supported| extension.eq_ignore_ascii_case(supported))
+        })
+}
+
+/// Validate and derive timeline metadata for a Lottie JSON or `.lottie`
+/// container. The core only recognizes the extension; Velato remains at the
+/// desktop boundary so malformed documents are skipped rather than registered
+/// as media that can never preview.
+pub(crate) fn probe_lottie(path: &Path) -> Result<ProbedMedia, String> {
+    let mut materializer = crate::render::LottieMaterializer::new();
+    let metadata = materializer.metadata(path)?;
+    Ok(lottie_metadata_to_probe(metadata))
+}
+
+pub(crate) fn probe_lottie_file(path: &Path, file: &std::fs::File) -> Result<ProbedMedia, String> {
+    let mut materializer = crate::render::LottieMaterializer::new();
+    let metadata = materializer.metadata_file(path, file)?;
+    Ok(lottie_metadata_to_probe(metadata))
+}
+
+fn lottie_metadata_to_probe(metadata: crate::render::LottieMetadata) -> ProbedMedia {
+    ProbedMedia {
+        duration_secs: metadata.duration_seconds,
+        width: Some(metadata.width as i32),
+        height: Some(metadata.height as i32),
+        fps: Some(metadata.frame_rate),
+        has_audio: false,
+        color: None,
+    }
+}
+
 fn media_probe_to_core(probe: opentake_media::MediaProbe) -> ProbedMedia {
     ProbedMedia {
         duration_secs: probe.duration_secs,
@@ -1299,8 +1337,8 @@ fn display_file_name(path: &Path) -> String {
 /// Map a MIME type to the file extension the imported asset is written with.
 /// 1:1 port of upstream `ToolExecutor+Import.fileExtension(forMime:)` — the
 /// accepted set the agent's `import_media` (bytes / url override) validates
-/// against. `json`/Lottie is intentionally excluded from the import white-list
-/// downstream, but the mapping is kept for parity with upstream's table.
+/// against. JSON/Lottie MIME types map to the Lottie importer and are validated
+/// by the desktop renderer before publication.
 pub(crate) fn file_extension_for_mime(mime: &str) -> Option<&'static str> {
     match mime.to_ascii_lowercase().as_str() {
         "video/mp4" | "video/mpeg4" => Some("mp4"),
@@ -1313,6 +1351,7 @@ pub(crate) fn file_extension_for_mime(mime: &str) -> Option<&'static str> {
         "image/jpeg" | "image/jpg" => Some("jpg"),
         "image/tiff" => Some("tiff"),
         "image/heic" | "image/heif" => Some("heic"),
+        "application/json" | "application/vnd.lottie+json" => Some("json"),
         _ => None,
     }
 }
@@ -1320,7 +1359,7 @@ pub(crate) fn file_extension_for_mime(mime: &str) -> Option<&'static str> {
 /// The accepted-MIME error line upstream raises for an unsupported `mimeType`
 /// (`ToolExecutor+Import`). Centralized so bytes / url imports share the wording.
 pub(crate) const IMPORT_ACCEPTED_MIMES: &str =
-    "Accepted: video/mp4, video/quicktime, audio/mpeg, audio/wav, audio/aac, audio/mp4, image/png, image/jpeg, image/tiff, image/heic.";
+    "Accepted: video/mp4, video/quicktime, audio/mpeg, audio/wav, audio/aac, audio/mp4, image/png, image/jpeg, image/tiff, image/heic, application/json, application/vnd.lottie+json.";
 
 /// Import one file into the core, probing it first. Returns the created entry, or
 /// `None` when the extension is not importable (the file is skipped, not an
@@ -1334,7 +1373,14 @@ pub(crate) fn import_one(
     if importable_clip_type(path).is_none() {
         return Ok(None);
     }
-    let probe = probe_media(engine, path);
+    let probe = if is_lottie_path(path) {
+        match probe_lottie(path) {
+            Ok(probe) => probe,
+            Err(_) => return Ok(None),
+        }
+    } else {
+        probe_media(engine, path)
+    };
     // `import_media_file` re-validates the extension; the type check above only
     // lets us skip probing unsupported files.
     let entry = core.import_media_file(path, display_name(path), &probe)?;
@@ -2177,7 +2223,17 @@ impl<'a> DirectoryImportPlanner<'a> {
                         path: child_path.clone(),
                         reason: "missing media engine".to_string(),
                     })?;
-                    let probe = probe_media_file(engine, &file, self.cancel);
+                    let probe = if is_lottie_path(&child_path) {
+                        match probe_lottie_file(&child_path, &file) {
+                            Ok(probe) => probe,
+                            Err(_) => {
+                                self.skipped.push(display_file_name(&child_path));
+                                continue;
+                            }
+                        }
+                    } else {
+                        probe_media_file(engine, &file, self.cancel)
+                    };
                     self.checkpoint()?;
                     self.plan.push(PreparedMediaImportOp::ImportFile {
                         path: child_path.clone(),
@@ -2632,7 +2688,17 @@ fn prepare_explicit_import_batch(
             skipped.push(display_file_name(&source.final_path));
             continue;
         }
-        let probe = probe_media_file(engine, source.identity.as_file(), None);
+        let probe = if is_lottie_path(&source.final_path) {
+            match probe_lottie_file(&source.final_path, source.identity.as_file()) {
+                Ok(probe) => probe,
+                Err(_) => {
+                    skipped.push(display_file_name(&source.final_path));
+                    continue;
+                }
+            }
+        } else {
+            probe_media_file(engine, source.identity.as_file(), None)
+        };
         plan.push(PreparedMediaImportOp::ImportFile {
             path: source.final_path.clone(),
             name: display_name(&source.final_path),
@@ -5119,6 +5185,7 @@ pub fn preload_media(
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::Write;
 
     fn engine_for(tmp: &Path) -> MediaEngine {
         MediaEngine::new(tmp.join("cache"), tmp.join("models"))
@@ -8213,6 +8280,68 @@ mod tests {
         assert_eq!(list.items[0].kind, ClipType::Image);
         // The touched file exists → not missing.
         assert!(!list.items[0].missing);
+    }
+
+    #[test]
+    fn import_one_registers_valid_lottie_json_with_composition_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let source = root.join("title-card.json");
+        std::fs::write(
+            &source,
+            br#"{"v":"5.5.2","fr":2,"ip":0,"op":2,"w":16,"h":16,"ddd":0,"assets":[],"layers":[]}"#,
+        )
+        .unwrap();
+        let core = AppCore::new();
+        let engine = engine_for(root);
+
+        let imported = import_one(&core, &engine, &source).unwrap().unwrap();
+
+        assert_eq!(imported.kind, ClipType::Lottie);
+        assert_eq!(imported.source_width, Some(16));
+        assert_eq!(imported.source_height, Some(16));
+        assert_eq!(imported.source_fps, Some(2.0));
+        assert_eq!(imported.duration, 1.0);
+    }
+
+    #[test]
+    fn import_one_skips_malformed_lottie_json_instead_of_registering_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("broken.json");
+        std::fs::write(&source, b"{not valid lottie}").unwrap();
+        let core = AppCore::new();
+        let engine = engine_for(tmp.path());
+
+        assert!(import_one(&core, &engine, &source).unwrap().is_none());
+        assert!(core.media().entries.is_empty());
+    }
+
+    #[test]
+    fn import_one_registers_lottie_container_animation_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("title-card.lottie");
+        let file = fs::File::create(&source).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        archive
+            .start_file("animations/title.json", options)
+            .unwrap();
+        archive
+            .write_all(
+                br#"{"v":"5.5.2","fr":2,"ip":0,"op":2,"w":16,"h":16,"ddd":0,"assets":[],"layers":[]}"#,
+            )
+            .unwrap();
+        archive.finish().unwrap();
+
+        let core = AppCore::new();
+        let engine = engine_for(tmp.path());
+        let imported = import_one(&core, &engine, &source).unwrap().unwrap();
+
+        assert_eq!(imported.kind, ClipType::Lottie);
+        assert_eq!(imported.source_width, Some(16));
+        assert_eq!(imported.source_height, Some(16));
+        assert_eq!(imported.source_fps, Some(2.0));
     }
 
     #[test]

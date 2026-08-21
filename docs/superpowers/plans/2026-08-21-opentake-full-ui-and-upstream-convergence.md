@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-07-10-opentake-full-convergence-design.md`、`docs/superpowers/specs/2026-08-13-opentake-beta5-design.md` 与本轮用户目标。
 
-**Current checkpoint (2026-08-22, Asia/Shanghai):** 代码与自动化主线保持全绿；最新安装包 `3ce3c1d0…c7eef` 已完成小屏、媒体/预览、时间轴范围删除与 Undo、H.264/H.265/ProRes 422、Motion 透明发布的既有屏幕证据。当前 Mac 仍处于锁屏，透明 ProRes 4444 专用 SavePanel、Option trim、字幕 SavePanel/模型下载和取消导出的最新安装版动作不能伪造为已完成。上游对齐 agent 正在独立审计，工作区只保留用户已有审计素材的 dirty/untracked 状态。
+**Current checkpoint (2026-08-22, Asia/Shanghai):** 受影响 crate/Tauri/Web 定向门禁保持全绿；最新安装包 `3ce3c1d0…c7eef` 已完成小屏、媒体/预览、时间轴范围删除与 Undo、H.264/H.265/ProRes 422、Motion 透明发布的既有屏幕证据。上游审计确认的两个缺口已在代码侧补齐：Agent 文件夹批量 `entries` 单步 Undo，以及 JSON/`.lottie` Lottie 导入、Velato 校验和 metadata。当前 Mac 仍处于锁屏，透明 ProRes 4444 专用 SavePanel、Option trim、字幕 SavePanel/模型下载、Lottie 屏幕路径和取消导出的最新安装版动作不能伪造为已完成。2026-08-22 workspace 全量复跑在既有 4K Chromium budget smoke 超时并 poison gate，已确认与本次 diff 无直接关系；clippy 仍被既有 `chunks_exact` lint 阻塞。工作区只保留用户已有审计素材的 dirty/untracked 状态。
 
 ## Global Constraints
 
@@ -133,7 +133,7 @@
 
   截图、日志、ffprobe 摘要和测试命令按场景编号存放；敏感路径和凭据脱敏。
 
-  结果：首轮和第二轮 UI agent 报告已合并；窗口、项目生命周期、文件/文件夹/relink 导入、视频素材预览、播放/seek、有效分割/撤销、Inspector、设置、Preview tabs、导出面板和帮助均有证据；媒体 folder/flat/grouped 三态、网格/列表密度、真实文件夹导航和音频导入/收藏子页也已在安装版验收；音频独立预览、全局素材库/Motion 的稳定截图、最终导出仍在后续矩阵。
+  结果：首轮和第二轮 UI agent 报告已合并；窗口、项目生命周期、文件/文件夹/relink 导入、视频素材预览、播放/seek、有效分割/撤销、Inspector、设置、Preview tabs、导出面板和帮助均有证据；媒体 folder/flat/grouped 三态、网格/列表密度、真实文件夹导航和音频导入/收藏子页也已在安装版验收；Lottie JSON/`.lottie` 已补代码/自动化导入与 metadata，安装版 Lottie 卡片/预览/落轨/重开、音频独立预览、全局素材库/Motion 的稳定截图、最终导出仍在后续矩阵。
 
 ### Task 4: 收敛 Models、EditCommand 和时间轴编辑 parity
 
@@ -243,6 +243,8 @@
 
   当前进展（2026-08-22）：字幕纵切的代码/自动化证据已补齐：`cargo test -p opentake-domain subtitle_export` 16/16、`cargo test -p opentake-tauri subtitle_export_tests -- --nocapture` 5/5、`CaptionsTab.test.tsx + TitleBar.visual.test.ts` 10/10；安装版模型下载、转写结果编辑和 SavePanel SRT/VTT 导出仍须在解锁后补桌面证据。
 
+  同期补齐上游媒体/Agent 缺口：`create_folder.entries` 与 `move_to_folder.entries` 通过 `CreateFolders` / `MoveToFolders` 在一个 EditCommand 事务中执行，Agent 返回上游约定形状；core 现在识别 `.json` / `.lottie` 为 Lottie，Tauri 用 Velato 校验 JSON、从 `.lottie` ZIP 的 `animations/*.json` 提取 composition 并写入尺寸/帧率/时长。Agent lib 417/417、ops 209/209、Lottie JSON/容器/MCP path 定向测试通过；最新安装包屏幕路径待解锁。
+
 ### Task 7: 收敛 Agent/MCP、生成、Motion 和设置/帮助能力
 
 **Files:**
@@ -259,6 +261,8 @@
   将上游 Agent 工具逐个映射到 dispatcher、参数校验、命令、项目作用域、撤销行为和测试；没有真实调用链的工具不得标为已完成。
 
   当前进展（2026-08-21）：发现并修复 Agent/MCP `move_clips` 与上游不一致的入口缺口：显式 `toFrame` 现在会通过同一原子 `MoveClips` payload 传播 frame delta 到 linked A/V partner，track-only move 不传播；新增 frame-propagation 和 track-only 回归测试，Agent lib 415/415 通过。继续按同一方法审计其余 Agent/MCP 工具入口。
+
+  2026-08-22 上游审计又确认并修复两个入口缺口：批量文件夹参数此前已广告但 dispatcher 返回 not implemented，现改为单事务 `CreateFolders` / `MoveToFolders`；普通媒体导入此前排除 JSON/Lottie，现已接入 Lottie JSON 和 `.lottie` ZIP container，坏文档 fail-soft。剩余 Agent/MCP 重点是安装版本地调用证据与安全失败边界，不再把已确认的两个缺口留在“待实现”。
 
 - [ ] **Step 2: 验证 MCP 安全边界**
 

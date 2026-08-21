@@ -32,8 +32,8 @@ use opentake_media::analysis::{
 };
 use opentake_media::{PcmFormat, PcmSpec};
 use opentake_ops::{
-    ClipEntry, ClipMove, ClipProperties, ClipPropertyAssignment, EditCommand, FrameRange,
-    KeyframePayload, KeyframeProperty, RenameEntry, TextEntry,
+    ClipEntry, ClipMove, ClipProperties, ClipPropertyAssignment, EditCommand, FolderCreateEntry,
+    FolderMoveEntry, FrameRange, KeyframePayload, KeyframeProperty, RenameEntry, TextEntry,
 };
 use serde_json::Value;
 
@@ -709,8 +709,8 @@ impl Dispatcher {
             ToolName::SetKeyframes => self.set_keyframes(args),
             ToolName::RippleDeleteRanges => self.ripple_delete_ranges(args, before, op),
             ToolName::AddTexts => self.add_texts(args, before),
-            ToolName::CreateFolder => self.create_folder(args),
-            ToolName::MoveToFolder => self.move_to_folder(args),
+            ToolName::CreateFolder => self.create_folder(args, manifest),
+            ToolName::MoveToFolder => self.move_to_folder(args, manifest),
             ToolName::SetClipProperties => self.set_clip_properties(args, before, manifest),
             ToolName::SetColorGrade => self.set_color_grade(args),
             ToolName::ChromaKey => self.chroma_key(args),
@@ -2564,18 +2564,67 @@ impl Dispatcher {
         Ok(ToolResult::ok(res.summary))
     }
 
-    fn create_folder(&self, args: &Value) -> Result<ToolResult, ToolError> {
+    fn create_folder(
+        &self,
+        args: &Value,
+        manifest: &MediaManifest,
+    ) -> Result<ToolResult, ToolError> {
         let a: CreateFolderArgs = decode_tool_args(args, "")?;
-        // Single form (name / parentFolderId) only; the batch `entries` form is
-        // not yet wired (one CreateFolder command per call).
-        if a.entries.is_some() {
-            return Ok(ToolResult::error(
-                "create_folder: batch 'entries' form not yet implemented; pass name/parentFolderId",
+        if let Some(raw_entries) = a.entries {
+            if a.name.is_some() || a.parent_folder_id.is_some() {
+                return Err(ToolError::new(
+                    "create_folder: pass either entries or name/parentFolderId, not both",
+                ));
+            }
+            if raw_entries.is_empty() {
+                return Err(ToolError::new("create_folder: entries must not be empty"));
+            }
+            let mut entries = Vec::with_capacity(raw_entries.len());
+            for (index, raw) in raw_entries.iter().enumerate() {
+                let entry: args::CreateFolderEntry =
+                    decode_tool_args(raw, &format!("entries[{index}]"))?;
+                if let Some(parent) = entry.parent_folder_id.as_deref() {
+                    if !manifest.folders.iter().any(|folder| folder.id == parent) {
+                        return Err(ToolError::new(format!(
+                            "entries[{index}]: parentFolderId not found: {parent}"
+                        )));
+                    }
+                }
+                entries.push(FolderCreateEntry {
+                    name: entry.name,
+                    parent_folder_id: entry.parent_folder_id,
+                });
+            }
+            let response_entries = entries.clone();
+            let res = self.apply(EditCommand::CreateFolders { entries })?;
+            let folders = response_entries
+                .iter()
+                .zip(res.affected_clip_ids.iter())
+                .map(|(entry, id)| {
+                    let mut folder = serde_json::json!({
+                        "id": id,
+                        "name": entry.name,
+                    });
+                    if let Some(parent) = &entry.parent_folder_id {
+                        folder["parentFolderId"] = serde_json::json!(parent);
+                    }
+                    folder
+                })
+                .collect::<Vec<_>>();
+            return Ok(ToolResult::ok(
+                serde_json::json!({ "folders": folders }).to_string(),
             ));
         }
         let Some(name) = a.name else {
             return Err(ToolError::new("arguments: missing required field 'name'"));
         };
+        if let Some(parent) = a.parent_folder_id.as_deref() {
+            if !manifest.folders.iter().any(|folder| folder.id == parent) {
+                return Err(ToolError::new(format!(
+                    "create_folder: parentFolderId not found: {parent}"
+                )));
+            }
+        }
         let res = self.apply(EditCommand::CreateFolder {
             name,
             parent_folder_id: a.parent_folder_id,
@@ -2583,18 +2632,74 @@ impl Dispatcher {
         Ok(ToolResult::ok(res.summary))
     }
 
-    fn move_to_folder(&self, args: &Value) -> Result<ToolResult, ToolError> {
+    fn move_to_folder(
+        &self,
+        args: &Value,
+        manifest: &MediaManifest,
+    ) -> Result<ToolResult, ToolError> {
         let a: MoveToFolderArgs = decode_tool_args(args, "")?;
-        if a.entries.is_some() {
-            return Ok(ToolResult::error(
-                "move_to_folder: batch 'entries' form not yet implemented; pass assetIds/folderId",
-            ));
+        if let Some(raw_entries) = a.entries {
+            if a.asset_ids.is_some() || a.folder_id.is_some() {
+                return Err(ToolError::new(
+                    "move_to_folder: pass either entries or assetIds/folderId, not both",
+                ));
+            }
+            if raw_entries.is_empty() {
+                return Err(ToolError::new("move_to_folder: entries must not be empty"));
+            }
+            let mut entries = Vec::with_capacity(raw_entries.len());
+            for (index, raw) in raw_entries.iter().enumerate() {
+                let entry: args::MoveToFolderEntry =
+                    decode_tool_args(raw, &format!("entries[{index}]"))?;
+                if entry.asset_ids.is_empty() {
+                    return Err(ToolError::new(format!(
+                        "entries[{index}]: assetIds must not be empty"
+                    )));
+                }
+                for asset_id in &entry.asset_ids {
+                    if !manifest.entries.iter().any(|asset| asset.id == *asset_id) {
+                        return Err(ToolError::new(format!(
+                            "entries[{index}]: media asset not found: {asset_id}"
+                        )));
+                    }
+                }
+                if let Some(folder_id) = entry.folder_id.as_deref() {
+                    if !manifest.folders.iter().any(|folder| folder.id == folder_id) {
+                        return Err(ToolError::new(format!(
+                            "entries[{index}]: folderId not found: {folder_id}"
+                        )));
+                    }
+                }
+                entries.push(FolderMoveEntry {
+                    asset_ids: entry.asset_ids,
+                    folder_id: entry.folder_id,
+                });
+            }
+            let res = self.apply(EditCommand::MoveToFolders { entries })?;
+            return Ok(ToolResult::ok(res.summary));
         }
         let Some(asset_ids) = a.asset_ids else {
             return Err(ToolError::new(
                 "arguments: missing required field 'assetIds'",
             ));
         };
+        if asset_ids.is_empty() {
+            return Err(ToolError::new("arguments: 'assetIds' must not be empty"));
+        }
+        for asset_id in &asset_ids {
+            if !manifest.entries.iter().any(|asset| asset.id == *asset_id) {
+                return Err(ToolError::new(format!(
+                    "move_to_folder: media asset not found: {asset_id}"
+                )));
+            }
+        }
+        if let Some(folder_id) = a.folder_id.as_deref() {
+            if !manifest.folders.iter().any(|folder| folder.id == folder_id) {
+                return Err(ToolError::new(format!(
+                    "move_to_folder: folderId not found: {folder_id}"
+                )));
+            }
+        }
         let res = self.apply(EditCommand::MoveToFolder {
             asset_ids,
             folder_id: a.folder_id,
@@ -6586,6 +6691,69 @@ mod tests {
         assert!(!r.is_error, "{}", r.text_joined());
         assert!(r.text_joined().contains("Hero Shot"), "{}", r.text_joined());
         assert_eq!(h.media().entries[0].name, "Hero Shot");
+    }
+
+    #[test]
+    fn create_folder_batch_returns_records_and_uses_one_undo_step() {
+        let h = Arc::new(StateHandle::new(Timeline::new(), MediaManifest::new()));
+        let d = dispatcher_with(h.clone());
+
+        let result = d.dispatch(
+            "create_folder",
+            serde_json::json!({
+                "entries": [{"name": "A-Roll"}, {"name": "B-Roll"}]
+            }),
+        );
+
+        assert!(!result.is_error, "{}", result.text_joined());
+        let body = first_json(&result);
+        let folders = body["folders"].as_array().expect("batch folders");
+        assert_eq!(folders.len(), 2);
+        assert_eq!(folders[0]["name"], "A-Roll");
+        assert_eq!(folders[1]["name"], "B-Roll");
+        assert_eq!(h.media().folders.len(), 2);
+
+        let undo = d.dispatch("undo", serde_json::json!({}));
+        assert!(!undo.is_error, "{}", undo.text_joined());
+        assert!(h.media().folders.is_empty(), "batch must undo atomically");
+    }
+
+    #[test]
+    fn move_to_folder_batch_moves_each_entry_and_uses_one_undo_step() {
+        let mut manifest = MediaManifest::new();
+        manifest.entries.push(entry("asset-a", "A"));
+        manifest.entries.push(entry("asset-b", "B"));
+        manifest
+            .folders
+            .push(opentake_domain::MediaFolder::new("folder-a", "A-Roll"));
+        manifest
+            .folders
+            .push(opentake_domain::MediaFolder::new("folder-b", "B-Roll"));
+        let h = Arc::new(StateHandle::new(Timeline::new(), manifest));
+        let d = dispatcher_with(h.clone());
+
+        let result = d.dispatch(
+            "move_to_folder",
+            serde_json::json!({
+                "entries": [
+                    {"assetIds": ["asset-a"], "folderId": "folder-a"},
+                    {"assetIds": ["asset-b"], "folderId": "folder-b"}
+                ]
+            }),
+        );
+
+        assert!(!result.is_error, "{}", result.text_joined());
+        let media = h.media();
+        assert_eq!(media.entries[0].folder_id.as_deref(), Some("folder-a"));
+        assert_eq!(media.entries[1].folder_id.as_deref(), Some("folder-b"));
+
+        let undo = d.dispatch("undo", serde_json::json!({}));
+        assert!(!undo.is_error, "{}", undo.text_joined());
+        let restored = h.media();
+        assert!(restored
+            .entries
+            .iter()
+            .all(|asset| asset.folder_id.is_none()));
     }
 
     #[test]

@@ -18,7 +18,7 @@ skip_when:
   - 仅查看单个内部函数
 priority: must
 freshness_class: project
-last_verified: 2026-08-21T23:47:02+08:00
+last_verified: 2026-08-22T01:03:46+08:00
 owners:
   - OpenTake-generation
 source_of_truth:
@@ -47,6 +47,7 @@ tags:
 - Inspector、字幕/转写/搜索、Agent/MCP、Motion Studio opaque MP4：代码和对应测试入口已存在；仍需安装版场景证据才能升级为 verified。
 - Motion Studio transparent alpha：Rust/Web 纵切已接通并通过全量自动化；最新包已完成透明开关、发布进度、时间线落轨和保存重开屏幕验收；导出面板已新增透明 ProRes 4444 codec，真实 GPU/FFmpeg integration 已复核 `yuva444` alpha；透明导出屏幕仍待解锁后复验。
 - Agent/MCP linked move parity：`move_clips` 现在和上游约定一致，显式 `toFrame` 会把 frame delta 传播到 linked A/V partner，track-only move 不传播；新增两条 dispatcher 回归测试。最新安装版还验证了 Agent 面板标签生命周期、无通道时发送禁用和快捷键收起布局。
+- 上游收敛新切片：`create_folder.entries` 与 `move_to_folder.entries` 已接入单一 EditCommand/Undo 事务；普通媒体导入现在接受有效 `.json` / `.lottie`，用 Velato 校验并写入 Lottie metadata，坏文档在批量入口跳过，MCP 单文件入口返回明确错误。
 
 ## 首轮明确缺口
 
@@ -54,6 +55,7 @@ tags:
 |---|---:|---|---|---|
 | `OT-WINDOW-SMALL-SCREEN` | P0 | verified | Tauri 安全初始尺寸 + monitor-aware standard/compact 裁剪 + Home/Editor min-size 回归 | 1066×666、1280×720、1331×768 contract 测试；安装版紧凑/标准切换与 Home/编辑器截图 |
 | `UP-MEDIA-IMPORT-AND-FOLDERS` | P0 | verified | 文件/文件夹导入、跳过 unsupported、relink 和预览均已通过安装版验收 | 新构建 app 中 MP4、PNG、双文件多选 Open 可用；导入数 1→3；文件夹导入出现目录并提示跳过 64；relink 恢复离线媒体 |
+| `UP-MEDIA-LOTTIE-IMPORT` | P1 | partial | 对齐上游 `.json/.lottie` 导入；Velato JSON 校验、`.lottie` ZIP `animations/*.json` 提取、metadata 写入和坏文件 fail-soft 已通过自动化 | `cargo test -p opentake-core importable_clip_type_covers_whitelist_and_rejects_others`；Tauri Lottie JSON/容器/MCP path 定向测试；安装版素材预览/落轨/重开屏幕待解锁 |
 | `UP-TIMELINE-UI` | P0 | partial | 已补 Shift+标尺范围标记、范围 start/end 边缘命中/拖动、标尺吸附、取消回滚、同帧清除、PointerEvent 回归，以及上游 playhead split/trim 的无选区 no-op 语义；继续补真实删除、撤销及拖拽对拍 | 时间轴目录 8 files / 88 tests；linked slice 新增 command routing 2 个 no-selection 测试，Web 全量 151 files / 1412 tests；最新包 `de4cb52b…` 已安装但本轮屏幕重跑因 Mac 锁定 blocked |
 | `UP-PREVIEW-PLAYBACK` | P0 | partial | compositor temporal route、speed/reversed 原生帧映射、音频整轨解码和缺失媒体 fail-closed 已补齐；安装版与 preview/export 全面对拍仍继续 | Render 18 项、Playback resolver 15 项、Playback integration 8 项和顺序 Rust workspace 通过；preview/export 同帧语义、音画同步、取消和最新包屏幕证据仍待 |
 | `UP-EXPORT` | P0 | partial | H.264/AAC、H.265、ProRes 422 和字幕命令已有实现；普通输出失败清理、external cancel 全链路、输出父目录/文件 identity 校验已补齐 | 最新包已补 H.265/AAC 与 ProRes 422 HQ/PCM 的 SavePanel/文件证据；透明 ProRes 4444、字幕、取消、实时音画同步和首中尾对拍仍待 |
@@ -61,6 +63,7 @@ tags:
 | `UP-MEDIA-VIEW-MODES` | P1 | verified | folder/flat/grouped 三态投影、网格/列表密度、文件夹导航和音频导入入口已通过测试及安装版验收 | 搜索、选择、拖拽和预览沿用同一 MediaItem ID 链路，继续纳入后续模块化 QA |
 | `OT-MOTION-ALPHA` | P1 | partial | Motion Studio 透明发布开关、导出面板 ProRes 4444/yuva444、manifest straight-alpha provenance | 透明 motion 覆盖底图、预览/导出一致，并完成安装版时间线导入对拍；代码/自动化已通过，透明导出屏幕和 opaque→transparent 编辑仍待 |
 | `UP-ACCOUNT-CLOUD-BOUNDARY` | P0 | blocked | 先定义 BYOK/provider 替代还是追同构云契约，再补 capability gate | 未授权时不广告/不发送；有凭据时生成→媒体→落轨闭环 |
+| `UP-AGENT-FOLDER-BATCH` | P1 | verified | `create_folder.entries` / `move_to_folder.entries` 批量参数与上游一致，分别返回 folder records/汇总并保持单步 Undo | `cargo test -p opentake-agent folder_batch`；Agent lib 417/417 |
 | `UP-SETTINGS-TAXONOMY` | P2 | partial | 明确 models/agent/storage/general/account 语义映射 | 设置入口和上游语义一一可解释 |
 
 ## 真实 UI 证据摘要
@@ -178,3 +181,5 @@ tags:
 - `2026-08-21T23:09:09+08:00` — 写回最新包范围删除/Undo 与 playhead clamp 屏幕证据；安装包 SHA-256 `893b6ed0…d0ba`，Web 全量 151/1415 通过；Option trim 和其它导出矩阵仍保持 partial。
 - `2026-08-21T23:19:12+08:00` — 写回最新包 H.265/AAC、ProRes 422 HQ/PCM SavePanel 与文件证据；透明 ProRes 4444 专用导出、字幕、取消和实时音画同步仍未升级为完成。
 - `2026-08-21T23:47:02+08:00` — 写回透明 ProRes 4444 导出实现和 GPU/FFmpeg alpha integration；最新安装包 `3ce3c1d0…c7eef`，Computer Use 因 Mac 锁屏未完成透明导出屏幕复验。
+- `2026-08-22T00:46:36+08:00` — 完成上游 agent 确认的两个 P1 切片：Agent 文件夹批量 entries 进入单步 Undo；媒体导入接受 Lottie JSON/`.lottie`，Velato 校验、`.lottie` ZIP animation 提取和 metadata 进入 Tauri 边界；Agent 417/417、ops 209/209、Tauri Lottie JSON/容器/MCP path 定向测试通过，安装版 Lottie 屏幕验收仍待解锁。
+- `2026-08-22T01:03:46+08:00` — Tauri lib 726/726、Web 151/1416、tsc/build 通过；workspace 全量在既有 Motion Chromium 4K budget smoke 超时 180s 后 poison gate，记录为环境/GPU/锁屏风险，未把该失败归因到本轮改动。

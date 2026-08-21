@@ -3927,6 +3927,7 @@ dependencies = [
  "uuid",
  "velato",
  "windows-sys 0.61.2",
+ "zip",
 ]
 
 [[package]]

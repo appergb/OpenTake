@@ -27,7 +27,7 @@ skip_when:
   - 仅修改零 IO 的 domain 算法且不改变 UI 合同
 priority: must
 freshness_class: project
-last_verified: 2026-08-21T23:47:02+08:00
+last_verified: 2026-08-22T01:03:46+08:00
 owners:
   - OpenTake-generation
 source_of_truth:
@@ -75,6 +75,7 @@ tags:
 | Media | 文件夹 / 平铺 / 分组 | 安装版 `媒体组织方式` 菜单可访问；真实文件夹导入后文件夹模式显示目录卡片，平铺模式显示 37 个媒体且隐藏目录卡片，分组模式显示“全部 / editor-core-after-fix-assets”两组；分组网格/列表均可切换 | 通过 | `mediaViewModes` + `MediaPanel` 64 tests；安装版 Computer Use 13:xx；二次 code review Ready |
 | Media | Relink | 选择原始 MP4 后离线媒体恢复，Preview tab 和 Inspector 路径更新 | 通过 | 新构建 app packaged relink 验收 |
 | Media | 素材预览 | 导入后真实 MP4 缩略图/画面可见，PNG 也能作为 source preview 打开 | 通过 | Computer Use：素材 tab、Preview tab、Inspector 来源/尺寸/路径 |
+| Media | Lottie JSON / `.lottie` 导入 | 普通媒体入口和 MCP path 入口现在接受 `.json` / `.lottie`；Velato 校验 JSON，ZIP 容器读取 `animations/*.json`，导入后保存宽高、帧率和时长；坏 Lottie 在批量入口跳过、MCP 单文件返回明确错误；core/Tauri/Agent 相关定向测试通过 | 部分（代码/自动化） | Mac 解锁后补素材库 Lottie 卡片、预览 tab、时间轴落轨和保存重开屏幕对拍 |
 | Timeline | 播放/暂停 | 播放头从 0 推进到约 54，时间从 00:00:00 推进到约 00:01:24 | 通过 | 增加暂停/恢复/seek/尾帧证据 |
 | Timeline | 选中片段 | 选中 `sample-text-0` 后 Inspector 切换到文本属性 | 通过 | 补选区、拖拽、删除和 undo |
 | Timeline | 播放头处分割 | 初始在帧 0 或片段外尝试时无变化；补齐有效前置条件（选中 `sample-text-0`、播放头推进到帧 15）后成功新增片段、撤销变可用 | 通过（有效前置条件） | 新构建 app AX：分割后出现 UUID 片段；`cargo test -p opentake-ops split_clip_distributes_keyframes_at_cut` 通过 |
@@ -84,6 +85,7 @@ tags:
 | Preview | compositor temporal 预览 | 最新安装版在 QA 工程中设置 `speed=1.5` 和曝光 `0.50` compositor 属性后不再出现 unsupported surface；画面可见，播放头可到尾帧，暂停后抓帧按钮保持可用；speed/reversed 的首次 native render、JPEG publication、source-frame 映射由 Rust integration tests 锁定 | 通过（代码/native/屏幕组合证据） | 预览与导出起/中/尾帧、音频同步和取消仍在后续闭环 |
 | Preview | 多素材 tabs | 打开 `audit-4k60-h264` 与 `export-h264-frame30` 后显示 Timeline/两个媒体 tab；关闭第二个回退第一个 | 通过 | 安装版 AX：两个 Close 按钮；Preview slice 4 files / 91 tests |
 | Agent | 面板、对话标签和本地边界 | Agent 面板可打开；新建/关闭对话标签成功；无配置通道时输入框存在但发送按钮禁用；用 `⌘⌥A` 可收起并恢复编辑器布局 | 通过（入口/本地边界） | 不发送外部消息；MCP 握手、失败/取消、真实工具调用仍待 |
+| Agent / MCP | 文件夹批量工具 | `create_folder.entries` 返回创建出的 folder records，`move_to_folder.entries` 支持多个资产到不同目录；两者都通过单一 EditCommand 事务和单步 Undo，417 个 Agent lib 测试全绿 | 通过（代码/自动化） | 屏幕层无独立入口；解锁后可用 Agent/MCP 本地工具调用做一次安装包验收，不发送外部消息 |
 | Subtitles | 字幕入口与导出 | 字幕页可打开，来源/样式/位置/翻译同意项均可见；点击生成字幕后明确提示需下载约 141 MB 的 multilingual 转写模型，并提供“下载模型”入口；未同意外部 Provider 时翻译按钮保持禁用；domain 字幕格式 16/16、Tauri 实际 SRT/VTT 写文件 5/5、Captions/TitleBar 前端 10/10 通过 | 部分（入口/失败边界/代码自动化） | Mac 解锁后补模型下载、转写结果编辑和安装版 SavePanel SRT/VTT 导出屏幕证据；翻译真实闭环仍受 provider 凭据边界限制 |
 | Motion | Studio 入口 | HTML/CSS 编辑器、预览、参数检查器、关键帧时间线出现；播放帧推进 | 通过（既有桌面证据） | 用最新包补发布、保存重开和导入时间线 |
 | Motion | 透明发布与透明导出 | Motion Studio Inspector 可点击“透明背景（ProRes 4444）”；真实发布进度出现，完成后素材库新增 Motion Graphic、时间线新增 V2 片段，预览/Inspector 均可见；QA 工程内真实媒体叶子为 ProRes 4444 `ap4h` / `yuva444p12le`，90 帧/3.000s；新增导出面板 `ProRes 4444 透明 / .mov`，Rust GPU/FFmpeg integration 验证透明清屏、ProRes、alpha 平面 0→非零；manifest 的 `transparent: true` 与项目媒体引用一致 | 部分（发布屏幕/文件通过；透明专用导出屏幕因 Mac 锁屏待复验） | 解锁后补透明专用导出 SavePanel/状态/文件屏幕对拍；opaque clip 编辑时切换透明仍待 |
@@ -114,7 +116,7 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - App 构建：release `.app` 已生成并安装；DMG bundle 脚本因超过一分钟无输出被停止，DMG 不在本轮交付证据内。
 - 本轮主线 fresh verification：Preview/Store/Media 4 files / 91 tests passed；MediaActions/MediaPanel 2 files / 59 tests passed；`pnpm build` exit 0。
 - 全量 Web 串行门禁：`NODE_OPTIONS=--localstorage-file=/tmp/opentake-vitest-range-refresh-full.json pnpm exec vitest run --pool=forks --maxWorkers=1` → 151 files / 1415 tests passed；`pnpm build` exit 0。
-- Rust workspace：`cargo test --workspace --jobs 1 -- --test-threads=1` 与 `cargo fmt --all -- --check` 通过；本轮包含缺失媒体 Preview/Playback fail-closed、透明 Motion ProRes 4444 集成和 RenderLoop 集成测试。字幕定向门禁 `cargo test -p opentake-domain subtitle_export` 为 16/16，`cargo test -p opentake-tauri subtitle_export_tests -- --nocapture` 为 5/5。全 workspace clippy 仍被既有 `chunks_exact`/`chunks_exact_mut` lint 阻塞，当前输出涉及 `opentake-media`、`opentake-motion` 等旧模块；一次未限并发运行在 motion sandbox 180s 超时，单独串行重跑通过，保留为 GPU/Chromium 资源争用风险；仅保留明确标记为 ignored 的 real-device / optional fixture tests。
+- Rust workspace：此前顺序全量曾通过；本轮受影响门禁仍全绿：Agent lib 417/417、ops lib 209/209、Tauri lib 726/726，字幕 16/16 + 5/5，Lottie JSON/容器/MCP path 定向测试通过，`cargo fmt --all -- --check` 通过。2026-08-22 再跑 `cargo test --workspace --jobs 1 -- --test-threads=1` 在既有 `opentake-motion/tests/chromium.rs::four_k_single_frame_opaque_and_transparent_budget_smoke` 处超时 180s，随后同 gate 的 3 个测试因 poison 连带失败；本次 diff 未修改 `opentake-motion`，保留为当前机器 Chromium/GPU/锁屏环境风险，不宣称 workspace 全量本轮通过。全 workspace clippy 仍被既有 `chunks_exact`/`chunks_exact_mut` lint 阻塞，当前输出涉及 `opentake-media`、`opentake-motion` 等旧模块。
 - 最终 `.app`：`web/node_modules/.bin/tauri build --bundles app` exit 0；当前安装包 SHA-256 `3ce3c1d04fd28e5b9f98e056788112513e82ae4d46e13bdc462dc55af16c7eef`；最新包已完成 Home 小屏、媒体预览 tab、播放/尾帧、分割/撤销、范围删除/Undo、H.264/H.265/ProRes 422 导出面板和 Motion 透明发布屏幕 smoke；透明 ProRes 4444 屏幕、Option trim、字幕 SavePanel/模型下载和取消导出仍待。
 
 ## Related Documents
@@ -151,3 +153,5 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - `2026-08-21T23:19:12+08:00` — 最新安装包完成 H.265/AAC 与 ProRes 422 HQ/PCM 的 SavePanel 导出和文件级复核：HEVC `hev1` 与 ProRes `apch` 均通过完整 `ffmpeg -xerror`；透明 ProRes 4444、字幕和取消导出仍保持待验证。
 - `2026-08-21T23:47:02+08:00` — 新增透明 ProRes 4444 导出纵切：前端暴露 `ProRes 4444 透明 / .mov`，Rust 将透明 codec 映射到 `yuva444` + alpha 清屏；Rust workspace 722 tests、导出 integration 6/6、Web 151/1416 通过。最新包 `3ce3c1d0…c7eef` 已安装，但 Computer Use 当前被 Mac 锁屏阻塞，透明导出屏幕证据保留 partial。
 - `2026-08-22T00:06:00+08:00` — 复跑字幕纵切：domain 16/16、Tauri 实际 SRT/VTT 写文件 5/5、Captions/TitleBar 前端 10/10 通过；字幕能力保持“代码/自动化通过，安装版模型下载与 SavePanel 导出屏幕待解锁”。同时将导出取消状态明确区分为“代码/自动化通过，最新安装版 UI toast/清理仍待”。
+- `2026-08-22T00:46:36+08:00` — 上游 parity agent 确认并完成两项缺口：Agent 文件夹批量 entries 单步 Undo；Lottie JSON/`.lottie` 导入、Velato 校验和 metadata。Agent 417/417、ops 209/209、Lottie JSON/容器/MCP path 定向测试通过；最新安装版屏幕路径因 Mac 锁屏保持待验证。
+- `2026-08-22T01:03:46+08:00` — 受影响 Tauri lib 726/726、Web 151 files / 1416 tests、tsc、build 通过；workspace 全量复跑在既有 4K Chromium budget smoke 180s 超时，poison gate 连带 3 项失败，未把环境失败归因到本次媒体/Agent 改动。

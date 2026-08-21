@@ -21,7 +21,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -435,6 +435,19 @@ impl LottieMaterializer {
         path: &std::path::Path,
         bytes: &[u8],
     ) -> Result<(), String> {
+        let json = if is_lottie_container(path) {
+            extract_lottie_animation(path, bytes)?
+        } else {
+            bytes.to_vec()
+        };
+        self.ensure_json_document_bytes(path, &json)
+    }
+
+    fn ensure_json_document_bytes(
+        &mut self,
+        path: &std::path::Path,
+        bytes: &[u8],
+    ) -> Result<(), String> {
         if bytes.is_empty() || bytes.len() > MAX_LOTTIE_BYTES {
             return Err(format!(
                 "Lottie document {} must be 1..={MAX_LOTTIE_BYTES} bytes (got {})",
@@ -470,6 +483,19 @@ impl LottieMaterializer {
 
     pub(crate) fn metadata(&mut self, path: &std::path::Path) -> Result<LottieMetadata, String> {
         self.ensure_document(path)?;
+        self.metadata_cached(path)
+    }
+
+    pub(crate) fn metadata_file(
+        &mut self,
+        path: &std::path::Path,
+        file: &File,
+    ) -> Result<LottieMetadata, String> {
+        self.ensure_document_file(path, file)?;
+        self.metadata_cached(path)
+    }
+
+    fn metadata_cached(&self, path: &std::path::Path) -> Result<LottieMetadata, String> {
         let composition = &self
             .documents
             .get(path)
@@ -637,6 +663,61 @@ impl Default for LottieMaterializer {
     fn default() -> Self {
         Self::new()
     }
+}
+
+const MAX_LOTTIE_CONTAINER_BYTES: usize = MAX_LOTTIE_BYTES;
+
+fn is_lottie_container(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("lottie"))
+}
+
+/// Extract the first animation JSON from a `.lottie` ZIP container. The
+/// archive is bounded before parsing and the decompressed animation is capped
+/// by the same limit as a plain Lottie JSON document.
+fn extract_lottie_animation(path: &std::path::Path, bytes: &[u8]) -> Result<Vec<u8>, String> {
+    if bytes.is_empty() || bytes.len() > MAX_LOTTIE_CONTAINER_BYTES {
+        return Err(format!(
+            "Lottie container {} must be 1..={MAX_LOTTIE_CONTAINER_BYTES} bytes (got {})",
+            path.display(),
+            bytes.len()
+        ));
+    }
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
+        .map_err(|error| format!("read Lottie container {}: {error}", path.display()))?;
+    let mut selected = None;
+    for index in 0..archive.len() {
+        let file = archive
+            .by_index(index)
+            .map_err(|error| format!("read Lottie container {}: {error}", path.display()))?;
+        let name = file.name().to_ascii_lowercase();
+        if file.is_file() && name.starts_with("animations/") && name.ends_with(".json") {
+            selected = Some(index);
+            break;
+        }
+    }
+    let Some(index) = selected else {
+        return Err(format!(
+            "Lottie container {} has no animations/*.json entry",
+            path.display()
+        ));
+    };
+    let file = archive
+        .by_index(index)
+        .map_err(|error| format!("read Lottie animation {}: {error}", path.display()))?;
+    let mut json = Vec::new();
+    file.take((MAX_LOTTIE_BYTES + 1) as u64)
+        .read_to_end(&mut json)
+        .map_err(|error| format!("read Lottie animation {}: {error}", path.display()))?;
+    if json.is_empty() || json.len() > MAX_LOTTIE_BYTES {
+        return Err(format!(
+            "Lottie animation {} must be 1..={MAX_LOTTIE_BYTES} bytes (got {})",
+            path.display(),
+            json.len()
+        ));
+    }
+    Ok(json)
 }
 
 fn validate_lottie(
