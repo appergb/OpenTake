@@ -189,13 +189,66 @@ function previewHistoryWithActivation(previewTabHistory: string[], mediaId: stri
   return [...previewTabHistory.filter((id) => id !== mediaId), mediaId];
 }
 
+interface EffectivePreviewState {
+  previewTabIds: string[];
+  previewTabHistory: string[];
+  previewActiveTabId: string;
+}
+
+export function resolveEffectivePreviewState(
+  state: Pick<
+    UiState,
+    | "previewTabHistory"
+    | "previewTabIds"
+    | "previewActiveTabId"
+    | "previewMediaId"
+  >,
+): EffectivePreviewState {
+  const previewTabIds = dedupePreviewTabIds(state.previewTabIds);
+  const previewMediaId = state.previewMediaId;
+  const activeMediaId = previewTabMediaId(state.previewActiveTabId);
+  const activeTabValid =
+    state.previewActiveTabId === PREVIEW_TIMELINE_TAB_ID
+      ? previewMediaId === null
+      : activeMediaId !== null && previewTabIds.includes(activeMediaId);
+  const effectivePreviewTabIds =
+    previewMediaId &&
+    !previewTabIds.includes(previewMediaId) &&
+    (previewTabIds.length === 0 || !activeTabValid)
+      ? [...previewTabIds, previewMediaId]
+      : previewTabIds;
+  const previewTabHistory = state.previewTabHistory.filter((id) =>
+    effectivePreviewTabIds.includes(id),
+  );
+  const effectivePreviewTabHistory =
+    previewMediaId &&
+    effectivePreviewTabIds.includes(previewMediaId) &&
+    !previewTabHistory.includes(previewMediaId)
+      ? [...previewTabHistory, previewMediaId]
+      : previewTabHistory;
+  const effectivePreviewActiveTabId =
+    state.previewActiveTabId !== PREVIEW_TIMELINE_TAB_ID &&
+    activeMediaId !== null &&
+    effectivePreviewTabIds.includes(activeMediaId)
+      ? state.previewActiveTabId
+      : previewMediaId && effectivePreviewTabIds.includes(previewMediaId)
+        ? previewMediaTabId(previewMediaId)
+        : PREVIEW_TIMELINE_TAB_ID;
+
+  return {
+    previewTabIds: effectivePreviewTabIds,
+    previewTabHistory: effectivePreviewTabHistory,
+    previewActiveTabId: effectivePreviewActiveTabId,
+  };
+}
+
 function previewSelectionState(
   state: Pick<
     UiState,
     | "previewTabHistory"
-    | "selectedClipIds"
-    | "selectedFolderIds"
-    | "selectedMediaAssetIds"
+    | "previewTabIds"
+    | "previewActiveTabId"
+    | "previewMediaId"
   >,
   previewTabIds: string[],
   tabId: string,
@@ -610,38 +663,45 @@ export const createEditorUiStore = () => create<UiState>((set, get) => ({
   openPreviewTab: (mediaId) =>
     set((state) => {
       if (!mediaId) return {};
-      const previewTabIds = state.previewTabIds.includes(mediaId)
-        ? state.previewTabIds
-        : [...state.previewTabIds, mediaId];
+      const effectivePreviewState = resolveEffectivePreviewState(state);
+      const previewTabIds = effectivePreviewState.previewTabIds.includes(mediaId)
+        ? effectivePreviewState.previewTabIds
+        : [...effectivePreviewState.previewTabIds, mediaId];
       return (
         previewSelectionState(state, previewTabIds, previewMediaTabId(mediaId)) ?? {}
       );
     }),
   selectPreviewTab: (tabId) =>
-    set((state) => previewSelectionState(state, state.previewTabIds, tabId) ?? {}),
+    set((state) => {
+      const effectivePreviewState = resolveEffectivePreviewState(state);
+      return (
+        previewSelectionState(state, effectivePreviewState.previewTabIds, tabId) ?? {}
+      );
+    }),
   closePreviewTab: (tabId) =>
     set((state) => {
       if (tabId === PREVIEW_TIMELINE_TAB_ID) return {};
       const mediaId = previewTabMediaId(tabId);
       if (!mediaId) return {};
-      const closingIndex = state.previewTabIds.indexOf(mediaId);
+      const effectivePreviewState = resolveEffectivePreviewState(state);
+      const closingIndex = effectivePreviewState.previewTabIds.indexOf(mediaId);
       if (closingIndex < 0) return {};
-      const previewTabIds = state.previewTabIds.filter((id) => id !== mediaId);
-      if (state.previewActiveTabId !== tabId) {
+      const previewTabIds = effectivePreviewState.previewTabIds.filter((id) => id !== mediaId);
+      if (effectivePreviewState.previewActiveTabId !== tabId) {
         return {
           ...(previewSelectionState(
             state,
             previewTabIds,
-            state.previewActiveTabId,
+            effectivePreviewState.previewActiveTabId,
             { updateHistory: false },
           ) ?? {}),
-          previewTabHistory: state.previewTabHistory.filter((id) => id !== mediaId),
+          previewTabHistory: effectivePreviewState.previewTabHistory.filter((id) => id !== mediaId),
         };
       }
-      const previewTabHistory = state.previewTabHistory.filter((id) => id !== mediaId);
+      const previewTabHistory = effectivePreviewState.previewTabHistory.filter((id) => id !== mediaId);
       const fallbackMediaId =
         previewTabHistory[previewTabHistory.length - 1] ??
-        (closingIndex > 0 ? state.previewTabIds[closingIndex - 1] ?? null : null);
+        (closingIndex > 0 ? effectivePreviewState.previewTabIds[closingIndex - 1] ?? null : null);
       return (
         previewSelectionState(
           { ...state, previewTabHistory },
@@ -655,15 +715,20 @@ export const createEditorUiStore = () => create<UiState>((set, get) => ({
     set((state) => previewSelectionState(state, [], PREVIEW_TIMELINE_TAB_ID) ?? {}),
   setPreviewMedia: (previewMediaId) => {
     if (previewMediaId === null) {
-      set((state) =>
-        previewSelectionState(state, state.previewTabIds, PREVIEW_TIMELINE_TAB_ID) ?? {},
+    set((state) =>
+        previewSelectionState(
+          state,
+          resolveEffectivePreviewState(state).previewTabIds,
+          PREVIEW_TIMELINE_TAB_ID,
+        ) ?? {},
       );
       return;
     }
     set((state) => {
-      const previewTabIds = state.previewTabIds.includes(previewMediaId)
-        ? state.previewTabIds
-        : [...state.previewTabIds, previewMediaId];
+      const effectivePreviewState = resolveEffectivePreviewState(state);
+      const previewTabIds = effectivePreviewState.previewTabIds.includes(previewMediaId)
+        ? effectivePreviewState.previewTabIds
+        : [...effectivePreviewState.previewTabIds, previewMediaId];
       return (
         previewSelectionState(state, previewTabIds, previewMediaTabId(previewMediaId)) ?? {}
       );

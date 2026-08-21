@@ -254,4 +254,34 @@ describe("timeline playback state", () => {
       previewMediaId: null,
     });
   });
+
+  it("normalizes legacy previewMediaId-only state when selecting and closing a synthetic media tab", () => {
+    useEditorUiStore.setState({
+      previewTabIds: [],
+      previewTabHistory: [],
+      previewActiveTabId: "timeline",
+      previewMediaId: "legacy",
+      selectedClipIds: new Set(["clip-1"]),
+      selectedFolderIds: new Set(["folder-1"]),
+      selectedMediaAssetIds: new Set(),
+    });
+
+    useEditorUiStore.getState().selectPreviewTab("media_legacy");
+    expect(useEditorUiStore.getState()).toMatchObject({
+      previewTabIds: ["legacy"],
+      previewActiveTabId: "media_legacy",
+      previewMediaId: "legacy",
+    });
+    expect([...useEditorUiStore.getState().selectedClipIds]).toEqual([]);
+    expect([...useEditorUiStore.getState().selectedFolderIds]).toEqual([]);
+    expect([...useEditorUiStore.getState().selectedMediaAssetIds]).toEqual(["legacy"]);
+
+    useEditorUiStore.getState().closePreviewTab("media_legacy");
+    expect(useEditorUiStore.getState()).toMatchObject({
+      previewTabIds: [],
+      previewActiveTabId: "timeline",
+      previewMediaId: null,
+    });
+    expect([...useEditorUiStore.getState().selectedMediaAssetIds]).toEqual([]);
+  });
 });

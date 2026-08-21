@@ -65,6 +65,9 @@ async function runDeleteTransaction(
 
     const deleted = new Set(targets);
     if (kind === "media") {
+      const remainingSelected = new Set(
+        [...useEditorUiStore.getState().selectedMediaAssetIds].filter((id) => !deleted.has(id)),
+      );
       useEditorUiStore.setState((latest) => ({
         selectedMediaAssetIds: new Set(
           [...latest.selectedMediaAssetIds].filter((id) => !deleted.has(id)),
@@ -78,6 +81,7 @@ async function runDeleteTransaction(
           ui.closePreviewTab(previewMediaTabId(mediaId));
         }
       }
+      useEditorUiStore.setState({ selectedMediaAssetIds: remainingSelected });
     } else {
       useEditorUiStore.setState((latest) => ({
         selectedFolderIds: new Set(

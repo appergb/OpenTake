@@ -3,7 +3,7 @@
  * bar with project-setting badges. Transport drives the local playhead.
  */
 
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   SkipBack,
   SkipForward,
@@ -19,7 +19,7 @@ import { PanelHeaderBar } from "../ui/PanelShell";
 import { HoverButton } from "../ui/HoverButton";
 import { Icon } from "../ui/Icon";
 import { useProjectStore } from "../../store/projectStore";
-import { useEditorUiStore } from "../../store/uiStore";
+import { resolveEffectivePreviewState, useEditorUiStore } from "../../store/uiStore";
 import { useMediaStore, refreshMedia } from "../../store/mediaStore";
 import { useSettingsStore } from "../../store/settingsStore";
 import { formatTimecode, totalFrames } from "../../lib/geometry";
@@ -1021,35 +1021,27 @@ export function MediaPreview({
 
 export function PreviewTabs({ item: _item }: { item: MediaItem | null }) {
   const t = useT();
-  const previewTabIds = useEditorUiStore((s) => s.previewTabIds ?? []);
-  const previewActiveTabId = useEditorUiStore((s) => s.previewActiveTabId ?? "timeline");
-  const previewMediaId = useEditorUiStore((s) => s.previewMediaId ?? null);
+  const previewTabIds = useEditorUiStore((s) => s.previewTabIds);
+  const previewTabHistory = useEditorUiStore((s) => s.previewTabHistory);
+  const previewActiveTabId = useEditorUiStore((s) => s.previewActiveTabId);
+  const previewMediaId = useEditorUiStore((s) => s.previewMediaId);
+  const previewState = useMemo(
+    () =>
+      resolveEffectivePreviewState({
+        previewTabIds,
+        previewTabHistory,
+        previewActiveTabId,
+        previewMediaId,
+      }),
+    [previewActiveTabId, previewMediaId, previewTabHistory, previewTabIds],
+  );
   const selectPreviewTab = useEditorUiStore((s) => s.selectPreviewTab);
   const closePreviewTab = useEditorUiStore((s) => s.closePreviewTab);
   const mediaItems = useMediaStore((s) => s.items);
   const tabRefs = useRef(new Map<string, HTMLButtonElement>());
   type PreviewTabDescriptor = { id: string; label: string; mediaId: string | null };
 
-  const effectivePreviewTabIds = [...previewTabIds];
-  const activeMediaId =
-    previewActiveTabId === "timeline"
-      ? null
-      : previewActiveTabId.startsWith("media_")
-        ? previewActiveTabId.slice("media_".length)
-        : null;
-  const activeTabValid =
-    previewActiveTabId === "timeline"
-      ? previewMediaId === null
-      : activeMediaId !== null && effectivePreviewTabIds.includes(activeMediaId);
-  if (
-    previewMediaId &&
-    !effectivePreviewTabIds.includes(previewMediaId) &&
-    (effectivePreviewTabIds.length === 0 || !activeTabValid)
-  ) {
-    effectivePreviewTabIds.push(previewMediaId);
-  }
-
-  const mediaTabs: PreviewTabDescriptor[] = effectivePreviewTabIds.flatMap((mediaId) => {
+  const mediaTabs: PreviewTabDescriptor[] = previewState.previewTabIds.flatMap((mediaId) => {
     const media = mediaItems.find((entry) => entry.id === mediaId);
     return media
       ? [{ id: `media_${mediaId}`, label: media.name, mediaId }]
@@ -1059,12 +1051,6 @@ export function PreviewTabs({ item: _item }: { item: MediaItem | null }) {
     { id: "timeline", label: t("preview.timelineTab"), mediaId: null },
     ...mediaTabs,
   ];
-  const effectivePreviewActiveTabId =
-    previewActiveTabId !== "timeline" && tabs.some((tab) => tab.id === previewActiveTabId)
-      ? previewActiveTabId
-      : previewMediaId && tabs.some((tab) => tab.id === `media_${previewMediaId}`)
-        ? `media_${previewMediaId}`
-        : "timeline";
 
   const focusTab = (tabId: string) => {
     tabRefs.current.get(tabId)?.focus();
@@ -1101,7 +1087,7 @@ export function PreviewTabs({ item: _item }: { item: MediaItem | null }) {
       style={{ display: "flex", alignItems: "center", gap: "var(--space-md)" }}
     >
       {tabs.map((tab) => {
-        const active = effectivePreviewActiveTabId === tab.id;
+        const active = previewState.previewActiveTabId === tab.id;
         return (
           <div
             key={tab.id}

@@ -305,17 +305,48 @@ it("renders a legacy media preview tab when previewMediaId is set without a tab 
   useMediaStore.setState({ items: [previewItem("legacy", "Legacy")] });
   useEditorUiStore.setState({
     previewTabIds: [],
+    previewTabHistory: [],
     previewActiveTabId: "timeline",
     previewMediaId: "legacy",
+    selectedClipIds: new Set(["clip-1"]),
+    selectedFolderIds: new Set(["folder-1"]),
+    selectedMediaAssetIds: new Set(),
   });
 
   await act(async () => root.render(<PreviewTabs item={null} />));
 
-  const tabs = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+  let tabs = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
   expect(tabs).toHaveLength(2);
   expect(tabs[1]?.id).toBe("preview-media-tab-legacy");
   expect(tabs[1]?.textContent?.replace(/\s+/g, " ").trim()).toBe("Legacy");
   expect(tabs.map((tab) => tab.getAttribute("aria-selected"))).toEqual(["false", "true"]);
+
+  await act(async () =>
+    tabs[1]?.dispatchEvent(new MouseEvent("click", { bubbles: true })),
+  );
+  expect(useEditorUiStore.getState()).toMatchObject({
+    previewTabIds: ["legacy"],
+    previewActiveTabId: "media_legacy",
+    previewMediaId: "legacy",
+  });
+  expect([...useEditorUiStore.getState().selectedClipIds]).toEqual([]);
+  expect([...useEditorUiStore.getState().selectedFolderIds]).toEqual([]);
+  expect([...useEditorUiStore.getState().selectedMediaAssetIds]).toEqual(["legacy"]);
+
+  const closeLegacy = container.querySelector<HTMLButtonElement>(
+    'button[aria-label="Close Legacy"]',
+  );
+  await act(async () =>
+    closeLegacy?.dispatchEvent(new MouseEvent("click", { bubbles: true })),
+  );
+  expect(useEditorUiStore.getState()).toMatchObject({
+    previewTabIds: [],
+    previewActiveTabId: "timeline",
+    previewMediaId: null,
+  });
+  expect([...useEditorUiStore.getState().selectedMediaAssetIds]).toEqual([]);
+  tabs = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+  expect(tabs).toHaveLength(1);
 });
 
 it("requests latest-only FFmpeg source stills for paused source seek", async () => {

@@ -13,6 +13,9 @@ const store = vi.hoisted(() => ({
     currentFrame: 42,
     isPlaying: false,
     isScrubbing: false,
+    previewTabIds: [] as string[],
+    previewTabHistory: [] as string[],
+    previewActiveTabId: "timeline",
     previewMediaId: null as string | null,
     selectedClipIds: new Set<string>(),
     canvasZoom: 1,
@@ -60,6 +63,52 @@ vi.mock("../../store/uiStore", () => ({
   useEditorUiStore: Object.assign((selector: (state: typeof store.ui) => unknown) => selector(store.ui), {
     getState: () => store.ui,
   }),
+  resolveEffectivePreviewState: (state: {
+    previewTabIds?: string[];
+    previewTabHistory?: string[];
+    previewActiveTabId?: string;
+    previewMediaId?: string | null;
+  }) => {
+    const previewTabIds = [...new Set((state.previewTabIds ?? []).filter(Boolean))];
+    const previewMediaId = state.previewMediaId ?? null;
+    const previewActiveTabId = state.previewActiveTabId ?? "timeline";
+    const activeMediaId =
+      previewActiveTabId.startsWith("media_") && previewActiveTabId.length > "media_".length
+        ? previewActiveTabId.slice("media_".length)
+        : null;
+    const activeTabValid =
+      previewActiveTabId === "timeline"
+        ? previewMediaId === null
+        : activeMediaId !== null && previewTabIds.includes(activeMediaId);
+    const effectivePreviewTabIds =
+      previewMediaId &&
+      !previewTabIds.includes(previewMediaId) &&
+      (previewTabIds.length === 0 || !activeTabValid)
+        ? [...previewTabIds, previewMediaId]
+        : previewTabIds;
+    const previewTabHistory = (state.previewTabHistory ?? []).filter((id) =>
+      effectivePreviewTabIds.includes(id),
+    );
+    const effectivePreviewTabHistory =
+      previewMediaId &&
+      effectivePreviewTabIds.includes(previewMediaId) &&
+      !previewTabHistory.includes(previewMediaId)
+        ? [...previewTabHistory, previewMediaId]
+        : previewTabHistory;
+    const effectivePreviewActiveTabId =
+      previewActiveTabId !== "timeline" &&
+      activeMediaId !== null &&
+      effectivePreviewTabIds.includes(activeMediaId)
+        ? previewActiveTabId
+        : previewMediaId && effectivePreviewTabIds.includes(previewMediaId)
+          ? `media_${previewMediaId}`
+          : "timeline";
+    return {
+      previewTabIds: effectivePreviewTabIds,
+      previewTabHistory: effectivePreviewTabHistory,
+      previewActiveTabId: effectivePreviewActiveTabId,
+    };
+  },
 }));
 
 vi.mock("../../store/mediaStore", () => ({
