@@ -113,7 +113,7 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - 全量 Web 串行门禁：151 files / 1412 tests passed；运行时使用已初始化 localStorage file 和单 worker，包含无选区 split/trim no-op 回归。
 - 本轮 alpha slice Web 串行门禁：`NODE_OPTIONS=--localstorage-file=/tmp/opentake-vitest-localstorage.json pnpm exec vitest run --pool=forks --maxWorkers=1` → 151 files / 1413 tests passed；`pnpm build` exit 0。
 - Rust workspace：`cargo test --workspace --jobs 1 -- --test-threads=1` 与 `cargo fmt --all -- --check` 通过；本轮包含缺失媒体 Preview/Playback fail-closed、透明 Motion ProRes 4444 集成和 RenderLoop 集成测试。全 workspace clippy 仍被既有 `chunks_exact`/`chunks_exact_mut` lint 阻塞，当前输出涉及 `opentake-media`、`opentake-motion` 等旧模块；一次未限并发运行在 motion sandbox 180s 超时，单独串行重跑通过，保留为 GPU/Chromium 资源争用风险；仅保留明确标记为 ignored 的 real-device / optional fixture tests。
-- 最终 `.app`：`web/node_modules/.bin/tauri build --bundles app` exit 0；当前安装包 SHA-256 `7634979ed3f29b2623c6dc630b34267b79e81b9129f2b4c3c48cc8dafa607f00`，构建产物 hash 一致；本轮 Computer Use 屏幕 smoke 因 Mac 锁定 blocked，媒体 Preview tabs/小屏等桌面证据仍引用之前的已完成专项包，透明 Motion 开关/发布也未升级为桌面通过。
+- 最终 `.app`：`web/node_modules/.bin/tauri build --bundles app` exit 0；当前安装包 SHA-256 `38c814f4ac4fddc729f2f3733c637dfd171a8c67ad1bfa7195257d58033bc838`，构建产物 hash 一致；本轮 Computer Use 屏幕 smoke 因 Mac 锁定 blocked，媒体 Preview tabs/小屏等桌面证据仍引用之前的已完成专项包，透明 Motion 开关/发布也未升级为桌面通过。
 
 ## Related Documents
 
@@ -138,3 +138,4 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - `2026-08-21T20:09:19+08:00` — 写回 `741ff07` 的缺失媒体 Preview/Playback fail-closed、RenderLoop 集成 8 项和顺序 Rust workspace 全量结果；最新安装包 `40c21ce0…e7f08`，屏幕 smoke 仍受 Mac 锁定阻塞。
 - `2026-08-21T20:19:15+08:00` — 写回当前提交 `6b31449` 的顺序 workspace 全量、clippy 既有 lint 边界和最新安装包 `7ad988f3…a9799`；屏幕 smoke 仍受 Mac 锁定阻塞。
 - `2026-08-21T20:57:59+08:00` — 写回 `OT-MOTION-ALPHA` 首条透明发布纵切：ProRes 4444 `.mov`、alpha manifest provenance、Motion Studio 开关和 151/1413 Web + Rust workspace 全量证据；最新安装包 `7634979e…607f00`。Mac 锁屏仍阻塞透明发布桌面对拍。
+- `2026-08-21T21:21:26+08:00` — Agent Motion 文档新增透明发布参数，重新构建并安装最新 app `38c814f4…bc838`；Computer Use 再次返回 Mac locked，屏幕验收边界不变。

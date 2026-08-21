@@ -268,7 +268,7 @@
 
   覆盖编辑、预览、发布视频、取消、结果校验、导入时间线、保存重开和预览/导出一致性。
 
-  当前进展（2026-08-21）：`OT-MOTION-ALPHA-1` 的首条代码纵切已完成：透明模板背景、Chromium alpha capture、ProRes 4444/`yuva444p10le` `.mov`、`GenerationInput.transparent` / straight-alpha manifest provenance，以及 Motion Studio 透明背景发布开关均已接通。新增透明发布集成测试验证 `.mov`、ProRes、完全透明和半透明像素；Rust workspace 串行全量通过，Web 全量 `151 files / 1413 tests` 与 `pnpm build` 通过，当前包 `7634979e…607f00` 已重建并安装。仍未勾选本步骤：Mac 锁屏阻塞最新包屏幕操作，透明开关→发布→时间线预览/导出→保存重开的桌面状态对拍未完成；已有 Motion Studio 文档编辑替换路径也仍固定为 opaque，后续需单独决定是否扩展为 alpha-preserving edit。
+  当前进展（2026-08-21）：`OT-MOTION-ALPHA-1` 的首条代码纵切已完成：透明模板背景、Chromium alpha capture、ProRes 4444/`yuva444p10le` `.mov`、`GenerationInput.transparent` / straight-alpha manifest provenance，以及 Motion Studio 透明背景发布开关均已接通；Agent `publish_motion_document` 的新增 clip 路径也已接通 transparent 参数。新增透明发布集成测试验证 `.mov`、ProRes、完全透明和半透明像素；Rust workspace 串行全量通过，Web 全量 `151 files / 1413 tests` 与 `pnpm build` 通过，当前包 `38c814f4…bc838` 已重建并安装。仍未勾选本步骤：Mac 锁屏阻塞最新包屏幕操作，透明开关→发布→时间线预览/导出→保存重开的桌面状态对拍未完成；已有 Motion Studio 文档编辑替换路径也仍固定为 opaque，后续需单独决定是否扩展为 alpha-preserving edit。
 
 - [ ] **Step 5: 验证设置和帮助**
 
