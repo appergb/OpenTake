@@ -46,6 +46,7 @@ import {
 } from "./nativePlaybackSession";
 import { rustEngineEnabled } from "./rustEngine";
 import { resolveTimelinePlaybackRoute } from "./playbackRoute";
+import { createPreviewAudioGainController } from "./audioGain";
 
 interface NativeFrameListenerSlot {
   registration: NativeFrameListenerRegistration | null;
@@ -211,13 +212,18 @@ export async function startNativePlaybackAfterListener<T>(
 // (the browser does not auto-pause it), so the renderer pauses on detach via
 // `remove` before dropping the entry.
 const elements = new Map<string, HTMLMediaElement>();
+const previewAudioGain = createPreviewAudioGainController();
 
 export const previewElements = {
   set(id: string, el: HTMLMediaElement): void {
+    const previous = elements.get(id);
+    if (previous && previous !== el) previewAudioGain.remove(previous);
     elements.set(id, el);
   },
   remove(id: string): void {
-    elements.get(id)?.pause();
+    const element = elements.get(id);
+    element?.pause();
+    if (element) previewAudioGain.remove(element);
     elements.delete(id);
   },
   get(id: string): HTMLMediaElement | null {
@@ -367,7 +373,7 @@ function performInteractiveSeek(tl: Timeline, frame: number, fps: number): void 
   for (const m of activeAt(tl, frame)) {
     const el = previewElements.get(previewElementKey(m));
     if (!el) continue; // images carry no media element
-    el.muted = true;
+    previewAudioGain.setMuted(el, true);
     if (!el.paused) el.pause();
     const desired = sourceTimeSec(m.clip, frame, fps);
     if (Math.abs(el.currentTime - desired) > 0.01) el.currentTime = desired;
@@ -625,11 +631,10 @@ export function useTimelinePlaybackEngine(): void {
         // >1 static volume) but HTMLMediaElement.volume is capped to [0,1] and
         // throws a RangeError above 1, so the clamp lives here at the
         // assignment, not inside the pure helper.
-        // TODO(>0dB): route through a Web Audio GainNode to make >0 dB boosts audible.
         const gain = clipVolumeAt(m.track, m.clip, r);
         const isVisualVideo = visuals.some((visual) => visual.clip.id === m.clip.id);
-        el.muted = gain <= 0 || (isVisualVideo && duplicatedVisualAudioRefs.has(m.clip.mediaRef));
-        el.volume = Math.min(1, gain);
+        const muted = gain <= 0 || (isVisualVideo && duplicatedVisualAudioRefs.has(m.clip.mediaRef));
+        previewAudioGain.setGain(el, gain, muted);
         const desired = sourceTimeSec(m.clip, f, fps);
         const previousClipId = lastClipByKey.get(key) ?? null;
         lastClipByKey.set(key, m.clip.id);

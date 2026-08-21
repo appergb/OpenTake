@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-07-10-opentake-full-convergence-design.md`、`docs/superpowers/specs/2026-08-13-opentake-beta5-design.md` 与本轮用户目标。
 
-**Current checkpoint (2026-08-22, Asia/Shanghai):** 受影响 crate/Tauri/Web 定向门禁保持全绿；最新安装包二进制 SHA-256 `acd7b105a75d957bc761f9128f9f89e7ee563f65031dc7e22952fa7a6c65c319`，已重新打包并安装。此前包已完成小屏、媒体/预览、时间轴范围删除与 Undo、H.264/H.265/ProRes 422、Motion 透明发布的既有屏幕证据。上游审计确认的两个缺口已在代码侧补齐：Agent 文件夹批量 `entries` 单步 Undo，以及 JSON/`.lottie` Lottie 导入、Velato 校验和 metadata。当前 Mac 仍处于锁屏，透明 ProRes 4444 专用 SavePanel、Option trim、字幕 SavePanel/模型下载、Lottie 屏幕路径和取消导出的最新安装版动作不能伪造为已完成。2026-08-22 workspace 全量复跑在既有 4K Chromium budget smoke 超时并 poison gate，已确认与本次 diff 无直接关系；clippy 仍被既有 `chunks_exact` lint 阻塞。工作区只保留用户已有审计素材的 dirty/untracked 状态。
+**Current checkpoint (2026-08-22, Asia/Shanghai):** 受影响 crate/Tauri/Web 定向门禁保持全绿；最新安装包二进制 SHA-256 `d454bccc37d42c8fb6ccd3baee6472f45de908831a9ae5dc97579ca5cc1eb4b6`，已重新打包并安装，包含 WebKit >0 dB GainNode 修复。此前包已完成小屏、媒体/预览、时间轴范围删除与 Undo、H.264/H.265/ProRes 422、Motion 透明发布的既有屏幕证据。上游审计确认的两个缺口已在代码侧补齐：Agent 文件夹批量 `entries` 单步 Undo，以及 JSON/`.lottie` Lottie 导入、Velato 校验和 metadata。当前 Mac 仍处于锁屏，透明 ProRes 4444 专用 SavePanel、Option trim、字幕 SavePanel/模型下载、Lottie 屏幕路径、GainNode 听感和取消导出的最新安装版动作不能伪造为已完成。2026-08-22 workspace 全量复跑在既有 4K Chromium budget smoke 超时并 poison gate，已确认与本次 diff 无直接关系；clippy 仍被既有 `chunks_exact` lint 阻塞。工作区只保留用户已有审计素材的 dirty/untracked 状态。
 
 ## Global Constraints
 
@@ -178,6 +178,8 @@
   2026-08-22 01:28：新增 `editActions.test.ts` 的 ripple action routing 覆盖，选中片段、标记范围、选中 gap 和 out-of-band filled-gap 拒绝 42/42 通过；同时锁定前端 `rippleDeleteRanges` 的实际 wire 形状 `{start,end}`。仍不替代安装版屏幕验收。
 
   2026-08-22 01:32：新增 Tauri playback resolver 的 `.lottie` 容器预览/导出像素一致性测试；真实 GPU 路径通过，preview/export 两个独立 materializer 对同一容器输出完全一致。该自动化证据仍不替代安装版 Lottie 素材预览和落轨屏幕验收。
+
+  2026-08-22 01:49：修复 WebKit 预览音量 >0 dB 被 `HTMLMediaElement.volume` 截断的问题。新增独立 GainNode controller：只在需要 boost 时接管元素、保留每个元素单一 source/gain 节点、支持临时静音/恢复、卸载断开、AudioContext 不可用回退；预览相关 58/58、Web 152/1423、tsc/build 通过。安装版已重建，但屏幕锁定，GainNode 听感仍待实机确认。
 
 ### Task 5: 收敛预览、播放、RenderPlan 和导出闭环
 

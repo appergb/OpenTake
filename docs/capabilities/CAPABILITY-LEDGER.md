@@ -57,7 +57,7 @@ tags:
 | `UP-MEDIA-IMPORT-AND-FOLDERS` | P0 | verified | 文件/文件夹导入、跳过 unsupported、relink 和预览均已通过安装版验收 | 新构建 app 中 MP4、PNG、双文件多选 Open 可用；导入数 1→3；文件夹导入出现目录并提示跳过 64；relink 恢复离线媒体 |
 | `UP-MEDIA-LOTTIE-IMPORT` | P1 | partial | 对齐上游 `.json/.lottie` 导入；Velato JSON 校验、`.lottie` ZIP `animations/*.json` 提取、metadata 写入和坏文件 fail-soft 已通过自动化 | `cargo test -p opentake-core importable_clip_type_covers_whitelist_and_rejects_others`；Tauri Lottie JSON/容器/MCP path 定向测试；安装版素材预览/落轨/重开屏幕待解锁 |
 | `UP-TIMELINE-UI` | P0 | partial | 已补 Shift+标尺范围标记、范围 start/end 边缘命中/拖动、标尺吸附、取消回滚、同帧清除、PointerEvent 回归，以及上游 playhead split/trim 的无选区 no-op 语义；继续补真实删除、撤销及拖拽对拍 | Timeline/编辑动作定向 7 files / 97 tests；Web 全量 151 files / 1419 tests；最新包 `acd7b105…c319` 已安装但本轮屏幕重跑因 Mac 锁定 blocked |
-| `UP-PREVIEW-PLAYBACK` | P0 | partial | compositor temporal route、speed/reversed 原生帧映射、音频整轨解码和缺失媒体 fail-closed 已补齐；安装版与 preview/export 全面对拍仍继续 | Render 18 项、Playback resolver 15 项、Playback integration 8 项和顺序 Rust workspace 通过；preview/export 同帧语义、音画同步、取消和最新包屏幕证据仍待 |
+| `UP-PREVIEW-PLAYBACK` | P0 | partial | compositor temporal route、speed/reversed 原生帧映射、音频整轨解码、缺失媒体 fail-closed 和 WebKit >0 dB GainNode 路由已补齐；安装版与 preview/export 全面对拍仍继续 | Render 18 项、Playback resolver 15 项、Playback integration 8 项、preview 58 项和 Web 152/1423 通过；preview/export 同帧语义、实时音画同步、GainNode 听感、取消和最新包屏幕证据仍待 |
 | `UP-EXPORT` | P0 | partial | H.264/AAC、H.265、ProRes 422 和字幕命令已有实现；普通输出失败清理、external cancel 全链路、输出父目录/文件 identity 校验已补齐 | 最新包已补 H.265/AAC 与 ProRes 422 HQ/PCM 的 SavePanel/文件证据；透明 ProRes 4444、字幕、取消、实时音画同步和首中尾对拍仍待 |
 | `UP-PREVIEW-TABS` | P1 | verified | `previewTabIds + previewTabHistory + activeTabId`，含 legacy 归一和删除清理 | 安装版同时显示 Timeline/两个素材 tab；关闭第二个回退第一个；91 个定向测试通过 |
 | `UP-MEDIA-VIEW-MODES` | P1 | verified | folder/flat/grouped 三态投影、网格/列表密度、文件夹导航和音频导入入口已通过测试及安装版验收 | 搜索、选择、拖拽和预览沿用同一 MediaItem ID 链路，继续纳入后续模块化 QA |
@@ -75,7 +75,7 @@ tags:
 - Web/Agent：Motion Studio Inspector 新增“透明背景（ProRes 4444）”开关；预览请求保持原 schema，只有发布请求带 `transparent` 字段，切换项目时重置为关闭；Agent `add_motion_graphic` 和 `publish_motion_document` 的新增 clip 路径也接受透明发布，已有透明 clip 的文档编辑保留 alpha。
 - 自动化证据：`src-tauri/tests/motion_command.rs` 的透明发布集成测试验证 `.mov`、ProRes、64×36 尺寸、完全透明像素和半透明动画像素；Rust workspace 串行全量通过（Tauri 720 tests、Motion Chromium/integration、导出/播放等）；Web 全量 `151 files / 1415 tests`、Web build 通过。
 - 文件级证据：`/private/tmp/opentake-audio-desktop-qa-L8Nvwh/audio-preview-export-qa.opentake/media/motion-0e4cacc9-161a-4704-a790-7e233397c8c4.mov` 被 `ffprobe` 识别为 `prores` profile `4444`、tag `ap4h`、pixel format `yuva444p12le`、90 帧/3.000s；`ffmpeg -vf alphaextract` 成功，抽样 alpha 平面为非全黑值；对应 `media.json` 的 `generationInput.transparent` 为 `true`。
-- 安装包：当前 `/Applications/OpenTake.app` 二进制 SHA-256 `acd7b105a75d957bc761f9128f9f89e7ee563f65031dc7e22952fa7a6c65c319`，对应 `c1db732`；已重新打包安装，但 Mac 锁屏，透明 ProRes 4444 专用导出、Lottie 屏幕路径和其它待验收动作仍不升级为通过。
+- 安装包：当前 `/Applications/OpenTake.app` 二进制 SHA-256 `d454bccc37d42c8fb6ccd3baee6472f45de908831a9ae5dc97579ca5cc1eb4b6`，包含 WebKit >0 dB GainNode 修复；已重新打包安装，但 Mac 锁屏，透明 ProRes 4444 专用导出、Lottie 屏幕路径、GainNode 听感和其它待验收动作仍不升级为通过。
 
 ## 上游 linked A/V parity 当前切片
 
@@ -189,3 +189,4 @@ tags:
 - `2026-08-22T01:28:03+08:00` — `editActions.test.ts` 新增 ripple action routing 覆盖，选中片段/标记范围/选中 gap/out-of-band gap 拒绝 42/42 通过，并确认前端范围 wire 使用 `{start,end}`；Timeline 屏幕验收仍待解锁。
 - `2026-08-22T01:32:55+08:00` — Tauri playback resolver 新增 `.lottie` 容器 preview/export 独立 materializer 像素一致性测试，真实 GPU 路径通过；安装版 Lottie 预览/落轨屏幕验收仍待解锁。
 - `2026-08-22T01:38:58+08:00` — 统一 Timeline/编辑动作与 Web 全量测试数字：7 files / 97 定向测试、151 files / 1419 全量测试；屏幕验收边界不变。
+- `2026-08-22T01:49:23+08:00` — WebKit 预览新增可复用 GainNode 路由，修复 >0 dB 增益被截断；预览 58/58、Web 152/1423、tsc/build 通过；最新安装包 `d454bccc…b4b6` 已安装，Mac 锁屏，保留听感/屏幕验收为 partial。
