@@ -50,6 +50,7 @@ import {
 } from "./mediaActions";
 import { useMediaStore } from "./mediaStore";
 import { useProjectStore } from "./projectStore";
+import { useSettingsStore } from "./settingsStore";
 import { useEditorUiStore } from "./uiStore";
 
 describe("mediaActions import warmup", () => {
@@ -78,6 +79,9 @@ describe("mediaActions import warmup", () => {
     useProjectStore.setState({
       projectEpoch: 1,
       projectPath: "/tmp/project-a.opentake",
+    });
+    useSettingsStore.setState({
+      defaultImportFolder: "/tmp/default-imports",
     });
     useEditorUiStore.setState({ toast: null });
   });
@@ -165,6 +169,51 @@ describe("mediaActions import warmup", () => {
     second.resolve(srv.imported);
     await secondImport;
     expect(useMediaStore.getState().importing).toBe(false);
+  });
+
+  it("opens the file import picker without native filters so supported files stay selectable", async () => {
+    srv.open.mockResolvedValueOnce(null);
+
+    await importFilesViaDialog();
+
+    expect(srv.open).toHaveBeenCalledTimes(1);
+    expect(srv.open).toHaveBeenCalledWith({
+      directory: false,
+      multiple: true,
+      defaultPath: "/tmp/default-imports",
+    });
+    expect(srv.open.mock.calls[0]?.[0]).not.toHaveProperty("filters");
+    expect(srv.importMedia).not.toHaveBeenCalled();
+  });
+
+  it("opens the relink picker without native filters so the replacement file stays selectable", async () => {
+    srv.open.mockResolvedValueOnce(null);
+
+    await relinkMediaViaDialog("asset-1");
+
+    expect(srv.open).toHaveBeenCalledTimes(1);
+    expect(srv.open).toHaveBeenCalledWith({
+      directory: false,
+      multiple: false,
+      defaultPath: "/tmp/default-imports",
+    });
+    expect(srv.open.mock.calls[0]?.[0]).not.toHaveProperty("filters");
+    expect(srv.relinkMedia).not.toHaveBeenCalled();
+  });
+
+  it("opens the folder picker with only directory options and no file filters", async () => {
+    srv.open.mockResolvedValueOnce(null);
+
+    await importFolderViaDialog();
+
+    expect(srv.open).toHaveBeenCalledTimes(1);
+    expect(srv.open).toHaveBeenCalledWith({
+      directory: true,
+      multiple: false,
+      defaultPath: "/tmp/default-imports",
+    });
+    expect(srv.open.mock.calls[0]?.[0]).not.toHaveProperty("filters");
+    expect(srv.importFolder).not.toHaveBeenCalled();
   });
 
   it("does not start a folder import selected after the project changed", async () => {
