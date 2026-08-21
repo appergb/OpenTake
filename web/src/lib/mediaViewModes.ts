@@ -26,8 +26,8 @@ export interface ProjectMediaViewOptions {
 
 const ROOT_GROUP_LABEL = "All";
 
-function normalizeFolderId(id: string | null | undefined): string | null {
-  return id ?? null;
+export function normalizeFolderId(id: string | null | undefined): string | null {
+  return id == null || id === "" ? null : id;
 }
 
 function matchesFilters(
@@ -59,6 +59,15 @@ function folderLabel(
   return parts.join(" / ");
 }
 
+function groupedFolderId(
+  item: MediaItem,
+  byId: ReadonlyMap<string, MediaFolder>,
+): string | null {
+  const folderId = normalizeFolderId(item.folderId);
+  if (folderId === null) return null;
+  return byId.has(folderId) ? folderId : null;
+}
+
 export function projectMediaView({
   mode,
   items,
@@ -82,7 +91,7 @@ export function projectMediaView({
     const folderById = new Map(folders.map((folder) => [folder.id, folder]));
     const groupsByFolder = new Map<string | null, MediaItem[]>();
     for (const item of filteredItems) {
-      const folderId = normalizeFolderId(item.folderId);
+      const folderId = groupedFolderId(item, folderById);
       const groupItems = groupsByFolder.get(folderId);
       if (groupItems) groupItems.push(item);
       else groupsByFolder.set(folderId, [item]);

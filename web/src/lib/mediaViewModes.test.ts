@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { MediaFolder, MediaItem } from "./types";
 import {
+  normalizeFolderId,
   projectMediaView,
   type MediaOrganizationMode,
 } from "./mediaViewModes";
@@ -67,6 +68,32 @@ describe("projectMediaView", () => {
     expect(nestedProjection.groups).toEqual([]);
   });
 
+  it("treats null, undefined, and empty folder ids as the root", () => {
+    expect(normalizeFolderId(null)).toBeNull();
+    expect(normalizeFolderId(undefined)).toBeNull();
+    expect(normalizeFolderId("")).toBeNull();
+
+    const projection = projectMediaView({
+      mode: "folder",
+      folders: [
+        { id: "root-folder", name: "Root Folder", parentFolderId: "" },
+        { id: "nested-folder", name: "Nested Folder", parentFolderId: "root-folder" },
+      ],
+      items: [
+        mediaItem("root-null", { folderId: null }),
+        mediaItem("root-empty", { folderId: "" }),
+        mediaItem("nested", { folderId: "nested-folder" }),
+      ],
+      currentFolderId: "",
+      query: "",
+      typeFilter: "all",
+      favoriteOnly: false,
+    });
+
+    expect(projection.folders.map((folder) => folder.id)).toEqual(["root-folder"]);
+    expect(projection.items.map((item) => item.id)).toEqual(["root-null", "root-empty"]);
+  });
+
   it("projects flat mode to every filtered asset regardless of folder depth", () => {
     const projection = project("flat");
     expect(projection.folders).toEqual([]);
@@ -115,6 +142,42 @@ describe("projectMediaView", () => {
         folderId: "folder-loop",
         label: "Loop",
         items: ["loop-asset"],
+      },
+    ]);
+  });
+
+  it("fails soft for assets whose folder id points at a missing folder", () => {
+    const projection = projectMediaView({
+      mode: "grouped",
+      folders: [{ id: "folder-a", name: "A" }],
+      items: [
+        mediaItem("root-asset", { folderId: null }),
+        mediaItem("dangling-asset", { folderId: "missing-folder" }),
+        mediaItem("empty-string-root", { folderId: "" }),
+        mediaItem("folder-asset", { folderId: "folder-a" }),
+      ],
+      currentFolderId: null,
+      query: "",
+      typeFilter: "all",
+      favoriteOnly: false,
+    });
+
+    expect(
+      projection.groups.map((group) => ({
+        folderId: group.folderId,
+        label: group.label,
+        items: group.items.map((item) => item.id),
+      })),
+    ).toEqual([
+      {
+        folderId: null,
+        label: "All",
+        items: ["root-asset", "dangling-asset", "empty-string-root"],
+      },
+      {
+        folderId: "folder-a",
+        label: "A",
+        items: ["folder-asset"],
       },
     ]);
   });
