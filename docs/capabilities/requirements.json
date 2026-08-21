@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "catalog_status": "initial-triage",
-  "last_verified": "2026-08-21T22:32:49+08:00",
+  "last_verified": "2026-08-21T22:47:48+08:00",
   "scope": "首轮模块级能力清单；完整 UP-* 行为级拆分由长期计划 Task 1 继续展开。",
   "capabilities": [
     {"id":"UP-MODELS-TIMELINE","area":"models","title":"Timeline/Track/Clip/Keyframe/Transform/TextStyle","status":"implemented","priority":"P1","source":"palmier-pro-upstream/Sources/PalmierPro/Models/","opentake":"crates/opentake-domain/src/","tests":["cargo test -p opentake-domain"]},

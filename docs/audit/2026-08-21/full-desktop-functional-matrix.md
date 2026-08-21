@@ -79,13 +79,14 @@ tags:
 | Timeline | 选中片段 | 选中 `sample-text-0` 后 Inspector 切换到文本属性 | 通过 | 补选区、拖拽、删除和 undo |
 | Timeline | 播放头处分割 | 初始在帧 0 或片段外尝试时无变化；补齐有效前置条件（选中 `sample-text-0`、播放头推进到帧 15）后成功新增片段、撤销变可用 | 通过（有效前置条件） | 新构建 app AX：分割后出现 UUID 片段；`cargo test -p opentake-ops split_clip_distributes_keyframes_at_cut` 通过 |
 | Timeline | 入点/出点范围与范围边缘 | `TimelineContainer` 已接入 Shift+标尺 range mark、已有范围 start/end 边缘命中与拖动、clip-edge/playhead snap、pointercancel 回滚和同帧清除；Option trim 改为只修剪主 clip，普通 trim 保持 linked propagation；Web 全量 151 files / 1414 tests 通过。最新包屏幕上已完成播放到尾帧、有效分割产生 V/A 两组片段、Undo 恢复；选中 linked V1 后 Shift+Backspace 删除 V1/A1、保留 Motion clip，Undo 恢复成功；Option trim 坐标拖动仍被 sky 返回 `noWindowsAvailable` | 部分 | 继续补可复现的安装版 Option trim、范围删除状态对拍 |
-| Inspector | 文本属性 | 可读出 Welcome to OpenTake、字体、字号、颜色、对齐、阴影、关键帧 | 通过 | 补编辑后保存重开 |
+| Inspector | 片段属性与 AI 编辑 | 选中 V1 后视频 Inspector 展开 131 项，覆盖变换、裁剪、翻转、淡入淡出、运动追踪、防抖、RVM 抠像、速度和调色；水平翻转可切换并由 Undo 恢复；音频页能显示音量/响度/降噪/人声分离；AI 编辑页能生成本地建议，应用后显示“可撤销编辑命令”，撤销成功 | 通过（入口/可撤销行为） | 数值控件逐项边界、关键帧落盘重开和本地模型分析仍待 |
 | Preview | 带音频 fixture 的导入/波形/seek/暂停 | `nested-timeline-compound-export-2026-07-31.mp4`：7.700s、H.264 1280×720/30fps/231帧 + AAC 48kHz 单声道；安装版出现 V1+A1、A1 波形和音频 Inspector，已操作起点/中点/终点 seek，连续暂停状态稳定 | 部分 | 实时听感级同步和最新 cleanup 包的导出复测仍待 |
 | Preview | compositor temporal 预览 | 最新安装版在 QA 工程中设置 `speed=1.5` 和曝光 `0.50` compositor 属性后不再出现 unsupported surface；画面可见，播放头可到尾帧，暂停后抓帧按钮保持可用；speed/reversed 的首次 native render、JPEG publication、source-frame 映射由 Rust integration tests 锁定 | 通过（代码/native/屏幕组合证据） | 预览与导出起/中/尾帧、音频同步和取消仍在后续闭环 |
 | Preview | 多素材 tabs | 打开 `audit-4k60-h264` 与 `export-h264-frame30` 后显示 Timeline/两个媒体 tab；关闭第二个回退第一个 | 通过 | 安装版 AX：两个 Close 按钮；Preview slice 4 files / 91 tests |
-| Agent | 面板入口 | Agent 面板、新建对话标签、输入框出现；发送按钮禁用 | 通过 | 不发送外部消息；补本地失败/取消路径 |
+| Agent | 面板、对话标签和本地边界 | Agent 面板可打开；新建/关闭对话标签成功；无配置通道时输入框存在但发送按钮禁用；用 `⌘⌥A` 可收起并恢复编辑器布局 | 通过（入口/本地边界） | 不发送外部消息；MCP 握手、失败/取消、真实工具调用仍待 |
+| Subtitles | 字幕入口与缺失模型边界 | 字幕页可打开，来源/样式/位置/翻译同意项均可见；点击生成字幕后明确提示需下载约 141 MB 的 multilingual 转写模型，并提供“下载模型”入口；未同意外部 Provider 时翻译按钮保持禁用 | 通过（入口/失败边界） | 模型下载、转写结果编辑、SRT/VTT 导出和翻译真实闭环仍待 |
 | Motion | Studio 入口 | HTML/CSS 编辑器、预览、参数检查器、关键帧时间线出现；播放帧推进 | 通过（既有桌面证据） | 用最新包补发布、保存重开和导入时间线 |
-| Motion | 透明发布 | 最新包 Motion Studio Inspector 可见并可点击“透明背景（ProRes 4444）”；真实发布进度出现，完成后素材库新增 Motion Graphic、时间线新增 V2 片段，预览/Inspector 均可见；ProRes/alpha 由 Rust FFmpeg integration 验证 | 部分（代码/自动化/发布屏幕通过） | 继续补透明输出的屏幕导出文件、保存重开和 Option trim 后的完整时间线对拍 |
+| Motion | 透明发布 | 最新包 Motion Studio Inspector 可见并可点击“透明背景（ProRes 4444）”；真实发布进度出现，完成后素材库新增 Motion Graphic、时间线新增 V2 片段，预览/Inspector 均可见；QA 工程内真实媒体叶子为 ProRes 4444 `ap4h` / `yuva444p12le`，90 帧/3.000s；`alphaextract` 可读取非全黑 alpha 样本；manifest 的 `transparent: true` 与项目媒体引用一致 | 通过（代码/自动化/发布屏幕/文件） | 透明 Motion 的专用导出 UI、opaque clip 编辑时切换透明、H.265/字幕/取消导出仍待矩阵化 |
 | Export | 导出面板 | 导出视频面板可打开，格式/分辨率/取消/导出可见 | 通过 | 复制目标路径后完成导出并 ffprobe |
 | Export | temporal 视频实际导出 | 修复 SavePanel filters 后，原生 Save 按钮可用；H.264 temporal QA 导出成功，应用显示 3840×2160 / 160 帧，ffprobe 显示 H.264、60fps、2.666667s | 通过（H.264 视频） | H.265/ProRes、带音频/字幕、取消和 preview/export 像素对拍仍待矩阵化 |
 | Export | 带音频 H.264/AAC 实际导出 | 最新包 `918eac84…9551b` 通过 SavePanel 导出 `/private/tmp/opentake-audio-desktop-qa-L8Nvwh/opentake-latest-smoke.mp4`；ffprobe：H.264 1280×720/30fps/231 帧、AAC 48kHz 单声道/362 包、7.700s；完整 `ffmpeg -xerror` 通过 | 通过（最新包） | H.265/ProRes、字幕、取消和实时音画同步仍待矩阵化 |
@@ -142,3 +143,5 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - `2026-08-21T22:15:18+08:00` — 最新包 `918eac84…9551b` 解锁后完成真实桌面 smoke：紧凑/标准 Home、媒体预览 tab、播放到尾帧、有效分割与撤销、导出面板、Motion 透明开关和透明发布落轨均通过；Option trim 坐标操作返回 `noWindowsAvailable`，保留为未完成屏幕证据。
 - `2026-08-21T22:27:41+08:00` — 当前包完成 H.264/AAC SavePanel 导出；输出文件 ffprobe、完整 `ffmpeg -xerror` 和 7.700s A/V 流事实通过。透明 ProRes 专用导出、H.265/字幕/取消仍待。
 - `2026-08-21T22:32:49+08:00` — 最新包完成 linked V1/A1 的 Shift+Backspace ripple delete 和 Undo 屏幕对拍：V1/A1 同时移除、Motion clip 保留、撤销恢复三条 clip；Option trim 坐标接口仍未提供可用窗口。
+- `2026-08-21T22:37:23+08:00` — 对透明 Motion 发布产物做文件级复核：QA 工程中的 `.mov` 为 ProRes 4444 `ap4h` / `yuva444p12le`、90 帧/3.000s；`alphaextract` 成功读取非全黑 alpha；`media.json` 保留 `generationInput.transparent: true`。透明专用导出 UI、opaque→transparent 编辑和其它编码格式仍保持待验证。
+- `2026-08-21T22:47:48+08:00` — 最新包完成 Inspector 视频/音频/AI 编辑页、可撤销翻转和本地 AI 建议应用/撤销；字幕页的缺失转写模型提示；Agent 对话标签新建/关闭、发送禁用和 `⌘⌥A` 收起布局恢复。模型下载、真实转写/字幕导出、MCP/Agent 工具调用仍保持待验证。

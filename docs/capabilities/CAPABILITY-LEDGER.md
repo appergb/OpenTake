@@ -45,8 +45,8 @@ tags:
 - Models、Timeline、Track、Clip、Keyframe、Transform、TextStyle：domain crate 已有实现，需继续做完整行为级枚举。
 - EditCommand、事务边界、undo/redo、split/trim/move/ripple：ops/core 已有上游对齐实现；`split_clip_distributes_keyframes_at_cut` 通过。
 - Inspector、字幕/转写/搜索、Agent/MCP、Motion Studio opaque MP4：代码和对应测试入口已存在；仍需安装版场景证据才能升级为 verified。
-- Motion Studio transparent alpha：Rust/Web 纵切已接通并通过全量自动化；最新包已完成透明开关、发布进度和时间线落轨屏幕验收，透明导出文件/保存重开仍待。
-- Agent/MCP linked move parity：`move_clips` 现在和上游约定一致，显式 `toFrame` 会把 frame delta 传播到 linked A/V partner，track-only move 不传播；新增两条 dispatcher 回归测试。
+- Motion Studio transparent alpha：Rust/Web 纵切已接通并通过全量自动化；最新包已完成透明开关、发布进度、时间线落轨和保存重开屏幕验收；QA 工程内真实 `.mov` 已复核为 ProRes 4444 并带可读取 alpha。
+- Agent/MCP linked move parity：`move_clips` 现在和上游约定一致，显式 `toFrame` 会把 frame delta 传播到 linked A/V partner，track-only move 不传播；新增两条 dispatcher 回归测试。最新安装版还验证了 Agent 面板标签生命周期、无通道时发送禁用和快捷键收起布局。
 
 ## 首轮明确缺口
 
@@ -59,7 +59,7 @@ tags:
 | `UP-EXPORT` | P0 | partial | H.264/AAC、H.265、ProRes 422 和字幕命令已有实现；普通输出失败清理、external cancel 全链路、输出父目录/文件 identity 校验已补齐 | 70 个 export 单测、18 个 media cancel 测试、5 个 export integration 和顺序 Rust workspace 门禁通过；真实 H.264/AAC 文件及首中尾帧已有一次安装版证据，但最新包的 SavePanel、H.265/ProRes/字幕/取消仍待 |
 | `UP-PREVIEW-TABS` | P1 | verified | `previewTabIds + previewTabHistory + activeTabId`，含 legacy 归一和删除清理 | 安装版同时显示 Timeline/两个素材 tab；关闭第二个回退第一个；91 个定向测试通过 |
 | `UP-MEDIA-VIEW-MODES` | P1 | verified | folder/flat/grouped 三态投影、网格/列表密度、文件夹导航和音频导入入口已通过测试及安装版验收 | 搜索、选择、拖拽和预览沿用同一 MediaItem ID 链路，继续纳入后续模块化 QA |
-| `OT-MOTION-ALPHA` | P1 | partial | Motion Studio 透明发布开关、ProRes 4444/yuva444p10le、manifest straight-alpha provenance | 透明 motion 覆盖底图、预览/导出一致，并完成安装版时间线导入对拍 |
+| `OT-MOTION-ALPHA` | P1 | partial | Motion Studio 透明发布开关、ProRes 4444/yuva444p10le、manifest straight-alpha provenance | 透明 motion 覆盖底图、预览/导出一致，并完成安装版时间线导入对拍；透明专用导出 UI、opaque→transparent 编辑仍待 |
 | `UP-ACCOUNT-CLOUD-BOUNDARY` | P0 | blocked | 先定义 BYOK/provider 替代还是追同构云契约，再补 capability gate | 未授权时不广告/不发送；有凭据时生成→媒体→落轨闭环 |
 | `UP-SETTINGS-TAXONOMY` | P2 | partial | 明确 models/agent/storage/general/account 语义映射 | 设置入口和上游语义一一可解释 |
 
@@ -71,12 +71,19 @@ tags:
 - Manifest：`GenerationInput.transparent` 持久化为 `true`，`MediaManifestEntry::carries_straight_alpha()` 对透明 Motion 返回 `true`；既有 RVM matting provenance 规则保持不变。
 - Web/Agent：Motion Studio Inspector 新增“透明背景（ProRes 4444）”开关；预览请求保持原 schema，只有发布请求带 `transparent` 字段，切换项目时重置为关闭；Agent `add_motion_graphic` 和 `publish_motion_document` 的新增 clip 路径也接受透明发布，已有透明 clip 的文档编辑保留 alpha。
 - 自动化证据：`src-tauri/tests/motion_command.rs` 的透明发布集成测试验证 `.mov`、ProRes、64×36 尺寸、完全透明像素和半透明动画像素；Rust workspace 串行全量通过（Tauri 720 tests、Motion Chromium/integration、导出/播放等）；Web 全量 `151 files / 1414 tests`、Web build 通过。
-- 安装包：当前 `/Applications/OpenTake.app` 二进制 SHA-256 `918eac845be23b4e5a528154ea95fbe321b871ab33bedbb1e7b05e0160c9551b`，构建产物与安装包一致。最新包已通过透明开关/发布/落轨屏幕路径；透明导出文件和保存重开仍未完成。
+- 文件级证据：`/private/tmp/opentake-audio-desktop-qa-L8Nvwh/audio-preview-export-qa.opentake/media/motion-0e4cacc9-161a-4704-a790-7e233397c8c4.mov` 被 `ffprobe` 识别为 `prores` profile `4444`、tag `ap4h`、pixel format `yuva444p12le`、90 帧/3.000s；`ffmpeg -vf alphaextract` 成功，抽样 alpha 平面为非全黑值；对应 `media.json` 的 `generationInput.transparent` 为 `true`。
+- 安装包：当前 `/Applications/OpenTake.app` 二进制 SHA-256 `918eac845be23b4e5a528154ea95fbe321b871ab33bedbb1e7b05e0160c9551b`，构建产物与安装包一致。最新包已通过透明开关/发布/落轨/保存重开屏幕路径；专用导出 UI、opaque→transparent 编辑和其它导出格式仍未完成。
 
 ## 上游 linked A/V parity 当前切片
 
 - Agent/MCP 的 `move_clips` 入口已补齐上游 `partnerMoves` 语义：只提供 `toFrame` 时按 lead 的时间差移动同组伙伴，并保留伙伴所在轨道；只提供 `toTrack` 时不改伙伴时间；调用方显式列出伙伴时不再生成重复 move。
 - 证据：`cargo test -p opentake-agent --lib -- --test-threads=1` → 415 passed；新增测试覆盖 frame delta propagation 和 track-only no propagation。Web Timeline 拖拽原有 linked expansion 保持不变。
+
+## 最新安装版模块入口证据
+
+- Inspector：选中 V1 后视频页展开变换/裁剪/翻转/淡入淡出/运动追踪/防抖/抠像/速度/调色；水平翻转切换后由 Undo 恢复。音频页显示音量、响度归一化、降噪和人声/伴奏分离；AI 编辑页生成本地启发式建议，应用后显示“可撤销编辑命令”，再撤销恢复。
+- 字幕：字幕样式、位置和翻译同意项可见；点击生成字幕时在无模型环境明确提示下载约 141 MB 的 multilingual 转写模型；无同意时翻译按钮保持禁用。
+- Agent：面板可打开，新建/关闭对话标签可用；未配置通道时发送保持禁用；`⌘⌥A` 可收起并恢复编辑器布局。未发送外部消息。
 
 - 约 `1331×768`：标准窗口配置偏大，最近项目区域宽度控制弱。
 - 紧凑档约 `1066×666`：可见、可操作，当前切换行为通过。
@@ -166,3 +173,5 @@ tags:
 - `2026-08-21T22:15:18+08:00` — 最新包 `918eac84…9551b` 完成真实桌面 smoke：小屏/标准 Home、媒体预览 tab、播放到尾帧、分割/撤销、导出面板和 Motion 透明发布落轨；Option trim 坐标接口仍返回 `noWindowsAvailable`，透明导出/保存重开保持待验证。
 - `2026-08-21T22:27:41+08:00` — 最新包 H.264/AAC SavePanel 导出写入 `/private/tmp/opentake-audio-desktop-qa-L8Nvwh/opentake-latest-smoke.mp4`，ffprobe 和完整 `ffmpeg -xerror` 通过；透明 ProRes 专用导出仍待。
 - `2026-08-21T22:32:49+08:00` — 最新包真实屏幕验证 linked V1/A1 的 Shift+Backspace ripple delete 与 Undo：伙伴同时删除、其它 Motion clip 保留、撤销恢复；时间轴剩余 Option trim/range 屏幕对拍继续保持 partial。
+- `2026-08-21T22:37:23+08:00` — 复核透明 Motion 文件级产物：真实 QA `.mov` 为 ProRes 4444 `ap4h` / `yuva444p12le`，alphaextract 可读且非全黑；能力仍因透明专用导出 UI、opaque→transparent 编辑和其它导出矩阵保持 partial。
+- `2026-08-21T22:47:48+08:00` — 写回最新安装版 Inspector、字幕和 Agent 入口/失败边界证据；完整模型下载、转写/字幕导出、MCP/Agent 工具调用仍未升级为完成。
