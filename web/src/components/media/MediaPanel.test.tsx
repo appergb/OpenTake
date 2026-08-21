@@ -1345,6 +1345,87 @@ describe("media presentation controls (view mode / sort / filter)", () => {
     await act(async () => root.unmount());
   });
 
+  it("switches folder, flat, and grouped media organization while keeping layout toggle active", async () => {
+    useEditorUiStore.setState({
+      view: "editor",
+      settingsOpen: false,
+      exportDialogOpen: false,
+      saveAsProgress: null,
+      projectSettingsPrompt: null,
+      pendingSwapClipId: null,
+      mediaTab: "material",
+      mediaSubTab: "import",
+      mediaPanelCurrentFolderId: null,
+    });
+    useMediaStore.setState({
+      items: [
+        { ...mediaItem("root-asset"), name: "Root Asset", folderId: null },
+        { ...mediaItem("folder-a-asset"), name: "Folder A Asset", folderId: "folder-a" },
+        { ...mediaItem("folder-b-asset"), name: "Folder B Asset", folderId: "folder-b" },
+      ],
+      folders: [
+        { id: "folder-a", name: "Folder A" },
+        { id: "folder-b", name: "Folder B" },
+      ],
+      importing: false,
+      error: null,
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<MediaPanel />));
+
+    const assetIds = () =>
+      [...container.querySelectorAll<HTMLElement>("[data-media-asset-id]")].map(
+        (element) => element.dataset.mediaAssetId,
+      );
+    const folderIds = () =>
+      [...container.querySelectorAll<HTMLElement>("[data-media-folder-id]")].map(
+        (element) => element.dataset.mediaFolderId,
+      );
+    const openMenu = async (title: string) => {
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>(`button[title="${title}"]`)!
+          .dispatchEvent(new MouseEvent("click", { bubbles: true })),
+      );
+    };
+    const chooseMenuItem = async (label: string) => {
+      await act(async () =>
+        [...container.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
+          .find((button) => button.textContent === label)!
+          .dispatchEvent(new MouseEvent("click", { bubbles: true })),
+      );
+    };
+
+    expect(container.querySelector('[data-media-organization="folder"]')).not.toBeNull();
+    expect(folderIds()).toEqual(["folder-a", "folder-b"]);
+    expect(assetIds()).toEqual(["root-asset"]);
+
+    await openMenu("媒体组织方式");
+    await chooseMenuItem("平铺");
+    expect(container.querySelector('[data-media-organization="flat"]')).not.toBeNull();
+    expect(folderIds()).toEqual([]);
+    expect(assetIds()).toEqual(["root-asset", "folder-a-asset", "folder-b-asset"]);
+
+    await openMenu("媒体组织方式");
+    await chooseMenuItem("分组");
+    expect(container.querySelector('[data-media-organization="grouped"]')).not.toBeNull();
+    expect(folderIds()).toEqual([]);
+    expect(assetIds()).toEqual(["root-asset", "folder-a-asset", "folder-b-asset"]);
+    expect(
+      [...container.querySelectorAll<HTMLElement>("[data-media-group-heading]")].map(
+        (element) => element.textContent?.trim(),
+      ),
+    ).toEqual(["全部", "Folder A", "Folder B"]);
+
+    const viewButton = container.querySelector<HTMLButtonElement>('button[title="视图模式"]')!;
+    await act(async () => viewButton.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(container.querySelector('[data-media-layout="list"]')).not.toBeNull();
+    expect(container.querySelector('[data-media-organization="grouped"]')).not.toBeNull();
+    await act(async () => root.unmount());
+  });
+
   it("gives list rows the same selection/delete contract as grid cards", async () => {
     useEditorUiStore.setState({
       view: "editor",
@@ -1571,12 +1652,13 @@ describe("MediaPanel accessibility contracts", () => {
     const root = createRoot(container);
     await act(async () => root.render(<MediaPanel />));
 
-    const popupTriggers = () =>
-      [...container.querySelectorAll<HTMLButtonElement>('button[aria-haspopup="menu"]')];
-    expect(popupTriggers()).toHaveLength(3);
+    const popupTrigger = (title: string) =>
+      container.querySelector<HTMLButtonElement>(`button[title="${title}"]`)!;
+    const popupTitles = ["导入媒体 (⌘I)", "媒体组织方式", "排序", "筛选"] as const;
+    expect(popupTitles.map((title) => popupTrigger(title))).toHaveLength(4);
 
-    for (let index = 0; index < popupTriggers().length; index += 1) {
-      const trigger = popupTriggers()[index]!;
+    for (const title of popupTitles) {
+      const trigger = popupTrigger(title);
       expect(trigger.getAttribute("aria-expanded")).toBe("false");
       const menuId = trigger.getAttribute("aria-controls");
       expect(menuId).toBeTruthy();
@@ -1636,7 +1718,7 @@ describe("MediaPanel accessibility contracts", () => {
       expect(document.activeElement).toBe(trigger);
     }
 
-    const importTrigger = popupTriggers()[0]!;
+    const importTrigger = popupTrigger("导入媒体 (⌘I)");
     await act(async () =>
       importTrigger.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true })),
     );
@@ -1667,23 +1749,24 @@ describe("MediaPanel accessibility contracts", () => {
     const root = createRoot(container);
     await act(async () => root.render(<MediaPanel />));
 
-    const popupTriggers = () =>
-      [...container.querySelectorAll<HTMLButtonElement>('button[aria-haspopup="menu"]')];
-    expect(popupTriggers()).toHaveLength(3);
+    const popupTrigger = (title: string) =>
+      container.querySelector<HTMLButtonElement>(`button[title="${title}"]`)!;
+    const popupTitles = ["导入媒体 (⌘I)", "媒体组织方式", "排序", "筛选"] as const;
+    expect(popupTitles.map((title) => popupTrigger(title))).toHaveLength(4);
 
-    await act(async () => popupTriggers()[0]?.click());
-    await act(async () => popupTriggers()[1]?.click());
+    await act(async () => popupTrigger("导入媒体 (⌘I)").click());
+    await act(async () => popupTrigger("媒体组织方式").click());
     expect(container.querySelectorAll('[role="menu"]')).toHaveLength(1);
-    expect(popupTriggers()[0]?.getAttribute("aria-expanded")).toBe("false");
-    expect(popupTriggers()[1]?.getAttribute("aria-expanded")).toBe("true");
+    expect(popupTrigger("导入媒体 (⌘I)").getAttribute("aria-expanded")).toBe("false");
+    expect(popupTrigger("媒体组织方式").getAttribute("aria-expanded")).toBe("true");
     await act(async () =>
       document.activeElement?.dispatchEvent(
         new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
       ),
     );
 
-    for (let index = 0; index < 3; index += 1) {
-      let trigger = popupTriggers()[index]!;
+    for (const title of popupTitles) {
+      let trigger = popupTrigger(title);
       const menuId = trigger.getAttribute("aria-controls")!;
       await act(async () => trigger.click());
       let option = document
@@ -1694,7 +1777,7 @@ describe("MediaPanel accessibility contracts", () => {
       await act(async () =>
         option.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true })),
       );
-      trigger = popupTriggers()[index]!;
+      trigger = popupTrigger(title);
       expect(document.getElementById(menuId)).toBeNull();
       expect(trigger.getAttribute("aria-expanded")).toBe("false");
       expect(document.activeElement).not.toBe(trigger);
@@ -1705,7 +1788,7 @@ describe("MediaPanel accessibility contracts", () => {
         .querySelector<HTMLButtonElement>('[role^="menuitem"]')!;
       expect(document.activeElement).toBe(option);
       await act(async () => outside.focus());
-      trigger = popupTriggers()[index]!;
+      trigger = popupTrigger(title);
       expect(document.getElementById(menuId)).toBeNull();
       expect(trigger.getAttribute("aria-expanded")).toBe("false");
       expect(document.activeElement).toBe(outside);
@@ -1727,11 +1810,12 @@ describe("MediaPanel accessibility contracts", () => {
     const root = createRoot(container);
     await act(async () => root.render(<MediaPanel />));
 
-    const keys = ["Enter", " ", "Enter"] as const;
+    const popupTitles = ["导入媒体 (⌘I)", "媒体组织方式", "排序", "筛选"] as const;
+    const keys = ["Enter", " ", "Enter", " "] as const;
     for (let index = 0; index < keys.length; index += 1) {
-      const trigger = [
-        ...container.querySelectorAll<HTMLButtonElement>('button[aria-haspopup="menu"]'),
-      ][index]!;
+      const trigger = container.querySelector<HTMLButtonElement>(
+        `button[title="${popupTitles[index]}"]`,
+      )!;
       const menuId = trigger.getAttribute("aria-controls")!;
       await act(async () => trigger.click());
       const option = document

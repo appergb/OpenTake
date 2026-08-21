@@ -50,10 +50,15 @@ import { setDraggingMedia } from "../../lib/mediaDragState";
 import { assetUrl } from "../../lib/asset";
 import { BoundedCache } from "../../lib/lru";
 import {
+  projectMediaView,
+  type MediaOrganizationMode,
+  type MediaViewGroup,
+} from "../../lib/mediaViewModes";
+import {
   derivedResourceKinds,
   derivedResourceScheduler,
 } from "../../lib/derivedResourceScheduler";
-import { childFolders, folderTrail, normalizeFolderId } from "../../lib/folderTree";
+import { folderTrail } from "../../lib/folderTree";
 import { useProjectStore } from "../../store/projectStore";
 import {
   addMediaToTimeline,
@@ -126,6 +131,15 @@ const TYPE_FILTER_OPTIONS: ReadonlyArray<{ id: MediaTypeFilter; labelKey: string
   { id: "image", labelKey: "media.filter.image" },
   { id: "text", labelKey: "media.filter.text" },
   { id: "lottie", labelKey: "media.filter.lottie" },
+];
+
+const ORGANIZATION_OPTIONS: ReadonlyArray<{
+  id: MediaOrganizationMode;
+  labelKey: string;
+}> = [
+  { id: "folder", labelKey: "media.organization.folder" },
+  { id: "flat", labelKey: "media.organization.flat" },
+  { id: "grouped", labelKey: "media.organization.grouped" },
 ];
 
 /** 局部排序（ES2019 稳定排序，同值保持原顺序）。`default` 返回原数组引用。 */
@@ -335,9 +349,11 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
   const setCurrentFolderId = useEditorUiStore((s) => s.setMediaPanelCurrentFolderId);
   const [search, setSearch] = useState("");
   // 视图层展示状态：排序/筛选/视图模式只影响渲染，不改媒体镜像（store 不动）。
+  const [organizationMode, setOrganizationMode] = useState<MediaOrganizationMode>("folder");
   const [viewMode, setViewMode] = useState<MediaViewLayout>("grid");
   const [sortKey, setSortKey] = useState<MediaSortKey>("default");
   const [typeFilter, setTypeFilter] = useState<MediaTypeFilter>("all");
+  const [organizationOpen, setOrganizationOpen] = useState(false);
   const [sortOpen, setSortOpen] = useState(false);
   const [filterOpen, setFilterOpen] = useState(false);
   const isAudio = kind === "audio";
@@ -372,38 +388,44 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
   // Effective cursor: favorites view is always flat (root).
   const folderId = browsing ? currentFolderId : null;
   const query = search.trim().toLowerCase();
-
-  // Sub-folders shown as tiles in the current level (only while browsing, and
-  // not while a search is active — search flattens to matching files).
-  const visibleFolders = useMemo(
-    () => (browsing && query === "" ? childFolders(folders, folderId) : []),
-    [browsing, query, folders, folderId],
+  const importItems = useMemo(
+    () => items.filter((item) => (kind === "audio" ? item.type === "audio" : true)),
+    [items, kind],
   );
-
-  // File filter pipeline (all immutable filters; never mutates the store):
-  // 1) main tab — "音频" keeps only pure audio (strict type==='audio', no
-  //    audio-bearing video, matching CapCut). "素材" shows every type.
-  // 2) subtab — "我的" keeps only starred favorites; "导入" shows all.
-  // 3) folder — while browsing without a search, only this folder's direct
-  //    files. A search ignores folder scope and matches names library-wide
-  //    (within the current main/subtab filter).
-  // 4) presentation — local type filter + sort (view-layer only).
-  const filteredItems = useMemo(
+  const importProjection = useMemo(() => {
+    const projection = projectMediaView({
+      mode: organizationMode,
+      items: importItems,
+      folders,
+      currentFolderId: folderId,
+      query,
+      typeFilter,
+      favoriteOnly: false,
+    });
+    return {
+      folders: projection.folders,
+      items: sortMediaItems(projection.items, sortKey),
+      groups: projection.groups.map((group) => ({
+        ...group,
+        items: sortMediaItems(group.items, sortKey),
+      })),
+    };
+  }, [organizationMode, importItems, folders, folderId, query, typeFilter, sortKey]);
+  const searchNameMatches = useMemo(
     () =>
       sortMediaItems(
-        filterMediaByType(
-          items.filter((item) => {
-            if (kind === "audio" && item.type !== "audio") return false;
-            if (subTab === "mine" && !item.favorite) return false;
-            if (query !== "") return item.name.toLowerCase().includes(query);
-            if (browsing && normalizeFolderId(item.folderId) !== folderId) return false;
-            return true;
-          }),
+        projectMediaView({
+          mode: "flat",
+          items: importItems,
+          folders,
+          currentFolderId: folderId,
+          query,
           typeFilter,
-        ),
+          favoriteOnly: false,
+        }).items,
         sortKey,
       ),
-    [items, kind, subTab, query, browsing, folderId, typeFilter, sortKey],
+    [importItems, folders, folderId, query, typeFilter, sortKey],
   );
   const filteredLibraryEntries = useMemo(
     () =>
@@ -436,8 +458,12 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
   );
 
   const trail = useMemo(() => folderTrail(folders, folderId), [folders, folderId]);
-  const totalCount = visibleFolders.length + filteredItems.length;
-  const isEmpty = totalCount === 0;
+  const totalCount =
+    organizationMode === "grouped"
+      ? importProjection.groups.reduce((count, group) => count + group.items.length, 0)
+      : importProjection.folders.length + importProjection.items.length;
+  const isEmpty =
+    organizationMode === "grouped" ? importProjection.groups.length === 0 : totalCount === 0;
   const audioExtractView = isAudio && subTab === "extract";
   const audioSoundView = isAudio && subTab === "sound";
   const displayCount = audioExtractView
@@ -520,6 +546,27 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
               （数据源不同或语义固定），不显示这些控件，避免死按钮。 */}
           {subTab === "import" && (
             <>
+              <ToolbarMenu
+                title={t("media.organizationMode")}
+                icon={FolderIcon}
+                open={organizationOpen}
+                onToggle={setOrganizationOpen}
+              >
+                {(closeAndRestore) =>
+                  ORGANIZATION_OPTIONS.map((option, index) => (
+                    <ToolbarMenuOption
+                      key={option.id}
+                      label={t(option.labelKey)}
+                      selected={organizationMode === option.id}
+                      tabIndex={index === 0 ? 0 : -1}
+                      onSelect={() => {
+                        setOrganizationMode(option.id);
+                        closeAndRestore();
+                      }}
+                    />
+                  ))
+                }
+              </ToolbarMenu>
               <HoverButton
                 title={t("media.viewMode")}
                 active={viewMode === "list"}
@@ -575,7 +622,7 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
         </div>
         {/* Breadcrumb / 返回上级 — only while browsing the library tree and not
             searching. Root is always clickable; the current folder is plain text. */}
-        {browsing && query === "" && (
+        {browsing && organizationMode === "folder" && query === "" && (
           <FolderBreadcrumb trail={trail} onNavigate={setCurrentFolderId} />
         )}
         {/* contextBar */}
@@ -661,22 +708,25 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
                 )
               ) : query !== "" ? (
                 // Smart search: three result groups (Moments / Spoken / Files) + the
-                // index-status affordance. `filteredItems` is the name-matched Files group
+                // index-status affordance. `searchNameMatches` is the name-matched Files group
                 // (already scoped to the current main/subtab). Moments/Spoken come from
                 // the backend query; they degrade to empty with no model, leaving Files.
                 <MediaSearchResults
                   query={query}
-                  nameMatches={filteredItems}
+                  nameMatches={searchNameMatches}
                   hasIndexableAssets={items.some((i) => i.type === "video" || i.type === "image")}
                 />
               ) : isEmpty ? (
                 <EmptyState subTab={subTab} insideFolder={browsing && folderId !== null} />
+              ) : organizationMode === "grouped" ? (
+                <MediaGroupedView groups={importProjection.groups} layout={viewMode} />
               ) : (
                 <MediaGrid
-                  folders={visibleFolders}
-                  items={filteredItems}
+                  folders={importProjection.folders}
+                  items={importProjection.items}
                   onOpenFolder={setCurrentFolderId}
                   layout={viewMode}
+                  organization={organizationMode}
                 />
               )
             ) : null}
@@ -1057,11 +1107,13 @@ function MediaGrid({
   items,
   onOpenFolder,
   layout = "grid",
+  organization = "folder",
 }: {
   folders: MediaFolder[];
   items: MediaItem[];
   onOpenFolder: (id: string) => void;
   layout?: MediaViewLayout;
+  organization?: MediaOrganizationMode;
 }) {
   const selectedMediaAssetIds = useEditorUiStore((s) => s.selectedMediaAssetIds);
   const selectedFolderIds = useEditorUiStore((s) => s.selectedFolderIds);
@@ -1081,6 +1133,7 @@ function MediaGrid({
         aria-label="Media"
         data-media-roving-container="true"
         data-media-layout="list"
+        data-media-organization={organization}
         style={{
           flex: 1,
           overflowY: "auto",
@@ -1122,6 +1175,7 @@ function MediaGrid({
       aria-label="Media"
       data-media-roving-container="true"
       data-media-layout="grid"
+      data-media-organization={organization}
       style={{
         flex: 1,
         overflowY: "auto",
@@ -1153,6 +1207,86 @@ function MediaGrid({
             rovingTabIndex={item.id === (activeMediaId ?? defaultMediaId) ? 0 : -1}
           />
         </div>
+      ))}
+    </div>
+  );
+}
+
+function MediaGroupedView({
+  groups,
+  layout,
+}: {
+  groups: MediaViewGroup[];
+  layout: MediaViewLayout;
+}) {
+  const t = useT();
+  const selectedMediaAssetIds = useEditorUiStore((s) => s.selectedMediaAssetIds);
+  const allItems = groups.flatMap((group) => group.items);
+  const activeMediaId = allItems.find((item) => selectedMediaAssetIds.has(item.id))?.id;
+  const defaultMediaId = allItems[0]?.id;
+
+  return (
+    <div
+      role="grid"
+      aria-label="Media"
+      data-media-roving-container="true"
+      data-media-layout={layout}
+      data-media-organization="grouped"
+      style={{
+        flex: 1,
+        overflowY: "auto",
+        display: "flex",
+        flexDirection: "column",
+        gap: "var(--space-sm)",
+        padding: "var(--space-sm)",
+      }}
+    >
+      {groups.map((group) => (
+        <section
+          key={group.folderId ?? "__root__"}
+          style={{ display: "flex", flexDirection: "column", gap: "var(--space-xs)" }}
+        >
+          <div
+            data-media-group-heading="true"
+            style={{
+              color: "var(--text-secondary)",
+              fontSize: "var(--fs-xs)",
+              fontWeight: "var(--fw-medium)",
+            }}
+          >
+            {group.folderId === null ? t("media.folderRoot") : group.label}
+          </div>
+          {layout === "list" ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              {group.items.map((item) => (
+                <div key={item.id} role="row" style={{ minWidth: 0 }}>
+                  <MediaListRow
+                    item={item}
+                    rovingTabIndex={item.id === (activeMediaId ?? defaultMediaId) ? 0 : -1}
+                  />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fill, minmax(96px, 1fr))",
+                gap: "var(--space-sm)",
+                alignContent: "start",
+              }}
+            >
+              {group.items.map((item) => (
+                <div key={item.id} role="row" style={{ minWidth: 0 }}>
+                  <MediaCard
+                    item={item}
+                    rovingTabIndex={item.id === (activeMediaId ?? defaultMediaId) ? 0 : -1}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
       ))}
     </div>
   );
