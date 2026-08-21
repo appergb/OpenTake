@@ -254,6 +254,8 @@
 
   将上游 Agent 工具逐个映射到 dispatcher、参数校验、命令、项目作用域、撤销行为和测试；没有真实调用链的工具不得标为已完成。
 
+  当前进展（2026-08-21）：发现并修复 Agent/MCP `move_clips` 与上游不一致的入口缺口：显式 `toFrame` 现在会通过同一原子 `MoveClips` payload 传播 frame delta 到 linked A/V partner，track-only move 不传播；新增 frame-propagation 和 track-only 回归测试，Agent lib 415/415 通过。继续按同一方法审计其余 Agent/MCP 工具入口。
+
 - [ ] **Step 2: 验证 MCP 安全边界**
 
   覆盖 initialize、Origin/Host、随机端口/凭据、工程切换隔离、取消、stale hash、错误结构和旧凭据失效。

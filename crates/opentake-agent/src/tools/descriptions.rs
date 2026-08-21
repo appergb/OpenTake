@@ -106,7 +106,7 @@ pub fn description(tool: ToolName) -> &'static str {
         ToolName::ApplyEffect => "Sets the effect chain on one or more clips in one undoable action. The closed effect registry is grayscale, sepia, and invert; each accepts an optional amount from 0 to 1 (default 1). Effects execute in list order in the shared preview/export GPU compositor. Pass enabled:false to retain a disabled effect. The list replaces the current chain; pass an empty array to clear it. Unknown names, parameters, non-finite values, and out-of-range values are rejected instead of rendering unchanged. Applies to every clip in clipIds.",
 
         // --- OpenTake deterministic motion graphics (Issue #34 fallback vertical) ---
-        ToolName::AddMotionGraphic => "Renders a deterministic motion graphic to MP4, imports it, and places it on the timeline as one durable undoable workflow. Returns the new clipId. The packaged Beta uses the pinned Motion Canvas 3.17.2 runner for 'title-card'; it also supports the local 'lower-third.glass' template and self-contained HTML/CSS/JS fallback (animated through OpenTake.onSeek). Raw TypeScript/TSX and transparent output are reported as unsupported instead of being accepted as placeholders.\n\nstartFrame/durationFrames are project frames (from get_timeline). trackIndex is optional — omit to auto-create a new visual track; set it to target an existing non-audio track.",
+        ToolName::AddMotionGraphic => "Renders a deterministic motion graphic, imports it, and places it on the timeline as one durable undoable workflow. Output is MP4 by default; set transparent=true for a ProRes 4444 .mov with alpha. Returns the new clipId. The packaged Beta uses the pinned Motion Canvas 3.17.2 runner for 'title-card'; it also supports the local 'lower-third.glass' template and self-contained HTML/CSS/JS fallback (animated through OpenTake.onSeek). Raw TypeScript/TSX is not supported by the packaged renderer.\n\nstartFrame/durationFrames are project frames (from get_timeline). trackIndex is optional — omit to auto-create a new visual track; set it to target an existing non-audio track.",
 
         ToolName::EditMotionGraphic => "Re-renders an existing OpenTake motion graphic as one durable undoable workflow while preserving its timeline clipId and placement. Pass the clipId and either replacement self-contained HTML/CSS/JS for a code-authored graphic or parameter overrides for a template-authored graphic. Ordinary video clips and unsupported source types are rejected with typed errors.",
 
@@ -721,7 +721,7 @@ pub fn input_schema(tool: ToolName) -> Value {
                 },
                 "startFrame": {"type": "integer", "description": "Timeline frame position to place the graphic (project frames)."},
                 "durationFrames": {"type": "integer", "description": "Clip length on the timeline, in project frames (>= 1)."},
-                "transparent": {"type": "boolean", "description": "Forward-compatible alpha intent. The current MP4 path rejects true with a typed unsupported-capability error."},
+                "transparent": {"type": "boolean", "description": "When true, publish a transparent ProRes 4444 .mov with alpha instead of the default opaque MP4."},
                 "trackIndex": {"type": "integer", "description": "Optional. Existing non-audio track index (0-based) to place the graphic on. Omit to auto-create a new video track at the top."}
             }),
             &["source", "startFrame", "durationFrames"],

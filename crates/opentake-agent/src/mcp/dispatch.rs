@@ -1853,16 +1853,65 @@ impl Dispatcher {
 
     fn move_clips(&self, args: &Value, before: &Timeline) -> Result<ToolResult, ToolError> {
         let a: MoveClipsArgs = decode_tool_args(args, "")?;
-        let mut moves = Vec::with_capacity(a.moves.len());
-        for (i, raw) in a.moves.iter().enumerate() {
-            let m: MoveEntry = decode_tool_args(raw, &format!("moves[{i}]"))?;
+        let entries = a
+            .moves
+            .iter()
+            .enumerate()
+            .map(|(i, raw)| decode_tool_args::<MoveEntry>(raw, &format!("moves[{i}]")))
+            .collect::<Result<Vec<_>, _>>()?;
+        let requested_ids: BTreeSet<String> =
+            entries.iter().map(|entry| entry.clip_id.clone()).collect();
+        let mut moves = Vec::with_capacity(entries.len());
+        for m in entries {
             // Optional to_track / to_frame default to the clip's current location.
             let (cur_track, cur_frame) = clip_location(before, &m.clip_id);
+            let to_frame = m.to_frame.or(cur_frame).unwrap_or(0);
             moves.push(ClipMove {
-                clip_id: m.clip_id,
+                clip_id: m.clip_id.clone(),
                 to_track: m.to_track.or(cur_track).unwrap_or(0),
-                to_frame: m.to_frame.or(cur_frame).unwrap_or(0),
+                to_frame,
             });
+
+            // Match the upstream move_clips contract: an explicit start-frame
+            // move propagates its delta to linked partners, while a track-only
+            // move leaves the partners on their own tracks and frames. If the
+            // caller listed a partner explicitly, its requested move is the
+            // authoritative one and we do not synthesize a duplicate payload.
+            let Some(lead) = find_clip(before, &m.clip_id) else {
+                continue;
+            };
+            let Some(link_group_id) = lead.link_group_id.as_deref() else {
+                continue;
+            };
+            let Some(current_frame) = cur_frame else {
+                continue;
+            };
+            let Some(delta) = m.to_frame.and_then(|_| to_frame.checked_sub(current_frame)) else {
+                continue;
+            };
+            if delta == 0 {
+                continue;
+            }
+            for (track_index, track) in before.tracks.iter().enumerate() {
+                for partner in &track.clips {
+                    if partner.id == m.clip_id
+                        || partner.link_group_id.as_deref() != Some(link_group_id)
+                        || requested_ids.contains(partner.id.as_str())
+                    {
+                        continue;
+                    }
+                    let partner_frame = partner
+                        .start_frame
+                        .checked_add(delta)
+                        .ok_or_else(|| ToolError::new("linked partner move frame overflow"))?
+                        .max(0);
+                    moves.push(ClipMove {
+                        clip_id: partner.id.clone(),
+                        to_track: track_index,
+                        to_frame: partner_frame,
+                    });
+                }
+            }
         }
         let res = self.apply(EditCommand::MoveClips { moves })?;
         Ok(ToolResult::ok(res.summary))
@@ -5313,6 +5362,22 @@ mod tests {
         Arc::new(StateHandle::new(tl, m))
     }
 
+    fn linked_move_handle() -> Arc<StateHandle> {
+        let mut tl = Timeline::new();
+        let mut video_track = Track::new("video-track", ClipType::Video);
+        let mut video = Clip::new("video-1", "video-asset", 20, 30);
+        video.link_group_id = Some("av-group".into());
+        video_track.clips.push(video);
+        let mut audio_track = Track::new("audio-track", ClipType::Audio);
+        let mut audio = Clip::new("audio-1", "audio-asset", 14, 30);
+        audio.media_type = ClipType::Audio;
+        audio.source_clip_type = ClipType::Audio;
+        audio.link_group_id = Some("av-group".into());
+        audio_track.clips.push(audio);
+        tl.tracks = vec![video_track, audio_track];
+        Arc::new(StateHandle::new(tl, MediaManifest::new()))
+    }
+
     fn seeded_transform_handle(
         transform: Transform,
         media_size: Option<(i32, i32)>,
@@ -5372,6 +5437,36 @@ mod tests {
         let second = scoped_dispatch(&dispatcher, "chat-session-x", "undo", serde_json::json!({}));
         assert!(!second.is_error, "{}", second.text_joined());
         assert_eq!(handle.timeline().tracks[0].clips[0].start_frame, 0);
+    }
+
+    #[test]
+    fn move_clips_dispatch_propagates_frame_delta_to_linked_partner() {
+        let handle = linked_move_handle();
+        let dispatcher = dispatcher_with(handle.clone());
+        let result = dispatcher.dispatch(
+            "move_clips",
+            serde_json::json!({"moves":[{"clipId":"video-1","toFrame":35}]}),
+        );
+
+        assert!(!result.is_error, "{}", result.text_joined());
+        let timeline = handle.timeline();
+        assert_eq!(timeline.tracks[0].clips[0].start_frame, 35);
+        assert_eq!(timeline.tracks[1].clips[0].start_frame, 29);
+    }
+
+    #[test]
+    fn move_clips_track_only_does_not_move_linked_partner() {
+        let handle = linked_move_handle();
+        let dispatcher = dispatcher_with(handle.clone());
+        let result = dispatcher.dispatch(
+            "move_clips",
+            serde_json::json!({"moves":[{"clipId":"video-1","toTrack":0}]}),
+        );
+
+        assert!(!result.is_error, "{}", result.text_joined());
+        let timeline = handle.timeline();
+        assert_eq!(timeline.tracks[0].clips[0].start_frame, 20);
+        assert_eq!(timeline.tracks[1].clips[0].start_frame, 14);
     }
 
     #[test]

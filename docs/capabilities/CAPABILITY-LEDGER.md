@@ -18,7 +18,7 @@ skip_when:
   - 仅查看单个内部函数
 priority: must
 freshness_class: project
-last_verified: 2026-08-21T20:57:59+08:00
+last_verified: 2026-08-21T21:15:16+08:00
 owners:
   - OpenTake-generation
 source_of_truth:
@@ -46,6 +46,7 @@ tags:
 - EditCommand、事务边界、undo/redo、split/trim/move/ripple：ops/core 已有上游对齐实现；`split_clip_distributes_keyframes_at_cut` 通过。
 - Inspector、字幕/转写/搜索、Agent/MCP、Motion Studio opaque MP4：代码和对应测试入口已存在；仍需安装版场景证据才能升级为 verified。
 - Motion Studio transparent alpha：Rust/Web 纵切已接通并通过全量自动化；当前包已安装，但 Mac 锁屏使透明发布开关和时间线导入的最新屏幕验收暂时不能执行。
+- Agent/MCP linked move parity：`move_clips` 现在和上游约定一致，显式 `toFrame` 会把 frame delta 传播到 linked A/V partner，track-only move 不传播；新增两条 dispatcher 回归测试。
 
 ## 首轮明确缺口
 
@@ -71,6 +72,11 @@ tags:
 - Web：Motion Studio Inspector 新增“透明背景（ProRes 4444）”开关；预览请求保持原 schema，只有发布请求带 `transparent` 字段，切换项目时重置为关闭。
 - 自动化证据：`src-tauri/tests/motion_command.rs` 的透明发布集成测试验证 `.mov`、ProRes、64×36 尺寸、完全透明像素和半透明动画像素；Rust workspace 串行全量通过（Tauri 720 tests、Motion Chromium/integration、导出/播放等）；Web 全量 `151 files / 1413 tests`、Web build 通过。
 - 安装包：当前 `/Applications/OpenTake.app` 二进制 SHA-256 `7634979ed3f29b2623c6dc630b34267b79e81b9129f2b4c3c48cc8dafa607f00`，构建产物与安装包一致。Computer Use 重试仍返回 Mac locked，因此不把开关点击、透明发布后时间线预览和导出画面对拍标记为通过。
+
+## 上游 linked A/V parity 当前切片
+
+- Agent/MCP 的 `move_clips` 入口已补齐上游 `partnerMoves` 语义：只提供 `toFrame` 时按 lead 的时间差移动同组伙伴，并保留伙伴所在轨道；只提供 `toTrack` 时不改伙伴时间；调用方显式列出伙伴时不再生成重复 move。
+- 证据：`cargo test -p opentake-agent --lib -- --test-threads=1` → 415 passed；新增测试覆盖 frame delta propagation 和 track-only no propagation。Web Timeline 拖拽原有 linked expansion 保持不变。
 
 - 约 `1331×768`：标准窗口配置偏大，最近项目区域宽度控制弱。
 - 紧凑档约 `1066×666`：可见、可操作，当前切换行为通过。
@@ -153,3 +159,4 @@ tags:
 - `2026-08-21T20:09:19+08:00` — 完成缺失媒体 Preview/Playback fail-closed（`741ff07`），补真实 RenderLoop 集成证据；顺序 workspace 全量通过，当前安装包 SHA-256 `40c21ce0…e7f08`。Mac 仍锁定，未升级屏幕证据。
 - `2026-08-21T20:19:15+08:00` — 复跑当前提交 `6b31449` 的顺序 workspace 全量、导出/播放集成和 app 构建；最新安装包 SHA-256 `7ad988f3…a9799`。全 workspace clippy 的既有 `chunks_exact` lint 仍单独记录，Mac 屏幕 smoke 仍未完成。
 - `2026-08-21T20:57:59+08:00` — 完成 `OT-MOTION-ALPHA` 首条 Rust/Web 纵切：透明模板→Chromium alpha→ProRes 4444 `.mov`→manifest provenance→Motion Studio 发布开关；Rust workspace 720 Tauri tests 与 Web 151/1413 全量通过，重新构建并安装包 SHA-256 `7634979e…607f00`。最新包屏幕验收仍因 Mac 锁屏阻塞，能力保持 partial。
+- `2026-08-21T21:15:16+08:00` — 补齐 Agent/MCP `move_clips` 的 linked A/V frame-delta parity，并修正文档中 `add_motion_graphic.transparent` 已支持 ProRes 4444 的描述；Agent lib 415/415 通过。屏幕验收阻塞边界不变。
