@@ -1091,7 +1091,7 @@ export function PreviewTabs({ item: _item }: { item: MediaItem | null }) {
         return (
           <div
             key={tab.id}
-            style={{ display: "inline-flex", alignItems: "center", gap: "var(--space-2xs)" }}
+            style={{ display: "inline-flex", alignItems: "center", gap: "var(--space-xxs)" }}
           >
             <button
               ref={(node) => {
