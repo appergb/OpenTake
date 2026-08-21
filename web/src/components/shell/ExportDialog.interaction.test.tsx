@@ -230,9 +230,9 @@ describe("ExportDialog control acceptance", () => {
     expect(mocks.save).toHaveBeenCalledWith(
       expect.objectContaining({
         defaultPath: "/tmp/My Film.mov",
-        filters: [{ name: "export.saveFilterMov", extensions: ["mov"] }],
       }),
     );
+    expect(mocks.save.mock.calls[0]?.[0]).not.toHaveProperty("filters");
     expect(mocks.exportVideo).toHaveBeenCalledWith(
       { outPath: "/tmp/render.mov", codec: "prores", quality: "1080p" },
       "video-operation-1",
@@ -314,9 +314,9 @@ describe("ExportDialog control acceptance", () => {
     expect(mocks.save).toHaveBeenCalledWith(
       expect.objectContaining({
         defaultPath: "/exports/Timeline.mp4",
-        filters: [{ name: "export.saveFilter", extensions: ["mp4"] }],
       }),
     );
+    expect(mocks.save.mock.calls[0]?.[0]).not.toHaveProperty("filters");
     expect(mocks.onExportProgress).toHaveBeenCalledWith(
       "video-operation-1",
       expect.any(Function),
@@ -372,6 +372,49 @@ describe("ExportDialog control acceptance", () => {
     });
     expect(mocks.exportVideo).toHaveBeenCalledTimes(exportCallCount);
     expect(useEditorUiStore.getState().exportDialogOpen).toBe(true);
+  });
+
+  it("preserves codec-specific export extensions without constraining the native save dialog", async () => {
+    await renderDialog();
+
+    await chooseDropdown("export.format", "export.codec.h265");
+    mocks.save.mockResolvedValueOnce("/tmp/h265-render");
+    await act(async () => {
+      buttonWithText("export.run").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mocks.save).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        defaultPath: "/tmp/My Film.mp4",
+      }),
+    );
+    expect(mocks.save.mock.calls.at(-1)?.[0]).not.toHaveProperty("filters");
+    expect(mocks.exportVideo).toHaveBeenLastCalledWith(
+      { outPath: "/tmp/h265-render.mp4", codec: "h265", quality: "1080p" },
+      "video-operation-1",
+    );
+
+    await act(async () => useEditorUiStore.setState({ exportDialogOpen: true, toast: null }));
+    await chooseDropdown("export.format", "export.codec.prores");
+    mocks.save.mockResolvedValueOnce("/tmp/prores-render");
+    await act(async () => {
+      buttonWithText("export.run").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mocks.save).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        defaultPath: "/tmp/My Film.mov",
+      }),
+    );
+    expect(mocks.save.mock.calls.at(-1)?.[0]).not.toHaveProperty("filters");
+    expect(mocks.exportVideo).toHaveBeenLastCalledWith(
+      { outPath: "/tmp/prores-render.mov", codec: "prores", quality: "1080p" },
+      "video-operation-1",
+    );
   });
 
   it("announces an export failure as an atomic assertive live message", async () => {

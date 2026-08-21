@@ -273,12 +273,6 @@ export function ExportDialog() {
     const chosen = await save({
       title: t("export.saveDialog"),
       defaultPath,
-      filters: [
-        {
-          name: t(ext === MOV_EXT ? "export.saveFilterMov" : "export.saveFilter"),
-          extensions: [ext],
-        },
-      ],
     });
     if (typeof chosen !== "string") return; // cancelled
 
