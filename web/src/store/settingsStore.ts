@@ -60,8 +60,8 @@ function loadProvider(): ByokProvider {
     : "anthropic";
 }
 function loadWindowSize(): WindowSizeOpt {
-  if (typeof localStorage === "undefined") return "standard";
-  return localStorage.getItem(LS.windowSize) === "compact" ? "compact" : "standard";
+  if (typeof localStorage === "undefined") return "compact";
+  return localStorage.getItem(LS.windowSize) === "standard" ? "standard" : "compact";
 }
 function loadProxyPlaybackEnabled(): boolean {
   if (typeof localStorage === "undefined") return false;
@@ -158,8 +158,12 @@ export async function applyWindowSize(size: WindowSizeOpt): Promise<void> {
         size: monitor.workArea.size.toLogical(monitor.scaleFactor),
       }
     : null;
-  const targetWidth = Math.min(preset.width, workArea?.size.width ?? preset.width);
-  const targetHeight = Math.min(preset.height, workArea?.size.height ?? preset.height);
+  const targetWidth = workArea
+    ? Math.min(preset.width, workArea.size.width)
+    : Math.min(preset.width, logicalSize.width);
+  const targetHeight = workArea
+    ? Math.min(preset.height, workArea.size.height)
+    : Math.min(preset.height, logicalSize.height);
   const newX = workArea
     ? workArea.position.x + (workArea.size.width - targetWidth) / 2
     : logicalPos.x + (logicalSize.width - targetWidth) / 2;

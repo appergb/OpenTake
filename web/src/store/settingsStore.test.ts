@@ -39,6 +39,32 @@ vi.mock("@tauri-apps/api/dpi", () => ({
   },
 }));
 
+function monitorWorkArea({
+  x,
+  y,
+  width,
+  height,
+  scaleFactor = 1,
+}: {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  scaleFactor?: number;
+}) {
+  return {
+    scaleFactor,
+    workArea: {
+      position: {
+        toLogical: () => ({ x, y }),
+      },
+      size: {
+        toLogical: () => ({ width, height }),
+      },
+    },
+  };
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -92,6 +118,21 @@ it("removes legacy and versioned theme preferences without a document theme mark
   expect(document.documentElement.dataset.theme).toBeUndefined();
 });
 
+it("defaults fresh installs to the compact window layout", async () => {
+  const { useSettingsStore } = await loadStores();
+
+  expect(useSettingsStore.getState().windowSize).toBe("compact");
+  expect(localStorage.getItem("windowSize")).toBeNull();
+});
+
+it("loads an explicit persisted standard layout choice", async () => {
+  localStorage.setItem("windowSize", "standard");
+
+  const { useSettingsStore } = await loadStores();
+
+  expect(useSettingsStore.getState().windowSize).toBe("standard");
+});
+
 it("awaits a native resize before persisting the selected dark compact layout", async () => {
   const resize = deferred<void>();
   native.setSize.mockReturnValueOnce(resize.promise);
@@ -136,6 +177,7 @@ it("does not move the native window when its size is rejected", async () => {
 });
 
 it("restores native geometry when positioning a resized window fails", async () => {
+  localStorage.setItem("windowSize", "standard");
   native.setPosition
     .mockRejectedValueOnce(new Error("position denied"))
     .mockResolvedValueOnce(undefined);
@@ -155,19 +197,32 @@ it("restores native geometry when positioning a resized window fails", async () 
   expect(useSettingsStore.getState().windowSize).toBe("standard");
 });
 
-it("clamps the standard layout to the current monitor work area and recenters it", async () => {
-  native.scaleFactor.mockResolvedValue(2);
-  native.currentMonitor.mockResolvedValue({
-    scaleFactor: 2,
-    workArea: {
-      position: {
-        toLogical: () => ({ x: 0, y: 24 }),
-      },
-      size: {
-        toLogical: () => ({ width: 1331, height: 768 }),
-      },
-    },
+it("clamps to the current window when monitor metadata is unavailable", async () => {
+  native.innerSize.mockResolvedValue({
+    toLogical: () => ({ width: 900, height: 600 }),
   });
+  native.outerPosition.mockResolvedValue({
+    toLogical: () => ({ x: 120, y: 90 }),
+  });
+  const { useSettingsStore } = await loadStores();
+
+  await useSettingsStore.getState().setWindowSize("standard");
+
+  expect(native.currentMonitor).toHaveBeenCalledOnce();
+  expect(native.primaryMonitor).toHaveBeenCalledOnce();
+  expect(native.setSize).toHaveBeenCalledWith(
+    expect.objectContaining({ width: 900, height: 600 }),
+  );
+  expect(native.setPosition).toHaveBeenCalledWith(
+    expect.objectContaining({ x: 120, y: 90 }),
+  );
+});
+
+it("falls back to the primary monitor work area when the current monitor is unavailable", async () => {
+  native.scaleFactor.mockResolvedValue(2);
+  native.primaryMonitor.mockResolvedValue(
+    monitorWorkArea({ x: 0, y: 24, width: 1331, height: 768, scaleFactor: 2 }),
+  );
   native.innerSize.mockResolvedValue({
     toLogical: () => ({ width: 1066, height: 666 }),
   });
@@ -179,6 +234,7 @@ it("clamps the standard layout to the current monitor work area and recenters it
   await useSettingsStore.getState().setWindowSize("standard");
 
   expect(native.currentMonitor).toHaveBeenCalledOnce();
+  expect(native.primaryMonitor).toHaveBeenCalledOnce();
   expect(native.setSize).toHaveBeenCalledWith(
     expect.objectContaining({ width: 1331, height: 768 }),
   );
@@ -219,6 +275,7 @@ it("serializes a later layout choice after an earlier native resize", async () =
 });
 
 it("serializes a user layout selection after startup resize", async () => {
+  localStorage.setItem("windowSize", "standard");
   const startupResize = deferred<void>();
   const startupPosition = deferred<void>();
   native.setSize
