@@ -27,7 +27,7 @@ skip_when:
   - 仅修改零 IO 的 domain 算法且不改变 UI 合同
 priority: must
 freshness_class: project
-last_verified: 2026-08-21T22:15:18+08:00
+last_verified: 2026-08-21T22:27:41+08:00
 owners:
   - OpenTake-generation
 source_of_truth:
@@ -88,7 +88,7 @@ tags:
 | Motion | 透明发布 | 最新包 Motion Studio Inspector 可见并可点击“透明背景（ProRes 4444）”；真实发布进度出现，完成后素材库新增 Motion Graphic、时间线新增 V2 片段，预览/Inspector 均可见；ProRes/alpha 由 Rust FFmpeg integration 验证 | 部分（代码/自动化/发布屏幕通过） | 继续补透明输出的屏幕导出文件、保存重开和 Option trim 后的完整时间线对拍 |
 | Export | 导出面板 | 导出视频面板可打开，格式/分辨率/取消/导出可见 | 通过 | 复制目标路径后完成导出并 ffprobe |
 | Export | temporal 视频实际导出 | 修复 SavePanel filters 后，原生 Save 按钮可用；H.264 temporal QA 导出成功，应用显示 3840×2160 / 160 帧，ffprobe 显示 H.264、60fps、2.666667s | 通过（H.264 视频） | H.265/ProRes、带音频/字幕、取消和 preview/export 像素对拍仍待矩阵化 |
-| Export | 带音频 H.264/AAC 实际导出 | 安装包 `03bdcef3…` 生成 `qa-h264-aac-export.mp4`；ffprobe：H.264 1280×720/30fps/231 帧、AAC 48kHz 单声道/362 包、7.700s；音视频均 `ffmpeg -xerror` 通过；源/导出首中尾 SSIM `0.999997 / 0.999997 / 1.000000` | 通过（一次真实 QA 包）/当前包部分 | 当前安装包已更新为 `40c21ce0…e7f08`（代码 `741ff07`），但 SavePanel/取消/最新包重跑仍待；H.265/ProRes、字幕和实时音画同步仍待 |
+| Export | 带音频 H.264/AAC 实际导出 | 最新包 `918eac84…9551b` 通过 SavePanel 导出 `/private/tmp/opentake-audio-desktop-qa-L8Nvwh/opentake-latest-smoke.mp4`；ffprobe：H.264 1280×720/30fps/231 帧、AAC 48kHz 单声道/362 包、7.700s；完整 `ffmpeg -xerror` 通过 | 通过（最新包） | H.265/ProRes、字幕、取消和实时音画同步仍待矩阵化 |
 | Export | 失败/取消输出清理 | `0bae80e` 增加普通输出 identity-safe guard、replacement race、双 cancel source fail-closed；`a7d98d6` 增加 symlink/reparse 最终路径拒绝；export unit 70/70、media cancel 18/18、audio/video integration 5/5，顺序 workspace 全量通过 | 通过（代码/测试） | 仍需最新安装包触发一次错误/取消并确认 UI toast/文件清理 |
 | Help | 菜单 | 快捷键/MCP 说明可展开；教程/反馈显示 Beta 禁用 | 通过 | 记录禁用原因和可用边界 |
 | Library | 全局素材库 | AX 可读分类、搜索、排序；部分截图曾未重绘，当前复测仍需重复 | 部分 | 在窗口修复后重跑可见性和空态 |
@@ -140,3 +140,4 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - `2026-08-21T21:21:26+08:00` — Agent Motion 文档新增透明发布参数，重新构建并安装最新 app `38c814f4…bc838`；Computer Use 再次返回 Mac locked，屏幕验收边界不变。
 - `2026-08-21T21:31:52+08:00` — alpha-preserving document edit 修复后重新构建并安装最新 app `d5f8aa46…87ae7`；真实 FFmpeg add→edit integration 通过，Computer Use 仍返回 Mac locked。
 - `2026-08-21T22:15:18+08:00` — 最新包 `918eac84…9551b` 解锁后完成真实桌面 smoke：紧凑/标准 Home、媒体预览 tab、播放到尾帧、有效分割与撤销、导出面板、Motion 透明开关和透明发布落轨均通过；Option trim 坐标操作返回 `noWindowsAvailable`，保留为未完成屏幕证据。
+- `2026-08-21T22:27:41+08:00` — 当前包完成 H.264/AAC SavePanel 导出；输出文件 ffprobe、完整 `ffmpeg -xerror` 和 7.700s A/V 流事实通过。透明 ProRes 专用导出、H.265/字幕/取消仍待。

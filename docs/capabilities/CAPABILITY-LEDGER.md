@@ -18,7 +18,7 @@ skip_when:
   - 仅查看单个内部函数
 priority: must
 freshness_class: project
-last_verified: 2026-08-21T22:15:18+08:00
+last_verified: 2026-08-21T22:27:41+08:00
 owners:
   - OpenTake-generation
 source_of_truth:
@@ -164,3 +164,4 @@ tags:
 - `2026-08-21T21:21:26+08:00` — 重新构建并安装包含 Agent Motion 透明参数的 app，当前二进制 SHA-256 `38c814f4…bc838`；Computer Use 仍因 Mac locked 无法执行最新包屏幕 smoke。
 - `2026-08-21T21:31:52+08:00` — alpha-preserving document edit 真实 FFmpeg integration 通过，重新构建并安装当前 app，二进制 SHA-256 `d5f8aa46…87ae7`；屏幕 smoke 仍因 Mac locked 阻塞。
 - `2026-08-21T22:15:18+08:00` — 最新包 `918eac84…9551b` 完成真实桌面 smoke：小屏/标准 Home、媒体预览 tab、播放到尾帧、分割/撤销、导出面板和 Motion 透明发布落轨；Option trim 坐标接口仍返回 `noWindowsAvailable`，透明导出/保存重开保持待验证。
+- `2026-08-21T22:27:41+08:00` — 最新包 H.264/AAC SavePanel 导出写入 `/private/tmp/opentake-audio-desktop-qa-L8Nvwh/opentake-latest-smoke.mp4`，ffprobe 和完整 `ffmpeg -xerror` 通过；透明 ProRes 专用导出仍待。
