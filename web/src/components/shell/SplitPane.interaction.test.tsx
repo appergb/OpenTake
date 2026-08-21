@@ -63,6 +63,9 @@ it("control-d88c7103e09bb382 resize two editor panes", async () => {
   expect(separator.getAttribute("aria-valuemax")).toBe("450");
   expect(separator.style.width).toBe("24px");
   expect(separator.style.pointerEvents).toBe("none");
+  expect(split.style.overflow).toBe("hidden");
+  expect((split.firstElementChild as HTMLElement | null)?.style.overflow).toBe("hidden");
+  expect((split.lastElementChild as HTMLElement | null)?.style.overflow).toBe("hidden");
 
   const seamControl = container.querySelector<HTMLButtonElement>("[data-pane='first']")!;
   await act(async () => {
