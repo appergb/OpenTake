@@ -743,19 +743,18 @@ export async function splitAtPlayhead() {
   await splitClips(ids, frame);
 }
 
-/** Clips the playhead is strictly inside, restricted to the selection when one
- *  exists (else all clips under the playhead) — the target set for trim-to-
- *  playhead, matching `splitAtPlayhead`'s "act on what's under the playhead". */
+/** Selected clips the playhead is strictly inside. Upstream playhead-relative
+ *  edits are selection-driven; an empty selection intentionally yields none. */
 function clipsUnderPlayhead(): Clip[] {
   const ui = useEditorUiStore.getState();
   const frame = Math.round(ui.activeFrame);
   const selected = new Set(ui.selectedClipIds);
-  const restrict = selected.size > 0;
+  if (selected.size === 0) return [];
   const out: Clip[] = [];
   for (const track of currentTimeline().tracks) {
     for (const c of track.clips) {
       if (frame <= c.startFrame || frame >= c.startFrame + c.durationFrames) continue;
-      if (restrict && !selected.has(c.id)) continue;
+      if (!selected.has(c.id)) continue;
       out.push(c);
     }
   }

@@ -95,6 +95,8 @@ import {
   splitClips,
   splitAtPlayhead,
   stampKeyframe,
+  trimEndToPlayhead,
+  trimStartToPlayhead,
   swapClips,
   swapMedia,
   swapTracks,
@@ -537,6 +539,50 @@ describe("edit gesture command routing", () => {
     useEditorUiStore.setState({ activeFrame: 15, currentFrame: 15, selectedClipIds: new Set() });
 
     await splitAtPlayhead();
+
+    expect(ipc.calls).toEqual([]);
+  });
+
+  it("does not trim clips when the playhead has no selection", async () => {
+    const clip: Clip = {
+      id: "unselected-trim",
+      mediaRef: "media-a",
+      mediaType: "video",
+      sourceClipType: "video",
+      startFrame: 10,
+      durationFrames: 20,
+      trimStartFrame: 0,
+      trimEndFrame: 0,
+      speed: 1,
+      volume: 1,
+      fadeInFrames: 0,
+      fadeOutFrames: 0,
+      fadeInInterpolation: "linear",
+      fadeOutInterpolation: "linear",
+      opacity: 1,
+      transform,
+      crop: { left: 0, top: 0, right: 0, bottom: 0 },
+    };
+    useProjectStore.getState().replaceProjectSnapshot({
+      timeline: {
+        fps: 30,
+        width: 1920,
+        height: 1080,
+        settingsConfigured: true,
+        tracks: [
+          { id: "v1", type: "video", muted: false, hidden: false, syncLocked: false, clips: [clip] },
+        ],
+      },
+      projectEpoch: 1,
+      version: 3,
+      projectPath: "/trim-no-selection.opentake",
+      compatibilityReadOnly: false,
+      compatibilityBlockers: [],
+    });
+    useEditorUiStore.setState({ activeFrame: 15, currentFrame: 15, selectedClipIds: new Set() });
+
+    await trimStartToPlayhead();
+    await trimEndToPlayhead();
 
     expect(ipc.calls).toEqual([]);
   });
