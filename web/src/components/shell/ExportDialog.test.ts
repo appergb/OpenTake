@@ -5,6 +5,7 @@ import {
   defaultBundleName,
   defaultMp4Name,
   defaultQuality,
+  extForCodec,
   formatBytes,
   progressPercent,
   withMp4Ext,
@@ -52,6 +53,10 @@ describe("withMp4Ext", () => {
   it("appends .mp4 to a path with a different extension (does not strip it)", () => {
     // The save dialog filters to .mp4, but guard the H.264 container regardless.
     expect(withMp4Ext("/out/clip.mov")).toBe("/out/clip.mov.mp4");
+  });
+
+  it("uses a .mov container for transparent ProRes 4444", () => {
+    expect(extForCodec("prores4444")).toBe("mov");
   });
 });
 

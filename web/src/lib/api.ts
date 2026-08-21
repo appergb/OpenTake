@@ -547,7 +547,7 @@ export async function exportSubtitles(
 // MARK: - Video export (#112)
 //
 // `export_video` composites every timeline frame on the GPU and encodes it to a
-// real file on disk (H.264 / H.265 in an .mp4 container, or ProRes 422 in a
+// real file on disk (H.264 / H.265 in an .mp4 container, or ProRes 422 / 4444 in a
 // .mov container). The request mirrors the Rust `ExportRequest` DTO verbatim
 // (camelCase `outPath`; lowercase enum tags). Outside Tauri there is no
 // GPU/ffmpeg, so the wrapper rejects with a friendly error rather than
@@ -556,8 +556,8 @@ export async function exportSubtitles(
 // (`onExportProgress`); `cancelExport` requests a mid-encode stop, which
 // surfaces back through `exportVideo`'s rejection as `EXPORT_CANCELLED_SENTINEL`.
 
-/** Output codec. `h264`/`h265` require an `.mp4` output path; `prores` requires `.mov`. */
-export type ExportCodec = "h264" | "h265" | "prores";
+/** Output codec. `h264`/`h265` require `.mp4`; ProRes 422/4444 require `.mov`. */
+export type ExportCodec = "h264" | "h265" | "prores" | "prores4444";
 
 /** Output short-edge resolution selector. */
 export type ExportQuality = "720p" | "1080p" | "4k";

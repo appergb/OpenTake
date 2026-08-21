@@ -268,7 +268,7 @@
 
   覆盖编辑、预览、发布视频、取消、结果校验、导入时间线、保存重开和预览/导出一致性。
 
-  当前进展（2026-08-21）：`OT-MOTION-ALPHA-1` 的透明模板、Chromium alpha、ProRes 4444、manifest provenance、Motion Studio/Agent 发布开关、alpha-preserving edit 均已实现并有自动化/真实 FFmpeg 证据。最新包 `893b6ed0…d0ba` 已完成透明开关、发布进度、时间线落轨、保存重开和 Inspector/预览屏幕验收；同包 H.264/AAC SavePanel 导出也已通过文件级校验。QA 工程内发布生成的 `.mov` 已文件级复核为 ProRes 4444 `ap4h` / `yuva444p12le`，`alphaextract` 可读取非全黑 alpha，`media.json` 保留 `transparent: true`；Web 全量 `151 files / 1415 tests`、`pnpm build` 通过。仍未勾选本步骤：透明 ProRes 专用导出 UI、opaque clip 在编辑时切换为透明，以及 H.265/字幕/取消导出矩阵仍待。
+  当前进展（2026-08-21）：`OT-MOTION-ALPHA-1` 的透明模板、Chromium alpha、ProRes 4444、manifest provenance、Motion Studio/Agent 发布开关、alpha-preserving edit 和透明导出 codec 均已实现并有自动化/真实 FFmpeg 证据。最新包 `3ce3c1d0…c7eef` 已完成透明开关、发布进度、时间线落轨、保存重开和 Inspector/预览屏幕验收；导出面板新增 `ProRes 4444 透明 / .mov`，GPU/FFmpeg integration 验证透明清屏、`yuva444` 和 alpha 0→非零；同包 H.264/AAC、H.265/AAC、ProRes 422/PCM 文件证据均通过。Web 全量 `151 files / 1416 tests`、`pnpm build`，Rust workspace 722 tests 通过。仍未勾选本步骤：透明 ProRes 4444 屏幕 SavePanel/状态复验（Mac 当前锁屏）、opaque clip 在编辑时切换透明，以及字幕/取消导出矩阵仍待。
 
 - [ ] **Step 5: 验证设置和帮助**
 

@@ -7,7 +7,8 @@
 //! (`opentake_media::VideoEncoder`) to produce a real `.mp4` on disk.
 //!
 //! Scope of this first cut (SPEC §2.4 / §8.2):
-//! - **H.264 / .mp4**, **H.265 / .mp4**, and **ProRes 422 / .mov** are wired.
+//! - **H.264 / .mp4**, **H.265 / .mp4**, **ProRes 422 / .mov**, and transparent
+//!   **ProRes 4444 / .mov** are wired.
 //! - **Linear audio mixdown**: every audio-bearing clip's source window is
 //!   decoded to mono f32 at the mix rate, placed at its frame-derived sample
 //!   offset, scaled by its `volume_at` envelope, summed, hard-limited, and mux'd
@@ -90,6 +91,8 @@ pub enum ExportCodec {
     H265,
     /// Apple ProRes 422 / `.mov`.
     Prores,
+    /// Apple ProRes 4444 with an alpha plane / `.mov`.
+    Prores4444,
 }
 
 /// Requested output short-edge resolution, projected from the front-end.
@@ -468,6 +471,23 @@ fn resolve_preset(
                 quality.encode_resolution(),
             ))
         }
+        ExportCodec::Prores4444 => {
+            if ext.as_deref() != Some("mov") {
+                return Err("ProRes 4444 export requires a .mov output path".to_string());
+            }
+            Ok(ExportPreset::new(
+                VideoCodec::ProRes4444,
+                quality.encode_resolution(),
+            ))
+        }
+    }
+}
+
+fn export_clear_rgba(codec: ExportCodec) -> [f64; 4] {
+    if codec == ExportCodec::Prores4444 {
+        [0.0, 0.0, 0.0, 0.0]
+    } else {
+        [0.0, 0.0, 0.0, 1.0]
     }
 }
 
@@ -1700,7 +1720,8 @@ pub(crate) fn run_export_with_control(
             return Err(CANCELLED_SENTINEL.to_string());
         }
 
-        let frame_plan = plan.frame(timeline, f);
+        let mut frame_plan = plan.frame(timeline, f);
+        frame_plan.clear_rgba = export_clear_rgba(req.codec);
         let mut resolver = MediaResolver {
             device: &dev.device,
             queue: &dev.queue,
@@ -3374,6 +3395,27 @@ mod tests {
         .expect("prores mov should resolve");
         assert_eq!(preset.codec, VideoCodec::ProRes422);
         assert_eq!(preset.resolution, EncodeResolution::P1080);
+    }
+
+    #[test]
+    fn resolve_preset_accepts_prores_4444_mov() {
+        let preset = resolve_preset(
+            ExportCodec::Prores4444,
+            ExportQuality::P1080,
+            Path::new("/out.mov"),
+        )
+        .expect("prores 4444 mov should resolve");
+        assert_eq!(preset.codec, VideoCodec::ProRes4444);
+        assert_eq!(preset.resolution, EncodeResolution::P1080);
+    }
+
+    #[test]
+    fn prores_4444_export_uses_transparent_clear_color() {
+        assert_eq!(
+            export_clear_rgba(ExportCodec::Prores4444),
+            [0.0, 0.0, 0.0, 0.0]
+        );
+        assert_eq!(export_clear_rgba(ExportCodec::Prores), [0.0, 0.0, 0.0, 1.0]);
     }
 
     #[test]

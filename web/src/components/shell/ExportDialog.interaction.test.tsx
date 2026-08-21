@@ -216,6 +216,10 @@ describe("ExportDialog control acceptance", () => {
 
     expect(buttonWithLabel("export.mode: Video (.mov)").textContent).toContain(".mov");
     expect(buttonWithLabel("export.mode: Video (.mov)").textContent).not.toContain(".mp4");
+
+    await chooseDropdown("export.format", "export.codec.prores4444");
+    expect(buttonWithLabel("export.mode: Video (.mov)").textContent).toContain(".mov");
+    expect(container?.textContent).toContain("export.codec.prores4444");
   });
 
   it("control-6846958c0e19c8e9 choose export codec", async () => {
@@ -413,6 +417,22 @@ describe("ExportDialog control acceptance", () => {
     expect(mocks.save.mock.calls.at(-1)?.[0]).not.toHaveProperty("filters");
     expect(mocks.exportVideo).toHaveBeenLastCalledWith(
       { outPath: "/tmp/prores-render.mov", codec: "prores", quality: "1080p" },
+      "video-operation-1",
+    );
+
+    await act(async () => useEditorUiStore.setState({ exportDialogOpen: true, toast: null }));
+    await chooseDropdown("export.format", "export.codec.prores4444");
+    mocks.save.mockResolvedValueOnce("/tmp/prores-alpha-render");
+    await act(async () => {
+      buttonWithText("export.run").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(mocks.save).toHaveBeenLastCalledWith(
+      expect.objectContaining({ defaultPath: "/tmp/My Film.mov" }),
+    );
+    expect(mocks.exportVideo).toHaveBeenLastCalledWith(
+      { outPath: "/tmp/prores-alpha-render.mov", codec: "prores4444", quality: "1080p" },
       "video-operation-1",
     );
   });

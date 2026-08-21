@@ -4,7 +4,8 @@
  * (per-frame GPU composite → ffmpeg + AAC/LPCM mux).
  *
  * Scope mirrors the backend:
- *  - Format: H.264 / H.265 (`.mp4`) and ProRes 422 (`.mov`). The output path's
+ *  - Format: H.264 / H.265 (`.mp4`), ProRes 422 (`.mov`), and transparent
+ *    ProRes 4444 (`.mov`). The output path's
  *    extension tracks the selected codec so it always matches what the
  *    backend's `resolve_preset` requires (see `extForCodec`/`withExt` below).
  *  - Resolution: 720p / 1080p / 4K short-edge presets. The default pre-selects
@@ -50,7 +51,7 @@ export type ExportMode = "video" | "bundle";
 
 /** The container extension the backend's `resolve_preset` requires for a codec. */
 export function extForCodec(codec: ExportCodec): typeof MP4_EXT | typeof MOV_EXT {
-  return codec === "prores" ? MOV_EXT : MP4_EXT;
+  return codec === "prores" || codec === "prores4444" ? MOV_EXT : MP4_EXT;
 }
 
 /** Ensure a chosen path carries the given extension (does not strip a wrong one). */
@@ -214,6 +215,7 @@ export function ExportDialog() {
       { id: "h264" as const, label: t("export.codec.h264") },
       { id: "h265" as const, label: t("export.codec.h265") },
       { id: "prores" as const, label: t("export.codec.prores") },
+      { id: "prores4444" as const, label: t("export.codec.prores4444") },
     ],
     [t],
   );

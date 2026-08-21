@@ -18,7 +18,7 @@ skip_when:
   - 仅查看单个内部函数
 priority: must
 freshness_class: project
-last_verified: 2026-08-21T23:19:12+08:00
+last_verified: 2026-08-21T23:47:02+08:00
 owners:
   - OpenTake-generation
 source_of_truth:
@@ -45,7 +45,7 @@ tags:
 - Models、Timeline、Track、Clip、Keyframe、Transform、TextStyle：domain crate 已有实现，需继续做完整行为级枚举。
 - EditCommand、事务边界、undo/redo、split/trim/move/ripple：ops/core 已有上游对齐实现；`split_clip_distributes_keyframes_at_cut` 通过。
 - Inspector、字幕/转写/搜索、Agent/MCP、Motion Studio opaque MP4：代码和对应测试入口已存在；仍需安装版场景证据才能升级为 verified。
-- Motion Studio transparent alpha：Rust/Web 纵切已接通并通过全量自动化；最新包已完成透明开关、发布进度、时间线落轨和保存重开屏幕验收；QA 工程内真实 `.mov` 已复核为 ProRes 4444 并带可读取 alpha。
+- Motion Studio transparent alpha：Rust/Web 纵切已接通并通过全量自动化；最新包已完成透明开关、发布进度、时间线落轨和保存重开屏幕验收；导出面板已新增透明 ProRes 4444 codec，真实 GPU/FFmpeg integration 已复核 `yuva444` alpha；透明导出屏幕仍待解锁后复验。
 - Agent/MCP linked move parity：`move_clips` 现在和上游约定一致，显式 `toFrame` 会把 frame delta 传播到 linked A/V partner，track-only move 不传播；新增两条 dispatcher 回归测试。最新安装版还验证了 Agent 面板标签生命周期、无通道时发送禁用和快捷键收起布局。
 
 ## 首轮明确缺口
@@ -59,7 +59,7 @@ tags:
 | `UP-EXPORT` | P0 | partial | H.264/AAC、H.265、ProRes 422 和字幕命令已有实现；普通输出失败清理、external cancel 全链路、输出父目录/文件 identity 校验已补齐 | 最新包已补 H.265/AAC 与 ProRes 422 HQ/PCM 的 SavePanel/文件证据；透明 ProRes 4444、字幕、取消、实时音画同步和首中尾对拍仍待 |
 | `UP-PREVIEW-TABS` | P1 | verified | `previewTabIds + previewTabHistory + activeTabId`，含 legacy 归一和删除清理 | 安装版同时显示 Timeline/两个素材 tab；关闭第二个回退第一个；91 个定向测试通过 |
 | `UP-MEDIA-VIEW-MODES` | P1 | verified | folder/flat/grouped 三态投影、网格/列表密度、文件夹导航和音频导入入口已通过测试及安装版验收 | 搜索、选择、拖拽和预览沿用同一 MediaItem ID 链路，继续纳入后续模块化 QA |
-| `OT-MOTION-ALPHA` | P1 | partial | Motion Studio 透明发布开关、ProRes 4444/yuva444p10le、manifest straight-alpha provenance | 透明 motion 覆盖底图、预览/导出一致，并完成安装版时间线导入对拍；透明专用导出 UI、opaque→transparent 编辑仍待 |
+| `OT-MOTION-ALPHA` | P1 | partial | Motion Studio 透明发布开关、导出面板 ProRes 4444/yuva444、manifest straight-alpha provenance | 透明 motion 覆盖底图、预览/导出一致，并完成安装版时间线导入对拍；代码/自动化已通过，透明导出屏幕和 opaque→transparent 编辑仍待 |
 | `UP-ACCOUNT-CLOUD-BOUNDARY` | P0 | blocked | 先定义 BYOK/provider 替代还是追同构云契约，再补 capability gate | 未授权时不广告/不发送；有凭据时生成→媒体→落轨闭环 |
 | `UP-SETTINGS-TAXONOMY` | P2 | partial | 明确 models/agent/storage/general/account 语义映射 | 设置入口和上游语义一一可解释 |
 
@@ -72,7 +72,7 @@ tags:
 - Web/Agent：Motion Studio Inspector 新增“透明背景（ProRes 4444）”开关；预览请求保持原 schema，只有发布请求带 `transparent` 字段，切换项目时重置为关闭；Agent `add_motion_graphic` 和 `publish_motion_document` 的新增 clip 路径也接受透明发布，已有透明 clip 的文档编辑保留 alpha。
 - 自动化证据：`src-tauri/tests/motion_command.rs` 的透明发布集成测试验证 `.mov`、ProRes、64×36 尺寸、完全透明像素和半透明动画像素；Rust workspace 串行全量通过（Tauri 720 tests、Motion Chromium/integration、导出/播放等）；Web 全量 `151 files / 1415 tests`、Web build 通过。
 - 文件级证据：`/private/tmp/opentake-audio-desktop-qa-L8Nvwh/audio-preview-export-qa.opentake/media/motion-0e4cacc9-161a-4704-a790-7e233397c8c4.mov` 被 `ffprobe` 识别为 `prores` profile `4444`、tag `ap4h`、pixel format `yuva444p12le`、90 帧/3.000s；`ffmpeg -vf alphaextract` 成功，抽样 alpha 平面为非全黑值；对应 `media.json` 的 `generationInput.transparent` 为 `true`。
-- 安装包：当前 `/Applications/OpenTake.app` 二进制 SHA-256 `893b6ed082f6f8f4d70eeeb974d00ef11dafa2020075d69fc7629df83085d0ba`。最新包已通过透明开关/发布/落轨/保存重开屏幕路径；专用导出 UI、opaque→transparent 编辑和其它导出格式仍未完成。
+- 安装包：当前 `/Applications/OpenTake.app` 二进制 SHA-256 `3ce3c1d04fd28e5b9f98e056788112513e82ae4d46e13bdc462dc55af16c7eef`。最新包已通过透明开关/发布/落轨/保存重开屏幕路径；透明 ProRes 4444 专用导出已实现并通过自动化/底层文件证据，屏幕路径待解锁复验；opaque→transparent 编辑仍未完成。
 
 ## 上游 linked A/V parity 当前切片
 
@@ -95,7 +95,7 @@ tags:
 - 时间轴范围切片已补 Shift+标尺 range mark、已有范围 start/end 边缘命中/拖动、clip-edge/playhead snap、pointercancel/lost-capture 回滚和同帧清除；最新安装包按上游顺序完成 I/O 标记范围→选 V1 锚点→Shift+Backspace，V1/A1 联动删除、Motion 保留、播放头/时间码同步到新 3 秒长度、Undo 恢复。同步刷新新增 playhead clamp；时间轴目录 8 files / 88 tests，Web 全量 151 files / 1415 tests、tsc、Web build 通过。Option trim 屏幕坐标拖动仍待。
 - 带音频 fixture `nested-timeline-compound-export-2026-07-31.mp4` 已通过 `ffmpeg -xerror` 音视频解码；安装版出现 V1+A1、A1 波形和音频 Inspector，并完成起点/中点/终点 seek 与暂停稳定性检查。fixture 为 7.700s H.264 1280×720/30fps/231帧 + AAC 48kHz 单声道；独立实时听感级音画同步仍未完成。
 - 带音频导出真实证据：在安装包 `03bdcef36def17646c64e6c40978e26b6b675a5d90874e3264d93a0e3351ce2e` 中生成 `/private/tmp/opentake-audio-export-qa-YPhWaR/qa-h264-aac-export.mp4`；ffprobe 为 H.264 1280×720/30fps/231 帧 + AAC 48kHz 单声道/362 包/7.700s，视频和音频均通过 `ffmpeg -xerror`。源/导出首中尾 SSIM：`0.999997 / 0.999997 / 1.000000`，帧文件在 `/private/tmp/opentake-audio-frame-compare.M2Jvfu/`。这证明一次真实 preview-source/export 对拍，但不是听感级实时同步证据；cleanup 版最新包 `ca08edf97441ce3b3c69b5683a3b7383997371952490c8897021772e521eed64` 的 SavePanel 复测仍保持 partial。
-- 导出文件证据：最新包 `893b6ed0…d0ba` 生成 H.265/AAC `/private/tmp/opentake-audio-desktop-qa-L8Nvwh/audio-preview-export-qa.mp4`（HEVC `hev1` + AAC，7.700s）和 ProRes 422 HQ/PCM `/private/tmp/opentake-audio-desktop-qa-L8Nvwh/audio-preview-export-qa.mov`（`apch`/`yuv422p10le` + PCM，7.700s），两者均通过完整 `ffmpeg -xerror`。导出失败边界：`0bae80e` 增加 identity-safe 普通输出 guard、replacement race 测试、双 cancel source fail-closed；`a7d98d6` 再拒绝最终输出路径的 symlink/reparse identity，并新增替换为 symlink 的回归测试。当前 `export::tests` 70/70、`opentake-media` cancel 18/18、带音频 integration 5/5 通过。
+- 导出文件证据：包 `893b6ed0…d0ba` 生成 H.265/AAC `/private/tmp/opentake-audio-desktop-qa-L8Nvwh/audio-preview-export-qa.mp4`（HEVC `hev1` + AAC，7.700s）和 ProRes 422 HQ/PCM `/private/tmp/opentake-audio-desktop-qa-L8Nvwh/audio-preview-export-qa.mov`（`apch`/`yuv422p10le` + PCM，7.700s），两者均通过完整 `ffmpeg -xerror`。新增 `OPENTAKE_RUN_FFMPEG_TESTS=1 cargo test -p opentake-tauri --test export_integration export_prores_4444_preserves_transparent_text_alpha` 验证 ProRes 4444 `yuva444p10le/12le` 和 alpha 0→非零。导出失败边界：`0bae80e` 增加 identity-safe 普通输出 guard、replacement race 测试、双 cancel source fail-closed；`a7d98d6` 再拒绝最终输出路径的 symlink/reparse identity，并新增替换为 symlink 的回归测试。当前 `export::tests` 72/72、`opentake-media` cancel 18/18、带音频 integration 6/6 通过。
 - 上游 playhead parity：`f05bac8` 修复无选区 `splitAtPlayhead` 不应发编辑请求，`478e1b4` 修复无选区 Q/W trim 不应发编辑请求；相关 Web 全量门禁 `151 files / 1412 tests` 通过。最新 app `de4cb52b…` 已构建并安装，但 Computer Use 因 Mac 锁定未能完成本轮屏幕 smoke。
 - 缺失媒体 fail-closed：`741ff07` 让普通 Preview 缺失图片返回 materialization error，Playback Image/Text 缺失通过 `RenderLoop::render_frame` 返回错误而不是发布黑帧，并统一 Playback/Export 错误文案；新增 render 18、resolver 15、playback integration 8 项测试，Tauri lib 719 项和顺序 workspace 全量均通过。
 - 曾出现 AX 更新但截图未重绘的黑屏瞬间；关闭/重开后页面正常，后续以窗口重绘时序风险记录，不把瞬态截图直接等同于产品黑屏。
@@ -177,3 +177,4 @@ tags:
 - `2026-08-21T22:47:48+08:00` — 写回最新安装版 Inspector、字幕和 Agent 入口/失败边界证据；完整模型下载、转写/字幕导出、MCP/Agent 工具调用仍未升级为完成。
 - `2026-08-21T23:09:09+08:00` — 写回最新包范围删除/Undo 与 playhead clamp 屏幕证据；安装包 SHA-256 `893b6ed0…d0ba`，Web 全量 151/1415 通过；Option trim 和其它导出矩阵仍保持 partial。
 - `2026-08-21T23:19:12+08:00` — 写回最新包 H.265/AAC、ProRes 422 HQ/PCM SavePanel 与文件证据；透明 ProRes 4444 专用导出、字幕、取消和实时音画同步仍未升级为完成。
+- `2026-08-21T23:47:02+08:00` — 写回透明 ProRes 4444 导出实现和 GPU/FFmpeg alpha integration；最新安装包 `3ce3c1d0…c7eef`，Computer Use 因 Mac 锁屏未完成透明导出屏幕复验。
