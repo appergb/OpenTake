@@ -104,6 +104,9 @@ afterEach(() => {
     saveAsProgress: null,
     projectSettingsPrompt: null,
     pendingSwapClipId: null,
+    previewTabIds: [],
+    previewTabHistory: [],
+    previewActiveTabId: "timeline",
     selectedMediaAssetIds: new Set(),
     selectedFolderIds: new Set(),
     previewMediaId: null,
@@ -986,6 +989,47 @@ describe("media grid interaction consistency", () => {
 
     expect([...useEditorUiStore.getState().selectedMediaAssetIds]).toEqual([]);
     expect(useEditorUiStore.getState().previewMediaId).toBeNull();
+  });
+
+  it("keeps the most recent valid media tab active after batch deleting older preview tabs", async () => {
+    const completed = deferred<{
+      changed: boolean;
+      actionName: string;
+      affectedClipIds: string[];
+      timelineVersion: number;
+      summary: string;
+    }>();
+    vi.mocked(editActions.deleteMedia).mockReturnValue(completed.promise);
+    useProjectStore.setState({
+      projectEpoch: 24,
+      projectPath: "/same.opentake",
+      timelineVersion: 15,
+    });
+    const ui = useEditorUiStore.getState();
+    ui.openPreviewTab("a");
+    ui.openPreviewTab("b");
+    ui.openPreviewTab("c");
+    ui.selectPreviewTab("media_a");
+    useEditorUiStore.setState({
+      selectedMediaAssetIds: new Set(["a", "b"]),
+    });
+
+    const deletion = deleteSelectedMediaAssets();
+    useProjectStore.setState({ timelineVersion: 16 });
+    completed.resolve({
+      changed: true,
+      actionName: "Delete Media",
+      affectedClipIds: [],
+      timelineVersion: 16,
+      summary: "Deleted a,b",
+    });
+    await deletion;
+
+    expect(useEditorUiStore.getState()).toMatchObject({
+      previewTabIds: ["c"],
+      previewActiveTabId: "media_c",
+      previewMediaId: "c",
+    });
   });
 
   it("keeps folder selection when a newer revision supersedes completion", async () => {

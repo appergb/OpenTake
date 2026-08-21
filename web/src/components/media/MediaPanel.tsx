@@ -176,19 +176,18 @@ export function selectMediaFolder(folderId: string): void {
   const ui = useEditorUiStore.getState();
   ui.focusPanel("media");
   ui.selectMediaAssets(new Set());
-  useEditorUiStore.setState({
-    selectedFolderIds: new Set([folderId]),
-    previewMediaId: null,
-  });
+  ui.closeAllPreviewTabs();
+  useEditorUiStore.setState({ selectedFolderIds: new Set([folderId]) });
 }
 
 /** Commit folder navigation and clear the selection that would otherwise stay
  * hidden after the folder grid changes. */
 export function openMediaFolder(folderId: string, onOpen: (id: string) => void): void {
+  const ui = useEditorUiStore.getState();
+  ui.closeAllPreviewTabs();
   useEditorUiStore.setState({
     selectedMediaAssetIds: new Set(),
     selectedFolderIds: new Set(),
-    previewMediaId: null,
   });
   onOpen(folderId);
 }

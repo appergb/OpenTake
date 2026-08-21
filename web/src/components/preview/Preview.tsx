@@ -1019,35 +1019,78 @@ export function MediaPreview({
   );
 }
 
-export function PreviewTabs({ item }: { item: MediaItem | null }) {
+export function PreviewTabs({ item: _item }: { item: MediaItem | null }) {
   const t = useT();
-  const setPreviewMedia = useEditorUiStore((s) => s.setPreviewMedia);
-  const onTimeline = item === null;
-  const timelineRef = useRef<HTMLButtonElement>(null);
-  const sourceRef = useRef<HTMLButtonElement>(null);
+  const previewTabIds = useEditorUiStore((s) => s.previewTabIds ?? []);
+  const previewActiveTabId = useEditorUiStore((s) => s.previewActiveTabId ?? "timeline");
+  const previewMediaId = useEditorUiStore((s) => s.previewMediaId ?? null);
+  const selectPreviewTab = useEditorUiStore((s) => s.selectPreviewTab);
+  const closePreviewTab = useEditorUiStore((s) => s.closePreviewTab);
+  const mediaItems = useMediaStore((s) => s.items);
+  const tabRefs = useRef(new Map<string, HTMLButtonElement>());
+  type PreviewTabDescriptor = { id: string; label: string; mediaId: string | null };
 
-  const selectTimeline = () => {
-    setPreviewMedia(null);
-    timelineRef.current?.focus();
+  const effectivePreviewTabIds = [...previewTabIds];
+  const activeMediaId =
+    previewActiveTabId === "timeline"
+      ? null
+      : previewActiveTabId.startsWith("media_")
+        ? previewActiveTabId.slice("media_".length)
+        : null;
+  const activeTabValid =
+    previewActiveTabId === "timeline"
+      ? previewMediaId === null
+      : activeMediaId !== null && effectivePreviewTabIds.includes(activeMediaId);
+  if (
+    previewMediaId &&
+    !effectivePreviewTabIds.includes(previewMediaId) &&
+    (effectivePreviewTabIds.length === 0 || !activeTabValid)
+  ) {
+    effectivePreviewTabIds.push(previewMediaId);
+  }
+
+  const mediaTabs: PreviewTabDescriptor[] = effectivePreviewTabIds.flatMap((mediaId) => {
+    const media = mediaItems.find((entry) => entry.id === mediaId);
+    return media
+      ? [{ id: `media_${mediaId}`, label: media.name, mediaId }]
+      : [];
+  });
+  const tabs: PreviewTabDescriptor[] = [
+    { id: "timeline", label: t("preview.timelineTab"), mediaId: null },
+    ...mediaTabs,
+  ];
+  const effectivePreviewActiveTabId =
+    previewActiveTabId !== "timeline" && tabs.some((tab) => tab.id === previewActiveTabId)
+      ? previewActiveTabId
+      : previewMediaId && tabs.some((tab) => tab.id === `media_${previewMediaId}`)
+        ? `media_${previewMediaId}`
+        : "timeline";
+
+  const focusTab = (tabId: string) => {
+    tabRefs.current.get(tabId)?.focus();
   };
 
-  const handleTabKey = (event: React.KeyboardEvent<HTMLButtonElement>) => {
-    if (!item) return;
-    if (
-      event.key === "ArrowLeft" ||
-      event.key === "ArrowUp" ||
-      event.key === "Home"
-    ) {
-      event.preventDefault();
-      selectTimeline();
-    } else if (
-      event.key === "ArrowRight" ||
-      event.key === "ArrowDown" ||
-      event.key === "End"
-    ) {
-      event.preventDefault();
-      sourceRef.current?.focus();
+  const activateTab = (tabId: string) => {
+    selectPreviewTab(tabId);
+    focusTab(tabId);
+  };
+
+  const handleTabKey = (event: React.KeyboardEvent<HTMLButtonElement>, tabId: string) => {
+    const currentIndex = tabs.findIndex((tab) => tab.id === tabId);
+    if (currentIndex < 0) return;
+    let targetIndex: number | null = null;
+    if (event.key === "Home") targetIndex = 0;
+    else if (event.key === "End") targetIndex = tabs.length - 1;
+    else if (event.key === "ArrowLeft" || event.key === "ArrowUp") {
+      targetIndex = Math.max(0, currentIndex - 1);
+    } else if (event.key === "ArrowRight" || event.key === "ArrowDown") {
+      targetIndex = Math.min(tabs.length - 1, currentIndex + 1);
     }
+    if (targetIndex === null) return;
+    event.preventDefault();
+    const target = tabs[targetIndex];
+    if (!target) return;
+    activateTab(target.id);
   };
 
   return (
@@ -1057,61 +1100,69 @@ export function PreviewTabs({ item }: { item: MediaItem | null }) {
       aria-orientation="horizontal"
       style={{ display: "flex", alignItems: "center", gap: "var(--space-md)" }}
     >
-      <button
-        ref={timelineRef}
-        type="button"
-        id="preview-timeline-tab"
-        role="tab"
-        aria-selected={onTimeline}
-        aria-controls="preview-content-panel"
-        tabIndex={onTimeline ? 0 : -1}
-        onClick={selectTimeline}
-        onKeyDown={handleTabKey}
-        style={{
-          minHeight: 24,
-          display: "inline-flex",
-          alignItems: "center",
-          padding: "0 2px",
-          fontSize: "var(--fs-sm-md)",
-          fontWeight: "var(--fw-semibold)",
-          color: onTimeline ? "var(--text-primary)" : "var(--text-tertiary)",
-          borderBottom: onTimeline ? "var(--bw-medium) solid var(--accent-primary)" : "none",
-        }}
-      >
-        {t("preview.timelineTab")}
-      </button>
-      {item && (
-        <button
-          ref={sourceRef}
-          type="button"
-          id="preview-source-tab"
-          role="tab"
-          aria-selected={!onTimeline}
-          aria-controls="preview-content-panel"
-          tabIndex={onTimeline ? -1 : 0}
-          onClick={() => sourceRef.current?.focus()}
-          onKeyDown={handleTabKey}
-          style={{
-            minHeight: 24,
-            display: "inline-flex",
-            alignItems: "center",
-            maxWidth: 180,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-            fontSize: "var(--fs-sm-md)",
-            fontWeight: "var(--fw-semibold)",
-            color: "var(--text-primary)",
-            borderBottom: "var(--bw-medium) solid var(--accent-primary)",
-            background: "transparent",
-            borderTop: "none",
-            borderLeft: "none",
-            borderRight: "none",
-          }}
-        >
-          {item.name}
-        </button>
-      )}
+      {tabs.map((tab) => {
+        const active = effectivePreviewActiveTabId === tab.id;
+        return (
+          <div
+            key={tab.id}
+            style={{ display: "inline-flex", alignItems: "center", gap: "var(--space-2xs)" }}
+          >
+            <button
+              ref={(node) => {
+                if (node) tabRefs.current.set(tab.id, node);
+                else tabRefs.current.delete(tab.id);
+              }}
+              type="button"
+              id={tab.mediaId ? `preview-media-tab-${tab.mediaId}` : "preview-timeline-tab"}
+              role="tab"
+              aria-selected={active}
+              aria-controls="preview-content-panel"
+              tabIndex={active ? 0 : -1}
+              onClick={() => activateTab(tab.id)}
+              onKeyDown={(event) => handleTabKey(event, tab.id)}
+              style={{
+                minHeight: 24,
+                display: "inline-flex",
+                alignItems: "center",
+                maxWidth: 180,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                padding: "0 2px",
+                fontSize: "var(--fs-sm-md)",
+                fontWeight: "var(--fw-semibold)",
+                color: active ? "var(--text-primary)" : "var(--text-tertiary)",
+                borderBottom: active
+                  ? "var(--bw-medium) solid var(--accent-primary)"
+                  : "none",
+              }}
+            >
+              {tab.label}
+            </button>
+            {tab.mediaId && (
+              <button
+                type="button"
+                aria-label={`Close ${tab.label}`}
+                onClick={() => {
+                  closePreviewTab(tab.id);
+                  focusTab(useEditorUiStore.getState().previewActiveTabId ?? "timeline");
+                }}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: 18,
+                  height: 18,
+                  fontSize: "var(--fs-xs)",
+                  color: "var(--text-tertiary)",
+                }}
+              >
+                ×
+              </button>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

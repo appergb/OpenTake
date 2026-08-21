@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { MediaItem } from "../../lib/types";
 import { useEditorUiStore } from "../../store/uiStore";
+import { useMediaStore } from "../../store/mediaStore";
 import {
   BadgeMenu,
   exactTimelineFrame,
@@ -26,6 +27,17 @@ let onSeek: ReturnType<typeof vi.fn>;
 let onExactSeek: ReturnType<typeof vi.fn>;
 let onScrubbingChange: ReturnType<typeof vi.fn>;
 let setPointerCapture: ReturnType<typeof vi.spyOn>;
+
+function previewItem(id: string, name = id.toUpperCase()): MediaItem {
+  return {
+    id,
+    name,
+    type: "video",
+    duration: 1,
+    hasAudio: false,
+    favorite: false,
+  };
+}
 
 it("normalizes fractional playback ticks before exact frame stepping", () => {
   expect(exactTimelineFrame(26.4, 100)).toBe(26);
@@ -91,6 +103,16 @@ beforeEach(() => {
         onScrubbingChange={onScrubbingChange}
       />,
     );
+  });
+  useMediaStore.setState({ items: [], folders: [], importing: false, error: null });
+  useEditorUiStore.setState({
+    previewTabIds: [],
+    previewTabHistory: [],
+    previewActiveTabId: "timeline",
+    previewMediaId: null,
+    selectedClipIds: new Set(),
+    selectedMediaAssetIds: new Set(),
+    selectedFolderIds: new Set(),
   });
 });
 
@@ -181,32 +203,119 @@ it("control-200c9fd6ec3f0f35 pointer scrub preview playhead", async () => {
   expect(document.activeElement).toBe(scrub);
 });
 
-it("gives preview tabs a connected tablist and roving keyboard behavior", async () => {
-  const item: MediaItem = {
-    id: "source",
-    name: "Source clip",
-    type: "video",
-    duration: 1,
-    hasAudio: false,
-    favorite: false,
-  };
-  useEditorUiStore.setState({ previewMediaId: item.id });
-  await act(async () => root.render(<PreviewTabs item={item} />));
+it("renders a multi-tab preview stack with close controls and roving activation", async () => {
+  useMediaStore.setState({ items: [previewItem("a", "A"), previewItem("b", "B")] });
+  useEditorUiStore.getState().openPreviewTab("a");
+  useEditorUiStore.getState().openPreviewTab("b");
+  useEditorUiStore.setState({
+    selectedClipIds: new Set(["clip-1"]),
+    selectedFolderIds: new Set(["folder-1"]),
+  });
+
+  await act(async () => root.render(<PreviewTabs item={null} />));
 
   const tablist = container.querySelector('[role="tablist"]');
-  const tabs = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
   expect(tablist).not.toBeNull();
-  expect(tabs).toHaveLength(2);
-  expect(tabs.map((tab) => tab.getAttribute("aria-selected"))).toEqual(["false", "true"]);
-  expect(tabs.map((tab) => tab.tabIndex)).toEqual([-1, 0]);
-  expect(tabs[1]?.getAttribute("aria-controls")).toBe("preview-content-panel");
+  expect(tablist?.querySelector('[aria-label="Close"]')).toBeNull();
 
-  tabs[1]?.focus();
+  let tabs = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+  expect(tabs[0]?.id).toBe("preview-timeline-tab");
+  expect(tabs.slice(1).map((tab) => tab.textContent?.replace(/\s+/g, " ").trim())).toEqual([
+    "A",
+    "B",
+  ]);
+  expect(tabs.map((tab) => tab.getAttribute("aria-selected"))).toEqual([
+    "false",
+    "false",
+    "true",
+  ]);
+  expect(
+    [...container.querySelectorAll<HTMLButtonElement>('button[aria-label^="Close "]')].map(
+      (button) => button.getAttribute("aria-label"),
+    ),
+  ).toEqual(["Close A", "Close B"]);
+
   await act(async () =>
-    tabs[1]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true })),
+    tabs[1]?.dispatchEvent(new MouseEvent("click", { bubbles: true })),
   );
-  expect(useEditorUiStore.getState().previewMediaId).toBeNull();
+  expect(useEditorUiStore.getState()).toMatchObject({
+    previewActiveTabId: "media_a",
+    previewMediaId: "a",
+  });
+  expect([...useEditorUiStore.getState().selectedClipIds]).toEqual([]);
+  expect([...useEditorUiStore.getState().selectedFolderIds]).toEqual([]);
+  expect([...useEditorUiStore.getState().selectedMediaAssetIds]).toEqual(["a"]);
+
+  tabs = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+  tabs[2]?.focus();
+  await act(async () =>
+    tabs[2]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowLeft", bubbles: true })),
+  );
+  expect(useEditorUiStore.getState()).toMatchObject({
+    previewActiveTabId: "media_a",
+    previewMediaId: "a",
+  });
+  expect(document.activeElement).toBe(tabs[1]);
+
+  await act(async () =>
+    tabs[1]?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true })),
+  );
+  expect(useEditorUiStore.getState()).toMatchObject({
+    previewActiveTabId: "media_b",
+    previewMediaId: "b",
+  });
+  expect(document.activeElement).toBe(tabs[2]);
+
+  await act(async () =>
+    tabs[2]?.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true })),
+  );
+  expect(useEditorUiStore.getState()).toMatchObject({
+    previewActiveTabId: "timeline",
+    previewMediaId: null,
+  });
   expect(document.activeElement).toBe(tabs[0]);
+  expect([...useEditorUiStore.getState().selectedMediaAssetIds]).toEqual([]);
+
+  tabs = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+  await act(async () =>
+    tabs[0]?.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true })),
+  );
+  expect(useEditorUiStore.getState()).toMatchObject({
+    previewActiveTabId: "media_b",
+    previewMediaId: "b",
+  });
+  expect(document.activeElement).toBe(tabs[2]);
+
+  const closeA = container.querySelector<HTMLButtonElement>('button[aria-label="Close A"]');
+  await act(async () =>
+    closeA?.dispatchEvent(new MouseEvent("click", { bubbles: true })),
+  );
+  expect(useEditorUiStore.getState()).toMatchObject({
+    previewTabIds: ["b"],
+    previewActiveTabId: "media_b",
+    previewMediaId: "b",
+  });
+  tabs = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+  expect(tabs[0]?.id).toBe("preview-timeline-tab");
+  expect(tabs[1]?.textContent?.replace(/\s+/g, " ").trim()).toBe("B");
+  expect(container.querySelector('button[aria-label="Close Timeline"]')).toBeNull();
+});
+
+it("renders a legacy media preview tab when previewMediaId is set without a tab stack", async () => {
+  useMediaStore.setState({ items: [previewItem("legacy", "Legacy")] });
+  useEditorUiStore.setState({
+    previewTabIds: [],
+    previewActiveTabId: "timeline",
+    previewMediaId: "legacy",
+  });
+
+  await act(async () => root.render(<PreviewTabs item={null} />));
+
+  const tabs = [...container.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+  expect(tabs).toHaveLength(2);
+  expect(tabs[1]?.id).toBe("preview-media-tab-legacy");
+  expect(tabs[1]?.textContent?.replace(/\s+/g, " ").trim()).toBe("Legacy");
+  expect(tabs.map((tab) => tab.getAttribute("aria-selected"))).toEqual(["false", "true"]);
 });
 
 it("requests latest-only FFmpeg source stills for paused source seek", async () => {
