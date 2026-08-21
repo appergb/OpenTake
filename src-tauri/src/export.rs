@@ -1736,7 +1736,7 @@ pub(crate) fn run_export_with_control(
         if let Some(error) = resolver.materialization_error.take() {
             encoder.abort();
             return Err(format!(
-                "Lottie materialization failed at frame {f}: {error}"
+                "export materialization failed at frame {f}: {error}"
             ));
         }
         encoder

@@ -406,7 +406,7 @@ impl RenderLoop {
         drop(resolver);
         if let Some(error) = self.state.take_materialization_error() {
             return Err(format!(
-                "Lottie materialization failed at frame {target}: {error}"
+                "playback materialization failed at frame {target}: {error}"
             ));
         }
         self.last_video_sources = current_video_sources;

@@ -276,6 +276,54 @@ fn cold_bootstrap_decode_failure_is_reported_instead_of_publishing_black() {
 }
 
 #[test]
+fn missing_image_materialization_reaches_render_loop_instead_of_publishing_black() {
+    let dir = tempfile::tempdir().expect("fixture tempdir");
+    let missing = dir.path().join("missing.png");
+    let (w, h) = (64i32, 64i32);
+
+    let mut timeline = Timeline::new();
+    timeline.fps = 30;
+    let mut track = Track::new("t1", ClipType::Video);
+    let mut clip = Clip::new("clip-1", "asset-1", 0, 3);
+    clip.media_type = ClipType::Image;
+    clip.source_clip_type = ClipType::Image;
+    track.clips.push(clip);
+    timeline.tracks.push(track);
+    let mut manifest = MediaManifest::new();
+    manifest.entries.push(MediaManifestEntry {
+        id: "asset-1".into(),
+        name: "missing.png".into(),
+        kind: ClipType::Image,
+        source: MediaSource::External {
+            absolute_path: missing.to_string_lossy().into_owned(),
+        },
+        duration: 1.0,
+        generation_input: None,
+        source_width: Some(w),
+        source_height: Some(h),
+        source_fps: None,
+        has_audio: Some(false),
+        color: None,
+        proxy: None,
+        folder_id: None,
+        cached_remote_url: None,
+        cached_remote_url_expires_at: None,
+    });
+
+    let Some(mut render_loop) = try_render_loop(timeline, &manifest, RenderSize::new(64, 64))
+    else {
+        return;
+    };
+    let error = render_loop
+        .render_frame(0)
+        .expect_err("missing image must not publish a successful black frame");
+    assert!(
+        error.contains("playback materialization failed") && error.contains("asset-1"),
+        "error must identify playback materialization failure: {error}"
+    );
+}
+
+#[test]
 fn cancelling_initial_ready_bootstrap_releases_the_readiness_worker() {
     if !ffmpeg_ready() {
         eprintln!("skip: ffmpeg not available");

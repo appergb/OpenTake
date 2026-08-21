@@ -272,6 +272,13 @@ impl PlaybackResolverState {
     pub fn take_materialization_error(&mut self) -> Option<String> {
         self.materialization_error.take()
     }
+
+    fn fail_materialization<T>(&mut self, message: impl Into<String>) -> Option<T> {
+        if self.materialization_error.is_none() {
+            self.materialization_error = Some(message.into());
+        }
+        None
+    }
 }
 
 /// One video layer's decode target for a frame: which clip, which asset, and the
@@ -421,8 +428,19 @@ impl<'d, 's> StreamingResolver<'d, 's> {
     /// Decode (once) and cache a static image layer, mirroring the preview
     /// resolver's image path.
     fn resolve_image(&mut self, media_ref: &str) -> Option<Rc<GpuTexture>> {
-        let info = self.state.media.get(media_ref)?;
-        let content_hash = opentake_media::file_sha256(&info.path).ok()?;
+        let Some(info) = self.state.media.get(media_ref) else {
+            return self
+                .state
+                .fail_materialization(format!("image source {media_ref} is unauthorized"));
+        };
+        let content_hash = match opentake_media::file_sha256(&info.path) {
+            Ok(hash) => hash,
+            Err(error) => {
+                return self.state.fail_materialization(format!(
+                    "image source {media_ref} is unavailable: {error}"
+                ));
+            }
+        };
         let key = format!("i:{content_hash}");
         if let Some(tex) = self.state.static_cache.get(&key) {
             return Some(tex);
@@ -434,7 +452,14 @@ impl<'d, 's> StreamingResolver<'d, 's> {
             apply_rotation: true,
         };
         let (_actual, frame) =
-            decode_frame_at_cancellable(&info.path, &req, &self.state.cancel).ok()?;
+            match decode_frame_at_cancellable(&info.path, &req, &self.state.cancel) {
+                Ok(result) => result,
+                Err(error) => {
+                    return self.state.fail_materialization(format!(
+                        "image source {media_ref} decode failed: {error}"
+                    ));
+                }
+            };
         let decoded = DecodedFrame::new(frame.width, frame.height, frame.rgba, false);
         let tex = upload_rgba(
             self.device,
@@ -453,7 +478,11 @@ impl<'d, 's> StreamingResolver<'d, 's> {
         if let Some(tex) = self.state.static_cache.get(&key) {
             return Some(tex);
         }
-        let info = self.state.text.get(clip_id)?;
+        let Some(info) = self.state.text.get(clip_id) else {
+            return self
+                .state
+                .fail_materialization(format!("text clip {clip_id} has no raster input"));
+        };
         let req = TextRasterRequest {
             clip_id,
             content: &info.content,
@@ -461,7 +490,11 @@ impl<'d, 's> StreamingResolver<'d, 's> {
             box_norm: info.box_norm,
             canvas: self.state.render_box,
         };
-        let frame = self.state.text_rasterizer.rasterize(&req)?;
+        let Some(frame) = self.state.text_rasterizer.rasterize(&req) else {
+            return self
+                .state
+                .fail_materialization(format!("text clip {clip_id} rasterization failed"));
+        };
         let tex = upload_rgba(
             self.device,
             self.queue,
@@ -487,7 +520,11 @@ impl TextureResolver for StreamingResolver<'_, '_> {
             TextureSource::Image { media_ref } => self.resolve_image(media_ref),
             TextureSource::Text { clip_id } => self.resolve_text(clip_id),
             TextureSource::Lottie { media_ref } => {
-                let info = self.state.media.get(media_ref)?;
+                let Some(info) = self.state.media.get(media_ref) else {
+                    return self.state.fail_materialization(format!(
+                        "Lottie source {media_ref} is unauthorized"
+                    ));
+                };
                 match self.state.lottie.resolve(
                     self.device,
                     self.queue,
@@ -767,6 +804,66 @@ mod tests {
             .take_materialization_error()
             .expect("playback must retain the materialization failure");
         assert!(error.contains("parse Lottie document"), "{error}");
+    }
+
+    #[test]
+    fn missing_image_retains_a_materialization_error_instead_of_becoming_a_skipped_layer() {
+        let Ok(dev) = RenderDevice::try_new() else {
+            return;
+        };
+        let temp = tempfile::tempdir().expect("missing image fixture");
+        let missing_path = temp.path().join("gone.png");
+        let mut media = HashMap::new();
+        media.insert(
+            "missing-image".into(),
+            MediaInfo {
+                path: missing_path,
+                straight_alpha: false,
+            },
+        );
+        let mut state = PlaybackResolverState::new(
+            media,
+            HashMap::new(),
+            30,
+            (16, 16),
+            MediaCancelToken::new(),
+        );
+        let source = TextureSource::Image {
+            media_ref: "missing-image".into(),
+        };
+        let mut resolver = StreamingResolver::new(&dev.device, &dev.queue, &mut state);
+
+        assert!(resolver.resolve(&source, 0).is_none());
+        drop(resolver);
+        let error = state
+            .take_materialization_error()
+            .expect("missing image must retain an explicit materialization failure");
+        assert!(error.contains("image source missing-image"), "{error}");
+    }
+
+    #[test]
+    fn missing_text_retains_a_materialization_error_instead_of_becoming_a_skipped_layer() {
+        let Ok(dev) = RenderDevice::try_new() else {
+            return;
+        };
+        let mut state = PlaybackResolverState::new(
+            HashMap::new(),
+            HashMap::new(),
+            30,
+            (16, 16),
+            MediaCancelToken::new(),
+        );
+        let source = TextureSource::Text {
+            clip_id: "missing-text".into(),
+        };
+        let mut resolver = StreamingResolver::new(&dev.device, &dev.queue, &mut state);
+
+        assert!(resolver.resolve(&source, 0).is_none());
+        drop(resolver);
+        let error = state
+            .take_materialization_error()
+            .expect("missing text must retain an explicit materialization failure");
+        assert!(error.contains("text clip missing-text"), "{error}");
     }
 
     #[test]

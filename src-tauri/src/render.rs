@@ -712,7 +712,11 @@ struct MediaResolver<'d> {
 
 impl MediaResolver<'_> {
     fn fail_materialization<T>(&mut self, message: impl Into<String>) -> Option<T> {
-        if self.strict_materialization && self.materialization_error.is_none() {
+        // A missing or corrupt source is never a valid preview frame. The
+        // strict flag only controls retained-handle authority and the
+        // interpolation tail fallback; it must not turn an unavailable layer
+        // into a successful black composite.
+        if self.materialization_error.is_none() {
             self.materialization_error = Some(message.into());
         }
         None
@@ -2187,6 +2191,59 @@ mod tests {
     fn preview_size_floors_degenerate_canvas() {
         let rs = preview_render_size(0, 0, 1280);
         assert_eq!(rs, RenderSize::new(2, 2));
+    }
+
+    #[test]
+    fn preview_composite_rejects_missing_image_instead_of_returning_a_black_frame() {
+        if RenderDevice::try_new().is_err() {
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("missing image fixture");
+        let mut timeline = Timeline {
+            width: 32,
+            height: 32,
+            fps: 30,
+            ..Timeline::new()
+        };
+        let mut clip = Clip::new("missing-clip", "missing-image", 0, 1);
+        clip.media_type = ClipType::Image;
+        clip.source_clip_type = ClipType::Image;
+        let mut track = Track::new("video", ClipType::Video);
+        track.clips.push(clip);
+        timeline.tracks.push(track);
+
+        let mut manifest = MediaManifest::new();
+        manifest.entries.push(MediaManifestEntry {
+            id: "missing-image".into(),
+            name: "gone.png".into(),
+            kind: ClipType::Image,
+            source: MediaSource::External {
+                absolute_path: tmp.path().join("gone.png").display().to_string(),
+            },
+            duration: 0.0,
+            generation_input: None,
+            source_width: Some(32),
+            source_height: Some(32),
+            source_fps: None,
+            has_audio: Some(false),
+            color: None,
+            proxy: None,
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        });
+
+        let error = composite_timeline_frame(
+            &timeline,
+            &manifest,
+            &None,
+            &RenderState::new(),
+            0,
+            32,
+            &MediaCancelToken::new(),
+        )
+        .expect_err("missing preview media must not become a successful black frame");
+        assert!(error.contains("image source missing-image"), "{error}");
     }
 
     #[test]
