@@ -68,7 +68,7 @@ fn studio_document_publish_is_visible_atomic_editable_and_reopenable() {
                 fps: 10,
                 start_frame: 2,
                 duration_frames: 6,
-                transparent: false,
+                transparent: true,
                 track_index: None,
             },
             &opentake_media::MediaCancelToken::new(),
@@ -144,6 +144,7 @@ fn studio_document_publish_is_visible_atomic_editable_and_reopenable() {
         .unwrap();
     assert_eq!(edited.clip_id, added.clip_id);
     assert_ne!(edited.asset_id, added.asset_id);
+    assert_eq!(edited.output.output_file, "output.mov");
     assert_eq!(
         core.media().entries.len(),
         2,

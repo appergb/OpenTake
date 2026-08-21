@@ -922,7 +922,7 @@ impl TauriMotionBridge {
                 document_source: Some(request.source),
                 expected_authority: Some(request.project_authority),
                 duration_frames: request.duration_frames,
-                transparent: false,
+                transparent: entry.carries_straight_alpha(),
                 render_dimensions: Some((request.width, request.height, request.fps)),
                 placement: MotionPlacement::Replace {
                     clip_id: request.clip_id,

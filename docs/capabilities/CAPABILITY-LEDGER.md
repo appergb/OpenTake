@@ -67,9 +67,9 @@ tags:
 
 ## OT-MOTION-ALPHA 当前纵切
 
-- Rust：`DocumentMotionAddRequest.transparent` 已贯通到模板渲染、`MotionRenderRequest.with_transparent(true)`、ProRes 4444 `.mov` 编码和项目媒体落盘；title-card/lower-third 模板在透明模式下不填充不透明底色。
+- Rust：`DocumentMotionAddRequest.transparent` 已贯通到模板渲染、`MotionRenderRequest.with_transparent(true)`、ProRes 4444 `.mov` 编码和项目媒体落盘；title-card/lower-third 模板在透明模式下不填充不透明底色；编辑已有透明 Motion 时从 manifest provenance 保留 `.mov`/alpha 格式。
 - Manifest：`GenerationInput.transparent` 持久化为 `true`，`MediaManifestEntry::carries_straight_alpha()` 对透明 Motion 返回 `true`；既有 RVM matting provenance 规则保持不变。
-- Web/Agent：Motion Studio Inspector 新增“透明背景（ProRes 4444）”开关；预览请求保持原 schema，只有发布请求带 `transparent` 字段，切换项目时重置为关闭；Agent `add_motion_graphic` 和 `publish_motion_document` 的新增 clip 路径也接受透明发布。
+- Web/Agent：Motion Studio Inspector 新增“透明背景（ProRes 4444）”开关；预览请求保持原 schema，只有发布请求带 `transparent` 字段，切换项目时重置为关闭；Agent `add_motion_graphic` 和 `publish_motion_document` 的新增 clip 路径也接受透明发布，已有透明 clip 的文档编辑保留 alpha。
 - 自动化证据：`src-tauri/tests/motion_command.rs` 的透明发布集成测试验证 `.mov`、ProRes、64×36 尺寸、完全透明像素和半透明动画像素；Rust workspace 串行全量通过（Tauri 720 tests、Motion Chromium/integration、导出/播放等）；Web 全量 `151 files / 1413 tests`、Web build 通过。
 - 安装包：当前 `/Applications/OpenTake.app` 二进制 SHA-256 `38c814f4ac4fddc729f2f3733c637dfd171a8c67ad1bfa7195257d58033bc838`，构建产物与安装包一致。Computer Use 重试仍返回 Mac locked，因此不把开关点击、透明发布后时间线预览和导出画面对拍标记为通过。
 
@@ -160,5 +160,5 @@ tags:
 - `2026-08-21T20:19:15+08:00` — 复跑当前提交 `6b31449` 的顺序 workspace 全量、导出/播放集成和 app 构建；最新安装包 SHA-256 `7ad988f3…a9799`。全 workspace clippy 的既有 `chunks_exact` lint 仍单独记录，Mac 屏幕 smoke 仍未完成。
 - `2026-08-21T20:57:59+08:00` — 完成 `OT-MOTION-ALPHA` 首条 Rust/Web 纵切：透明模板→Chromium alpha→ProRes 4444 `.mov`→manifest provenance→Motion Studio 发布开关；Rust workspace 720 Tauri tests 与 Web 151/1413 全量通过，重新构建并安装包 SHA-256 `7634979e…607f00`。最新包屏幕验收仍因 Mac 锁屏阻塞，能力保持 partial。
 - `2026-08-21T21:15:16+08:00` — 补齐 Agent/MCP `move_clips` 的 linked A/V frame-delta parity，并修正文档中 `add_motion_graphic.transparent` 已支持 ProRes 4444 的描述；Agent lib 415/415 通过。屏幕验收阻塞边界不变。
-- `2026-08-21T21:21:26+08:00` — 将透明参数接入 Agent `publish_motion_document` 的新增 clip schema/host bridge；透明替换已有 Motion clip仍明确拒绝，等待 alpha-preserving edit 纵切。
+- `2026-08-21T21:21:26+08:00` — 将透明参数接入 Agent `publish_motion_document` 的新增 clip schema/host bridge；已有透明 Motion 的 document edit 仍需由旧 manifest provenance 保留 alpha，本轮随后补齐并用真实 FFmpeg integration 验证。
 - `2026-08-21T21:21:26+08:00` — 重新构建并安装包含 Agent Motion 透明参数的 app，当前二进制 SHA-256 `38c814f4…bc838`；Computer Use 仍因 Mac locked 无法执行最新包屏幕 smoke。
