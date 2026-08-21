@@ -209,7 +209,7 @@
 
   已完成的首个 parity micro-slice：上游 `splitAtPlayhead`、`trimStartToPlayhead`、`trimEndToPlayhead` 在无选区时均为 no-op；提交 `f05bac8`、`478e1b4`，Web 全量 `151 files / 1412 tests` 通过。当前安装包 `de4cb52b…25405` 已重建，但 Computer Use 因 Mac 锁定未完成屏幕状态对拍；linked trim/move/ripple 的正向带音频对拍仍待。
 
-  同期补齐缺失媒体错误边界：提交 `741ff07` 让普通 Preview、Playback Image/Text 和 RenderLoop 集成路径都返回显式 materialization error，不再发布黑帧；render 18、resolver 15、playback integration 8、Tauri lib 719 和顺序 workspace 全量通过。当前安装包 `40c21ce0…e7f08` 已重建，最新屏幕 smoke 仍因 Mac 锁定未完成。
+  同期补齐缺失媒体错误边界：提交 `741ff07` 让普通 Preview、Playback Image/Text 和 RenderLoop 集成路径都返回显式 materialization error，不再发布黑帧；render 18、resolver 15、playback integration 8、Tauri lib 719 和顺序 workspace 全量通过。`6b31449` 收口导出 clippy 建议；全 workspace clippy 仍有既有 `chunks_exact` lint。当前安装包 `7ad988f3…a9799` 已重建，最新屏幕 smoke 仍因 Mac 锁定未完成。
 
 ### Task 6: 收敛媒体、Inspector、字幕和项目生命周期
 

@@ -27,7 +27,7 @@ skip_when:
   - 仅修改零 IO 的 domain 算法且不改变 UI 合同
 priority: must
 freshness_class: project
-last_verified: 2026-08-21T20:09:19+08:00
+last_verified: 2026-08-21T20:19:15+08:00
 owners:
   - OpenTake-generation
 source_of_truth:
@@ -110,8 +110,8 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - App 构建：release `.app` 已生成并安装；DMG bundle 脚本因超过一分钟无输出被停止，DMG 不在本轮交付证据内。
 - 本轮主线 fresh verification：Preview/Store/Media 4 files / 91 tests passed；MediaActions/MediaPanel 2 files / 59 tests passed；`pnpm build` exit 0。
 - 全量 Web 串行门禁：151 files / 1412 tests passed；运行时使用已初始化 localStorage file 和单 worker，包含无选区 split/trim no-op 回归。
-- Rust workspace：`cargo test --workspace --jobs 1 -- --test-threads=1` 与 `cargo fmt --all -- --check` 通过；本轮包含缺失媒体 Preview/Playback fail-closed 和 RenderLoop 集成测试。一次未限并发运行在 motion sandbox 180s 超时，单独串行重跑通过，保留为 GPU/Chromium 资源争用风险；仅保留明确标记为 ignored 的 real-device / optional fixture tests。
-- 最终 `.app`：`web/node_modules/.bin/tauri build --bundles app` exit 0；当前安装包 SHA-256 `40c21ce03d0d20068ca00b5cff1e1e4914323de1eb380ce864d4e632207e7f08`，对应提交 `741ff07`；本轮 Computer Use 屏幕 smoke 因 Mac 锁定 blocked，媒体 Preview tabs/小屏等桌面证据仍引用之前的已完成专项包。
+- Rust workspace：`cargo test --workspace --jobs 1 -- --test-threads=1` 与 `cargo fmt --all -- --check` 通过；本轮包含缺失媒体 Preview/Playback fail-closed 和 RenderLoop 集成测试。全 workspace clippy 仍被既有模块 6 处 `chunks_exact` lint 阻塞；一次未限并发运行在 motion sandbox 180s 超时，单独串行重跑通过，保留为 GPU/Chromium 资源争用风险；仅保留明确标记为 ignored 的 real-device / optional fixture tests。
+- 最终 `.app`：`web/node_modules/.bin/tauri build --bundles app` exit 0；当前安装包 SHA-256 `7ad988f3d00c50af4758c0c036753d690101c2b4c66db17302b29b308bda9799`，对应提交 `6b31449`；本轮 Computer Use 屏幕 smoke 因 Mac 锁定 blocked，媒体 Preview tabs/小屏等桌面证据仍引用之前的已完成专项包。
 
 ## Related Documents
 
@@ -134,3 +134,4 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - `2026-08-21T19:32:27+08:00` — 写回 `a7d98d6` 的 symlink/reparse identity 防护、70 个 export 单测、顺序 workspace 全量门禁和最新安装包 `12e1db…9455d9`；并发 motion 超时保留为环境风险。
 - `2026-08-21T19:48:03+08:00` — 写回 `f05bac8`/`478e1b4` 的无选区 split/trim parity、Web 151/1412 全量门禁和最新安装包 `de4cb52b…25405`；Computer Use 因 Mac 锁定未完成屏幕 smoke。
 - `2026-08-21T20:09:19+08:00` — 写回 `741ff07` 的缺失媒体 Preview/Playback fail-closed、RenderLoop 集成 8 项和顺序 Rust workspace 全量结果；最新安装包 `40c21ce0…e7f08`，屏幕 smoke 仍受 Mac 锁定阻塞。
+- `2026-08-21T20:19:15+08:00` — 写回当前提交 `6b31449` 的顺序 workspace 全量、clippy 既有 lint 边界和最新安装包 `7ad988f3…a9799`；屏幕 smoke 仍受 Mac 锁定阻塞。

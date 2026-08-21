@@ -18,7 +18,7 @@ skip_when:
   - 仅查看单个内部函数
 priority: must
 freshness_class: project
-last_verified: 2026-08-21T20:09:19+08:00
+last_verified: 2026-08-21T20:19:15+08:00
 owners:
   - OpenTake-generation
 source_of_truth:
@@ -106,7 +106,7 @@ tags:
 - 文件导入定向回归：`mediaActions` + `MediaPanel` 为 2 files / 59 tests passed；Preview/媒体/Store 定向回归为 4 files / 91 tests passed；两条切片均已安装版验证。
 - 主线 fresh verification（2026-08-21 12:09 +08:00）：Preview/Store/Media 4 files / 91 tests passed；MediaActions/MediaPanel 2 files / 59 tests passed；`pnpm build` exit 0；仅保留既有 Vite chunk warnings。
 - 全量 Web 串行门禁（2026-08-21 16:46 +08:00）：`NODE_OPTIONS=--localstorage-file=/tmp/opentake-vitest-localstorage-temporal-final.json pnpm -C web exec vitest run --maxWorkers=1` → 151 files / 1410 tests passed；使用新 localStorage 文件会触发既有 locale/异步测试状态假失败，已保留为运行约束。
-- Rust workspace 门禁（2026-08-21 20:09 +08:00）：`cargo test --workspace --jobs 1 -- --test-threads=1` 通过；包含缺失媒体 fail-closed、export cleanup/external cancel、symlink identity、H.264/AAC integration、full-track PCM、RenderPlan temporal、Motion Chromium 和 native playback tests。`cargo fmt --all -- --check` 同样通过。此前未限并发的 workspace 运行曾出现一次 motion sandbox 180s 超时，单独串行重跑 4 次均通过，保留为并发 GPU/Chromium 资源争用风险，不作为代码绿证据。
+- Rust workspace 门禁（2026-08-21 20:19 +08:00）：`cargo test --workspace --jobs 1 -- --test-threads=1` 通过；包含缺失媒体 fail-closed、export cleanup/external cancel、symlink identity、H.264/AAC integration、full-track PCM、RenderPlan temporal、Motion Chromium 和 native playback tests。`cargo fmt --all -- --check` 同样通过。全 workspace clippy 仍被既有模块的 6 处 `chunks_exact` lint 阻塞；本次导出改动触发的两个 clippy 建议已在 `6b31449` 收口。此前未限并发的 workspace 运行曾出现一次 motion sandbox 180s 超时，单独串行重跑 4 次均通过，保留为并发 GPU/Chromium 资源争用风险，不作为代码绿证据。
 
 ## Media View Modes 新鲜验收证据
 
@@ -123,7 +123,7 @@ tags:
 - 代码提交：`a833764`（compositor temporal 路由）、`1013355`（多视频 temporal fail-closed）、`dafd5eb`（native Preview surface）、`3e124dc`（source frame 回退时 reset stream）。
 - Web：路由 16/16，Preview/engine 44/44，串行全量 151 files / 1410 tests，`pnpm build` 均通过。
 - Rust：`opentake-media` 432 tests + integration 通过；`opentake-render plan` 46 tests；native playback transport 8 tests；engine 11、transport 7 tests；workspace 全量通过。
-- 安装版：当前 `/Applications/OpenTake.app` SHA-256 `40c21ce03d0d20068ca00b5cff1e1e4914323de1eb380ce864d4e632207e7f08`，对应代码提交 `741ff07`；temporal 与带音频导出证据仍见旧 QA 包，最新包的 SavePanel/取消/实时 A/V 同步和屏幕 smoke 尚未重新跑完，因此不把旧包导出证据静默升级到当前包。
+- 安装版：当前 `/Applications/OpenTake.app` SHA-256 `7ad988f3d00c50af4758c0c036753d690101c2b4c66db17302b29b308bda9799`，对应代码提交 `6b31449`；temporal 与带音频导出证据仍见旧 QA 包，最新包的 SavePanel/取消/实时 A/V 同步和屏幕 smoke 尚未重新跑完，因此不把旧包导出证据静默升级到当前包。
 - 最新 range slice 安装包：`549a6e50a6de52c9653bcb50a2be09b41c0566892f6783d5276c2847c64698c9`；仅用于本轮范围交互代码和 Web build 的 packaged smoke，不能替代范围拖动/Undo/Redo 的完整桌面证据。
 - 带音频桌面 QA 证据：`/private/tmp/opentake-audio-desktop-qa-L8Nvwh/01-imported-timeline-waveform.png`、`02-preview-start-paused.png`、`03-preview-middle.png`、`04-preview-end-paused.png`、`05-playback-paused-stable.png`；原生 H.264 导出已打开并在开始前取消，不能声称有安装版带音频导出文件。
 
@@ -142,3 +142,4 @@ tags:
 - `2026-08-21T19:32:27+08:00` — 修复最终输出 symlink/reparse identity 校验并通过 RED→GREEN 回归；顺序 Rust workspace 全量通过；重新构建并安装对应提交 `a7d98d6` 的 app，记录 SHA-256 `12e1db…9455d9`。并发 workspace motion 超时保留为环境风险。
 - `2026-08-21T19:48:03+08:00` — 对齐上游无选区 split/trim no-op（`f05bac8`、`478e1b4`），Web 全量更新为 151 files / 1412 tests；最新安装包 SHA-256 `de4cb52b…25405`。Computer Use 屏幕 smoke 因 Mac 锁定 blocked，未升级桌面证据。
 - `2026-08-21T20:09:19+08:00` — 完成缺失媒体 Preview/Playback fail-closed（`741ff07`），补真实 RenderLoop 集成证据；顺序 workspace 全量通过，当前安装包 SHA-256 `40c21ce0…e7f08`。Mac 仍锁定，未升级屏幕证据。
+- `2026-08-21T20:19:15+08:00` — 复跑当前提交 `6b31449` 的顺序 workspace 全量、导出/播放集成和 app 构建；最新安装包 SHA-256 `7ad988f3…a9799`。全 workspace clippy 的既有 `chunks_exact` lint 仍单独记录，Mac 屏幕 smoke 仍未完成。
