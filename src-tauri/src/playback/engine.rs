@@ -25,7 +25,8 @@ use std::time::{Duration, Instant};
 use opentake_domain::Timeline;
 use opentake_media::MediaCancelToken;
 use opentake_render::{
-    try_build_render_plan, Compositor, DecodedFrame, RenderDevice, RenderPlan, RenderSize,
+    try_build_render_plan, Compositor, DecodedFrame, FramePlan, RenderDevice, RenderPlan,
+    RenderSize, TextureSource,
 };
 
 use super::project::{ManifestMetrics, MediaInfo, TextInfo};
@@ -281,6 +282,29 @@ pub struct RenderLoop {
     plan: RenderPlan,
     render_size: RenderSize,
     state: PlaybackResolverState,
+    last_video_sources: HashMap<String, i64>,
+}
+
+fn active_video_sources(frame_plan: &FramePlan) -> HashMap<String, i64> {
+    frame_plan
+        .draws
+        .iter()
+        .filter_map(|draw| match draw.source {
+            TextureSource::Decoded { .. } => Some((draw.clip_id.to_string(), draw.source_frame)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn rewinds_any_active_video_source(
+    previous: &HashMap<String, i64>,
+    current: &HashMap<String, i64>,
+) -> bool {
+    current.iter().any(|(clip_id, source_frame)| {
+        previous
+            .get(clip_id)
+            .is_some_and(|prev| source_frame < prev)
+    })
 }
 
 impl RenderLoop {
@@ -347,6 +371,7 @@ impl RenderLoop {
             plan,
             render_size,
             state,
+            last_video_sources: HashMap::new(),
         })
     }
 
@@ -362,6 +387,10 @@ impl RenderLoop {
     /// then run the same compositor pixel path as the preview/export.
     pub fn render_frame(&mut self, target: i32) -> Result<DecodedFrame, String> {
         let frame_plan = self.plan.frame(&self.timeline, target);
+        let current_video_sources = active_video_sources(&frame_plan);
+        if rewinds_any_active_video_source(&self.last_video_sources, &current_video_sources) {
+            self.state.clear_streams();
+        }
         let mut resolver = StreamingResolver::new(&self.device, &self.queue, &mut self.state);
         resolver.sync_active(&frame_plan)?;
         let composite = self
@@ -380,6 +409,7 @@ impl RenderLoop {
                 "Lottie materialization failed at frame {target}: {error}"
             ));
         }
+        self.last_video_sources = current_video_sources;
         composite
     }
 
@@ -387,6 +417,7 @@ impl RenderLoop {
     /// each visible clip's stream at its new target source frame.
     pub fn seek(&mut self) {
         self.state.clear_streams();
+        self.last_video_sources.clear();
     }
 }
 
@@ -1058,5 +1089,65 @@ mod tests {
                 generation: 2
             })
         );
+    }
+
+    #[test]
+    fn rewinding_active_video_source_requests_stream_reset() {
+        static NO_MASKS: [opentake_domain::Mask; 0] = [];
+        static NO_EFFECTS: [opentake_domain::Effect; 0] = [];
+        let previous = HashMap::from([("clip-1".to_string(), 7)]);
+        let source = TextureSource::Decoded {
+            media_ref: "asset".to_string(),
+        };
+        let current = active_video_sources(&FramePlan {
+            clear_rgba: [0.0, 0.0, 0.0, 1.0],
+            draws: vec![opentake_render::LayerDraw {
+                source: &source,
+                source_frame: 2,
+                affine: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                nat_size: (1.0, 1.0),
+                crop_uv: (0.0, 0.0, 1.0, 1.0),
+                opacity: 1.0,
+                needs_premultiply: false,
+                clip_id: "clip-1",
+                color_grade: None,
+                lut: None,
+                chroma_key: None,
+                masks: &NO_MASKS,
+                effects: &NO_EFFECTS,
+            }],
+        });
+
+        assert!(rewinds_any_active_video_source(&previous, &current));
+    }
+
+    #[test]
+    fn forward_active_video_source_keeps_stream_state() {
+        static NO_MASKS: [opentake_domain::Mask; 0] = [];
+        static NO_EFFECTS: [opentake_domain::Effect; 0] = [];
+        let previous = HashMap::from([("clip-1".to_string(), 2)]);
+        let source = TextureSource::Decoded {
+            media_ref: "asset".to_string(),
+        };
+        let current = active_video_sources(&FramePlan {
+            clear_rgba: [0.0, 0.0, 0.0, 1.0],
+            draws: vec![opentake_render::LayerDraw {
+                source: &source,
+                source_frame: 7,
+                affine: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                nat_size: (1.0, 1.0),
+                crop_uv: (0.0, 0.0, 1.0, 1.0),
+                opacity: 1.0,
+                needs_premultiply: false,
+                clip_id: "clip-1",
+                color_grade: None,
+                lut: None,
+                chroma_key: None,
+                masks: &NO_MASKS,
+                effects: &NO_EFFECTS,
+            }],
+        });
+
+        assert!(!rewinds_any_active_video_source(&previous, &current));
     }
 }
