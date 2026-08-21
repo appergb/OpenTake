@@ -72,6 +72,22 @@ fn allocation_error(detail: impl std::fmt::Display) -> MediaError {
     MediaError::Decode(format!("audio_allocation_failed: {detail}"))
 }
 
+fn expected_pcm_bytes_for_duration(duration_secs: f64, spec: &PcmSpec) -> Result<usize> {
+    if !duration_secs.is_finite() {
+        return Err(audio_buffer_too_large("non-finite duration"));
+    }
+    let frames = (duration_secs * f64::from(spec.sample_rate)).ceil();
+    if frames > usize::MAX as f64 {
+        return Err(audio_buffer_too_large("PCM frame count exceeds usize"));
+    }
+    let frame_bytes = usize::from(spec.channels)
+        .checked_mul(spec.format.bytes_per_sample())
+        .ok_or_else(|| audio_buffer_too_large("PCM frame byte count overflow"))?;
+    (frames as usize)
+        .checked_mul(frame_bytes)
+        .ok_or_else(|| audio_buffer_too_large("PCM output byte count overflow"))
+}
+
 fn expected_pcm_bytes(path: &Path, spec: &PcmSpec, range: Option<(f64, f64)>) -> Result<usize> {
     if spec.sample_rate == 0 || spec.channels == 0 {
         return Err(MediaError::Decode(
@@ -88,19 +104,7 @@ fn expected_pcm_bytes(path: &Path, spec: &PcmSpec, range: Option<(f64, f64)>) ->
             media.duration_secs
         }
     };
-    if !duration_secs.is_finite() {
-        return Err(audio_buffer_too_large("non-finite duration"));
-    }
-    let frames = (duration_secs * f64::from(spec.sample_rate)).ceil();
-    if frames > usize::MAX as f64 {
-        return Err(audio_buffer_too_large("PCM frame count exceeds usize"));
-    }
-    let frame_bytes = usize::from(spec.channels)
-        .checked_mul(spec.format.bytes_per_sample())
-        .ok_or_else(|| audio_buffer_too_large("PCM frame byte count overflow"))?;
-    (frames as usize)
-        .checked_mul(frame_bytes)
-        .ok_or_else(|| audio_buffer_too_large("PCM output byte count overflow"))
+    expected_pcm_bytes_for_duration(duration_secs, spec)
 }
 
 fn read_stdout(
@@ -424,14 +428,13 @@ pub(super) fn decode_raw_pcm_cancellable(
     } else {
         None
     };
-    let effective_range = match range {
-        Some(range) => Some(range),
+    let expected_bytes = match range {
+        Some(range) => expected_pcm_bytes(path, spec, Some(range))?,
         None => {
             let media = probed.unwrap_or(probe::probe(path)?);
-            Some((0.0, media.duration_secs))
+            expected_pcm_bytes_for_duration(media.duration_secs, spec)?
         }
     };
-    let expected_bytes = expected_pcm_bytes(path, spec, effective_range)?;
     let frame_bytes = usize::from(spec.channels)
         .checked_mul(spec.format.bytes_per_sample())
         .ok_or_else(|| audio_buffer_too_large("PCM frame byte count overflow"))?;
@@ -440,7 +443,7 @@ pub(super) fn decode_raw_pcm_cancellable(
         .ok_or_else(|| audio_buffer_too_large("PCM reader cap overflow"))?;
 
     let mut child = ff::ffmpeg()
-        .args(pcm_args(path, spec, effective_range))
+        .args(pcm_args(path, spec, range))
         .spawn()
         .map_err(|e| MediaError::Ffmpeg(format!("spawn: {e}")))?;
     cancel.child_spawned();

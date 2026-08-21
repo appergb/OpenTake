@@ -11,7 +11,7 @@ use std::path::Path;
 use std::process::Command;
 
 use opentake_media::decode::spawn_video_stream;
-use opentake_media::ffmpeg_status::{ffmpeg_available, ffprobe_available};
+use opentake_media::ffmpeg_status::{ffmpeg_available, ffmpeg_path, ffprobe_available};
 use opentake_media::{
     decode_frame_at, encode, extract_pcm, probe, video_thumbnails, waveform, ExportPreset,
     ExportResolution, FrameRequest, PcmFormat, PcmSpec, RgbaFrame, VideoCodec, VideoEncoder,
@@ -155,6 +155,64 @@ fn extract_pcm_yields_16k_mono() {
     // ~2 s of 16 kHz mono ≈ 32000 samples (allow generous tolerance).
     assert!(pcm.samples_f32.len() > 24_000 && pcm.samples_f32.len() < 40_000);
     assert!((pcm.duration_secs() - 2.0).abs() < 0.5);
+}
+
+#[test]
+fn extract_pcm_without_explicit_range_matches_full_track_decode() {
+    if !ffmpeg_available() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let av = dir.path().join("aac-full-track.mp4");
+    let ffmpeg = ffmpeg_path();
+    let generated = Command::new(&ffmpeg)
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x336699:s=32x18:r=4",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=16000",
+            "-t",
+            "1",
+            "-c:v",
+            "mpeg4",
+            "-c:a",
+            "aac",
+            "-y",
+        ])
+        .arg(&av)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !generated {
+        return;
+    }
+
+    let direct = Command::new(&ffmpeg)
+        .args(["-v", "error", "-i"])
+        .arg(&av)
+        .args(["-vn", "-ac", "1", "-ar", "16000", "-f", "f32le", "-"])
+        .output()
+        .unwrap();
+    assert!(direct.status.success(), "direct ffmpeg decode must succeed");
+    assert_eq!(direct.stdout.len() % 4, 0, "f32 PCM byte count must align");
+
+    let spec = PcmSpec {
+        sample_rate: 16_000,
+        channels: 1,
+        format: PcmFormat::F32,
+    };
+    let pcm = extract_pcm(&av, &spec, None).unwrap();
+    assert_eq!(
+        pcm.samples_f32.len(),
+        direct.stdout.len() / 4,
+        "range=None must decode the full track, not an implicit [0,duration] window"
+    );
 }
 
 #[test]

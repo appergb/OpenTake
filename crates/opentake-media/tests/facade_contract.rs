@@ -134,7 +134,12 @@ fn all_services_are_reachable_only_through_facade_and_dependencies_stay_acyclic(
     };
     let pcm = engine.extract_pcm(&source, &pcm_spec, None).unwrap();
     assert_eq!(pcm.spec, pcm_spec);
-    assert!((15_000..=16_500).contains(&pcm.samples_f32.len()));
+    assert!(
+        (15_000..=16_500).contains(&pcm.samples_f32.len()),
+        "expected ~1s of 16k mono, got {} samples ({:.6}s)",
+        pcm.samples_f32.len(),
+        pcm.duration_secs()
+    );
 
     let transcript_cache = opentake_media::TranscriptCache::new(temp.path().join("cache"));
     let transcript = engine
