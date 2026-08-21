@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createEditorUiStore } from "./uiStore";
 
 const V1 = {
+  view: "opentake.ui.v1.view",
   layoutPreset: "opentake.ui.v1.layoutPreset",
   agentPanelVisible: "opentake.ui.v1.agentPanelVisible",
   mediaPanelVisible: "opentake.ui.v1.mediaPanelVisible",
@@ -13,6 +14,7 @@ const V1 = {
 } as const;
 
 const LEGACY = {
+  view: "view",
   layoutPreset: "layoutPreset",
   agentPanelVisible: "agentPanelVisible",
   mediaPanelVisible: "mediaPanelVisible",
@@ -31,6 +33,12 @@ function expectDefaults() {
     inspectorPanelVisible: true,
     keyframesPanelVisible: false,
   });
+}
+
+function snapshotV1Storage(): Record<string, string | null> {
+  return Object.fromEntries(
+    Object.values(V1).map((key) => [key, localStorage.getItem(key)]),
+  );
 }
 
 beforeEach(() => {
@@ -94,11 +102,15 @@ describe("uiStore schema-safe persistence", () => {
 
     localStorage.clear();
     const first = createEditorUiStore();
-    const setItem = vi.spyOn(localStorage, "setItem");
     const writesOnly = (key: string, action: () => void, value: string) => {
-      setItem.mockClear();
+      const before = snapshotV1Storage();
       action();
-      expect(setItem.mock.calls).toEqual([[key, value]]);
+      const after = snapshotV1Storage();
+      expect(after[key]).toBe(value);
+      for (const persistedKey of Object.values(V1)) {
+        if (persistedKey === key) continue;
+        expect(after[persistedKey]).toBe(before[persistedKey]);
+      }
     };
     writesOnly(V1.layoutPreset, () => first.getState().setLayoutPreset("vertical"), "vertical");
     writesOnly(V1.agentPanelVisible, () => first.getState().toggleAgentPanel(), "true");
@@ -125,26 +137,41 @@ describe("uiStore schema-safe persistence", () => {
     });
     expect(restarted.selectedClipIds).toEqual(new Set());
 
-    vi.spyOn(localStorage, "getItem").mockImplementation(() => {
-      throw new DOMException("storage unavailable", "SecurityError");
-    });
+    vi.stubGlobal("localStorage", {
+      getItem: () => {
+        throw new DOMException("storage unavailable", "SecurityError");
+      },
+      setItem: () => undefined,
+      removeItem: () => undefined,
+      clear: () => undefined,
+      key: () => null,
+      length: 0,
+    } as Storage);
     expectDefaults();
-    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
 
     vi.stubGlobal("localStorage", undefined);
     expectDefaults();
     vi.unstubAllGlobals();
 
-    localStorage.clear();
+    const quotaStorage = {
+      getItem: () => null,
+      setItem: () => {
+        throw new DOMException("quota exceeded", "QuotaExceededError");
+      },
+      removeItem: () => undefined,
+      clear: () => undefined,
+      key: () => null,
+      length: 0,
+    } as Storage;
+    vi.stubGlobal("localStorage", quotaStorage);
     const unavailable = createEditorUiStore();
-    vi.spyOn(localStorage, "setItem").mockImplementation(() => {
-      throw new DOMException("quota exceeded", "QuotaExceededError");
-    });
     expect(() => unavailable.getState().setLayoutPreset("media")).not.toThrow();
     expect(() => unavailable.getState().toggleAgentPanel()).not.toThrow();
     expect(unavailable.getState()).toMatchObject({
       layoutPreset: "media",
       agentPanelVisible: true,
     });
+    vi.unstubAllGlobals();
   });
 });
