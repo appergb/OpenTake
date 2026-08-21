@@ -107,7 +107,7 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - 代码 review：首轮 F1（无 monitor fallback）、F2（fresh install 默认档位）、F3（Home 真实 DOM/CSS contract）、F4（Settings 高度 contract）均已在 review loop 收口；最终 scoped review 无新 Critical/Important。
 - App 构建：release `.app` 已生成并安装；DMG bundle 脚本因超过一分钟无输出被停止，DMG 不在本轮交付证据内。
 - 本轮主线 fresh verification：Preview/Store/Media 4 files / 91 tests passed；MediaActions/MediaPanel 2 files / 59 tests passed；`pnpm build` exit 0。
-- 全量 Web 串行门禁：150 files / 1405 tests passed；运行时使用已初始化 localStorage file 和单 worker。
+- 全量 Web 串行门禁：151 files / 1410 tests passed；运行时使用已初始化 localStorage file 和单 worker。
 - Rust workspace：`cargo test --workspace` 与 `cargo fmt --all -- --check` 通过；仅保留明确标记为 ignored 的 real-device / optional fixture tests。
 - 最终 `.app`：`web/node_modules/.bin/tauri build --bundles app` exit 0；安装包 SHA-256 `02150854e418cd3c3dedad97d905f972ddad99e3a23d287ed1fcac42b15b40a0`；最终包再次实测两个媒体 Preview tabs 和关闭回退。
 
@@ -127,3 +127,4 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - `2026-08-21T16:08:41+08:00` — 写回时间轴范围交互代码切片、85 个时间轴测试、最新安装包哈希，以及带音频 fixture 的 V1/A1 波形、seek、暂停证据；范围坐标拖动和带音频导出仍保持 partial。
 - `2026-08-21T16:29:21+08:00` — 补充真实 happy-dom PointerEvent 覆盖，时间轴回归更新为 8 files / 88 tests；最终 range 修复包 `1e271571…` 已重新构建并安装，范围桌面拖动证据仍受 Computer Use 坐标接口限制。
 - `2026-08-21T16:36:24+08:00` — 修复最终端点 sticky snap 时序和 Shift range 原始起点，补齐反向/同帧/mark cancel/lost-capture PointerEvent 覆盖；最终包 `03bdcef3…` 已安装。
+- `2026-08-21T16:46:00+08:00` — 全量 Web 串行门禁更新为 151 files / 1410 tests passed；时间轴 range slice 仍保持 Ready、整体桌面 QA 仍为 partial。
