@@ -100,6 +100,36 @@ describe("resolveTimelinePlaybackRoute", () => {
     expect(result).toEqual({ kind: "rust", reasons: [] });
   });
 
+  it("returns rust-unavailable for temporally remapped video stacks when native playback is absent", () => {
+    const result = resolveTimelinePlaybackRoute(
+      timeline(
+        clip({ id: "upper-video", mediaType: "video", speed: 1.5 }),
+        clip({ id: "lower-video", mediaType: "video" }),
+      ),
+      { rustAvailable: false, rustEnabled: true },
+    );
+
+    expect(result).toEqual({
+      kind: "unsupported",
+      reasons: [{ code: "rust-unavailable" }],
+    });
+  });
+
+  it("returns rust-disabled for temporally remapped video stacks when native playback is disabled", () => {
+    const result = resolveTimelinePlaybackRoute(
+      timeline(
+        clip({ id: "upper-video", mediaType: "video", reversed: true }),
+        clip({ id: "lower-video", mediaType: "video" }),
+      ),
+      { rustAvailable: true, rustEnabled: false },
+    );
+
+    expect(result).toEqual({
+      kind: "unsupported",
+      reasons: [{ code: "rust-disabled" }],
+    });
+  });
+
   it("retries a failed WebKit video revision through the native decoder", () => {
     expect(
       resolveTimelinePlaybackRoute(timeline(clip()), {

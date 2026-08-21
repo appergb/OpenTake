@@ -101,6 +101,16 @@ export function resolveTimelinePlaybackRoute(
 
   if (reasons.length > 0) return { kind: "unsupported", reasons };
   if (!needsRust) {
+    if (requiresNativeVideoStack && hasTemporalRemapping && hasVideo) {
+      if (!runtime.rustAvailable) {
+        return { kind: "unsupported", reasons: [{ code: "rust-unavailable" }] };
+      }
+      if (!runtime.rustEnabled) {
+        return { kind: "unsupported", reasons: [{ code: "rust-disabled" }] };
+      }
+      return { kind: "rust", reasons: [] };
+    }
+
     // A single ordinary video track stays on the low-overhead WebKit route.
     // Multiple video tracks need the native compositor for deterministic
     // decode/layer parity, even with temporal remapping. An explicit WebKit
