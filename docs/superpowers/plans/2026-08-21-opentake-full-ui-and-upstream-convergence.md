@@ -203,11 +203,13 @@
 
   导出后用 ffprobe、完整解码和首/中/尾帧检查；音频轨、时长、取消不提交和失败清理必须分别验证。
 
-  当前结果：安装包 `03bdcef3…` 已真实生成 H.264/AAC 输出，ffprobe、双流 `ffmpeg -xerror` 和首/中/尾 SSIM `0.999997 / 0.999997 / 1.000000` 通过；`0bae80e` 补了普通输出失败清理和 external cancel，`a7d98d6` 补了最终输出 symlink/reparse identity 拒绝。export unit 70/70、media cancel 18/18、audio/video integration 5/5 和顺序 Rust workspace 全量通过；当前安装包 `12e1db…9455d9` 已重建，但 SavePanel/取消/最新包导出尚未重跑，因此本步骤保持 partial，H.265/ProRes/字幕仍待。
+  当前结果：安装包 `03bdcef3…` 已真实生成 H.264/AAC 输出，ffprobe、双流 `ffmpeg -xerror` 和首/中/尾 SSIM `0.999997 / 0.999997 / 1.000000` 通过；`0bae80e` 补了普通输出失败清理和 external cancel，`a7d98d6` 补了最终输出 symlink/reparse identity 拒绝。export unit 70/70、media cancel 18/18、audio/video integration 5/5 和顺序 Rust workspace 全量通过；当前安装包 `40c21ce0…e7f08` 已重建，但 SavePanel/取消/最新包导出尚未重跑，因此本步骤保持 partial，H.265/ProRes/字幕仍待。
 
   下一执行切片：Linked A/V Timeline Parity。对齐 `crates/opentake-ops/src/ops/linking.rs`、`trim.rs`、`move_clips.rs`、`ripple.rs`、`command.rs` 与 `web/src/components/timeline/TimelineContainer.tsx`、`web/src/lib/editActions.ts`、`web/src/hooks/useKeyboardShortcuts.ts`；先补 linked trim、Option trim only-main、linked move partner delta/track、ripple sync-lock/atomic collision、Shift+Delete Undo/Redo、无选区 split no-op 的模块化测试，再做安装版状态对拍。
 
   已完成的首个 parity micro-slice：上游 `splitAtPlayhead`、`trimStartToPlayhead`、`trimEndToPlayhead` 在无选区时均为 no-op；提交 `f05bac8`、`478e1b4`，Web 全量 `151 files / 1412 tests` 通过。当前安装包 `de4cb52b…25405` 已重建，但 Computer Use 因 Mac 锁定未完成屏幕状态对拍；linked trim/move/ripple 的正向带音频对拍仍待。
+
+  同期补齐缺失媒体错误边界：提交 `741ff07` 让普通 Preview、Playback Image/Text 和 RenderLoop 集成路径都返回显式 materialization error，不再发布黑帧；render 18、resolver 15、playback integration 8、Tauri lib 719 和顺序 workspace 全量通过。当前安装包 `40c21ce0…e7f08` 已重建，最新屏幕 smoke 仍因 Mac 锁定未完成。
 
 ### Task 6: 收敛媒体、Inspector、字幕和项目生命周期
 

@@ -18,7 +18,7 @@ skip_when:
   - 仅查看单个内部函数
 priority: must
 freshness_class: project
-last_verified: 2026-08-21T19:48:03+08:00
+last_verified: 2026-08-21T20:09:19+08:00
 owners:
   - OpenTake-generation
 source_of_truth:
@@ -53,7 +53,7 @@ tags:
 | `OT-WINDOW-SMALL-SCREEN` | P0 | verified | Tauri 安全初始尺寸 + monitor-aware standard/compact 裁剪 + Home/Editor min-size 回归 | 1066×666、1280×720、1331×768 contract 测试；安装版紧凑/标准切换与 Home/编辑器截图 |
 | `UP-MEDIA-IMPORT-AND-FOLDERS` | P0 | verified | 文件/文件夹导入、跳过 unsupported、relink 和预览均已通过安装版验收 | 新构建 app 中 MP4、PNG、双文件多选 Open 可用；导入数 1→3；文件夹导入出现目录并提示跳过 64；relink 恢复离线媒体 |
 | `UP-TIMELINE-UI` | P0 | partial | 已补 Shift+标尺范围标记、范围 start/end 边缘命中/拖动、标尺吸附、取消回滚、同帧清除、PointerEvent 回归，以及上游 playhead split/trim 的无选区 no-op 语义；继续补真实删除、撤销及拖拽对拍 | 时间轴目录 8 files / 88 tests；linked slice 新增 command routing 2 个 no-selection 测试，Web 全量 151 files / 1412 tests；最新包 `de4cb52b…` 已安装但本轮屏幕重跑因 Mac 锁定 blocked |
-| `UP-PREVIEW-PLAYBACK` | P0 | partial | compositor temporal route、speed/reversed 原生帧映射和音频整轨解码已补齐；安装版与 preview/export 全面对拍仍继续 | preview/export 同帧语义、音画同步、取消和错误边界全部有证据后再升级 |
+| `UP-PREVIEW-PLAYBACK` | P0 | partial | compositor temporal route、speed/reversed 原生帧映射、音频整轨解码和缺失媒体 fail-closed 已补齐；安装版与 preview/export 全面对拍仍继续 | Render 18 项、Playback resolver 15 项、Playback integration 8 项和顺序 Rust workspace 通过；preview/export 同帧语义、音画同步、取消和最新包屏幕证据仍待 |
 | `UP-EXPORT` | P0 | partial | H.264/AAC、H.265、ProRes 422 和字幕命令已有实现；普通输出失败清理、external cancel 全链路、输出父目录/文件 identity 校验已补齐 | 70 个 export 单测、18 个 media cancel 测试、5 个 export integration 和顺序 Rust workspace 门禁通过；真实 H.264/AAC 文件及首中尾帧已有一次安装版证据，但最新包的 SavePanel、H.265/ProRes/字幕/取消仍待 |
 | `UP-PREVIEW-TABS` | P1 | verified | `previewTabIds + previewTabHistory + activeTabId`，含 legacy 归一和删除清理 | 安装版同时显示 Timeline/两个素材 tab；关闭第二个回退第一个；91 个定向测试通过 |
 | `UP-MEDIA-VIEW-MODES` | P1 | verified | folder/flat/grouped 三态投影、网格/列表密度、文件夹导航和音频导入入口已通过测试及安装版验收 | 搜索、选择、拖拽和预览沿用同一 MediaItem ID 链路，继续纳入后续模块化 QA |
@@ -75,6 +75,7 @@ tags:
 - 带音频导出真实证据：在安装包 `03bdcef36def17646c64e6c40978e26b6b675a5d90874e3264d93a0e3351ce2e` 中生成 `/private/tmp/opentake-audio-export-qa-YPhWaR/qa-h264-aac-export.mp4`；ffprobe 为 H.264 1280×720/30fps/231 帧 + AAC 48kHz 单声道/362 包/7.700s，视频和音频均通过 `ffmpeg -xerror`。源/导出首中尾 SSIM：`0.999997 / 0.999997 / 1.000000`，帧文件在 `/private/tmp/opentake-audio-frame-compare.M2Jvfu/`。这证明一次真实 preview-source/export 对拍，但不是听感级实时同步证据；cleanup 版最新包 `ca08edf97441ce3b3c69b5683a3b7383997371952490c8897021772e521eed64` 的 SavePanel 复测仍保持 partial。
 - 导出失败边界：`0bae80e` 增加 identity-safe 普通输出 guard、replacement race 测试、双 cancel source fail-closed；`a7d98d6` 再拒绝最终输出路径的 symlink/reparse identity，并新增替换为 symlink 的回归测试。当前 `export::tests` 70/70、`opentake-media` cancel 18/18、带音频 integration 5/5 通过。
 - 上游 playhead parity：`f05bac8` 修复无选区 `splitAtPlayhead` 不应发编辑请求，`478e1b4` 修复无选区 Q/W trim 不应发编辑请求；相关 Web 全量门禁 `151 files / 1412 tests` 通过。最新 app `de4cb52b…` 已构建并安装，但 Computer Use 因 Mac 锁定未能完成本轮屏幕 smoke。
+- 缺失媒体 fail-closed：`741ff07` 让普通 Preview 缺失图片返回 materialization error，Playback Image/Text 缺失通过 `RenderLoop::render_frame` 返回错误而不是发布黑帧，并统一 Playback/Export 错误文案；新增 render 18、resolver 15、playback integration 8 项测试，Tauri lib 719 项和顺序 workspace 全量均通过。
 - 曾出现 AX 更新但截图未重绘的黑屏瞬间；关闭/重开后页面正常，后续以窗口重绘时序风险记录，不把瞬态截图直接等同于产品黑屏。
 
 ## 定向验证
@@ -105,7 +106,7 @@ tags:
 - 文件导入定向回归：`mediaActions` + `MediaPanel` 为 2 files / 59 tests passed；Preview/媒体/Store 定向回归为 4 files / 91 tests passed；两条切片均已安装版验证。
 - 主线 fresh verification（2026-08-21 12:09 +08:00）：Preview/Store/Media 4 files / 91 tests passed；MediaActions/MediaPanel 2 files / 59 tests passed；`pnpm build` exit 0；仅保留既有 Vite chunk warnings。
 - 全量 Web 串行门禁（2026-08-21 16:46 +08:00）：`NODE_OPTIONS=--localstorage-file=/tmp/opentake-vitest-localstorage-temporal-final.json pnpm -C web exec vitest run --maxWorkers=1` → 151 files / 1410 tests passed；使用新 localStorage 文件会触发既有 locale/异步测试状态假失败，已保留为运行约束。
-- Rust workspace 门禁（2026-08-21 19:32 +08:00）：`cargo test --workspace --jobs 1 -- --test-threads=1` 通过；包含 export cleanup/external cancel、symlink identity、H.264/AAC integration、full-track PCM、RenderPlan temporal、Motion Chromium 和 native playback tests。`cargo fmt --all -- --check` 同样通过。此前未限并发的 workspace 运行曾出现一次 motion sandbox 180s 超时，单独串行重跑 4 次均通过，保留为并发 GPU/Chromium 资源争用风险，不作为代码绿证据。
+- Rust workspace 门禁（2026-08-21 20:09 +08:00）：`cargo test --workspace --jobs 1 -- --test-threads=1` 通过；包含缺失媒体 fail-closed、export cleanup/external cancel、symlink identity、H.264/AAC integration、full-track PCM、RenderPlan temporal、Motion Chromium 和 native playback tests。`cargo fmt --all -- --check` 同样通过。此前未限并发的 workspace 运行曾出现一次 motion sandbox 180s 超时，单独串行重跑 4 次均通过，保留为并发 GPU/Chromium 资源争用风险，不作为代码绿证据。
 
 ## Media View Modes 新鲜验收证据
 
@@ -122,7 +123,7 @@ tags:
 - 代码提交：`a833764`（compositor temporal 路由）、`1013355`（多视频 temporal fail-closed）、`dafd5eb`（native Preview surface）、`3e124dc`（source frame 回退时 reset stream）。
 - Web：路由 16/16，Preview/engine 44/44，串行全量 151 files / 1410 tests，`pnpm build` 均通过。
 - Rust：`opentake-media` 432 tests + integration 通过；`opentake-render plan` 46 tests；native playback transport 8 tests；engine 11、transport 7 tests；workspace 全量通过。
-- 安装版：当前 `/Applications/OpenTake.app` SHA-256 `12e1db5490172ec5b74b71b517ea7277255269f6ab4e2e02b53c03a5fe9455d9`，对应代码提交 `a7d98d6`；temporal 与带音频导出证据仍见旧 QA 包，最新包的 SavePanel/取消/实时 A/V 同步尚未重新跑完，因此不把旧包导出证据静默升级到当前包。
+- 安装版：当前 `/Applications/OpenTake.app` SHA-256 `40c21ce03d0d20068ca00b5cff1e1e4914323de1eb380ce864d4e632207e7f08`，对应代码提交 `741ff07`；temporal 与带音频导出证据仍见旧 QA 包，最新包的 SavePanel/取消/实时 A/V 同步和屏幕 smoke 尚未重新跑完，因此不把旧包导出证据静默升级到当前包。
 - 最新 range slice 安装包：`549a6e50a6de52c9653bcb50a2be09b41c0566892f6783d5276c2847c64698c9`；仅用于本轮范围交互代码和 Web build 的 packaged smoke，不能替代范围拖动/Undo/Redo 的完整桌面证据。
 - 带音频桌面 QA 证据：`/private/tmp/opentake-audio-desktop-qa-L8Nvwh/01-imported-timeline-waveform.png`、`02-preview-start-paused.png`、`03-preview-middle.png`、`04-preview-end-paused.png`、`05-playback-paused-stable.png`；原生 H.264 导出已打开并在开始前取消，不能声称有安装版带音频导出文件。
 
@@ -140,3 +141,4 @@ tags:
 - `2026-08-21T10:06:00+08:00` — 写入首轮 UI 真机巡检和上游 parity audit；状态均保守记录为 implemented/partial/blocked。
 - `2026-08-21T19:32:27+08:00` — 修复最终输出 symlink/reparse identity 校验并通过 RED→GREEN 回归；顺序 Rust workspace 全量通过；重新构建并安装对应提交 `a7d98d6` 的 app，记录 SHA-256 `12e1db…9455d9`。并发 workspace motion 超时保留为环境风险。
 - `2026-08-21T19:48:03+08:00` — 对齐上游无选区 split/trim no-op（`f05bac8`、`478e1b4`），Web 全量更新为 151 files / 1412 tests；最新安装包 SHA-256 `de4cb52b…25405`。Computer Use 屏幕 smoke 因 Mac 锁定 blocked，未升级桌面证据。
+- `2026-08-21T20:09:19+08:00` — 完成缺失媒体 Preview/Playback fail-closed（`741ff07`），补真实 RenderLoop 集成证据；顺序 workspace 全量通过，当前安装包 SHA-256 `40c21ce0…e7f08`。Mac 仍锁定，未升级屏幕证据。

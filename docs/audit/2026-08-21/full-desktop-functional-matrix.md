@@ -27,7 +27,7 @@ skip_when:
   - 仅修改零 IO 的 domain 算法且不改变 UI 合同
 priority: must
 freshness_class: project
-last_verified: 2026-08-21T19:48:03+08:00
+last_verified: 2026-08-21T20:09:19+08:00
 owners:
   - OpenTake-generation
 source_of_truth:
@@ -87,7 +87,7 @@ tags:
 | Motion | Studio 入口 | HTML/CSS 编辑器、预览、参数检查器、关键帧时间线出现；播放帧推进 | 通过 | 验证发布、透明输出和导入时间线 |
 | Export | 导出面板 | 导出视频面板可打开，格式/分辨率/取消/导出可见 | 通过 | 复制目标路径后完成导出并 ffprobe |
 | Export | temporal 视频实际导出 | 修复 SavePanel filters 后，原生 Save 按钮可用；H.264 temporal QA 导出成功，应用显示 3840×2160 / 160 帧，ffprobe 显示 H.264、60fps、2.666667s | 通过（H.264 视频） | H.265/ProRes、带音频/字幕、取消和 preview/export 像素对拍仍待矩阵化 |
-| Export | 带音频 H.264/AAC 实际导出 | 安装包 `03bdcef3…` 生成 `qa-h264-aac-export.mp4`；ffprobe：H.264 1280×720/30fps/231 帧、AAC 48kHz 单声道/362 包、7.700s；音视频均 `ffmpeg -xerror` 通过；源/导出首中尾 SSIM `0.999997 / 0.999997 / 1.000000` | 通过（一次真实 QA 包）/当前包部分 | 当前安装包已更新为 `12e1db…9455d9`（代码 `a7d98d6`），但 SavePanel/取消/最新包重跑仍待；H.265/ProRes、字幕和实时音画同步仍待 |
+| Export | 带音频 H.264/AAC 实际导出 | 安装包 `03bdcef3…` 生成 `qa-h264-aac-export.mp4`；ffprobe：H.264 1280×720/30fps/231 帧、AAC 48kHz 单声道/362 包、7.700s；音视频均 `ffmpeg -xerror` 通过；源/导出首中尾 SSIM `0.999997 / 0.999997 / 1.000000` | 通过（一次真实 QA 包）/当前包部分 | 当前安装包已更新为 `40c21ce0…e7f08`（代码 `741ff07`），但 SavePanel/取消/最新包重跑仍待；H.265/ProRes、字幕和实时音画同步仍待 |
 | Export | 失败/取消输出清理 | `0bae80e` 增加普通输出 identity-safe guard、replacement race、双 cancel source fail-closed；`a7d98d6` 增加 symlink/reparse 最终路径拒绝；export unit 70/70、media cancel 18/18、audio/video integration 5/5，顺序 workspace 全量通过 | 通过（代码/测试） | 仍需最新安装包触发一次错误/取消并确认 UI toast/文件清理 |
 | Help | 菜单 | 快捷键/MCP 说明可展开；教程/反馈显示 Beta 禁用 | 通过 | 记录禁用原因和可用边界 |
 | Library | 全局素材库 | AX 可读分类、搜索、排序；部分截图曾未重绘，当前复测仍需重复 | 部分 | 在窗口修复后重跑可见性和空态 |
@@ -110,8 +110,8 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - App 构建：release `.app` 已生成并安装；DMG bundle 脚本因超过一分钟无输出被停止，DMG 不在本轮交付证据内。
 - 本轮主线 fresh verification：Preview/Store/Media 4 files / 91 tests passed；MediaActions/MediaPanel 2 files / 59 tests passed；`pnpm build` exit 0。
 - 全量 Web 串行门禁：151 files / 1412 tests passed；运行时使用已初始化 localStorage file 和单 worker，包含无选区 split/trim no-op 回归。
-- Rust workspace：`cargo test --workspace --jobs 1 -- --test-threads=1` 与 `cargo fmt --all -- --check` 通过；一次未限并发运行在 motion sandbox 180s 超时，单独串行重跑通过，保留为 GPU/Chromium 资源争用风险；仅保留明确标记为 ignored 的 real-device / optional fixture tests。
-- 最终 `.app`：`web/node_modules/.bin/tauri build --bundles app` exit 0；当前安装包 SHA-256 `de4cb52bf10020d0bf39c3a293fdd4f9b08e28ffccc0de57fe0afe1042425405`，对应提交 `478e1b4`；本轮 Computer Use 屏幕 smoke 因 Mac 锁定 blocked，媒体 Preview tabs/小屏等桌面证据仍引用之前的已完成专项包。
+- Rust workspace：`cargo test --workspace --jobs 1 -- --test-threads=1` 与 `cargo fmt --all -- --check` 通过；本轮包含缺失媒体 Preview/Playback fail-closed 和 RenderLoop 集成测试。一次未限并发运行在 motion sandbox 180s 超时，单独串行重跑通过，保留为 GPU/Chromium 资源争用风险；仅保留明确标记为 ignored 的 real-device / optional fixture tests。
+- 最终 `.app`：`web/node_modules/.bin/tauri build --bundles app` exit 0；当前安装包 SHA-256 `40c21ce03d0d20068ca00b5cff1e1e4914323de1eb380ce864d4e632207e7f08`，对应提交 `741ff07`；本轮 Computer Use 屏幕 smoke 因 Mac 锁定 blocked，媒体 Preview tabs/小屏等桌面证据仍引用之前的已完成专项包。
 
 ## Related Documents
 
@@ -133,3 +133,4 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - `2026-08-21T17:46:17+08:00` — 写回带音频 H.264/AAC 安装版导出、ffprobe、完整解码和首中尾 SSIM；新增 export cleanup/external cancel 代码与 workspace 门禁。最新 cleanup 包的 SavePanel 复测仍记录为 partial，不把旧包成功静默升级。
 - `2026-08-21T19:32:27+08:00` — 写回 `a7d98d6` 的 symlink/reparse identity 防护、70 个 export 单测、顺序 workspace 全量门禁和最新安装包 `12e1db…9455d9`；并发 motion 超时保留为环境风险。
 - `2026-08-21T19:48:03+08:00` — 写回 `f05bac8`/`478e1b4` 的无选区 split/trim parity、Web 151/1412 全量门禁和最新安装包 `de4cb52b…25405`；Computer Use 因 Mac 锁定未完成屏幕 smoke。
+- `2026-08-21T20:09:19+08:00` — 写回 `741ff07` 的缺失媒体 Preview/Playback fail-closed、RenderLoop 集成 8 项和顺序 Rust workspace 全量结果；最新安装包 `40c21ce0…e7f08`，屏幕 smoke 仍受 Mac 锁定阻塞。
