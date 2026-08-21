@@ -203,7 +203,7 @@
 
   导出后用 ffprobe、完整解码和首/中/尾帧检查；音频轨、时长、取消不提交和失败清理必须分别验证。
 
-  当前结果：安装包 `03bdcef3…` 已真实生成 H.264/AAC 输出，ffprobe、双流 `ffmpeg -xerror` 和首/中/尾 SSIM `0.999997 / 0.999997 / 1.000000` 通过；`0bae80e` 补了普通输出失败清理和 external cancel，`a7d98d6` 补了最终输出 symlink/reparse identity 拒绝。export unit 70/70、media cancel 18/18、audio/video integration 5/5 和顺序 Rust workspace 全量通过；当前安装包 `40c21ce0…e7f08` 已重建，但 SavePanel/取消/最新包导出尚未重跑，因此本步骤保持 partial，H.265/ProRes/字幕仍待。
+  当前结果：安装包 `893b6ed0…d0ba` 已真实生成 H.265/AAC 与 ProRes 422 HQ/PCM 文件；H.265 为 HEVC `hev1` + AAC，ProRes 为 `apch`/`yuv422p10le` + PCM，两者均为 7.700s、完整 `ffmpeg -xerror` 通过；`0bae80e` 补了普通输出失败清理和 external cancel，`a7d98d6` 补了最终输出 symlink/reparse identity 拒绝。export unit 70/70、media cancel 18/18、audio/video integration 5/5 和顺序 Rust workspace 全量通过；本步骤保持 partial，透明 ProRes 4444、字幕、取消、实时音画同步和首中尾对拍仍待。
 
   下一执行切片：Linked A/V Timeline Parity。对齐 `crates/opentake-ops/src/ops/linking.rs`、`trim.rs`、`move_clips.rs`、`ripple.rs`、`command.rs` 与 `web/src/components/timeline/TimelineContainer.tsx`、`web/src/lib/editActions.ts`、`web/src/hooks/useKeyboardShortcuts.ts`；linked move Agent parity 和 Option trim only-main 已补齐并通过自动化，继续补 linked trim/ripple sync-lock/atomic collision、Shift+Delete Undo/Redo，再做安装版状态对拍。
 
