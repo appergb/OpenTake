@@ -173,6 +173,8 @@
 
   2026-08-22 窄范围上游对拍确认 Rust `ripple_delete`、`ripple_delete_ranges_on_track`、`ripple_insert`、`trim_clips`、linked partner propagation 和 command 原子拒绝语义与上游一致；现有 ops/command 测试覆盖这些边界。前端 `web/src/components/timeline` 尚未完成逐函数对拍，因此 Timeline 能力仍保持 partial，不能仅凭 Rust parity 升级完成。
 
+  前端代码基线（2026-08-22 01:20）：TimelineContainer、范围交互、TrackHeader sync-lock、overlay、range context menu、clip context menu 定向门禁 6 files / 55 tests 通过；这只证明当前前端路由和交互单测绿，不替代安装版 Timeline 全流程屏幕对拍。
+
 ### Task 5: 收敛预览、播放、RenderPlan 和导出闭环
 
 **Files:**
