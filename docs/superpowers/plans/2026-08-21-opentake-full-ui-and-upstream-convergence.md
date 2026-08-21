@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-07-10-opentake-full-convergence-design.md`、`docs/superpowers/specs/2026-08-13-opentake-beta5-design.md` 与本轮用户目标。
 
-**Current checkpoint (2026-08-22, Asia/Shanghai):** 受影响 crate/Tauri/Web 定向门禁保持全绿；最新安装包 `3ce3c1d0…c7eef` 已完成小屏、媒体/预览、时间轴范围删除与 Undo、H.264/H.265/ProRes 422、Motion 透明发布的既有屏幕证据。上游审计确认的两个缺口已在代码侧补齐：Agent 文件夹批量 `entries` 单步 Undo，以及 JSON/`.lottie` Lottie 导入、Velato 校验和 metadata。当前 Mac 仍处于锁屏，透明 ProRes 4444 专用 SavePanel、Option trim、字幕 SavePanel/模型下载、Lottie 屏幕路径和取消导出的最新安装版动作不能伪造为已完成。2026-08-22 workspace 全量复跑在既有 4K Chromium budget smoke 超时并 poison gate，已确认与本次 diff 无直接关系；clippy 仍被既有 `chunks_exact` lint 阻塞。工作区只保留用户已有审计素材的 dirty/untracked 状态。
+**Current checkpoint (2026-08-22, Asia/Shanghai):** 受影响 crate/Tauri/Web 定向门禁保持全绿；最新安装包二进制 SHA-256 `acd7b105a75d957bc761f9128f9f89e7ee563f65031dc7e22952fa7a6c65c319`，已重新打包并安装。此前包已完成小屏、媒体/预览、时间轴范围删除与 Undo、H.264/H.265/ProRes 422、Motion 透明发布的既有屏幕证据。上游审计确认的两个缺口已在代码侧补齐：Agent 文件夹批量 `entries` 单步 Undo，以及 JSON/`.lottie` Lottie 导入、Velato 校验和 metadata。当前 Mac 仍处于锁屏，透明 ProRes 4444 专用 SavePanel、Option trim、字幕 SavePanel/模型下载、Lottie 屏幕路径和取消导出的最新安装版动作不能伪造为已完成。2026-08-22 workspace 全量复跑在既有 4K Chromium budget smoke 超时并 poison gate，已确认与本次 diff 无直接关系；clippy 仍被既有 `chunks_exact` lint 阻塞。工作区只保留用户已有审计素材的 dirty/untracked 状态。
 
 ## Global Constraints
 

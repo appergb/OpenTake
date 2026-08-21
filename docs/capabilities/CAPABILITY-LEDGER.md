@@ -75,7 +75,7 @@ tags:
 - Web/Agent：Motion Studio Inspector 新增“透明背景（ProRes 4444）”开关；预览请求保持原 schema，只有发布请求带 `transparent` 字段，切换项目时重置为关闭；Agent `add_motion_graphic` 和 `publish_motion_document` 的新增 clip 路径也接受透明发布，已有透明 clip 的文档编辑保留 alpha。
 - 自动化证据：`src-tauri/tests/motion_command.rs` 的透明发布集成测试验证 `.mov`、ProRes、64×36 尺寸、完全透明像素和半透明动画像素；Rust workspace 串行全量通过（Tauri 720 tests、Motion Chromium/integration、导出/播放等）；Web 全量 `151 files / 1415 tests`、Web build 通过。
 - 文件级证据：`/private/tmp/opentake-audio-desktop-qa-L8Nvwh/audio-preview-export-qa.opentake/media/motion-0e4cacc9-161a-4704-a790-7e233397c8c4.mov` 被 `ffprobe` 识别为 `prores` profile `4444`、tag `ap4h`、pixel format `yuva444p12le`、90 帧/3.000s；`ffmpeg -vf alphaextract` 成功，抽样 alpha 平面为非全黑值；对应 `media.json` 的 `generationInput.transparent` 为 `true`。
-- 安装包：当前 `/Applications/OpenTake.app` 二进制 SHA-256 `3ce3c1d04fd28e5b9f98e056788112513e82ae4d46e13bdc462dc55af16c7eef`。最新包已通过透明开关/发布/落轨/保存重开屏幕路径；透明 ProRes 4444 专用导出已实现并通过自动化/底层文件证据，屏幕路径待解锁复验；opaque→transparent 编辑仍未完成。
+- 安装包：当前 `/Applications/OpenTake.app` 二进制 SHA-256 `acd7b105a75d957bc761f9128f9f89e7ee563f65031dc7e22952fa7a6c65c319`，对应 `c1db732`；已重新打包安装，但 Mac 锁屏，透明 ProRes 4444 专用导出、Lottie 屏幕路径和其它待验收动作仍不升级为通过。
 
 ## 上游 linked A/V parity 当前切片
 
@@ -183,3 +183,4 @@ tags:
 - `2026-08-21T23:47:02+08:00` — 写回透明 ProRes 4444 导出实现和 GPU/FFmpeg alpha integration；最新安装包 `3ce3c1d0…c7eef`，Computer Use 因 Mac 锁屏未完成透明导出屏幕复验。
 - `2026-08-22T00:46:36+08:00` — 完成上游 agent 确认的两个 P1 切片：Agent 文件夹批量 entries 进入单步 Undo；媒体导入接受 Lottie JSON/`.lottie`，Velato 校验、`.lottie` ZIP animation 提取和 metadata 进入 Tauri 边界；Agent 417/417、ops 209/209、Tauri Lottie JSON/容器/MCP path 定向测试通过，安装版 Lottie 屏幕验收仍待解锁。
 - `2026-08-22T01:03:46+08:00` — Tauri lib 726/726、Web 151/1416、tsc/build 通过；workspace 全量在既有 Motion Chromium 4K budget smoke 超时 180s 后 poison gate，记录为环境/GPU/锁屏风险，未把该失败归因到本轮改动。
+- `2026-08-22T01:08:00+08:00` — 基于 `c1db732` 重建并安装最新 `.app`，二进制 SHA-256 `acd7b105…c319`；Mac 锁屏，仅记录构建/安装证据。

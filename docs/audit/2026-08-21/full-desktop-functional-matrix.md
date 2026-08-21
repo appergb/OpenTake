@@ -117,7 +117,7 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - 本轮主线 fresh verification：Preview/Store/Media 4 files / 91 tests passed；MediaActions/MediaPanel 2 files / 59 tests passed；`pnpm build` exit 0。
 - 全量 Web 串行门禁：`NODE_OPTIONS=--localstorage-file=/tmp/opentake-vitest-range-refresh-full.json pnpm exec vitest run --pool=forks --maxWorkers=1` → 151 files / 1415 tests passed；`pnpm build` exit 0。
 - Rust workspace：此前顺序全量曾通过；本轮受影响门禁仍全绿：Agent lib 417/417、ops lib 209/209、Tauri lib 726/726，字幕 16/16 + 5/5，Lottie JSON/容器/MCP path 定向测试通过，`cargo fmt --all -- --check` 通过。2026-08-22 再跑 `cargo test --workspace --jobs 1 -- --test-threads=1` 在既有 `opentake-motion/tests/chromium.rs::four_k_single_frame_opaque_and_transparent_budget_smoke` 处超时 180s，随后同 gate 的 3 个测试因 poison 连带失败；本次 diff 未修改 `opentake-motion`，保留为当前机器 Chromium/GPU/锁屏环境风险，不宣称 workspace 全量本轮通过。全 workspace clippy 仍被既有 `chunks_exact`/`chunks_exact_mut` lint 阻塞，当前输出涉及 `opentake-media`、`opentake-motion` 等旧模块。
-- 最终 `.app`：`web/node_modules/.bin/tauri build --bundles app` exit 0；当前安装包 SHA-256 `3ce3c1d04fd28e5b9f98e056788112513e82ae4d46e13bdc462dc55af16c7eef`；最新包已完成 Home 小屏、媒体预览 tab、播放/尾帧、分割/撤销、范围删除/Undo、H.264/H.265/ProRes 422 导出面板和 Motion 透明发布屏幕 smoke；透明 ProRes 4444 屏幕、Option trim、字幕 SavePanel/模型下载和取消导出仍待。
+- 最终 `.app`：`web/node_modules/.bin/tauri build --bundles app` exit 0；当前安装包二进制 SHA-256 `acd7b105a75d957bc761f9128f9f89e7ee563f65031dc7e22952fa7a6c65c319`，已重新安装；既有包已完成 Home 小屏、媒体预览 tab、播放/尾帧、分割/撤销、范围删除/Undo、H.264/H.265/ProRes 422 导出面板和 Motion 透明发布屏幕 smoke；最新包的透明 ProRes 4444 屏幕、Option trim、字幕 SavePanel/模型下载、Lottie 屏幕路径和取消导出仍待。
 
 ## Related Documents
 
@@ -155,3 +155,4 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - `2026-08-22T00:06:00+08:00` — 复跑字幕纵切：domain 16/16、Tauri 实际 SRT/VTT 写文件 5/5、Captions/TitleBar 前端 10/10 通过；字幕能力保持“代码/自动化通过，安装版模型下载与 SavePanel 导出屏幕待解锁”。同时将导出取消状态明确区分为“代码/自动化通过，最新安装版 UI toast/清理仍待”。
 - `2026-08-22T00:46:36+08:00` — 上游 parity agent 确认并完成两项缺口：Agent 文件夹批量 entries 单步 Undo；Lottie JSON/`.lottie` 导入、Velato 校验和 metadata。Agent 417/417、ops 209/209、Lottie JSON/容器/MCP path 定向测试通过；最新安装版屏幕路径因 Mac 锁屏保持待验证。
 - `2026-08-22T01:03:46+08:00` — 受影响 Tauri lib 726/726、Web 151 files / 1416 tests、tsc、build 通过；workspace 全量复跑在既有 4K Chromium budget smoke 180s 超时，poison gate 连带 3 项失败，未把环境失败归因到本次媒体/Agent 改动。
+- `2026-08-22T01:08:00+08:00` — 基于 `c1db732` 重新执行 `web/node_modules/.bin/tauri build --bundles app` 并安装 `/Applications/OpenTake.app`；二进制 SHA-256 `acd7b105…c319`。Mac 仍锁屏，因此只记录构建/安装成功，不升级任何屏幕验收状态。
