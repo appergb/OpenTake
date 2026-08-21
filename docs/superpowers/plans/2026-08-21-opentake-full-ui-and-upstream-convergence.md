@@ -183,21 +183,29 @@
 - 任意时间线帧可稳定 seek；暂停、播放、scrub、尾帧保持、音画同步和取消行为有明确结果。
 - 预览和导出使用同一合成语义；H.264/AAC、H.265/ProRes、字幕和不支持内容分别有能力门控与失败证据。
 
-- [ ] **Step 1: 建立代表性媒体 fixture**
+- [x] **Step 1: 建立代表性媒体 fixture**
 
   准备短视频、带音频视频、透明/静态图片、文字和字幕输入，并用 ffprobe 固定帧率、时长、分辨率和音轨事实。
+
+  结果：带音频 fixture `nested-timeline-compound-export-2026-07-31.mp4` 已固定为 7.700s、H.264 1280×720/30fps/231 帧、AAC 48kHz 单声道/362 包；源视频和音频均通过 `ffmpeg -xerror`。
 
 - [ ] **Step 2: 验证单帧合成**
 
   对首帧、中帧、尾帧和关键帧边界做 RGBA/PNG 证据；任何缺失片段返回结构化错误而不是黑帧成功。
 
-- [ ] **Step 3: 验证播放和 seek**
+- [x] **Step 3: 验证播放和 seek**
 
   在安装包中执行播放/暂停/恢复/scrub/seek/尾帧保持，记录实际画面和音频状态；失败按解码、时钟、UI ref、合成或资源回收分类。
+
+  结果：安装版 QA 工程出现 V1/A1 和 A1 波形，起点/中点/终点 seek 与暂停状态均有截图；实时听感级 A/V 同步仍未证明。
 
 - [ ] **Step 4: 验证导出**
 
   导出后用 ffprobe、完整解码和首/中/尾帧检查；音频轨、时长、取消不提交和失败清理必须分别验证。
+
+  当前结果：安装包 `03bdcef3…` 已真实生成 H.264/AAC 输出，ffprobe、双流 `ffmpeg -xerror` 和首/中/尾 SSIM `0.999997 / 0.999997 / 1.000000` 通过；`0bae80e` 补了普通输出失败清理和 external cancel，`a7d98d6` 补了最终输出 symlink/reparse identity 拒绝。export unit 70/70、media cancel 18/18、audio/video integration 5/5 和顺序 Rust workspace 全量通过；当前安装包 `12e1db…9455d9` 已重建，但 SavePanel/取消/最新包导出尚未重跑，因此本步骤保持 partial，H.265/ProRes/字幕仍待。
+
+  下一执行切片：Linked A/V Timeline Parity。对齐 `crates/opentake-ops/src/ops/linking.rs`、`trim.rs`、`move_clips.rs`、`ripple.rs`、`command.rs` 与 `web/src/components/timeline/TimelineContainer.tsx`、`web/src/lib/editActions.ts`、`web/src/hooks/useKeyboardShortcuts.ts`；先补 linked trim、Option trim only-main、linked move partner delta/track、ripple sync-lock/atomic collision、Shift+Delete Undo/Redo、无选区 split no-op 的模块化测试，再做安装版状态对拍。
 
 ### Task 6: 收敛媒体、Inspector、字幕和项目生命周期
 
