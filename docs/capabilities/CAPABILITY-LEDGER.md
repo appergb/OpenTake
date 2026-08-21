@@ -98,6 +98,7 @@ tags:
 - 文件导入定向回归：`mediaActions` + `MediaPanel` 为 2 files / 59 tests passed；Preview/媒体/Store 定向回归为 4 files / 91 tests passed；两条切片均已安装版验证。
 - 主线 fresh verification（2026-08-21 12:09 +08:00）：Preview/Store/Media 4 files / 91 tests passed；MediaActions/MediaPanel 2 files / 59 tests passed；`pnpm build` exit 0；仅保留既有 Vite chunk warnings。
 - 全量 Web 串行门禁（2026-08-21 12:20 +08:00）：`NODE_OPTIONS=--localstorage-file=/tmp/opentake-vitest-localstorage-serial-final.json pnpm exec vitest run --maxWorkers=1` → 149 files / 1391 tests passed；Node 26 并行共享 localStorage file 会产生假失败，因此本地门禁使用单 worker。
+- Rust workspace 门禁（2026-08-21 13:15 +08:00）：`cargo fmt --all -- --check` 通过；`cargo test --workspace` 在既有 `opentake-media` facade contract 失败，`facade_contract.rs:137` 的 1 秒 AAC fixture 解码后 PCM sample 数超出 `15_000..=16_500`，单独重跑仍失败。该失败未修改本轮前端媒体视图代码，保留为音频/预览长期缺口。
 
 ## Media View Modes 新鲜验收证据
 
