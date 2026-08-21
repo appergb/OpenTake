@@ -207,7 +207,7 @@
 
   下一执行切片：Linked A/V Timeline Parity。对齐 `crates/opentake-ops/src/ops/linking.rs`、`trim.rs`、`move_clips.rs`、`ripple.rs`、`command.rs` 与 `web/src/components/timeline/TimelineContainer.tsx`、`web/src/lib/editActions.ts`、`web/src/hooks/useKeyboardShortcuts.ts`；linked move Agent parity 和 Option trim only-main 已补齐并通过自动化，继续补 linked trim/ripple sync-lock/atomic collision、Shift+Delete Undo/Redo，再做安装版状态对拍。
 
-  已完成的 parity slices：上游 `splitAtPlayhead`、`trimStartToPlayhead`、`trimEndToPlayhead` 无选区 no-op；Agent `move_clips` linked partner delta；Timeline Option/Alt trim only-main（普通 trim 仍同步 linked group）。Web 全量当前 `151 files / 1414 tests` 通过。最新包屏幕已完成有效分割/撤销和播放到尾帧；Option trim 坐标操作返回 `noWindowsAvailable`，linked trim/ripple/Shift+Delete 的正向安装版对拍仍待。
+  已完成的 parity slices：上游 `splitAtPlayhead`、`trimStartToPlayhead`、`trimEndToPlayhead` 无选区 no-op；Agent `move_clips` linked partner delta；Timeline Option/Alt trim only-main（普通 trim 仍同步 linked group）。Web 全量当前 `151 files / 1414 tests` 通过。最新包屏幕已完成有效分割/撤销、播放到尾帧，以及 linked V1/A1 的 Shift+Backspace ripple delete/Undo；Option trim 坐标操作返回 `noWindowsAvailable`，范围删除和透明 ProRes 专用导出仍待。
 
   同期补齐缺失媒体错误边界：提交 `741ff07` 让普通 Preview、Playback Image/Text 和 RenderLoop 集成路径都返回显式 materialization error，不再发布黑帧；render 18、resolver 15、playback integration 8、Tauri lib 719 和顺序 workspace 全量通过。`6b31449` 收口导出 clippy 建议；全 workspace clippy 仍有既有 `chunks_exact` lint。当前安装包 `7ad988f3…a9799` 已重建，最新屏幕 smoke 仍因 Mac 锁定未完成。
 

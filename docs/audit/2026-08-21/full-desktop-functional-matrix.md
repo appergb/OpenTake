@@ -27,7 +27,7 @@ skip_when:
   - 仅修改零 IO 的 domain 算法且不改变 UI 合同
 priority: must
 freshness_class: project
-last_verified: 2026-08-21T22:27:41+08:00
+last_verified: 2026-08-21T22:32:49+08:00
 owners:
   - OpenTake-generation
 source_of_truth:
@@ -78,7 +78,7 @@ tags:
 | Timeline | 播放/暂停 | 播放头从 0 推进到约 54，时间从 00:00:00 推进到约 00:01:24 | 通过 | 增加暂停/恢复/seek/尾帧证据 |
 | Timeline | 选中片段 | 选中 `sample-text-0` 后 Inspector 切换到文本属性 | 通过 | 补选区、拖拽、删除和 undo |
 | Timeline | 播放头处分割 | 初始在帧 0 或片段外尝试时无变化；补齐有效前置条件（选中 `sample-text-0`、播放头推进到帧 15）后成功新增片段、撤销变可用 | 通过（有效前置条件） | 新构建 app AX：分割后出现 UUID 片段；`cargo test -p opentake-ops split_clip_distributes_keyframes_at_cut` 通过 |
-| Timeline | 入点/出点范围与范围边缘 | `TimelineContainer` 已接入 Shift+标尺 range mark、已有范围 start/end 边缘命中与拖动、clip-edge/playhead snap、pointercancel 回滚和同帧清除；Option trim 改为只修剪主 clip，普通 trim 保持 linked propagation；Web 全量 151 files / 1414 tests 通过。最新包屏幕上已完成播放到尾帧、有效分割产生 V/A 两组片段、Undo 恢复；Option trim 坐标拖动仍被 sky 返回 `noWindowsAvailable`，未把它升级为屏幕通过 | 部分 | 继续补可复现的安装版 Option trim、范围删除和 Shift+Delete 状态对拍 |
+| Timeline | 入点/出点范围与范围边缘 | `TimelineContainer` 已接入 Shift+标尺 range mark、已有范围 start/end 边缘命中与拖动、clip-edge/playhead snap、pointercancel 回滚和同帧清除；Option trim 改为只修剪主 clip，普通 trim 保持 linked propagation；Web 全量 151 files / 1414 tests 通过。最新包屏幕上已完成播放到尾帧、有效分割产生 V/A 两组片段、Undo 恢复；选中 linked V1 后 Shift+Backspace 删除 V1/A1、保留 Motion clip，Undo 恢复成功；Option trim 坐标拖动仍被 sky 返回 `noWindowsAvailable` | 部分 | 继续补可复现的安装版 Option trim、范围删除状态对拍 |
 | Inspector | 文本属性 | 可读出 Welcome to OpenTake、字体、字号、颜色、对齐、阴影、关键帧 | 通过 | 补编辑后保存重开 |
 | Preview | 带音频 fixture 的导入/波形/seek/暂停 | `nested-timeline-compound-export-2026-07-31.mp4`：7.700s、H.264 1280×720/30fps/231帧 + AAC 48kHz 单声道；安装版出现 V1+A1、A1 波形和音频 Inspector，已操作起点/中点/终点 seek，连续暂停状态稳定 | 部分 | 实时听感级同步和最新 cleanup 包的导出复测仍待 |
 | Preview | compositor temporal 预览 | 最新安装版在 QA 工程中设置 `speed=1.5` 和曝光 `0.50` compositor 属性后不再出现 unsupported surface；画面可见，播放头可到尾帧，暂停后抓帧按钮保持可用；speed/reversed 的首次 native render、JPEG publication、source-frame 映射由 Rust integration tests 锁定 | 通过（代码/native/屏幕组合证据） | 预览与导出起/中/尾帧、音频同步和取消仍在后续闭环 |
@@ -141,3 +141,4 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - `2026-08-21T21:31:52+08:00` — alpha-preserving document edit 修复后重新构建并安装最新 app `d5f8aa46…87ae7`；真实 FFmpeg add→edit integration 通过，Computer Use 仍返回 Mac locked。
 - `2026-08-21T22:15:18+08:00` — 最新包 `918eac84…9551b` 解锁后完成真实桌面 smoke：紧凑/标准 Home、媒体预览 tab、播放到尾帧、有效分割与撤销、导出面板、Motion 透明开关和透明发布落轨均通过；Option trim 坐标操作返回 `noWindowsAvailable`，保留为未完成屏幕证据。
 - `2026-08-21T22:27:41+08:00` — 当前包完成 H.264/AAC SavePanel 导出；输出文件 ffprobe、完整 `ffmpeg -xerror` 和 7.700s A/V 流事实通过。透明 ProRes 专用导出、H.265/字幕/取消仍待。
+- `2026-08-21T22:32:49+08:00` — 最新包完成 linked V1/A1 的 Shift+Backspace ripple delete 和 Undo 屏幕对拍：V1/A1 同时移除、Motion clip 保留、撤销恢复三条 clip；Option trim 坐标接口仍未提供可用窗口。
