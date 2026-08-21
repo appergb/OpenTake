@@ -281,6 +281,7 @@ describe("Motion Studio authoring workspace", () => {
     const transparent = container.querySelector<HTMLInputElement>('input[name="transparent"]');
     expect(transparent).not.toBeNull();
     expect(transparent!.checked).toBe(false);
+    expect(transparent!.closest('[aria-label="motionStudio.inspector"]')).not.toBeNull();
     await act(async () => transparent!.click());
     expect(store.getState().transparent).toBe(true);
     await act(async () => publish!.click());

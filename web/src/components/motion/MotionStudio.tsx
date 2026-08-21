@@ -176,16 +176,6 @@ export function MotionStudio({ store = useMotionStudioStore }: { store?: MotionS
               <small>{new Date(summary.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</small>
             </button>
           ))}
-          <label className="motion-inspector__toggle">
-            <input
-              name="transparent"
-              type="checkbox"
-              checked={transparent}
-              aria-label={t("motionStudio.transparentOutput")}
-              onChange={(event) => setTransparent(event.currentTarget.checked)}
-            />
-            <span>{t("motionStudio.transparentOutput")}</span>
-          </label>
         </div>
         <div className="motion-files__section">
           <p className="motion-files__eyebrow"><Icon icon={Sparkles} size={11} /> {t("motionStudio.templates")}</p>
@@ -292,6 +282,16 @@ export function MotionStudio({ store = useMotionStudioStore }: { store?: MotionS
               />
             </label>
           ))}
+          <label className="motion-inspector__toggle">
+            <input
+              name="transparent"
+              type="checkbox"
+              checked={transparent}
+              aria-label={t("motionStudio.transparentOutput")}
+              onChange={(event) => setTransparent(event.currentTarget.checked)}
+            />
+            <span>{t("motionStudio.transparentOutput")}</span>
+          </label>
         </div>
         <dl className="motion-inspector__summary">
           <div><dt>{t("motionStudio.aspect")}</dt><dd>{parameters.width} × {parameters.height}</dd></div>
