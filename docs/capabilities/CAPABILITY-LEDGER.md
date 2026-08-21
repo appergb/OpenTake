@@ -187,3 +187,4 @@ tags:
 - `2026-08-22T01:17:36+08:00` — 窄范围上游对拍确认 Rust ripple/range/insert/trim、linked partner 和原子拒绝语义一致；前端 Timeline 逐函数对拍与安装版屏幕验收仍未完成，能力保持 partial。
 - `2026-08-22T01:20:00+08:00` — 前端 Timeline 定向门禁 6 files / 55 tests 通过，覆盖 TimelineContainer、范围交互、sync-lock 轨道头、overlay、range/clip context menu；仅作为代码基线，不升级屏幕验收状态。
 - `2026-08-22T01:28:03+08:00` — `editActions.test.ts` 新增 ripple action routing 覆盖，选中片段/标记范围/选中 gap/out-of-band gap 拒绝 42/42 通过，并确认前端范围 wire 使用 `{start,end}`；Timeline 屏幕验收仍待解锁。
+- `2026-08-22T01:32:55+08:00` — Tauri playback resolver 新增 `.lottie` 容器 preview/export 独立 materializer 像素一致性测试，真实 GPU 路径通过；安装版 Lottie 预览/落轨屏幕验收仍待解锁。

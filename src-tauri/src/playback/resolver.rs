@@ -574,6 +574,7 @@ mod tests {
     use opentake_media::RgbaFrame;
     use opentake_render::plan::LayerDraw;
     use opentake_render::{Compositor, FramePlan, RenderDevice, RenderSize};
+    use std::io::Write;
 
     fn lottie_fixture(first: &str, second: &str) -> String {
         format!(
@@ -804,6 +805,60 @@ mod tests {
             .take_materialization_error()
             .expect("playback must retain the materialization failure");
         assert!(error.contains("parse Lottie document"), "{error}");
+    }
+
+    #[test]
+    fn lottie_container_preview_and_export_materialize_identical_pixels() {
+        let Ok(dev) = RenderDevice::try_new() else {
+            return;
+        };
+        let temp = tempfile::tempdir().expect("temp Lottie container fixture");
+        let path = temp.path().join("container.lottie");
+        let file = std::fs::File::create(&path).expect("create Lottie container");
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        archive
+            .start_file("animations/main.json", options)
+            .expect("create Lottie animation entry");
+        archive
+            .write_all(lottie_fixture("[1,0,0,1]", "[0,1,0,1]").as_bytes())
+            .expect("write Lottie animation entry");
+        archive.finish().expect("finish Lottie container");
+
+        let mut preview = crate::render::LottieMaterializer::new();
+        let mut preview_cache = TextureCache::new(4);
+        let preview_frame = preview
+            .resolve(
+                &dev.device,
+                &dev.queue,
+                &mut preview_cache,
+                &path,
+                0,
+                (16, 16),
+                "preview-lottie-container",
+            )
+            .expect("materialize Lottie container for preview");
+
+        let mut export = crate::render::LottieMaterializer::new();
+        let mut export_cache = TextureCache::new(4);
+        let export_frame = export
+            .resolve(
+                &dev.device,
+                &dev.queue,
+                &mut export_cache,
+                &path,
+                0,
+                (16, 16),
+                "export-lottie-container",
+            )
+            .expect("materialize Lottie container for export");
+
+        let preview_pixels = composite_texture(&dev.device, &dev.queue, preview_frame);
+        let export_pixels = composite_texture(&dev.device, &dev.queue, export_frame);
+        assert_eq!(preview_pixels, export_pixels);
+        let center = &preview_pixels.rgba[(8 * 16 + 8) * 4..][..4];
+        assert!(center[0] > 200 && center[1] < 30, "{center:?}");
     }
 
     #[test]

@@ -177,6 +177,8 @@
 
   2026-08-22 01:28：新增 `editActions.test.ts` 的 ripple action routing 覆盖，选中片段、标记范围、选中 gap 和 out-of-band filled-gap 拒绝 42/42 通过；同时锁定前端 `rippleDeleteRanges` 的实际 wire 形状 `{start,end}`。仍不替代安装版屏幕验收。
 
+  2026-08-22 01:32：新增 Tauri playback resolver 的 `.lottie` 容器预览/导出像素一致性测试；真实 GPU 路径通过，preview/export 两个独立 materializer 对同一容器输出完全一致。该自动化证据仍不替代安装版 Lottie 素材预览和落轨屏幕验收。
+
 ### Task 5: 收敛预览、播放、RenderPlan 和导出闭环
 
 **Files:**
