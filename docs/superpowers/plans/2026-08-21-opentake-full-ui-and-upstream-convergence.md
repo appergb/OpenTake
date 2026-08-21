@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-07-10-opentake-full-convergence-design.md`、`docs/superpowers/specs/2026-08-13-opentake-beta5-design.md` 与本轮用户目标。
 
+**Current checkpoint (2026-08-22, Asia/Shanghai):** 代码与自动化主线保持全绿；最新安装包 `3ce3c1d0…c7eef` 已完成小屏、媒体/预览、时间轴范围删除与 Undo、H.264/H.265/ProRes 422、Motion 透明发布的既有屏幕证据。当前 Mac 仍处于锁屏，透明 ProRes 4444 专用 SavePanel、Option trim、字幕 SavePanel/模型下载和取消导出的最新安装版动作不能伪造为已完成。上游对齐 agent 正在独立审计，工作区只保留用户已有审计素材的 dirty/untracked 状态。
+
 ## Global Constraints
 
 - 只修改 `/Users/trip/TRUE 开发/PRIMARY-CN/OpenTake-generation`；`OpenTake/` 只作对照；`palmier-pro-upstream/` 永远只读。
@@ -203,7 +205,7 @@
 
   导出后用 ffprobe、完整解码和首/中/尾帧检查；音频轨、时长、取消不提交和失败清理必须分别验证。
 
-  当前结果：安装包 `893b6ed0…d0ba` 已真实生成 H.265/AAC 与 ProRes 422 HQ/PCM 文件；H.265 为 HEVC `hev1` + AAC，ProRes 为 `apch`/`yuv422p10le` + PCM，两者均为 7.700s、完整 `ffmpeg -xerror` 通过；`0bae80e` 补了普通输出失败清理和 external cancel，`a7d98d6` 补了最终输出 symlink/reparse identity 拒绝。export unit 70/70、media cancel 18/18、audio/video integration 5/5 和顺序 Rust workspace 全量通过；本步骤保持 partial，透明 ProRes 4444、字幕、取消、实时音画同步和首中尾对拍仍待。
+  当前结果：安装包 `893b6ed0…d0ba` 已真实生成 H.265/AAC 与 ProRes 422 HQ/PCM 文件；H.265 为 HEVC `hev1` + AAC，ProRes 为 `apch`/`yuv422p10le` + PCM，两者均为 7.700s、完整 `ffmpeg -xerror` 通过；`cca9327` 新增透明 ProRes 4444 codec、alpha 清屏和真实 GPU/FFmpeg integration，`export_prores_4444_preserves_transparent_text_alpha` 通过；`0bae80e` 补了普通输出失败清理和 external cancel，`a7d98d6` 补了最终输出 symlink/reparse identity 拒绝。当前 export unit 72/72、media cancel 18/18、audio/video integration 6/6 和顺序 Rust workspace 全量通过；本步骤保持 partial，透明 ProRes 4444 SavePanel 屏幕、字幕、取消、实时音画同步和首中尾对拍仍待。
 
   下一执行切片：Linked A/V Timeline Parity。对齐 `crates/opentake-ops/src/ops/linking.rs`、`trim.rs`、`move_clips.rs`、`ripple.rs`、`command.rs` 与 `web/src/components/timeline/TimelineContainer.tsx`、`web/src/lib/editActions.ts`、`web/src/hooks/useKeyboardShortcuts.ts`；linked move Agent parity 和 Option trim only-main 已补齐并通过自动化，继续补 linked trim/ripple sync-lock/atomic collision、Shift+Delete Undo/Redo，再做安装版状态对拍。
 
@@ -238,6 +240,8 @@
 - [ ] **Step 4: 验证项目边界**
 
   新建、打开、保存、另存、自动保存、退出 flush、切换工程、恢复和旧 schema 读取都必须有可复现证据。
+
+  当前进展（2026-08-22）：字幕纵切的代码/自动化证据已补齐：`cargo test -p opentake-domain subtitle_export` 16/16、`cargo test -p opentake-tauri subtitle_export_tests -- --nocapture` 5/5、`CaptionsTab.test.tsx + TitleBar.visual.test.ts` 10/10；安装版模型下载、转写结果编辑和 SavePanel SRT/VTT 导出仍须在解锁后补桌面证据。
 
 ### Task 7: 收敛 Agent/MCP、生成、Motion 和设置/帮助能力
 
