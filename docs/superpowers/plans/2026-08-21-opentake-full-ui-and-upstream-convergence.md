@@ -171,6 +171,8 @@
 
   当前进展（2026-08-21）：`TimelineContainer` 已完成一个 bounded range slice：Shift+标尺 range mark、已有范围 start/end 边缘命中/拖动、clip-edge/playhead snap、pointercancel/lostpointercapture 回滚、同帧清除和最终端点 sticky snap 时序；新增 happy-dom PointerEvent 测试后时间轴目录为 8 files / 88 tests，tsc、Web build 通过。最终安装包 `03bdcef3…` 已安装，但 Computer Use 坐标拖动返回 `noWindowsAvailable`，范围拖动、`Shift+Delete` 以及删除前后 Undo/Redo 的安装版对拍继续保持未完成。
 
+  2026-08-22 窄范围上游对拍确认 Rust `ripple_delete`、`ripple_delete_ranges_on_track`、`ripple_insert`、`trim_clips`、linked partner propagation 和 command 原子拒绝语义与上游一致；现有 ops/command 测试覆盖这些边界。前端 `web/src/components/timeline` 尚未完成逐函数对拍，因此 Timeline 能力仍保持 partial，不能仅凭 Rust parity 升级完成。
+
 ### Task 5: 收敛预览、播放、RenderPlan 和导出闭环
 
 **Files:**

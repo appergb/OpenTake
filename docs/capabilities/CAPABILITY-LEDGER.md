@@ -184,3 +184,4 @@ tags:
 - `2026-08-22T00:46:36+08:00` — 完成上游 agent 确认的两个 P1 切片：Agent 文件夹批量 entries 进入单步 Undo；媒体导入接受 Lottie JSON/`.lottie`，Velato 校验、`.lottie` ZIP animation 提取和 metadata 进入 Tauri 边界；Agent 417/417、ops 209/209、Tauri Lottie JSON/容器/MCP path 定向测试通过，安装版 Lottie 屏幕验收仍待解锁。
 - `2026-08-22T01:03:46+08:00` — Tauri lib 726/726、Web 151/1416、tsc/build 通过；workspace 全量在既有 Motion Chromium 4K budget smoke 超时 180s 后 poison gate，记录为环境/GPU/锁屏风险，未把该失败归因到本轮改动。
 - `2026-08-22T01:08:00+08:00` — 基于 `c1db732` 重建并安装最新 `.app`，二进制 SHA-256 `acd7b105…c319`；Mac 锁屏，仅记录构建/安装证据。
+- `2026-08-22T01:17:36+08:00` — 窄范围上游对拍确认 Rust ripple/range/insert/trim、linked partner 和原子拒绝语义一致；前端 Timeline 逐函数对拍与安装版屏幕验收仍未完成，能力保持 partial。
