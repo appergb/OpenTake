@@ -67,11 +67,11 @@
 - A `rust` route renders the existing native playback surface, keeps play/pause/seek/capture enabled, and starts `nativePlaybackController` with the current `projectEpoch`, `timelineVersion`, and start frame.
 - An unsupported route keeps the current visible error surface and disabled controls.
 
-- [ ] **Step 1: Add failing Preview surface tests**
+- [x] **Step 1: Add failing Preview surface tests**
 
   Add a compositor timeline with `speed: 1.5` and a reversed text/compositor clip to the existing Preview fixtures. Assert there is no `unsupported-playback-surface`, `data-playback-surface="native"` is present when the mocked endpoint is available, and play/capture are not disabled.
 
-- [ ] **Step 2: Run Preview and engine tests before implementation**
+- [x] **Step 2: Run Preview and engine tests before implementation**
 
   Run:
 
@@ -79,15 +79,15 @@
 
   Expected before implementation: the new cases fail because the route is still unsupported.
 
-- [ ] **Step 3: Wire only the route-dependent surface**
+- [x] **Step 3: Wire only the route-dependent surface**
 
   Reuse the existing `playbackRoute.kind === "rust"` branches. Do not add a second clock or a WebKit fallback for authored temporal properties. If a stale comment or conditional still says temporal remapping must stay on WebKit, update that contract to match Task 1.
 
-- [ ] **Step 4: Run Preview tests and verify failure fallback**
+- [x] **Step 4: Run Preview tests and verify failure fallback**
 
   Run the focused command again. Confirm native temporal playback starts with Rust available, while the same timeline still shows a typed unsupported surface when Rust is unavailable or disabled.
 
-- [ ] **Step 5: Commit the Preview slice**
+- [x] **Step 5: Commit the Preview slice**
 
   Commit the UI and engine tests with `feat(preview): enable temporal compositor controls`.
 
