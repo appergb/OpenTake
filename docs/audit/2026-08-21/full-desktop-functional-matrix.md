@@ -27,7 +27,7 @@ skip_when:
   - 仅修改零 IO 的 domain 算法且不改变 UI 合同
 priority: must
 freshness_class: project
-last_verified: 2026-08-21T15:32:21+08:00
+last_verified: 2026-08-21T16:43:31+08:00
 owners:
   - OpenTake-generation
 source_of_truth:
@@ -78,8 +78,9 @@ tags:
 | Timeline | 播放/暂停 | 播放头从 0 推进到约 54，时间从 00:00:00 推进到约 00:01:24 | 通过 | 增加暂停/恢复/seek/尾帧证据 |
 | Timeline | 选中片段 | 选中 `sample-text-0` 后 Inspector 切换到文本属性 | 通过 | 补选区、拖拽、删除和 undo |
 | Timeline | 播放头处分割 | 初始在帧 0 或片段外尝试时无变化；补齐有效前置条件（选中 `sample-text-0`、播放头推进到帧 15）后成功新增片段、撤销变可用 | 通过（有效前置条件） | 新构建 app AX：分割后出现 UUID 片段；`cargo test -p opentake-ops split_clip_distributes_keyframes_at_cut` 通过 |
+| Timeline | 入点/出点范围与范围边缘 | `TimelineContainer` 已接入 Shift+标尺 range mark、已有范围 start/end 边缘命中与拖动、clip-edge/playhead snap、pointercancel 回滚和同帧清除；时间轴目录 8 files / 88 tests、tsc、Web build 通过；最终安装包 SHA-256 `03bdcef3…`。Computer Use 音频 QA 工程能显示 V1+A1 和波形，但当前 sky 坐标拖动返回 `noWindowsAvailable`，因此没有把范围拖动及 `Shift+Delete` 的实际工程 diff 算作通过 | 部分 | 需要可复现的安装版坐标拖动证据，并对删除前后 Timeline、Undo/Redo 做状态对拍 |
 | Inspector | 文本属性 | 可读出 Welcome to OpenTake、字体、字号、颜色、对齐、阴影、关键帧 | 通过 | 补编辑后保存重开 |
-| Preview | 时间线预览 | 文本时间线预览可见，播放头可动；视频时间线起点/尾帧/回起点画面切换已验 | 部分 | 音频独立轨和完整 RenderPlan/export 对照仍待补 |
+| Preview | 带音频 fixture 的导入/波形/seek/暂停 | `nested-timeline-compound-export-2026-07-31.mp4`：7.700s、H.264 1280×720/30fps/231帧 + AAC 48kHz 单声道；安装版出现 V1+A1、A1 波形和音频 Inspector，已操作起点/中点/终点 seek，连续暂停状态稳定 | 部分 | 仍缺安装版 H.264/AAC 导出文件、导出首中尾帧与预览对拍、独立音频捕获或等价音画同步证据 |
 | Preview | compositor temporal 预览 | 最新安装版在 QA 工程中设置 `speed=1.5` 和曝光 `0.50` compositor 属性后不再出现 unsupported surface；画面可见，播放头可到尾帧，暂停后抓帧按钮保持可用；speed/reversed 的首次 native render、JPEG publication、source-frame 映射由 Rust integration tests 锁定 | 通过（代码/native/屏幕组合证据） | 预览与导出起/中/尾帧、音频同步和取消仍在后续闭环 |
 | Preview | 多素材 tabs | 打开 `audit-4k60-h264` 与 `export-h264-frame30` 后显示 Timeline/两个媒体 tab；关闭第二个回退第一个 | 通过 | 安装版 AX：两个 Close 按钮；Preview slice 4 files / 91 tests |
 | Agent | 面板入口 | Agent 面板、新建对话标签、输入框出现；发送按钮禁用 | 通过 | 不发送外部消息；补本地失败/取消路径 |
@@ -123,3 +124,6 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - `2026-08-21T13:12:31+08:00` — 写回媒体 folder/flat/grouped 三态、网格/列表密度、文件夹导航及音频子页的安装版验收结果。
 - `2026-08-21T14:51:41+08:00` — 写回 audio full-track 解码修复、compositor temporal preview/native parity、最新安装包和全量 Web/Rust 门禁结果。
 - `2026-08-21T15:32:21+08:00` — 写回 SavePanel 修复、H.264 temporal 实际导出和 ffprobe 结果；带音频对拍仍保留为未闭环项。
+- `2026-08-21T16:08:41+08:00` — 写回时间轴范围交互代码切片、85 个时间轴测试、最新安装包哈希，以及带音频 fixture 的 V1/A1 波形、seek、暂停证据；范围坐标拖动和带音频导出仍保持 partial。
+- `2026-08-21T16:29:21+08:00` — 补充真实 happy-dom PointerEvent 覆盖，时间轴回归更新为 8 files / 88 tests；最终 range 修复包 `1e271571…` 已重新构建并安装，范围桌面拖动证据仍受 Computer Use 坐标接口限制。
+- `2026-08-21T16:36:24+08:00` — 修复最终端点 sticky snap 时序和 Shift range 原始起点，补齐反向/同帧/mark cancel/lost-capture PointerEvent 覆盖；最终包 `03bdcef3…` 已安装。

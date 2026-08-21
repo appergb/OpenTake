@@ -167,6 +167,8 @@
 
   验证选中、拖动、修剪、分割、删除、复制/粘贴、范围、轨道操作、吸附、播放头和键盘快捷键，确保不只是在 store 测试里通过。
 
+  当前进展（2026-08-21）：`TimelineContainer` 已完成一个 bounded range slice：Shift+标尺 range mark、已有范围 start/end 边缘命中/拖动、clip-edge/playhead snap、pointercancel/lostpointercapture 回滚、同帧清除和最终端点 sticky snap 时序；新增 happy-dom PointerEvent 测试后时间轴目录为 8 files / 88 tests，tsc、Web build 通过。最终安装包 `03bdcef3…` 已安装，但 Computer Use 坐标拖动返回 `noWindowsAvailable`，范围拖动、`Shift+Delete` 以及删除前后 Undo/Redo 的安装版对拍继续保持未完成。
+
 ### Task 5: 收敛预览、播放、RenderPlan 和导出闭环
 
 **Files:**
