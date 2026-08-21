@@ -155,7 +155,7 @@
 
   Mark only the proven portion in the ledger; keep `UP-PREVIEW-PLAYBACK` partial until temporal playback, audio timing, and preview/export frame evidence all pass. Update the desktop matrix with exact actions and results.
 
-**Current result:** temporal route/native/source-frame and installed-app screen checks pass; Step 3 remains open because this run did not produce a fresh preview-vs-export start/middle/end frame comparison or independent audio-sync evidence.
+**Current result:** temporal route/native/source-frame, installed-app screen checks, and H.264 SavePanel/export/ffprobe checks pass; Step 3 remains open for a fresh preview-vs-export start/middle/end comparison with a带音频 fixture and independent audio-sync evidence.
 
 ## Completion Conditions
 

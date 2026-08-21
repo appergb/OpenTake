@@ -27,7 +27,7 @@ skip_when:
   - 仅修改零 IO 的 domain 算法且不改变 UI 合同
 priority: must
 freshness_class: project
-last_verified: 2026-08-21T14:51:41+08:00
+last_verified: 2026-08-21T15:32:21+08:00
 owners:
   - OpenTake-generation
 source_of_truth:
@@ -85,6 +85,7 @@ tags:
 | Agent | 面板入口 | Agent 面板、新建对话标签、输入框出现；发送按钮禁用 | 通过 | 不发送外部消息；补本地失败/取消路径 |
 | Motion | Studio 入口 | HTML/CSS 编辑器、预览、参数检查器、关键帧时间线出现；播放帧推进 | 通过 | 验证发布、透明输出和导入时间线 |
 | Export | 导出面板 | 导出视频面板可打开，格式/分辨率/取消/导出可见 | 通过 | 复制目标路径后完成导出并 ffprobe |
+| Export | temporal 视频实际导出 | 修复 SavePanel filters 后，原生 Save 按钮可用；H.264 temporal QA 导出成功，应用显示 3840×2160 / 160 帧，ffprobe 显示 H.264、60fps、2.666667s | 通过（H.264 视频） | H.265/ProRes、带音频/字幕、取消和 preview/export 像素对拍仍待矩阵化 |
 | Help | 菜单 | 快捷键/MCP 说明可展开；教程/反馈显示 Beta 禁用 | 通过 | 记录禁用原因和可用边界 |
 | Library | 全局素材库 | AX 可读分类、搜索、排序；部分截图曾未重绘，当前复测仍需重复 | 部分 | 在窗口修复后重跑可见性和空态 |
 
@@ -105,7 +106,7 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - 代码 review：首轮 F1（无 monitor fallback）、F2（fresh install 默认档位）、F3（Home 真实 DOM/CSS contract）、F4（Settings 高度 contract）均已在 review loop 收口；最终 scoped review 无新 Critical/Important。
 - App 构建：release `.app` 已生成并安装；DMG bundle 脚本因超过一分钟无输出被停止，DMG 不在本轮交付证据内。
 - 本轮主线 fresh verification：Preview/Store/Media 4 files / 91 tests passed；MediaActions/MediaPanel 2 files / 59 tests passed；`pnpm build` exit 0。
-- 全量 Web 串行门禁：150 files / 1404 tests passed；运行时使用显式 localStorage file 和单 worker。
+- 全量 Web 串行门禁：150 files / 1405 tests passed；运行时使用已初始化 localStorage file 和单 worker。
 - Rust workspace：`cargo test --workspace` 与 `cargo fmt --all -- --check` 通过；仅保留明确标记为 ignored 的 real-device / optional fixture tests。
 - 最终 `.app`：`web/node_modules/.bin/tauri build --bundles app` exit 0；安装包 SHA-256 `02150854e418cd3c3dedad97d905f972ddad99e3a23d287ed1fcac42b15b40a0`；最终包再次实测两个媒体 Preview tabs 和关闭回退。
 
@@ -121,3 +122,4 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - `2026-08-21T12:09:35+08:00` — 写回 Preview tabs、文件/文件夹/relink 导入和主线 fresh verification 结果。
 - `2026-08-21T13:12:31+08:00` — 写回媒体 folder/flat/grouped 三态、网格/列表密度、文件夹导航及音频子页的安装版验收结果。
 - `2026-08-21T14:51:41+08:00` — 写回 audio full-track 解码修复、compositor temporal preview/native parity、最新安装包和全量 Web/Rust 门禁结果。
+- `2026-08-21T15:32:21+08:00` — 写回 SavePanel 修复、H.264 temporal 实际导出和 ffprobe 结果；带音频对拍仍保留为未闭环项。

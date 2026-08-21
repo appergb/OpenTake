@@ -18,7 +18,7 @@ skip_when:
   - 仅查看单个内部函数
 priority: must
 freshness_class: project
-last_verified: 2026-08-21T14:51:41+08:00
+last_verified: 2026-08-21T15:32:21+08:00
 owners:
   - OpenTake-generation
 source_of_truth:
@@ -98,7 +98,7 @@ tags:
 - 旧的并行 Web 门禁曾受 Node 26 共享 localStorage 影响；当前统一使用显式 localStorage 文件和单 worker，最新串行门禁已 150/150 files、1404/1404 tests 通过。
 - 文件导入定向回归：`mediaActions` + `MediaPanel` 为 2 files / 59 tests passed；Preview/媒体/Store 定向回归为 4 files / 91 tests passed；两条切片均已安装版验证。
 - 主线 fresh verification（2026-08-21 12:09 +08:00）：Preview/Store/Media 4 files / 91 tests passed；MediaActions/MediaPanel 2 files / 59 tests passed；`pnpm build` exit 0；仅保留既有 Vite chunk warnings。
-- 全量 Web 串行门禁（2026-08-21 14:48 +08:00）：`NODE_OPTIONS=--localstorage-file=/tmp/opentake-vitest-localstorage-temporal-final.json pnpm exec vitest run --maxWorkers=1` → 150 files / 1404 tests passed。
+- 全量 Web 串行门禁（2026-08-21 15:32 +08:00）：`NODE_OPTIONS=--localstorage-file=/tmp/opentake-vitest-localstorage-temporal-final.json pnpm exec vitest run --maxWorkers=1` → 150 files / 1405 tests passed；使用新 localStorage 文件会触发既有 locale/异步测试状态假失败，已保留为运行约束。
 - Rust workspace 门禁（2026-08-21 14:48 +08:00）：`cargo test --workspace` 通过；新增/修复的 `opentake-media` full-track PCM、RenderPlan temporal 和 native playback tests 均通过。`cargo fmt --all -- --check` 同样通过。
 
 ## Media View Modes 新鲜验收证据
@@ -116,7 +116,9 @@ tags:
 - 代码提交：`a833764`（compositor temporal 路由）、`1013355`（多视频 temporal fail-closed）、`dafd5eb`（native Preview surface）、`3e124dc`（source frame 回退时 reset stream）。
 - Web：路由 16/16，Preview/engine 44/44，串行全量 150 files / 1404 tests，`pnpm build` 均通过。
 - Rust：`opentake-media` 432 tests + integration 通过；`opentake-render plan` 46 tests；native playback transport 8 tests；engine 11、transport 7 tests；workspace 全量通过。
-- 安装版：最新 `/Applications/OpenTake.app` SHA-256 `a2c53dd6589e20fa36d3613779206650937ecb5439829b7f85058a3466c66b84`。Computer Use 在临时 QA 工程中设置速度 `1.5x` 和曝光 `0.50`，时间线预览无 unsupported surface、画面可见、播放头可到尾帧、暂停后抓帧按钮可用；完整 preview/export 起中尾帧和音频对拍仍未完成。
+- 安装版：最新 `/Applications/OpenTake.app` SHA-256 `5ec5c430021ed5e9210deae538defffdcb09a539c05cf2901b14ed588242acc9`。Computer Use 在临时 QA 工程中设置速度 `1.5x` 和曝光 `0.50`，时间线预览无 unsupported surface、画面可见、播放头可到尾帧、暂停后抓帧按钮可用；视频 SavePanel 修复后 Save 按钮可用，`temporal-export-test.mp4` 与 `temporal-remap-plain.mp4` 均成功生成并通过 ffprobe；带音频 fixture 的同步对拍仍未完成。
+
+- 视频导出 SavePanel：`35801f8` 移除 macOS 视频保存 filters，保留 codec→扩展名和 `withExt`；focused ExportDialog 11/11、H.264 临时导出 160 帧 / 2.666667s / H.264 通过。
 
 ## Related Documents
 
