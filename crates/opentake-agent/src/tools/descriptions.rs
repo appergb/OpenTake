@@ -120,7 +120,7 @@ pub fn description(tool: ToolName) -> &'static str {
 
         ToolName::PreviewMotionDocument => "Renders one bounded frame from the exact saved Motion Studio revision with the production Chromium renderer. Returns a PNG and diagnostics; it never changes the document or timeline.",
 
-        ToolName::PublishMotionDocument => "Publishes the exact saved Motion Studio revision through the production Chromium/FFmpeg atomic timeline path. Omit clipId and provide startFrame to add a clip; provide clipId and omit startFrame to replace that existing Motion clip. Returns committed clip/media ids and source revision.",
+        ToolName::PublishMotionDocument => "Publishes the exact saved Motion Studio revision through the production Chromium/FFmpeg atomic timeline path. Omit clipId and provide startFrame to add a clip; set transparent=true for a ProRes 4444 .mov with alpha. Provide clipId and omit startFrame to replace that existing Motion clip; transparent output is currently supported only for new clips. Returns committed clip/media ids and source revision.",
 
         ToolName::TrackMotion => "Analyzes a bounded source region and returns editable position keyframes that follow the subject. Defaults to preview-only; set apply=true only after reviewing confidence and samples. Applying is one undoable edit. The tool is advertised only when a production tracking backend is available.",
         ToolName::GenerateMatte => "Generates a frame-aligned reusable alpha matte for one clip without modifying the source asset. Defaults to preview-only and reports model/version/progress metadata. Applying the matte is one undoable edit. The tool is advertised only when an installed compatible model is available.",
@@ -807,6 +807,7 @@ pub fn input_schema(tool: ToolName) -> Value {
                 "durationFrames": {"type": "integer", "minimum": 1, "maximum": 3600},
                 "startFrame": {"type": "integer", "minimum": 0, "description": "Required for add; omit for edit."},
                 "trackIndex": {"type": "integer", "minimum": 0, "description": "Optional existing visual track for add."},
+                "transparent": {"type": "boolean", "description": "For a new clip only, publish a transparent ProRes 4444 .mov with alpha instead of opaque MP4."},
                 "clipId": {"type": "string", "description": "Existing Motion clip to replace; omit for add."}
             }),
             &[

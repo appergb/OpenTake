@@ -984,7 +984,7 @@ impl TauriMotionDocumentOperation {
                     start_frame: request.start_frame.expect("validated at Agent boundary"),
                     duration_frames: request.duration_frames,
                     track_index: request.track_index,
-                    transparent: false,
+                    transparent: request.transparent,
                 },
                 cancel,
             )
