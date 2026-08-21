@@ -355,6 +355,17 @@ fn validate_export_operation_id(operation_id: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_export_cancel_sources(
+    control: Option<&ExportControl>,
+    external_cancel: Option<&MediaCancelToken>,
+) -> Result<(), String> {
+    if control.is_some() && external_cancel.is_some() {
+        Err("export cannot combine control and external cancellation sources".to_string())
+    } else {
+        Ok(())
+    }
+}
+
 /// `cancel_export`: request that the in-flight export (if any) stop at its next
 /// cancellation checkpoint. The request must name the operation that exposed
 /// the cancel control; stale requests cannot target a successor generation.
@@ -787,8 +798,18 @@ where
     decode(path, &AUDIO_DECODE_SPEC, range, &cancel, progress)
 }
 
+#[cfg(test)]
 fn check_audio_cancel(control: &ExportControl) -> Result<(), String> {
-    if control.is_cancelled() {
+    check_audio_cancel_with_external(Some(control), None)
+}
+
+fn check_audio_cancel_with_external(
+    control: Option<&ExportControl>,
+    external_cancel: Option<&MediaCancelToken>,
+) -> Result<(), String> {
+    if control.is_some_and(ExportControl::is_cancelled)
+        || external_cancel.is_some_and(MediaCancelToken::is_cancelled)
+    {
         Err(CANCELLED_SENTINEL.to_string())
     } else {
         Ok(())
@@ -801,10 +822,20 @@ fn retime_pcm_to_len(samples: &[f32], target_len: usize) -> Vec<f32> {
         .expect("retime without cancellation cannot fail")
 }
 
+#[cfg(test)]
 fn retime_pcm_to_len_with_control(
     samples: &[f32],
     target_len: usize,
     control: Option<&ExportControl>,
+) -> Result<Vec<f32>, String> {
+    retime_pcm_to_len_with_external(samples, target_len, control, None)
+}
+
+fn retime_pcm_to_len_with_external(
+    samples: &[f32],
+    target_len: usize,
+    control: Option<&ExportControl>,
+    external_cancel: Option<&MediaCancelToken>,
 ) -> Result<Vec<f32>, String> {
     if samples.is_empty() || target_len == 0 {
         return Ok(Vec::new());
@@ -815,9 +846,7 @@ fn retime_pcm_to_len_with_control(
     let mut retimed = Vec::with_capacity(target_len);
     for index in 0..target_len {
         if index.is_multiple_of(AUDIO_CANCEL_CHUNK_SAMPLES) {
-            if let Some(control) = control {
-                check_audio_cancel(control)?;
-            }
+            check_audio_cancel_with_external(control, external_cancel)?;
         }
         let value = if samples.len() == 1 || target_len == 1 {
             samples[0]
@@ -976,17 +1005,29 @@ fn project_clip_audio<T: AudioPlanLike>(
     }))
 }
 
+#[cfg(test)]
 fn apply_export_denoise(
     samples: &[f32],
     channels: usize,
     config: Option<AudioDenoise>,
     control: Option<&ExportControl>,
 ) -> Result<Vec<f32>, String> {
+    apply_export_denoise_with_external(samples, channels, config, control, None)
+}
+
+fn apply_export_denoise_with_external(
+    samples: &[f32],
+    channels: usize,
+    config: Option<AudioDenoise>,
+    control: Option<&ExportControl>,
+    external_cancel: Option<&MediaCancelToken>,
+) -> Result<Vec<f32>, String> {
     let Some(config) = config else {
         return Ok(samples.to_vec());
     };
     let cancel = control
         .map(ExportControl::media_cancel_token)
+        .or_else(|| external_cancel.cloned())
         .unwrap_or_default();
     opentake_media::analysis::denoise_interleaved(
         samples,
@@ -1032,6 +1073,7 @@ fn mix_timeline_audio(
             start_frame: 0,
             end_frame: timeline.total_frames(),
             control,
+            external_cancel: None,
             on_progress,
         },
         |samples| {
@@ -1053,6 +1095,7 @@ struct AudioStreamOptions<'a> {
     start_frame: i32,
     end_frame: i32,
     control: Option<&'a ExportControl>,
+    external_cancel: Option<&'a MediaCancelToken>,
     on_progress: Option<AudioExportProgress>,
 }
 
@@ -1067,6 +1110,7 @@ fn stream_flattened_audio<T: AudioPlanLike>(
         start_frame,
         end_frame,
         control,
+        external_cancel,
         on_progress,
     } = options;
     if timeline_fps <= 0 || start_frame >= end_frame {
@@ -1104,12 +1148,11 @@ fn stream_flattened_audio<T: AudioPlanLike>(
         .min_by(f64::total_cmp);
     let cancel = control
         .map(ExportControl::media_cancel_token)
+        .or_else(|| external_cancel.cloned())
         .unwrap_or_default();
 
     for relative_start in (0..total_samples).step_by(AUDIO_STREAM_WINDOW_SAMPLES) {
-        if let Some(control) = control {
-            check_audio_cancel(control)?;
-        }
+        check_audio_cancel_with_external(control, external_cancel)?;
         let window_len = AUDIO_STREAM_WINDOW_SAMPLES.min(total_samples - relative_start);
         let window_start = range_start.saturating_add(relative_start);
         let window_end = window_start.saturating_add(window_len);
@@ -1147,7 +1190,16 @@ fn stream_flattened_audio<T: AudioPlanLike>(
                     None,
                     extract_pcm_cancellable_with_progress,
                 ),
-                None => extract_pcm(&info.path, &AUDIO_DECODE_SPEC, Some(source_range)),
+                None => match external_cancel {
+                    Some(cancel) => extract_pcm_cancellable_with_progress(
+                        &info.path,
+                        &AUDIO_DECODE_SPEC,
+                        Some(source_range),
+                        cancel,
+                        None,
+                    ),
+                    None => extract_pcm(&info.path, &AUDIO_DECODE_SPEC, Some(source_range)),
+                },
             };
             let pcm = match decoded {
                 Ok(pcm) => pcm,
@@ -1163,14 +1215,23 @@ fn stream_flattened_audio<T: AudioPlanLike>(
                 }
             };
             let target_len = overlap_end - overlap_start;
-            let retimed = retime_pcm_to_len_with_control(&pcm.samples_f32, target_len, control)?;
-            let processed = apply_export_denoise(&retimed, 1, plan.audio_denoise(), control)?;
+            let retimed = retime_pcm_to_len_with_external(
+                &pcm.samples_f32,
+                target_len,
+                control,
+                external_cancel,
+            )?;
+            let processed = apply_export_denoise_with_external(
+                &retimed,
+                1,
+                plan.audio_denoise(),
+                control,
+                external_cancel,
+            )?;
             let output_start = overlap_start - window_start;
             for (offset, sample) in processed.into_iter().take(target_len).enumerate() {
                 if offset.is_multiple_of(AUDIO_CANCEL_CHUNK_SAMPLES) {
-                    if let Some(control) = control {
-                        check_audio_cancel(control)?;
-                    }
+                    check_audio_cancel_with_external(control, external_cancel)?;
                 }
                 let absolute_sample = overlap_start.saturating_add(offset);
                 let timeline_frame = ((absolute_sample as f64 / MIX_SAMPLE_RATE as f64)
@@ -1191,7 +1252,7 @@ fn stream_flattened_audio<T: AudioPlanLike>(
                 AUDIO_MIX_START + (completed.saturating_mul(span) / total_samples.max(1)) as i32;
             report(mapped, AUDIO_PROGRESS_TOTAL);
         }
-        if cancel.checkpoint() {
+        if cancel.checkpoint() || external_cancel.is_some_and(MediaCancelToken::is_cancelled) {
             return Err(CANCELLED_SENTINEL.to_string());
         }
     }
@@ -1236,6 +1297,7 @@ pub(crate) fn write_timeline_audio_wav_for_manifest_with_control(
             start_frame: 0,
             end_frame,
             control: Some(control),
+            external_cancel: None,
             on_progress: on_progress.clone(),
         },
         |samples| {
@@ -1374,6 +1436,83 @@ pub(crate) struct ExportRunOptions<'a> {
     pub(crate) defer_completion: bool,
 }
 
+/// Best-effort cleanup for a normal video export's partial output. The parent
+/// directory is opened before the output file is created and the output handle
+/// is retained by the guard, so even encoder initialization failures clean the
+/// same inode through the identity-safe removal path. Reserved project-media
+/// outputs stay owned by `ProjectMediaOutput`, whose descriptor/identity-safe
+/// Drop path performs the stronger cleanup contract.
+struct ExportOutputCleanup {
+    enabled: bool,
+    active: bool,
+    succeeded: bool,
+    directory: Option<File>,
+    file: Option<File>,
+    final_name: Option<OsString>,
+}
+
+impl ExportOutputCleanup {
+    fn new(path: PathBuf, enabled: bool) -> Result<Self, String> {
+        if !enabled {
+            return Ok(Self {
+                enabled,
+                active: false,
+                succeeded: false,
+                directory: None,
+                file: None,
+                final_name: None,
+            });
+        }
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let final_name = path
+            .file_name()
+            .ok_or_else(|| "export output has no file name".to_string())?
+            .to_os_string();
+        let directory = open_media_directory_nofollow(parent)?;
+        Ok(Self {
+            enabled,
+            active: true,
+            succeeded: false,
+            directory: Some(directory),
+            file: None,
+            final_name: Some(final_name),
+        })
+    }
+
+    fn attach_output(&mut self, output: File) {
+        if self.enabled {
+            self.file = Some(output);
+        }
+    }
+
+    fn encoder_file(&self) -> Result<File, String> {
+        self.file
+            .as_ref()
+            .ok_or_else(|| "export cleanup output handle is not attached".to_string())?
+            .try_clone()
+            .map_err(|error| format!("clone export output for encoder: {error}"))
+    }
+
+    fn mark_success(&mut self) {
+        self.succeeded = true;
+    }
+}
+
+impl Drop for ExportOutputCleanup {
+    fn drop(&mut self) {
+        if self.enabled && self.active && !self.succeeded {
+            if let (Some(directory), Some(file), Some(final_name)) =
+                (&self.directory, &self.file, &self.final_name)
+            {
+                if let Err(error) = destroy_and_remove_reserved_output(directory, file, final_name)
+                {
+                    eprintln!("[export] failed to clean ordinary partial output: {error}");
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn run_export_with_control(
     timeline: &opentake_domain::Timeline,
     manifest: &opentake_domain::MediaManifest,
@@ -1383,6 +1522,7 @@ pub(crate) fn run_export_with_control(
 ) -> Result<ExportSummary, String> {
     let control = options.control;
     let external_cancel = options.external_cancel.clone();
+    validate_export_cancel_sources(control, external_cancel.as_ref())?;
     let on_progress = options.on_progress;
     let defer_completion = options.defer_completion;
     let reserved_output = options.output_file.is_some();
@@ -1430,23 +1570,26 @@ pub(crate) fn run_export_with_control(
     // the preview path (render.rs) deliberately stays lenient.
     ensure_text_export_fonts(!plan.text_plans.is_empty(), &text_rasterizer)?;
 
-    let mut encoder = match options.output_file.take() {
-        Some(output) => VideoEncoder::new_with_file(
-            &out_path,
-            output,
-            render_size.width,
-            render_size.height,
-            plan.fps,
-            &preset,
-        ),
-        None => VideoEncoder::new(
-            &out_path,
-            render_size.width,
-            render_size.height,
-            plan.fps,
-            &preset,
-        ),
-    }
+    // Declare this before the encoder so Rust drops the encoder first (which
+    // reaps ffmpeg) and only then removes an error/cancelled partial output.
+    let mut output_cleanup = ExportOutputCleanup::new(out_path.clone(), !reserved_output)?;
+    let encoder_output = match options.output_file.take() {
+        Some(output) => output,
+        None => {
+            let output = VideoEncoder::open_output_file(&out_path)
+                .map_err(|error| format!("open export output: {error}"))?;
+            output_cleanup.attach_output(output);
+            output_cleanup.encoder_file()?
+        }
+    };
+    let mut encoder = VideoEncoder::new_with_file(
+        &out_path,
+        encoder_output,
+        render_size.width,
+        render_size.height,
+        plan.fps,
+        &preset,
+    )
     .map_err(|e| format!("encoder init failed: {e}"))?;
 
     let (start_frame, end_frame) = match options.frame_range {
@@ -1475,9 +1618,6 @@ pub(crate) fn run_export_with_control(
             // Best-effort cleanup of the partial file — a leftover half-encoded
             // video must not look like a finished export. Missing/unwritable is
             // not itself an error worth surfacing over the cancel.
-            if !reserved_output {
-                let _ = std::fs::remove_file(&out_path);
-            }
             return Err(CANCELLED_SENTINEL.to_string());
         }
 
@@ -1515,9 +1655,6 @@ pub(crate) fn run_export_with_control(
             .map_err(|e| format!("composite render failed at frame {f}: {e}"))?;
         if let Some(error) = resolver.materialization_error.take() {
             encoder.abort();
-            if !reserved_output {
-                let _ = std::fs::remove_file(&out_path);
-            }
             return Err(format!(
                 "Lottie materialization failed at frame {f}: {error}"
             ));
@@ -1560,6 +1697,7 @@ pub(crate) fn run_export_with_control(
     });
     let cancel = control
         .map(ExportControl::media_cancel_token)
+        .or_else(|| external_cancel.clone())
         .unwrap_or_default();
     let has_audio = stream_flattened_audio(
         &plan.audio_clips,
@@ -1569,6 +1707,7 @@ pub(crate) fn run_export_with_control(
             start_frame,
             end_frame,
             control,
+            external_cancel: external_cancel.as_ref(),
             on_progress: audio_progress,
         },
         |samples| {
@@ -1594,22 +1733,13 @@ pub(crate) fn run_export_with_control(
     ) {
         Ok(()) => {}
         Err(opentake_media::MediaError::Cancelled) => {
-            if !reserved_output {
-                let _ = std::fs::remove_file(&out_path);
-            }
             return Err(CANCELLED_SENTINEL.to_string());
         }
         Err(error) => {
-            if !reserved_output {
-                let _ = std::fs::remove_file(&out_path);
-            }
             return Err(format!("encoder finish failed: {error}"));
         }
     }
     if control.is_some_and(ExportControl::is_cancelled) {
-        if !reserved_output {
-            let _ = std::fs::remove_file(&out_path);
-        }
         return Err(CANCELLED_SENTINEL.to_string());
     }
     // Post-encode verification (mirrors motion.rs's post-encode probe): the
@@ -1637,9 +1767,6 @@ pub(crate) fn run_export_with_control(
             .map_err(|error| format!("output validation failed: {error}"))
             .and_then(|probe| validate_export_probe(&probe, &expectations));
         if let Err(error) = probe_result {
-            if !reserved_output {
-                let _ = std::fs::remove_file(&out_path);
-            }
             return Err(error);
         }
     }
@@ -1647,6 +1774,7 @@ pub(crate) fn run_export_with_control(
         emit(completion_progress(defer_completion), AUDIO_PROGRESS_TOTAL);
     }
 
+    output_cleanup.mark_success();
     Ok(ExportSummary {
         out_path: req.out_path.clone(),
         width: render_size.width,
@@ -2750,6 +2878,29 @@ mod tests {
     }
 
     #[test]
+    fn external_cancel_is_seen_by_audio_checkpoint() {
+        let external = MediaCancelToken::new();
+        assert!(check_audio_cancel_with_external(None, Some(&external)).is_ok());
+        external.cancel();
+        assert_eq!(
+            check_audio_cancel_with_external(None, Some(&external)).unwrap_err(),
+            CANCELLED_SENTINEL
+        );
+    }
+
+    #[test]
+    fn export_rejects_ambiguous_cancel_sources() {
+        let control = ExportControl::default();
+        let external = MediaCancelToken::new();
+        assert_eq!(
+            validate_export_cancel_sources(Some(&control), Some(&external)).unwrap_err(),
+            "export cannot combine control and external cancellation sources"
+        );
+        assert!(validate_export_cancel_sources(Some(&control), None).is_ok());
+        assert!(validate_export_cancel_sources(None, Some(&external)).is_ok());
+    }
+
+    #[test]
     fn export_control_rejects_invalid_external_operation_ids() {
         let control = ExportControl::default();
 
@@ -3477,6 +3628,77 @@ mod tests {
 
         assert_eq!(result.unwrap_err(), "render failed");
         assert!(!output.exists());
+    }
+
+    #[test]
+    fn export_output_cleanup_removes_active_partial_output_on_drop() {
+        let project = tempfile::tempdir().expect("project");
+        let output = project.path().join("partial.mp4");
+        fs::write(&output, b"partial").expect("partial output");
+        let output_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&output)
+            .expect("open partial output");
+
+        let mut cleanup = ExportOutputCleanup::new(output.clone(), true).expect("create cleanup");
+        cleanup.attach_output(output_file);
+        let _encoder_file = cleanup.encoder_file().expect("clone encoder file");
+        drop(cleanup);
+
+        assert!(!output.exists());
+    }
+
+    #[test]
+    fn export_output_cleanup_keeps_successful_output_and_reserved_output() {
+        let project = tempfile::tempdir().expect("project");
+        let successful = project.path().join("successful.mp4");
+        fs::write(&successful, b"complete").expect("successful output");
+        let successful_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&successful)
+            .expect("open successful output");
+        let mut keep = ExportOutputCleanup::new(successful.clone(), true).expect("create cleanup");
+        keep.attach_output(successful_file);
+        let _encoder_file = keep.encoder_file().expect("clone encoder file");
+        keep.mark_success();
+        drop(keep);
+        assert!(successful.exists());
+
+        let reserved = project.path().join("reserved.mp4");
+        fs::write(&reserved, b"reserved").expect("reserved output");
+        let reserved_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&reserved)
+            .expect("open reserved output");
+        let mut reserved_cleanup =
+            ExportOutputCleanup::new(reserved.clone(), false).expect("create cleanup");
+        reserved_cleanup.attach_output(reserved_file);
+        drop(reserved_cleanup);
+        assert!(reserved.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_output_cleanup_does_not_remove_a_replaced_visible_path() {
+        let project = tempfile::tempdir().expect("project");
+        let output = project.path().join("race.mp4");
+        let moved = project.path().join("race-original.mp4");
+        fs::write(&output, b"original").expect("original output");
+        let output_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&output)
+            .expect("open original output");
+        let mut cleanup = ExportOutputCleanup::new(output.clone(), true).expect("create cleanup");
+        cleanup.attach_output(output_file);
+        fs::rename(&output, &moved).expect("move original output");
+        fs::write(&output, b"replacement").expect("replacement output");
+        drop(cleanup);
+
+        assert_eq!(fs::read(&output).expect("read replacement"), b"replacement");
     }
 
     #[test]
