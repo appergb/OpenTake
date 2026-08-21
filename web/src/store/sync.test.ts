@@ -165,6 +165,65 @@ afterEach(() => {
 });
 
 describe("project event sync", () => {
+  it("clamps both playhead values when a refresh shortens the timeline", async () => {
+    const previousTimeline = srv.timeline;
+    srv.timeline = {
+      fps: 30,
+      width: 1280,
+      height: 720,
+      settingsConfigured: true,
+      tracks: [
+        {
+          id: "v1",
+          type: "video",
+          muted: false,
+          hidden: false,
+          syncLocked: true,
+          clips: [
+            {
+              id: "clip-short",
+              mediaRef: "media",
+              mediaType: "video",
+              sourceClipType: "video",
+              startFrame: 0,
+              durationFrames: 90,
+              trimStartFrame: 0,
+              trimEndFrame: 0,
+              speed: 1,
+              volume: 1,
+              fadeInFrames: 0,
+              fadeOutFrames: 0,
+              fadeInInterpolation: "linear",
+              fadeOutInterpolation: "linear",
+              opacity: 1,
+              transform: {
+                centerX: 0.5,
+                centerY: 0.5,
+                width: 1,
+                height: 1,
+                rotation: 0,
+                flipHorizontal: false,
+                flipVertical: false,
+              },
+              crop: { left: 0, top: 0, right: 0, bottom: 0 },
+            },
+          ],
+        },
+      ],
+    };
+    useProjectStore.setState({ projectEpoch: 1, timelineVersion: 0, projectPath: null });
+    useEditorUiStore.setState({ currentFrame: 231, activeFrame: 231 });
+    srv.snapshotResponses.push(Promise.resolve(snapshot(1, 1, null)));
+
+    try {
+      await forceRefresh();
+      expect(useEditorUiStore.getState().currentFrame).toBe(90);
+      expect(useEditorUiStore.getState().activeFrame).toBe(90);
+    } finally {
+      srv.timeline = previousTimeline;
+    }
+  });
+
   it("refreshes again after both listeners register so an event in the setup gap is not lost", async () => {
     srv.snapshotResponses.push(
       Promise.resolve(snapshot(1, 0, "/tmp/old.opentake")),

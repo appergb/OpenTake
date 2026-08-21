@@ -27,7 +27,7 @@ skip_when:
   - 仅修改零 IO 的 domain 算法且不改变 UI 合同
 priority: must
 freshness_class: project
-last_verified: 2026-08-21T22:32:49+08:00
+last_verified: 2026-08-21T23:09:09+08:00
 owners:
   - OpenTake-generation
 source_of_truth:
@@ -78,7 +78,7 @@ tags:
 | Timeline | 播放/暂停 | 播放头从 0 推进到约 54，时间从 00:00:00 推进到约 00:01:24 | 通过 | 增加暂停/恢复/seek/尾帧证据 |
 | Timeline | 选中片段 | 选中 `sample-text-0` 后 Inspector 切换到文本属性 | 通过 | 补选区、拖拽、删除和 undo |
 | Timeline | 播放头处分割 | 初始在帧 0 或片段外尝试时无变化；补齐有效前置条件（选中 `sample-text-0`、播放头推进到帧 15）后成功新增片段、撤销变可用 | 通过（有效前置条件） | 新构建 app AX：分割后出现 UUID 片段；`cargo test -p opentake-ops split_clip_distributes_keyframes_at_cut` 通过 |
-| Timeline | 入点/出点范围与范围边缘 | `TimelineContainer` 已接入 Shift+标尺 range mark、已有范围 start/end 边缘命中与拖动、clip-edge/playhead snap、pointercancel 回滚和同帧清除；Option trim 改为只修剪主 clip，普通 trim 保持 linked propagation；Web 全量 151 files / 1414 tests 通过。最新包屏幕上已完成播放到尾帧、有效分割产生 V/A 两组片段、Undo 恢复；选中 linked V1 后 Shift+Backspace 删除 V1/A1、保留 Motion clip，Undo 恢复成功；Option trim 坐标拖动仍被 sky 返回 `noWindowsAvailable` | 部分 | 继续补可复现的安装版 Option trim、范围删除状态对拍 |
+| Timeline | 入点/出点范围与范围边缘 | `TimelineContainer` 已接入 Shift+标尺 range mark、已有范围 start/end 边缘命中与拖动、clip-edge/playhead snap、pointercancel 回滚和同帧清除；Option trim 改为只修剪主 clip，普通 trim 保持 linked propagation；最新包按上游顺序完成 I/O 标记整段范围→再选 V1 锚点→Shift+Backspace，V1/A1 联动删除、Motion 保留，删除后播放头从 7.7s 合法收敛到 3.0s，Undo 恢复三条轨道；Web 全量 151 files / 1415 tests 通过 | 通过（范围删除/Undo/播放头屏幕对拍；Option trim 仍 partial） | 继续补可复现的安装版 Option trim，以及部分范围/多片段场景 |
 | Inspector | 片段属性与 AI 编辑 | 选中 V1 后视频 Inspector 展开 131 项，覆盖变换、裁剪、翻转、淡入淡出、运动追踪、防抖、RVM 抠像、速度和调色；水平翻转可切换并由 Undo 恢复；音频页能显示音量/响度/降噪/人声分离；AI 编辑页能生成本地建议，应用后显示“可撤销编辑命令”，撤销成功 | 通过（入口/可撤销行为） | 数值控件逐项边界、关键帧落盘重开和本地模型分析仍待 |
 | Preview | 带音频 fixture 的导入/波形/seek/暂停 | `nested-timeline-compound-export-2026-07-31.mp4`：7.700s、H.264 1280×720/30fps/231帧 + AAC 48kHz 单声道；安装版出现 V1+A1、A1 波形和音频 Inspector，已操作起点/中点/终点 seek，连续暂停状态稳定 | 部分 | 实时听感级同步和最新 cleanup 包的导出复测仍待 |
 | Preview | compositor temporal 预览 | 最新安装版在 QA 工程中设置 `speed=1.5` 和曝光 `0.50` compositor 属性后不再出现 unsupported surface；画面可见，播放头可到尾帧，暂停后抓帧按钮保持可用；speed/reversed 的首次 native render、JPEG publication、source-frame 映射由 Rust integration tests 锁定 | 通过（代码/native/屏幕组合证据） | 预览与导出起/中/尾帧、音频同步和取消仍在后续闭环 |
@@ -111,9 +111,9 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - 代码 review：首轮 F1（无 monitor fallback）、F2（fresh install 默认档位）、F3（Home 真实 DOM/CSS contract）、F4（Settings 高度 contract）均已在 review loop 收口；最终 scoped review 无新 Critical/Important。
 - App 构建：release `.app` 已生成并安装；DMG bundle 脚本因超过一分钟无输出被停止，DMG 不在本轮交付证据内。
 - 本轮主线 fresh verification：Preview/Store/Media 4 files / 91 tests passed；MediaActions/MediaPanel 2 files / 59 tests passed；`pnpm build` exit 0。
-- 全量 Web 串行门禁：`NODE_OPTIONS=--localstorage-file=/tmp/opentake-vitest-localstorage-option-trim.json pnpm exec vitest run --pool=forks --maxWorkers=1` → 151 files / 1414 tests passed；`pnpm build` exit 0。
+- 全量 Web 串行门禁：`NODE_OPTIONS=--localstorage-file=/tmp/opentake-vitest-range-refresh-full.json pnpm exec vitest run --pool=forks --maxWorkers=1` → 151 files / 1415 tests passed；`pnpm build` exit 0。
 - Rust workspace：`cargo test --workspace --jobs 1 -- --test-threads=1` 与 `cargo fmt --all -- --check` 通过；本轮包含缺失媒体 Preview/Playback fail-closed、透明 Motion ProRes 4444 集成和 RenderLoop 集成测试。全 workspace clippy 仍被既有 `chunks_exact`/`chunks_exact_mut` lint 阻塞，当前输出涉及 `opentake-media`、`opentake-motion` 等旧模块；一次未限并发运行在 motion sandbox 180s 超时，单独串行重跑通过，保留为 GPU/Chromium 资源争用风险；仅保留明确标记为 ignored 的 real-device / optional fixture tests。
-- 最终 `.app`：`web/node_modules/.bin/tauri build --bundles app` exit 0；当前安装包 SHA-256 `918eac845be23b4e5a528154ea95fbe321b871ab33bedbb1e7b05e0160c9551b`，构建产物 hash 一致；最新包已完成 Home 小屏、媒体预览 tab、播放/尾帧、分割/撤销、导出面板和 Motion 透明发布屏幕 smoke；Option trim/range delete/实际导出文件仍待。
+- 最终 `.app`：`web/node_modules/.bin/tauri build --bundles app` exit 0；当前安装包 SHA-256 `893b6ed082f6f8f4d70eeeb974d00ef11dafa2020075d69fc7629df83085d0ba`；最新包已完成 Home 小屏、媒体预览 tab、播放/尾帧、分割/撤销、范围删除/Undo、导出面板和 Motion 透明发布屏幕 smoke；Option trim/其它编码/字幕/取消导出仍待。
 
 ## Related Documents
 
@@ -145,3 +145,4 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - `2026-08-21T22:32:49+08:00` — 最新包完成 linked V1/A1 的 Shift+Backspace ripple delete 和 Undo 屏幕对拍：V1/A1 同时移除、Motion clip 保留、撤销恢复三条 clip；Option trim 坐标接口仍未提供可用窗口。
 - `2026-08-21T22:37:23+08:00` — 对透明 Motion 发布产物做文件级复核：QA 工程中的 `.mov` 为 ProRes 4444 `ap4h` / `yuva444p12le`、90 帧/3.000s；`alphaextract` 成功读取非全黑 alpha；`media.json` 保留 `generationInput.transparent: true`。透明专用导出 UI、opaque→transparent 编辑和其它编码格式仍保持待验证。
 - `2026-08-21T22:47:48+08:00` — 最新包完成 Inspector 视频/音频/AI 编辑页、可撤销翻转和本地 AI 建议应用/撤销；字幕页的缺失转写模型提示；Agent 对话标签新建/关闭、发送禁用和 `⌘⌥A` 收起布局恢复。模型下载、真实转写/字幕导出、MCP/Agent 工具调用仍保持待验证。
+- `2026-08-21T23:09:09+08:00` — 最新安装包 `893b6ed0…d0ba` 完成范围删除屏幕对拍：I/O 标记全范围后再选 V1 锚点，Shift+Backspace 删除 V1/A1 并保留 Motion，预览时长和播放头同步到 3.000s，Undo 恢复三条轨道；同步刷新新增 playhead clamp，Web 全量更新为 151 files / 1415 tests。

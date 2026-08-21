@@ -18,7 +18,7 @@ skip_when:
   - 仅查看单个内部函数
 priority: must
 freshness_class: project
-last_verified: 2026-08-21T22:32:49+08:00
+last_verified: 2026-08-21T23:09:09+08:00
 owners:
   - OpenTake-generation
 source_of_truth:
@@ -70,9 +70,9 @@ tags:
 - Rust：`DocumentMotionAddRequest.transparent` 已贯通到模板渲染、`MotionRenderRequest.with_transparent(true)`、ProRes 4444 `.mov` 编码和项目媒体落盘；title-card/lower-third 模板在透明模式下不填充不透明底色；编辑已有透明 Motion 时从 manifest provenance 保留 `.mov`/alpha 格式。
 - Manifest：`GenerationInput.transparent` 持久化为 `true`，`MediaManifestEntry::carries_straight_alpha()` 对透明 Motion 返回 `true`；既有 RVM matting provenance 规则保持不变。
 - Web/Agent：Motion Studio Inspector 新增“透明背景（ProRes 4444）”开关；预览请求保持原 schema，只有发布请求带 `transparent` 字段，切换项目时重置为关闭；Agent `add_motion_graphic` 和 `publish_motion_document` 的新增 clip 路径也接受透明发布，已有透明 clip 的文档编辑保留 alpha。
-- 自动化证据：`src-tauri/tests/motion_command.rs` 的透明发布集成测试验证 `.mov`、ProRes、64×36 尺寸、完全透明像素和半透明动画像素；Rust workspace 串行全量通过（Tauri 720 tests、Motion Chromium/integration、导出/播放等）；Web 全量 `151 files / 1414 tests`、Web build 通过。
+- 自动化证据：`src-tauri/tests/motion_command.rs` 的透明发布集成测试验证 `.mov`、ProRes、64×36 尺寸、完全透明像素和半透明动画像素；Rust workspace 串行全量通过（Tauri 720 tests、Motion Chromium/integration、导出/播放等）；Web 全量 `151 files / 1415 tests`、Web build 通过。
 - 文件级证据：`/private/tmp/opentake-audio-desktop-qa-L8Nvwh/audio-preview-export-qa.opentake/media/motion-0e4cacc9-161a-4704-a790-7e233397c8c4.mov` 被 `ffprobe` 识别为 `prores` profile `4444`、tag `ap4h`、pixel format `yuva444p12le`、90 帧/3.000s；`ffmpeg -vf alphaextract` 成功，抽样 alpha 平面为非全黑值；对应 `media.json` 的 `generationInput.transparent` 为 `true`。
-- 安装包：当前 `/Applications/OpenTake.app` 二进制 SHA-256 `918eac845be23b4e5a528154ea95fbe321b871ab33bedbb1e7b05e0160c9551b`，构建产物与安装包一致。最新包已通过透明开关/发布/落轨/保存重开屏幕路径；专用导出 UI、opaque→transparent 编辑和其它导出格式仍未完成。
+- 安装包：当前 `/Applications/OpenTake.app` 二进制 SHA-256 `893b6ed082f6f8f4d70eeeb974d00ef11dafa2020075d69fc7629df83085d0ba`。最新包已通过透明开关/发布/落轨/保存重开屏幕路径；专用导出 UI、opaque→transparent 编辑和其它导出格式仍未完成。
 
 ## 上游 linked A/V parity 当前切片
 
@@ -92,7 +92,7 @@ tags:
 - 本轮修复后，文件导入 MP4/PNG/双文件多选均能点 Open，导入后素材预览可见；文件夹导入成功出现目录并提示跳过 unsupported；relink 成功恢复离线媒体。
 - Preview tabs 已在安装版打开两个素材并验证关闭回退；当前 Preview/Media slice 的定向测试为 4 files / 91 tests passed。
 - Preview temporal parity 已补 route、native surface 和 source-frame rewind reset；安装版 QA 工程设置 `speed=1.5` + 曝光 compositor 属性后没有 unsupported surface，时间线可见、播放头可到尾帧、暂停后抓帧按钮可用。
-- 时间轴范围切片已补 Shift+标尺 range mark、已有范围 start/end 边缘命中/拖动、clip-edge/playhead snap、pointercancel/lost-capture 回滚和同帧清除；时间轴目录 8 files / 88 tests、tsc、Web build 通过。最终包 `03bdcef36def17646c64e6c40978e26b6b675a5d90874e3264d93a0e3351ce2e` 已安装；Computer Use 坐标拖动返回 `noWindowsAvailable`，所以没有把范围删除及 Undo/Redo 状态对拍升级为通过。
+- 时间轴范围切片已补 Shift+标尺 range mark、已有范围 start/end 边缘命中/拖动、clip-edge/playhead snap、pointercancel/lost-capture 回滚和同帧清除；最新安装包按上游顺序完成 I/O 标记范围→选 V1 锚点→Shift+Backspace，V1/A1 联动删除、Motion 保留、播放头/时间码同步到新 3 秒长度、Undo 恢复。同步刷新新增 playhead clamp；时间轴目录 8 files / 88 tests，Web 全量 151 files / 1415 tests、tsc、Web build 通过。Option trim 屏幕坐标拖动仍待。
 - 带音频 fixture `nested-timeline-compound-export-2026-07-31.mp4` 已通过 `ffmpeg -xerror` 音视频解码；安装版出现 V1+A1、A1 波形和音频 Inspector，并完成起点/中点/终点 seek 与暂停稳定性检查。fixture 为 7.700s H.264 1280×720/30fps/231帧 + AAC 48kHz 单声道；独立实时听感级音画同步仍未完成。
 - 带音频导出真实证据：在安装包 `03bdcef36def17646c64e6c40978e26b6b675a5d90874e3264d93a0e3351ce2e` 中生成 `/private/tmp/opentake-audio-export-qa-YPhWaR/qa-h264-aac-export.mp4`；ffprobe 为 H.264 1280×720/30fps/231 帧 + AAC 48kHz 单声道/362 包/7.700s，视频和音频均通过 `ffmpeg -xerror`。源/导出首中尾 SSIM：`0.999997 / 0.999997 / 1.000000`，帧文件在 `/private/tmp/opentake-audio-frame-compare.M2Jvfu/`。这证明一次真实 preview-source/export 对拍，但不是听感级实时同步证据；cleanup 版最新包 `ca08edf97441ce3b3c69b5683a3b7383997371952490c8897021772e521eed64` 的 SavePanel 复测仍保持 partial。
 - 导出失败边界：`0bae80e` 增加 identity-safe 普通输出 guard、replacement race 测试、双 cancel source fail-closed；`a7d98d6` 再拒绝最终输出路径的 symlink/reparse identity，并新增替换为 symlink 的回归测试。当前 `export::tests` 70/70、`opentake-media` cancel 18/18、带音频 integration 5/5 通过。
@@ -124,7 +124,7 @@ tags:
 
 ## 当前未闭环的全量门禁
 
-- 旧的并行 Web 门禁曾受 Node 26 共享 localStorage 影响；当前统一使用显式 localStorage 文件和单 worker，最新串行门禁已 151/151 files、1410/1410 tests 通过。
+- 旧的并行 Web 门禁曾受 Node 26 共享 localStorage 影响；当前统一使用显式 localStorage 文件和单 worker，最新串行门禁已 151/151 files、1415/1415 tests 通过。
 - 文件导入定向回归：`mediaActions` + `MediaPanel` 为 2 files / 59 tests passed；Preview/媒体/Store 定向回归为 4 files / 91 tests passed；两条切片均已安装版验证。
 - 主线 fresh verification（2026-08-21 12:09 +08:00）：Preview/Store/Media 4 files / 91 tests passed；MediaActions/MediaPanel 2 files / 59 tests passed；`pnpm build` exit 0；仅保留既有 Vite chunk warnings。
 - 全量 Web 串行门禁（2026-08-21 16:46 +08:00）：`NODE_OPTIONS=--localstorage-file=/tmp/opentake-vitest-localstorage-temporal-final.json pnpm -C web exec vitest run --maxWorkers=1` → 151 files / 1410 tests passed；使用新 localStorage 文件会触发既有 locale/异步测试状态假失败，已保留为运行约束。
@@ -175,3 +175,4 @@ tags:
 - `2026-08-21T22:32:49+08:00` — 最新包真实屏幕验证 linked V1/A1 的 Shift+Backspace ripple delete 与 Undo：伙伴同时删除、其它 Motion clip 保留、撤销恢复；时间轴剩余 Option trim/range 屏幕对拍继续保持 partial。
 - `2026-08-21T22:37:23+08:00` — 复核透明 Motion 文件级产物：真实 QA `.mov` 为 ProRes 4444 `ap4h` / `yuva444p12le`，alphaextract 可读且非全黑；能力仍因透明专用导出 UI、opaque→transparent 编辑和其它导出矩阵保持 partial。
 - `2026-08-21T22:47:48+08:00` — 写回最新安装版 Inspector、字幕和 Agent 入口/失败边界证据；完整模型下载、转写/字幕导出、MCP/Agent 工具调用仍未升级为完成。
+- `2026-08-21T23:09:09+08:00` — 写回最新包范围删除/Undo 与 playhead clamp 屏幕证据；安装包 SHA-256 `893b6ed0…d0ba`，Web 全量 151/1415 通过；Option trim 和其它导出矩阵仍保持 partial。

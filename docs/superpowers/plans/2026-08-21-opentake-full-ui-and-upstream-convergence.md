@@ -207,7 +207,7 @@
 
   下一执行切片：Linked A/V Timeline Parity。对齐 `crates/opentake-ops/src/ops/linking.rs`、`trim.rs`、`move_clips.rs`、`ripple.rs`、`command.rs` 与 `web/src/components/timeline/TimelineContainer.tsx`、`web/src/lib/editActions.ts`、`web/src/hooks/useKeyboardShortcuts.ts`；linked move Agent parity 和 Option trim only-main 已补齐并通过自动化，继续补 linked trim/ripple sync-lock/atomic collision、Shift+Delete Undo/Redo，再做安装版状态对拍。
 
-  已完成的 parity slices：上游 `splitAtPlayhead`、`trimStartToPlayhead`、`trimEndToPlayhead` 无选区 no-op；Agent `move_clips` linked partner delta；Timeline Option/Alt trim only-main（普通 trim 仍同步 linked group）。Web 全量当前 `151 files / 1414 tests` 通过。最新包屏幕已完成有效分割/撤销、播放到尾帧，以及 linked V1/A1 的 Shift+Backspace ripple delete/Undo；Option trim 坐标操作返回 `noWindowsAvailable`，范围删除和透明 ProRes 专用导出仍待。
+  已完成的 parity slices：上游 `splitAtPlayhead`、`trimStartToPlayhead`、`trimEndToPlayhead` 无选区 no-op；Agent `move_clips` linked partner delta；Timeline Option/Alt trim only-main（普通 trim 仍同步 linked group）。Web 全量当前 `151 files / 1415 tests` 通过。最新包屏幕已完成有效分割/撤销、播放到尾帧，以及按上游顺序的 I/O 范围标记→锚点选中→linked V1/A1 Shift+Backspace ripple delete/Undo；同步刷新新增 playhead clamp，删除后时间码与预览时长保持一致。Option trim 坐标操作仍返回 `noWindowsAvailable`，透明 ProRes 专用导出仍待。
 
   同期补齐缺失媒体错误边界：提交 `741ff07` 让普通 Preview、Playback Image/Text 和 RenderLoop 集成路径都返回显式 materialization error，不再发布黑帧；render 18、resolver 15、playback integration 8、Tauri lib 719 和顺序 workspace 全量通过。`6b31449` 收口导出 clippy 建议；全 workspace clippy 仍有既有 `chunks_exact` lint。当前安装包 `7ad988f3…a9799` 已重建，最新屏幕 smoke 仍因 Mac 锁定未完成。
 
@@ -268,7 +268,7 @@
 
   覆盖编辑、预览、发布视频、取消、结果校验、导入时间线、保存重开和预览/导出一致性。
 
-  当前进展（2026-08-21）：`OT-MOTION-ALPHA-1` 的透明模板、Chromium alpha、ProRes 4444、manifest provenance、Motion Studio/Agent 发布开关、alpha-preserving edit 均已实现并有自动化/真实 FFmpeg 证据。最新包 `918eac84…9551b` 已完成透明开关、发布进度、时间线落轨、保存重开和 Inspector/预览屏幕验收；同包 H.264/AAC SavePanel 导出也已通过文件级校验。QA 工程内发布生成的 `.mov` 已文件级复核为 ProRes 4444 `ap4h` / `yuva444p12le`，`alphaextract` 可读取非全黑 alpha，`media.json` 保留 `transparent: true`；Web 全量 `151 files / 1414 tests`、`pnpm build` 通过。仍未勾选本步骤：透明 ProRes 专用导出 UI、opaque clip 在编辑时切换为透明，以及 H.265/字幕/取消导出矩阵仍待。
+  当前进展（2026-08-21）：`OT-MOTION-ALPHA-1` 的透明模板、Chromium alpha、ProRes 4444、manifest provenance、Motion Studio/Agent 发布开关、alpha-preserving edit 均已实现并有自动化/真实 FFmpeg 证据。最新包 `893b6ed0…d0ba` 已完成透明开关、发布进度、时间线落轨、保存重开和 Inspector/预览屏幕验收；同包 H.264/AAC SavePanel 导出也已通过文件级校验。QA 工程内发布生成的 `.mov` 已文件级复核为 ProRes 4444 `ap4h` / `yuva444p12le`，`alphaextract` 可读取非全黑 alpha，`media.json` 保留 `transparent: true`；Web 全量 `151 files / 1415 tests`、`pnpm build` 通过。仍未勾选本步骤：透明 ProRes 专用导出 UI、opaque clip 在编辑时切换为透明，以及 H.265/字幕/取消导出矩阵仍待。
 
 - [ ] **Step 5: 验证设置和帮助**
 
