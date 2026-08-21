@@ -1023,7 +1023,10 @@ impl TauriGenerationBridge {
             let start_frame = span.start_frame;
             let end_frame = span.end_frame;
             let output = destination.clone();
-            let export_cancel = cancel.clone();
+            // Export has its own final success boundary; committing its child
+            // token must not make the later upload/download workflow immune
+            // to cancellation on the parent generation token.
+            let export_cancel = cancel.child();
             tokio::task::spawn_blocking(move || {
                 crate::export::run_export_with_control(
                     &timeline,
