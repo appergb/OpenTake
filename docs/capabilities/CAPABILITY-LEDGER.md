@@ -186,3 +186,4 @@ tags:
 - `2026-08-22T01:08:00+08:00` — 基于 `c1db732` 重建并安装最新 `.app`，二进制 SHA-256 `acd7b105…c319`；Mac 锁屏，仅记录构建/安装证据。
 - `2026-08-22T01:17:36+08:00` — 窄范围上游对拍确认 Rust ripple/range/insert/trim、linked partner 和原子拒绝语义一致；前端 Timeline 逐函数对拍与安装版屏幕验收仍未完成，能力保持 partial。
 - `2026-08-22T01:20:00+08:00` — 前端 Timeline 定向门禁 6 files / 55 tests 通过，覆盖 TimelineContainer、范围交互、sync-lock 轨道头、overlay、range/clip context menu；仅作为代码基线，不升级屏幕验收状态。
+- `2026-08-22T01:28:03+08:00` — `editActions.test.ts` 新增 ripple action routing 覆盖，选中片段/标记范围/选中 gap/out-of-band gap 拒绝 42/42 通过，并确认前端范围 wire 使用 `{start,end}`；Timeline 屏幕验收仍待解锁。

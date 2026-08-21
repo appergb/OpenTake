@@ -75,6 +75,8 @@ const srv = vi.hoisted(() => {
     }>;
     trackIndex?: number;
     atFrame?: number;
+    clipIds?: string[];
+    ranges?: Array<{ start: number; end: number }>;
     a?: number;
     b?: number;
   };
@@ -343,6 +345,27 @@ const srv = vi.hoisted(() => {
         state.version += 1;
         return { changed: true, affectedClipIds: [] };
       }
+      if (cmd.type === "rippleDeleteClips" && cmd.clipIds) {
+        const selected = new Set(cmd.clipIds);
+        const removed: string[] = [];
+        for (const track of state.tracks) {
+          for (const clip of track.clips) {
+            if (selected.has(clip.id)) removed.push(clip.id);
+          }
+          track.clips = track.clips.filter((clip) => !selected.has(clip.id));
+        }
+        if (removed.length === 0) return { changed: false, affectedClipIds: [] };
+        state.version += 1;
+        return { changed: true, affectedClipIds: removed };
+      }
+      if (
+        cmd.type === "rippleDeleteRanges" &&
+        cmd.trackIndex !== undefined &&
+        cmd.ranges
+      ) {
+        state.version += 1;
+        return { changed: true, affectedClipIds: [] };
+      }
       return { changed: false, affectedClipIds: [] };
     },
   };
@@ -439,6 +462,9 @@ import {
   mediaDurationFrames,
   momentDurationFrames,
   pasteClipsAtPlayhead,
+  rippleDeleteMarkedRange,
+  rippleDeleteSelectedClips,
+  rippleDeleteSelectedGap,
   resolveMediaDropTrack,
   swapTracks,
 } from "./editActions";
@@ -486,6 +512,43 @@ function visualClipTransforms(): Transform[] {
   return (track?.clips ?? []).map((c) => c.transform);
 }
 
+function rippleClip(id: string, startFrame: number, durationFrames: number): Clip {
+  return {
+    ...clipboardClip({
+      centerX: 0.5,
+      centerY: 0.5,
+      width: 1,
+      height: 1,
+      rotation: 0,
+      flipHorizontal: false,
+      flipVertical: false,
+    }),
+    id,
+    mediaRef: id,
+    startFrame,
+    durationFrames,
+  };
+}
+
+function setRippleTimeline(timeline: Timeline): void {
+  srv.state.tracks = timeline.tracks.map((track) => ({
+    id: track.id,
+    type: track.type,
+    clips: track.clips.map((clip) => ({
+      id: clip.id,
+      mediaRef: clip.mediaRef,
+      mediaType: clip.mediaType,
+      sourceClipType: clip.sourceClipType,
+      startFrame: clip.startFrame,
+      durationFrames: clip.durationFrames,
+      trimStartFrame: clip.trimStartFrame,
+      trimEndFrame: clip.trimEndFrame,
+      transform: clip.transform,
+    })),
+  }));
+  setMirror(timeline, 0, 1);
+}
+
 function clipboardClip(transform: Transform): Clip {
   return {
     id: "source-clip",
@@ -507,6 +570,102 @@ function clipboardClip(transform: Transform): Clip {
     crop: { left: 0, top: 0, right: 0, bottom: 0 },
   };
 }
+
+describe("ripple delete action routing", () => {
+  beforeEach(() => {
+    srv.reset();
+    setRippleTimeline({
+      fps: 30,
+      width: 1920,
+      height: 1080,
+      settingsConfigured: true,
+      tracks: [
+        {
+          id: "video-track",
+          type: "video",
+          muted: false,
+          hidden: false,
+          syncLocked: false,
+          clips: [rippleClip("lead", 0, 30), rippleClip("tail", 60, 30)],
+        },
+      ],
+    });
+    useEditorUiStore.setState({
+      activeFrame: 0,
+      currentFrame: 0,
+      selectedClipIds: new Set(),
+      selectedTimelineRange: null,
+      selectedGap: null,
+    });
+  });
+
+  it("routes Shift+Backspace on selected clips and clears selection after refresh", async () => {
+    useEditorUiStore.getState().selectClips(new Set(["lead"]));
+
+    await rippleDeleteSelectedClips();
+
+    expect(srv.state.commands.at(-1)).toEqual({
+      type: "rippleDeleteClips",
+      clipIds: ["lead"],
+    });
+    expect(useEditorUiStore.getState().selectedClipIds.size).toBe(0);
+    expect(useProjectStore.getState().timeline.tracks[0]?.clips.map((clip) => clip.id)).toEqual([
+      "tail",
+    ]);
+  });
+
+  it("routes a marked range from the selected clip track and clears range plus selection", async () => {
+    useEditorUiStore.getState().selectClips(new Set(["lead"]));
+    useEditorUiStore.setState({ selectedTimelineRange: { startFrame: 10, endFrame: 20 } });
+
+    await expect(rippleDeleteMarkedRange()).resolves.toBe(true);
+
+    expect(srv.state.commands.at(-1)).toEqual({
+      type: "rippleDeleteRanges",
+      trackIndex: 0,
+      ranges: [{ start: 10, end: 20 }],
+    });
+    expect(useEditorUiStore.getState().selectedTimelineRange).toBeNull();
+    expect(useEditorUiStore.getState().selectedClipIds.size).toBe(0);
+  });
+
+  it("routes a bounded selected gap and refuses an out-of-band filled gap", async () => {
+    useEditorUiStore.getState().selectGap({ trackIndex: 0, startFrame: 30, endFrame: 60 });
+
+    await expect(rippleDeleteSelectedGap()).resolves.toBe(true);
+    expect(srv.state.commands.at(-1)).toEqual({
+      type: "rippleDeleteRanges",
+      trackIndex: 0,
+      ranges: [{ start: 30, end: 60 }],
+    });
+    expect(useEditorUiStore.getState().selectedGap).toBeNull();
+
+    setRippleTimeline({
+      fps: 30,
+      width: 1920,
+      height: 1080,
+      settingsConfigured: true,
+      tracks: [
+        {
+          id: "video-track",
+          type: "video",
+          muted: false,
+          hidden: false,
+          syncLocked: false,
+          clips: [
+            rippleClip("lead", 0, 30),
+            rippleClip("filled", 45, 15),
+            rippleClip("tail", 60, 30),
+          ],
+        },
+      ],
+    });
+    useEditorUiStore.getState().selectGap({ trackIndex: 0, startFrame: 30, endFrame: 60 });
+    await expect(rippleDeleteSelectedGap()).resolves.toBe(false);
+    expect(srv.state.commands).toHaveLength(1);
+    expect(useEditorUiStore.getState().selectedGap).toBeNull();
+  });
+});
 
 describe("addMediaToTimeline", () => {
   beforeEach(() => {

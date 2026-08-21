@@ -175,6 +175,8 @@
 
   前端代码基线（2026-08-22 01:20）：TimelineContainer、范围交互、TrackHeader sync-lock、overlay、range context menu、clip context menu 定向门禁 6 files / 55 tests 通过；这只证明当前前端路由和交互单测绿，不替代安装版 Timeline 全流程屏幕对拍。
 
+  2026-08-22 01:28：新增 `editActions.test.ts` 的 ripple action routing 覆盖，选中片段、标记范围、选中 gap 和 out-of-band filled-gap 拒绝 42/42 通过；同时锁定前端 `rippleDeleteRanges` 的实际 wire 形状 `{start,end}`。仍不替代安装版屏幕验收。
+
 ### Task 5: 收敛预览、播放、RenderPlan 和导出闭环
 
 **Files:**
