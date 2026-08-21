@@ -103,11 +103,11 @@
 - Native playback of a compositor timeline with `speed: 1.5` or `reversed: true` emits valid frames and monotonic timeline frame events.
 - `RenderPlan` maps timeline frame to source frame consistently with existing export tests; no new independent remap formula is introduced.
 
-- [ ] **Step 1: Write a deterministic native playback regression test**
+- [x] **Step 1: Write a deterministic native playback regression test**
 
   Extend the existing `playback_transport_integration.rs` fixture helpers with one visual clip that has a compositor property and temporal remap. Start the playback engine through its existing `PreviewServer`/publication seam, collect at least the first, middle, and terminal frame publications, and assert JPEG bodies decode plus emitted timeline frames never move backwards.
 
-- [ ] **Step 2: Run the native test before any Rust change**
+- [x] **Step 2: Run the native test before any Rust change**
 
   Run:
 
@@ -115,15 +115,15 @@
 
   Record whether the existing RenderLoop already supports the case; if it does, keep Rust production code unchanged.
 
-- [ ] **Step 3: Add the smallest Rust fix only if the test proves a defect**
+- [x] **Step 3: Add the smallest Rust fix only if the test proves a defect**
 
   Reuse `try_build_render_plan`, `frameForSourceTime`, and the existing `PlaybackResolverState`; do not add a second source-frame conversion. Preserve seek cancellation, pause/resume, and audio clock ownership.
 
-- [ ] **Step 4: Run native parity and existing playback tests**
+- [x] **Step 4: Run native parity and existing playback tests**
 
   Run the focused integration test, `cargo test -p opentake-render plan`, and the existing playback transport/unit tests. Run `cargo fmt --all -- --check`.
 
-- [ ] **Step 5: Commit the native proof**
+- [x] **Step 5: Commit the native proof**
 
   Commit the test or minimal Rust fix with `test(preview): cover temporal compositor playback`.
 
