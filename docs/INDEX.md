@@ -46,6 +46,16 @@ docs/
 
 跨切面、不属单一模块的设计/规划/报告：总体架构、路线图、1:1 移植图与差距、剪映 gap、已知 Bug、编辑自动化 DOS。
 
+当前长期执行计划：[OpenTake 全功能与上游收敛计划](superpowers/plans/2026-08-21-opentake-full-ui-and-upstream-convergence.md)。
+
+当前 Preview 对齐切片：[Preview tabs parity plan](superpowers/plans/2026-08-21-preview-tabs-parity.md)。
+
+当前媒体导入切片：[File import dialog reliability plan](superpowers/plans/2026-08-21-file-import-dialog.md)。
+
+当前媒体视图切片：[Media view modes parity plan](superpowers/plans/2026-08-21-media-view-modes.md)。
+
+能力清单与证据：[Capability ledger](capabilities/CAPABILITY-LEDGER.md) · [Desktop functional matrix](audit/2026-08-21/full-desktop-functional-matrix.md)。
+
 ## 📐 上游拆解参考 → [upstream-analysis/README.md](upstream-analysis/README.md)
 
 上游 Palmier Pro（Swift）的架构、Apple 框架可移植性、闭源云边界、MCP/Agent 工具拆解。

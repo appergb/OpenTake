@@ -31,6 +31,8 @@ PRIMARY-CN/
 | 了解为何选了 Rust / Tauri / GPL-3.0 | [DECISIONS.md](DECISIONS.md) |
 | 查找某个上游模块的源码 | `palmier-pro-upstream/Sources/PalmierPro/` |
 
+当前长期任务计划：[OpenTake 全功能与上游收敛计划](docs/superpowers/plans/2026-08-21-opentake-full-ui-and-upstream-convergence.md)。
+
 ## 核心设计原则（来自上游拆解）
 
 1. **单一可观测状态容器**：Rust 持有权威 `Timeline`，前端只持只读镜像 + 版本号。
