@@ -31,11 +31,11 @@
 - `resolveTimelinePlaybackRoute(timeline, runtime)` 对 `needsRust && (speed !== 1 || reversed)` 在 Rust 可用/启用时返回 `{ kind: "rust", reasons: [] }`。
 - 普通单视频 `speed`/`reversed` 继续返回 WebKit；Rust 不可用/禁用时返回现有 typed unsupported reason。
 
-- [ ] **Step 1: Write failing route tests**
+- [x] **Step 1: Write failing route tests**
 
   在 `playbackRoute.test.ts` 增加三组断言：`text + reversed`、`colorGrade/mask + speed: 1.5` 在 `{ rustAvailable: true, rustEnabled: true }` 下返回 `rust`；同一时间线在 Rust 不可用时返回 `rust-unavailable`；普通单视频变速/反向仍返回 `webkit`。
 
-- [ ] **Step 2: Run the focused route tests and observe the old failure**
+- [x] **Step 2: Run the focused route tests and observe the old failure**
 
   Run:
 
@@ -43,15 +43,15 @@
 
   Expected before implementation: the compositor temporal cases remain `unsupported` with `composited-reverse` or `composited-speed`.
 
-- [ ] **Step 3: Implement the route matrix**
+- [x] **Step 3: Implement the route matrix**
 
   Stop adding `composited-reverse` and `composited-speed` reasons when Rust is available. Allow the existing Rust branch for compositor timelines and allow the multi-video Rust branch even when temporal remapping is present. Keep lottie, unknown effects, mask overflow, Rust unavailable, and Rust disabled as explicit reasons.
 
-- [ ] **Step 4: Run route tests and inspect the matrix**
+- [x] **Step 4: Run route tests and inspect the matrix**
 
   Run the focused command again and confirm all route cases pass, including fallback behavior when the native endpoint is absent.
 
-- [ ] **Step 5: Commit the route slice**
+- [x] **Step 5: Commit the route slice**
 
   Commit only `playbackRoute.ts` and `playbackRoute.test.ts` with `feat(preview): route temporal compositor playback to rust`.
 
