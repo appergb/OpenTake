@@ -1405,7 +1405,7 @@ pub fn export_video(
             },
         );
     });
-    let result = run_export_with_control(
+    run_export_with_control(
         &timeline,
         &manifest,
         &project_dir,
@@ -1415,8 +1415,7 @@ pub fn export_video(
             on_progress: Some(on_progress),
             ..ExportRunOptions::default()
         },
-    );
-    result
+    )
 }
 
 /// The export orchestration, decoupled from Tauri/`AppCore` so it can be driven
@@ -1853,9 +1852,7 @@ pub(crate) fn run_export_with_control(
         let probe_result = probe(&out_path)
             .map_err(|error| format!("output validation failed: {error}"))
             .and_then(|probe| validate_export_probe(&probe, &expectations));
-        if let Err(error) = probe_result {
-            return Err(error);
-        }
+        probe_result?;
     }
     output_cleanup.verify_visible_identity()?;
     if !defer_completion {
