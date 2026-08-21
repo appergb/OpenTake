@@ -22,7 +22,10 @@ describe("HomeView Vercel embedded visual direction", () => {
   it("keeps the sidebar on the background layer and floats the right workspace", () => {
     expect(homeSource).toContain("homeSidebarStyle");
     expect(homeSource).toContain("homeWorkspaceStyle");
+    expect(homeSource).toContain("minWidth: 0");
+    expect(homeSource).toContain("minHeight: 0");
     expect(homeSource).toContain("background: \"transparent\"");
+    expect(homeSource).toContain("overflowY: \"auto\"");
     expect(homeSource).not.toContain("borderRight");
   });
 
@@ -43,6 +46,7 @@ describe("HomeView Vercel embedded visual direction", () => {
   it("uses equal inset spacing around the embedded stage", () => {
     expect(homeSource).toContain("padding: \"var(--home-stage-inset)\"");
     expect(tokenSource).toContain("--home-stage-inset:");
+    expect(tokenSource).toContain("--titlebar-safe-top: clamp(");
   });
 
   it("uses separate empty and project-first home states", () => {
@@ -72,6 +76,13 @@ describe("HomeView Vercel embedded visual direction", () => {
     expect(homeSource).toContain("gridTemplateColumns: \"repeat(auto-fit, minmax(min(100%, 220px), 1fr))\"");
     expect(homeSource).toContain("ProjectGridCard");
     expect(homeSource).not.toContain("width: \"min(720px, 100%)\"");
+  });
+
+  it("wraps home action rows instead of forcing fixed-width button rails on small windows", () => {
+    expect(homeSource).toContain("function SampleProjectsStrip");
+    expect(homeSource).toContain("function EmptyLauncher");
+    expect(homeSource).toContain("function ProjectHero");
+    expect(homeSource).toContain("flexWrap: \"wrap\"");
   });
 
   it("keeps long recent project names from widening the project grid", () => {

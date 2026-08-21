@@ -100,10 +100,14 @@ body {
 
 .app-dialog-backdrop {
   animation: dialog-backdrop-enter var(--anim-hover) var(--ease-out) both;
+  min-width: 0;
+  min-height: 0;
 }
 
 .app-dialog-surface {
   animation: dialog-surface-enter var(--anim-transition) var(--ease-out) both;
+  min-width: 0;
+  min-height: 0;
 }
 
 .app-toast {

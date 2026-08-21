@@ -60,16 +60,22 @@ const homeShellStyle: CSSProperties = {
   display: "flex",
   height: "100%",
   width: "100%",
+  minWidth: 0,
+  minHeight: 0,
+  overflow: "hidden",
   background:
     "radial-gradient(1200px 760px at 88% -12%, rgba(255,255,255,0.045), transparent 54%), linear-gradient(180deg, rgba(255,255,255,0.015), transparent 30%), var(--home-bg)",
   color: "var(--home-foreground)",
 };
 
 const homeSidebarStyle: CSSProperties = {
-  width: 204,
+  width: "clamp(168px, 18vw, 204px)",
   flex: "0 0 auto",
   display: "flex",
   flexDirection: "column",
+  minWidth: 0,
+  minHeight: 0,
+  overflowY: "auto",
   padding: "var(--titlebar-safe-top) var(--space-md) var(--space-xl)",
   background: "transparent",
 };
@@ -77,6 +83,7 @@ const homeSidebarStyle: CSSProperties = {
 const homeMainStyle: CSSProperties = {
   flex: 1,
   minWidth: 0,
+  minHeight: 0,
   padding: "var(--home-stage-inset)",
 };
 
@@ -85,6 +92,7 @@ const homeWorkspaceStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
   minWidth: 0,
+  minHeight: 0,
   overflow: "hidden",
   background: "#111",
   border: "1px solid var(--home-border)",
@@ -334,7 +342,7 @@ function SampleProjectsStrip({
       >
         {t("home.samples")}
       </h2>
-      <div style={{ display: "flex", gap: "var(--space-sm)" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "var(--space-sm)" }}>
         {SAMPLE_PROJECTS.map((sample) => (
           <button
             key={sample.slug}
@@ -533,7 +541,14 @@ function EmptyLauncher({
         >
           {t("app.tagline")}
         </p>
-        <div style={{ display: "flex", gap: "var(--space-sm)", marginTop: "var(--space-xl)" }}>
+        <div
+          style={{
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "var(--space-sm)",
+            marginTop: "var(--space-xl)",
+          }}
+        >
           <LauncherButton
             primary
             label={projectAction === "new" ? t("home.creating") : t("home.newProject")}
@@ -756,7 +771,14 @@ function ProjectHero({
       >
         {t("app.tagline")}
       </p>
-      <div style={{ display: "flex", gap: "var(--space-sm)", marginTop: "var(--space-xl)" }}>
+      <div
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          gap: "var(--space-sm)",
+          marginTop: "var(--space-xl)",
+        }}
+      >
         <LauncherButton
           primary
           label={projectAction === "new" ? t("home.creating") : t("home.newProject")}

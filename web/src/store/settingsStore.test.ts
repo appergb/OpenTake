@@ -3,6 +3,8 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 const native = vi.hoisted(() => ({
+  currentMonitor: vi.fn(),
+  primaryMonitor: vi.fn(),
   scaleFactor: vi.fn(),
   innerSize: vi.fn(),
   outerPosition: vi.fn(),
@@ -17,6 +19,8 @@ vi.mock("../lib/api", () => ({
 }));
 
 vi.mock("@tauri-apps/api/window", () => ({
+  currentMonitor: native.currentMonitor,
+  primaryMonitor: native.primaryMonitor,
   getCurrentWindow: () => ({
     scaleFactor: native.scaleFactor,
     innerSize: native.innerSize,
@@ -55,6 +59,8 @@ async function loadStores() {
 beforeEach(() => {
   localStorage.clear();
   document.documentElement.removeAttribute("data-theme");
+  native.currentMonitor.mockReset().mockResolvedValue(null);
+  native.primaryMonitor.mockReset().mockResolvedValue(null);
   native.scaleFactor.mockReset().mockResolvedValue(1);
   native.innerSize.mockReset().mockResolvedValue({
     toLogical: () => ({ width: 1600, height: 1000 }),
@@ -146,6 +152,39 @@ it("restores native geometry when positioning a resized window fails", async () 
     expect.objectContaining({ width: 1600, height: 1000 }),
   );
   expect(native.setPosition).toHaveBeenLastCalledWith(expect.objectContaining({ x: 40, y: 60 }));
+  expect(useSettingsStore.getState().windowSize).toBe("standard");
+});
+
+it("clamps the standard layout to the current monitor work area and recenters it", async () => {
+  native.scaleFactor.mockResolvedValue(2);
+  native.currentMonitor.mockResolvedValue({
+    scaleFactor: 2,
+    workArea: {
+      position: {
+        toLogical: () => ({ x: 0, y: 24 }),
+      },
+      size: {
+        toLogical: () => ({ width: 1331, height: 768 }),
+      },
+    },
+  });
+  native.innerSize.mockResolvedValue({
+    toLogical: () => ({ width: 1066, height: 666 }),
+  });
+  native.outerPosition.mockResolvedValue({
+    toLogical: () => ({ x: 120, y: 90 }),
+  });
+  const { useSettingsStore } = await loadStores();
+
+  await useSettingsStore.getState().setWindowSize("standard");
+
+  expect(native.currentMonitor).toHaveBeenCalledOnce();
+  expect(native.setSize).toHaveBeenCalledWith(
+    expect.objectContaining({ width: 1331, height: 768 }),
+  );
+  expect(native.setPosition).toHaveBeenCalledWith(
+    expect.objectContaining({ x: 0, y: 24 }),
+  );
   expect(useSettingsStore.getState().windowSize).toBe("standard");
 });
 

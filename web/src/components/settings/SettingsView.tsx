@@ -51,10 +51,12 @@ import { StoragePane } from "./StoragePane";
 import { UpdateSettingsControl } from "./UpdateDialog";
 
 const settingsPanelStyle: CSSProperties = {
-  width: "100%",
+  width: "min(960px, 100%)",
   height: "100%",
   maxWidth: 960,
-  maxHeight: 620,
+  maxHeight: "min(620px, 100%)",
+  minWidth: 0,
+  minHeight: 0,
   background: "var(--bg-base)",
   borderRadius: "var(--radius-lg)",
   boxShadow: "var(--shadow-lg)",
@@ -89,8 +91,9 @@ const SETTINGS_PANES: Array<{ id: SettingsPaneId; icon: typeof SettingsIcon; lab
 ];
 
 const settingsSidebarStyle: CSSProperties = {
-  width: 150,
+  width: "clamp(138px, 16vw, 150px)",
   flex: "0 0 auto",
+  minWidth: 0,
   minHeight: 0,
   padding: "var(--space-xs)",
   background: "rgba(0, 0, 0, 0.22)",
@@ -182,7 +185,7 @@ export function SettingsView() {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        padding: "var(--space-xl)",
+        padding: "clamp(var(--space-md), 2.5vw, var(--space-xl))",
         zIndex: 1000,
       }}
     >
@@ -390,12 +393,13 @@ function Field({
     <div
       style={{
         display: "flex",
-        alignItems: "center",
+        alignItems: "flex-start",
+        flexWrap: "wrap",
         gap: "var(--space-lg)",
         justifyContent: "space-between",
       }}
     >
-      <div style={{ minWidth: 0 }}>
+      <div style={{ minWidth: 0, flex: "1 1 240px" }}>
         <div style={{ fontSize: "var(--fs-md)", color: "var(--text-primary)" }}>{label}</div>
         {description && (
           <div style={{ fontSize: "var(--fs-xs)", color: "var(--text-tertiary)", marginTop: 2 }}>
@@ -403,7 +407,7 @@ function Field({
           </div>
         )}
       </div>
-      <div style={{ flex: "0 0 auto" }}>{control}</div>
+      <div style={{ flex: "0 1 auto", maxWidth: "100%" }}>{control}</div>
     </div>
   );
 }

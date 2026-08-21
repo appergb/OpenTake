@@ -139,8 +139,8 @@
   /* Window chrome: macOS traffic-light safe area for the Overlay title bar
      (titleBarStyle:Overlay keeps the close/min/zoom buttons floating over the
      top-left of the content). Top-of-window UI must clear this region. */
-  --titlebar-safe-left: 82px;
-  --titlebar-safe-top: 44px;
+  --titlebar-safe-left: clamp(72px, 7vw, 82px);
+  --titlebar-safe-top: clamp(36px, 5vh, 44px);
 
   /* §1.12 Animation (AppTheme.swift:282-285) */
   --anim-hover: 150ms;
@@ -203,7 +203,7 @@
   --home-hover: rgba(255, 255, 255, 0.06);
   --home-selected: rgba(255, 255, 255, 0.1);
   --home-panel-shadow: 0 24px 80px rgba(0, 0, 0, 0.28);
-  --home-stage-inset: 8px;
+  --home-stage-inset: clamp(6px, 1vw, 8px);
 }
 
 @media (prefers-reduced-motion: reduce) {
