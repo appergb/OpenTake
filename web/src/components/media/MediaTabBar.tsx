@@ -2,7 +2,7 @@
  * 剪映式顶部素材面板标签条。
  * - MediaTabBar：九个主标签横排（素材/音频/音乐/文本/贴纸/特效/转场/字幕/智能包裹），
  *   选中=白+加粗+底部下划线；可用未选=次级灰+hover 提亮；禁用=极弱灰+不可点。
- *   素材/音频/音乐/文本/字幕已接真实内容，其余为功能未做的置灰占位。
+ *   素材/音频/音乐/文本/特效/字幕已接真实内容，其余为功能未做的置灰占位。
  * - MediaSubTabBar：素材/音频下的「导入 / 我的」二级 pill 切换。
  * 文案全部走 i18n（dict 里 media.tab.* / media.subtab.*），不硬编码中文。
  */
@@ -29,7 +29,7 @@ const MAIN_TABS: ReadonlyArray<MainTab> = [
   { id: "music", labelKey: "media.tab.music", enabled: true },
   { id: "text", labelKey: "media.tab.text", enabled: true },
   { id: "sticker", labelKey: "media.tab.sticker", enabled: false },
-  { id: "effect", labelKey: "media.tab.effect", enabled: false },
+  { id: "effect", labelKey: "media.tab.effect", enabled: true },
   { id: "transition", labelKey: "media.tab.transition", enabled: true },
   { id: "subtitle", labelKey: "media.tab.subtitle", enabled: true },
   { id: "smartPack", labelKey: "media.tab.smartPack", enabled: true },

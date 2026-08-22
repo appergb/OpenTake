@@ -64,6 +64,7 @@ import {
   addMediaToTimeline,
   addTextClip,
   reportMediaPlacementFailure,
+  setEffects,
 } from "../../store/editActions";
 import {
   deleteFolderFromContextMenu,
@@ -97,6 +98,7 @@ import { SmartPackTab } from "./SmartPackTab";
 import { MediaSearchResults } from "./MediaSearch";
 import { applyFavoriteMigrationOutcome, migrateLocalFavorites } from "./favorites";
 import { LibraryEntryGrid } from "./LibraryView";
+import { EFFECT_REGISTRY, newAdvertisedEffect, type AdvertisedEffectName } from "../../lib/effects";
 
 /** MIME-ish type used on dataTransfer when dragging a media item to the timeline. */
 export const MEDIA_DND_TYPE = "application/x-opentake-media";
@@ -323,6 +325,8 @@ export function MediaPanel() {
                 <CaptionsTab />
               ) : tab === "smartPack" ? (
                 <SmartPackTab />
+              ) : tab === "effect" ? (
+                <EffectTab />
               ) : tab === "text" ? (
                 <TextTab />
               ) : (
@@ -387,6 +391,76 @@ function TextTab() {
       >
         {t("toolbar.addText")}
       </button>
+    </div>
+  );
+}
+
+function EffectTab() {
+  const t = useT();
+  const timeline = useProjectStore((state) => state.timeline);
+  const selectedClipIds = useEditorUiStore((state) => state.selectedClipIds);
+  const pushToast = useEditorUiStore((state) => state.pushToast);
+  const [pending, setPending] = useState<AdvertisedEffectName | null>(null);
+  const selectedClip = selectedClipIds.size === 1
+    ? timeline.tracks.flatMap((track) => track.clips).find((clip) => selectedClipIds.has(clip.id))
+    : undefined;
+  const editable = selectedClip !== undefined && selectedClip.mediaType !== "audio";
+
+  const onAddEffect = async (name: AdvertisedEffectName) => {
+    if (!selectedClip || !editable || pending) return;
+    setPending(name);
+    try {
+      await setEffects([selectedClip.id], [
+        ...(selectedClip.effects ?? []),
+        newAdvertisedEffect(name),
+      ]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      pushToast(`${t("media.tab.effect")}: ${message}`);
+    } finally {
+      setPending(null);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        flex: 1,
+        minHeight: 0,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: "var(--space-md)",
+        color: "var(--text-secondary)",
+      }}
+    >
+      <span>{t("media.tab.effect")}</span>
+      <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: "var(--space-xs)" }}>
+        {EFFECT_REGISTRY.map((effect) => (
+          <button
+            key={effect.name}
+            type="button"
+            data-testid="effect-preset"
+            data-effect-name={effect.name}
+            aria-label={t(effect.labelKey)}
+            disabled={!editable || pending !== null}
+            onClick={() => void onAddEffect(effect.name)}
+            style={{
+              minHeight: 28,
+              padding: "0 var(--space-sm)",
+              borderRadius: "var(--radius-sm)",
+              border: "var(--bw-thin) solid var(--border-primary)",
+              background: "var(--bg-raised)",
+              color: "var(--text-primary)",
+              cursor: editable && pending === null ? "pointer" : "not-allowed",
+              opacity: editable && pending === null ? 1 : 0.5,
+            }}
+          >
+            {t(effect.labelKey)}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }

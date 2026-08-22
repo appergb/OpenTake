@@ -6,7 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { MediaItem, MediaList } from "../../lib/types";
+import type { Clip, MediaItem, MediaList, Timeline } from "../../lib/types";
 import {
   applyMediaErrorForProject,
   applyMediaListForProject,
@@ -64,6 +64,7 @@ vi.mock("../../store/editActions", async (importOriginal) => {
     ...actual,
     addMediaToTimeline: vi.fn(),
     addTextClip: vi.fn(),
+    setEffects: vi.fn(),
     deleteFolder: vi.fn(),
     deleteMedia: vi.fn(),
   };
@@ -1659,6 +1660,47 @@ describe("MediaPanel accessibility contracts", () => {
     expect(addText).not.toBeNull();
     await act(async () => addText?.click());
     expect(editActions.addTextClip).toHaveBeenCalledTimes(1);
+    await act(async () => root.unmount());
+  });
+
+  it("routes an effect preset to the selected clip effect chain", async () => {
+    const selectedClip = { id: "clip-1", mediaType: "video", effects: [] } as unknown as Clip;
+    const timeline = {
+      fps: 30,
+      width: 1920,
+      height: 1080,
+      settingsConfigured: true,
+      tracks: [{
+        id: "track-1",
+        type: "video",
+        muted: false,
+        hidden: false,
+        syncLocked: true,
+        clips: [selectedClip],
+      }],
+    } as Timeline;
+    useProjectStore.setState({ timeline });
+    useEditorUiStore.setState({
+      view: "editor",
+      mediaTab: "effect",
+      selectedClipIds: new Set(["clip-1"]),
+    });
+    vi.mocked(editActions.setEffects).mockResolvedValue(undefined);
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<MediaPanel />));
+    const grayscale = container.querySelector<HTMLButtonElement>(
+      '[data-testid="effect-preset"][data-effect-name="grayscale"]',
+    );
+    expect(grayscale).not.toBeNull();
+
+    await act(async () => grayscale?.click());
+    expect(editActions.setEffects).toHaveBeenCalledWith(
+      ["clip-1"],
+      [{ name: "grayscale", params: {}, enabled: true }],
+    );
     await act(async () => root.unmount());
   });
 

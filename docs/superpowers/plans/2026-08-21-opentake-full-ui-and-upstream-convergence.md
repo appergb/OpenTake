@@ -14,6 +14,8 @@
 
 **Latest slice (2026-08-22 11:58):** Text MediaPanel 标签已接入现有 `addTextClip()`/Inspector Text 工作流；MediaTabBar/MediaPanel 54/54、Web 全量 152/1427、tsc/build 和新安装包 `61dbb3e4…703e0` 通过。Sticker/Effect 仍是 OpenTake 自有未实现占位，原生屏幕验收仍受 Mac 锁屏影响。
 
+**Latest slice (2026-08-22 12:05):** Effect MediaPanel 标签已接入 grayscale/sepia/invert 预设，追加到选中片段效果链并复用 `setEffects()`；MediaTabBar/MediaPanel 56/56、Web 全量 152/1429、tsc/build 和新安装包 `8031c640…3fd44` 通过。Sticker 仍未实现，原生屏幕验收仍受 Mac 锁屏影响。
+
 ## Global Constraints
 
 - 只修改 `/Users/trip/TRUE 开发/PRIMARY-CN/OpenTake-generation`；`OpenTake/` 只作对照；`palmier-pro-upstream/` 永远只读。
