@@ -12,6 +12,8 @@
 
 **Current checkpoint (2026-08-22, Asia/Shanghai):** 受影响 crate/Tauri/Web 定向门禁保持全绿；最新安装包二进制 SHA-256 `2a5f8d72b8bac29c1f92d85c418a4987e8748eabe1fabd3b157f038db720034e`，已重新打包并安装，包含 WebKit >0 dB GainNode、Lottie native timeline route 和 ExportDialog cancel-race 修复。此前包已完成小屏、媒体/预览、时间轴范围删除与 Undo、H.264/H.265/ProRes 422、Motion 透明发布的既有屏幕证据；本轮又完成 JSON Lottie 卡片/素材预览/双击落轨/最近项目重开/时间轴画面/播放头推进屏幕证据，以及 SRT/VTT/透明 ProRes SavePanel 打开后取消。导出取消的进度订阅竞态已有 RED→GREEN 自动化覆盖，Shell export 39/39、Web 全量 152/1425、tsc/build 通过。上游审计确认的两个缺口已在代码侧补齐：Agent 文件夹批量 `entries` 单步 Undo，以及 JSON/`.lottie` Lottie 导入、Velato 校验和 metadata。Option trim、GainNode 听感、实时音画同步、可交互取消屏幕和 `.lottie` 容器屏幕仍保持 partial。2026-08-22 workspace 全量复跑在既有 4K Chromium budget smoke 超时并 poison gate，已确认与本次 diff 无直接关系；clippy 仍被既有 `chunks_exact` lint 阻塞。工作区只保留用户已有审计素材的 dirty/untracked 状态。
 
+**Latest slice (2026-08-22 11:58):** Text MediaPanel 标签已接入现有 `addTextClip()`/Inspector Text 工作流；MediaTabBar/MediaPanel 54/54、Web 全量 152/1427、tsc/build 和新安装包 `61dbb3e4…703e0` 通过。Sticker/Effect 仍是 OpenTake 自有未实现占位，原生屏幕验收仍受 Mac 锁屏影响。
+
 ## Global Constraints
 
 - 只修改 `/Users/trip/TRUE 开发/PRIMARY-CN/OpenTake-generation`；`OpenTake/` 只作对照；`palmier-pro-upstream/` 永远只读。

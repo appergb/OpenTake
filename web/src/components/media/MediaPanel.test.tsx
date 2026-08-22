@@ -63,6 +63,7 @@ vi.mock("../../store/editActions", async (importOriginal) => {
   return {
     ...actual,
     addMediaToTimeline: vi.fn(),
+    addTextClip: vi.fn(),
     deleteFolder: vi.fn(),
     deleteMedia: vi.fn(),
   };
@@ -107,6 +108,7 @@ afterEach(() => {
     previewTabIds: [],
     previewTabHistory: [],
     previewActiveTabId: "timeline",
+    mediaTab: "material",
     selectedMediaAssetIds: new Set(),
     selectedFolderIds: new Set(),
     previewMediaId: null,
@@ -1638,6 +1640,26 @@ describe("MediaPanel accessibility contracts", () => {
         expect(panel?.hidden).toBe(tab.getAttribute("aria-selected") !== "true");
       }
     }
+  });
+
+  it("routes the enabled text tab to the existing undoable text action", async () => {
+    useEditorUiStore.setState({
+      view: "editor",
+      mediaTab: "text",
+      mediaSubTab: "import",
+      mediaPanelCurrentFolderId: null,
+    });
+    vi.mocked(editActions.addTextClip).mockResolvedValue(undefined);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<MediaPanel />));
+
+    const addText = container.querySelector<HTMLButtonElement>('button[aria-label="添加文本"]');
+    expect(addText).not.toBeNull();
+    await act(async () => addText?.click());
+    expect(editActions.addTextClip).toHaveBeenCalledTimes(1);
+    await act(async () => root.unmount());
   });
 
   it("exposes popup state and supports complete menu focus navigation", async () => {

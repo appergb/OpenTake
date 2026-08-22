@@ -76,7 +76,7 @@ tags:
 | Media | Relink | 选择原始 MP4 后离线媒体恢复，Preview tab 和 Inspector 路径更新 | 通过 | 新构建 app packaged relink 验收 |
 | Media | 素材预览 | 导入后真实 MP4 缩略图/画面可见，PNG 也能作为 source preview 打开 | 通过 | Computer Use：素材 tab、Preview tab、Inspector 来源/尺寸/路径 |
 | Media | Lottie JSON / `.lottie` 导入 | 普通媒体入口和 MCP path 入口现在接受 `.json` / `.lottie`；Velato 校验 JSON，ZIP 容器读取 `animations/*.json`，导入后保存宽高、帧率和时长；坏 Lottie 在批量入口跳过、MCP 单文件返回明确错误；安装版 JSON 卡片、素材预览、双击落轨和最近项目重开均通过；`.lottie` 容器仍以自动化为主 | 部分（JSON 屏幕 + 容器代码/自动化） | 补 `.lottie` 容器安装版落轨/重开对拍 |
-| Media | 主标签与 OpenTake 扩展占位 | 对照上游 `MediaPanelView.swift`，上游真实面板只有 Media/Captions/Music；OpenTake 当前额外显示 Text/Sticker/Effect/Transition/Smart Pack，其中 Text/Sticker/Effect 明确置灰为未实现占位，Transition/Subtitle/Smart Pack 另有本地实现 | 部分（上游对齐无缺口；OpenTake 扩展未全实现） | 继续为置灰扩展建立明确实现切片，不能把占位标签计入“全功能通过” |
+| Media | 主标签与 OpenTake 扩展占位 | 对照上游 `MediaPanelView.swift`，上游真实面板只有 Media/Captions/Music；OpenTake 当前额外显示 Text/Sticker/Effect/Transition/Smart Pack。Text 已接入现有 `addTextClip()` 可撤销命令并提供“添加文本”面板；Sticker/Effect 仍是置灰占位，Transition/Subtitle/Smart Pack 另有本地实现 | 部分（Text 已接通；Sticker/Effect 未实现） | 继续为 Sticker/Effect 建立明确实现切片，不能把占位标签计入“全功能通过” |
 | Timeline | 播放/暂停 | 播放头从 0 推进到约 54，时间从 00:00:00 推进到约 00:01:24 | 通过 | 增加暂停/恢复/seek/尾帧证据 |
 | Timeline | 选中片段 | 选中 `sample-text-0` 后 Inspector 切换到文本属性 | 通过 | 补选区、拖拽、删除和 undo |
 | Timeline | 播放头处分割 | 初始在帧 0 或片段外尝试时无变化；补齐有效前置条件（选中 `sample-text-0`、播放头推进到帧 15）后成功新增片段、撤销变可用 | 通过（有效前置条件） | 新构建 app AX：分割后出现 UUID 片段；`cargo test -p opentake-ops split_clip_distributes_keyframes_at_cut` 通过 |
@@ -119,8 +119,8 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - 本轮主线 fresh verification：Preview/Store/Media 4 files / 91 tests passed；MediaActions/MediaPanel 2 files / 59 tests passed；`pnpm build` exit 0。
 - 全量 Web 串行门禁：`NODE_OPTIONS=--localstorage-file=/tmp/opentake-vitest-range-refresh-full.json pnpm exec vitest run --pool=forks --maxWorkers=1` → 151 files / 1415 tests passed；`pnpm build` exit 0。
 - Rust workspace：此前顺序全量曾通过；本轮受影响门禁仍全绿：Agent lib 417/417、ops lib 209/209、Tauri lib 726/726，字幕 16/16 + 5/5，Lottie JSON/容器/MCP path 定向测试通过，`cargo fmt --all -- --check` 通过。2026-08-22 再跑 `cargo test --workspace --jobs 1 -- --test-threads=1` 在既有 `opentake-motion/tests/chromium.rs::four_k_single_frame_opaque_and_transparent_budget_smoke` 处超时 180s，随后同 gate 的 3 个测试因 poison 连带失败；本次 diff 未修改 `opentake-motion`，保留为当前机器 Chromium/GPU/环境风险，不宣称 workspace 全量本轮通过。全 workspace clippy 仍被既有 `chunks_exact`/`chunks_exact_mut` lint 阻塞，当前输出涉及 `opentake-media`、`opentake-motion` 等旧模块。
-- Web：Lottie 与导出取消竞态修复后的串行全量 `152 files / 1425 tests` 通过，`pnpm build`/tsc 通过；Preview 目录为 `20 files / 196 tests`，Shell export 3 files / 39 tests 通过。
-- 最终 `.app`：`web/node_modules/.bin/tauri build --bundles app` exit 0；当前安装包二进制 SHA-256 `2a5f8d72b8bac29c1f92d85c418a4987e8748eabe1fabd3b157f038db720034e`，包含 Lottie native timeline route 和导出取消竞态修复；本轮新增 JSON Lottie 素材卡片/预览/落轨/最近项目重开/时间轴预览屏幕证据。透明 ProRes 4444 SavePanel 已打开并取消，字幕 SRT/VTT SavePanel 已打开并取消；Option 修饰键、实时听感级同步、可交互取消屏幕、`.lottie` 容器屏幕仍保持 partial。
+- Web：Lottie、导出取消竞态和 Text 面板接线后的串行全量 `152 files / 1427 tests` 通过，`pnpm build`/tsc 通过；MediaTabBar/MediaPanel 定向 54/54，Preview 目录为 `20 files / 196 tests`，Shell export 3 files / 39 tests 通过。
+- 最终 `.app`：`web/node_modules/.bin/tauri build --bundles app` exit 0；当前安装包二进制 SHA-256 `61dbb3e4c83b7db38018407b9a465ef002ea54e24818d9d6e550fb7542b703e0`，包含 Lottie native timeline route、导出取消竞态和 Text 面板接线；本轮新增 Text 入口的自动化证据。透明 ProRes 4444 SavePanel 已打开并取消，字幕 SRT/VTT SavePanel 已打开并取消；Option 修饰键、实时听感级同步、可交互取消屏幕、`.lottie` 容器屏幕仍保持 partial。
 
 ## Related Documents
 
@@ -134,6 +134,7 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - `2026-08-22T11:19:00+08:00` — 修复前端将 Lottie 时间轴误判为 unsupported 的路由缺口：Lottie 现在走 Rust native compositor；新增 route/Preview 回归，Web 全量 152/1424、tsc/build 和安装包均通过；Computer Use 在 QA 工程中验证 Lottie 素材预览、双击落轨、最近项目重开、时间轴画面和播放头推进。
 - `2026-08-22T11:33:00+08:00` — 修复 ExportDialog 在进度订阅尚未返回时丢失取消意图的竞态；新增 pending-listener RED→GREEN 回归，Shell export 39/39、Web 全量 152/1425、tsc/build 和新安装包 `2a5f8d72…0034e` 通过。Mac 仍锁屏，导出中途取消保留为屏幕待验收。
 - `2026-08-22T11:51:58+08:00` — Mac 仍锁屏期间使用项目 Browser fallback 做布局补证：1280×720 视口 `bodyScrollWidth=1280`、`bodyScrollHeight=720`，无横向/纵向溢出；示例项目和文本添加仍明确依赖 Tauri，未替代原生屏幕验收。
+- `2026-08-22T11:58:52+08:00` — 复用已有 `addTextClip()` 接通 MediaPanel 的 Text 标签和添加按钮；MediaTabBar/MediaPanel 54/54、Web 全量 152/1427、tsc/build 和新安装包 `61dbb3e4…703e0` 通过。Sticker/Effect 仍保持置灰占位。
 - `2026-08-21T12:09:35+08:00` — 写回 Preview tabs、文件/文件夹/relink 导入和主线 fresh verification 结果。
 - `2026-08-21T13:12:31+08:00` — 写回媒体 folder/flat/grouped 三态、网格/列表密度、文件夹导航及音频子页的安装版验收结果。
 - `2026-08-21T14:51:41+08:00` — 写回 audio full-track 解码修复、compositor temporal preview/native parity、最新安装包和全量 Web/Rust 门禁结果。

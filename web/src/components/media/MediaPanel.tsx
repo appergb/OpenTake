@@ -1,6 +1,6 @@
 /**
  * MediaPanel (SPEC §7 + 剪映式顶栏改造)。顶部横排主标签（素材/音频/文本/贴纸/
- * 特效/转场/字幕/智能包裹；素材/音频/音乐/字幕已接真实内容）取代了原左侧竖排
+ * 特效/转场/字幕/智能包裹；素材/音频/音乐/文本/字幕已接真实内容）取代了原左侧竖排
  * Media/Captions/Music 标签条。素材/音频下再分「导入 / 我的」二级标签：导入=当前
  * 项目素材（音频标签仅 type==='audio'），我的=跨项目全局收藏库。
  * 内容区仍是 actions/search/context 工具栏 + 资产网格；网格项 HTML5-draggable 到
@@ -62,6 +62,7 @@ import { folderTrail } from "../../lib/folderTree";
 import { useProjectStore } from "../../store/projectStore";
 import {
   addMediaToTimeline,
+  addTextClip,
   reportMediaPlacementFailure,
 } from "../../store/editActions";
 import {
@@ -257,7 +258,7 @@ function requestMediaCardThumbnail(item: MediaItem, projectEpoch: number) {
   });
 }
 
-/** 当前已实现内容的两个主标签；其余标签在 MediaTabBar 中置灰、点不到。 */
+/** Media/Audio share the asset surface; Text has its own lightweight action surface. */
 type MediaTabKind = "material" | "audio";
 
 export function MediaPanel() {
@@ -322,6 +323,8 @@ export function MediaPanel() {
                 <CaptionsTab />
               ) : tab === "smartPack" ? (
                 <SmartPackTab />
+              ) : tab === "text" ? (
+                <TextTab />
               ) : (
                 <Placeholder label={t(`media.tab.${tab}`)} />
               )
@@ -329,6 +332,61 @@ export function MediaPanel() {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function TextTab() {
+  const t = useT();
+  const pushToast = useEditorUiStore((state) => state.pushToast);
+  const [pending, setPending] = useState(false);
+
+  const onAddText = async () => {
+    if (pending) return;
+    setPending(true);
+    try {
+      await addTextClip();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      pushToast(`${t("toolbar.addText")}: ${message}`);
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        flex: 1,
+        minHeight: 0,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: "var(--space-md)",
+        color: "var(--text-secondary)",
+      }}
+    >
+      <Icon icon={TypeIcon} size={28} strokeWidth={1.5} />
+      <button
+        type="button"
+        aria-label={t("toolbar.addText")}
+        aria-busy={pending || undefined}
+        disabled={pending}
+        onClick={() => void onAddText()}
+        style={{
+          minHeight: 30,
+          padding: "0 var(--space-lg)",
+          borderRadius: "var(--radius-sm)",
+          border: "var(--bw-thin) solid var(--border-primary)",
+          background: "var(--bg-raised)",
+          color: "var(--text-primary)",
+          cursor: pending ? "wait" : "pointer",
+          opacity: pending ? 0.6 : 1,
+        }}
+      >
+        {t("toolbar.addText")}
+      </button>
     </div>
   );
 }

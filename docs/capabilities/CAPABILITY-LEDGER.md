@@ -48,6 +48,7 @@ tags:
 - Motion Studio transparent alpha：Rust/Web 纵切已接通并通过全量自动化；最新包已完成透明开关、发布进度、时间线落轨和保存重开屏幕验收；导出面板已新增透明 ProRes 4444 codec，真实 GPU/FFmpeg integration 已复核 `yuva444` alpha；透明导出屏幕仍待解锁后复验。
 - Agent/MCP linked move parity：`move_clips` 现在和上游约定一致，显式 `toFrame` 会把 frame delta 传播到 linked A/V partner，track-only move 不传播；新增两条 dispatcher 回归测试。最新安装版还验证了 Agent 面板标签生命周期、无通道时发送禁用和快捷键收起布局。
 - 上游收敛新切片：`create_folder.entries` 与 `move_to_folder.entries` 已接入单一 EditCommand/Undo 事务；普通媒体导入现在接受有效 `.json` / `.lottie`，用 Velato 校验并写入 Lottie metadata，坏文档在批量入口跳过，MCP 单文件入口返回明确错误。
+- OpenTake 扩展：MediaPanel 的 Text 标签已接入既有 `addTextClip()`/Inspector Text 工作流并保持单步 Undo；Sticker/Effect 仍是明确置灰占位，不计入已完成能力。
 
 ## 首轮明确缺口
 
@@ -76,6 +77,8 @@ tags:
 - 自动化证据：`src-tauri/tests/motion_command.rs` 的透明发布集成测试验证 `.mov`、ProRes、64×36 尺寸、完全透明像素和半透明动画像素；Rust workspace 串行全量通过（Tauri 720 tests、Motion Chromium/integration、导出/播放等）；Web 全量 `151 files / 1415 tests`、Web build 通过。
 - 文件级证据：`/private/tmp/opentake-audio-desktop-qa-L8Nvwh/audio-preview-export-qa.opentake/media/motion-0e4cacc9-161a-4704-a790-7e233397c8c4.mov` 被 `ffprobe` 识别为 `prores` profile `4444`、tag `ap4h`、pixel format `yuva444p12le`、90 帧/3.000s；`ffmpeg -vf alphaextract` 成功，抽样 alpha 平面为非全黑值；对应 `media.json` 的 `generationInput.transparent` 为 `true`。
 - 安装包：当前 `/Applications/OpenTake.app` 二进制 SHA-256 `2a5f8d72b8bac29c1f92d85c418a4987e8748eabe1fabd3b157f038db720034e`，包含 WebKit >0 dB GainNode、Lottie native timeline route 和 ExportDialog cancel-race 修复；本轮已完成 JSON Lottie 卡片/预览/落轨/最近项目重开/时间轴画面/播放头屏幕验收。透明 ProRes 4444 SavePanel、字幕 SRT/VTT SavePanel 已打开并取消；GainNode 听感、可交互取消屏幕和 `.lottie` 容器屏幕仍保持 partial。
+
+最新安装版（2026-08-22 11:58）：`/Applications/OpenTake.app` SHA-256 `61dbb3e4c83b7db38018407b9a465ef002ea54e24818d9d6e550fb7542b703e0`，包含 Text 面板接线；Text 自动化通过，Sticker/Effect 仍为占位。
 
 ## 上游 linked A/V parity 当前切片
 
@@ -192,3 +195,4 @@ tags:
 - `2026-08-22T01:49:23+08:00` — WebKit 预览新增可复用 GainNode 路由，修复 >0 dB 增益被截断；预览 58/58、Web 152/1423、tsc/build 通过；最新安装包 `d454bccc…b4b6` 已安装，Mac 锁屏，保留听感/屏幕验收为 partial。
 - `2026-08-22T11:19:00+08:00` — 修复 `resolveTimelinePlaybackRoute` 把 Lottie 直接标为 unsupported 的前端缺口，改为使用已有 Rust `TextureSource::Lottie` native compositor；route/Preview 20 files / 196 tests、Web 全量 152/1424、tsc/build 和安装版 QA 屏幕验证通过，包 SHA-256 `6bcbfa0f…7dec14`。
 - `2026-08-22T11:33:00+08:00` — 修复 ExportDialog 在 progress listener 尚未返回时丢失取消意图的竞态；Shell export 3 files / 39 tests、Web 全量 152/1425、tsc/build 和新安装包 `2a5f8d72…0034e` 通过；导出中途取消仍需屏幕解锁后验证。
+- `2026-08-22T11:58:52+08:00` — MediaPanel Text 标签接入已有 `addTextClip()` 和 Inspector Text 流程；MediaTabBar/MediaPanel 54/54、Web 全量 152/1427、tsc/build 和新安装包 `61dbb3e4…703e0` 通过；Sticker/Effect 继续保留为明确未实现占位。
