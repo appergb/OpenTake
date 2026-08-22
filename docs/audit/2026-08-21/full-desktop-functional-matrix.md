@@ -59,7 +59,7 @@ tags:
 
 | 场景 | 期望 | 实际 | 状态 | 证据 |
 |---|---|---|---|---|
-| Home / 标准档 / 小屏 | 不超过工作区，内容有合理最大宽度 | 最新包标准档 Home 截图无白边、卡片不溢出；标准档工作区完整可见 | 通过（窗口）/部分（Home 内容密度） | `src-tauri/tauri.conf.json`；`web/src/store/settingsStore.ts`；Task 2 5 files / 50 tests；最新包 Computer Use 截图 |
+| Home / 标准档 / 小屏 | 不超过工作区，内容有合理最大宽度 | 最新包标准档 Home 截图无白边、卡片不溢出；标准档工作区完整可见；浏览器 fallback 在 1280×720 视口实测 bodyScrollWidth/Height 与视口一致，无横向/纵向溢出 | 通过（窗口）/部分（Home 内容密度） | `src-tauri/tauri.conf.json`；`web/src/store/settingsStore.ts`；Task 2 5 files / 50 tests；最新包 Computer Use 截图；Browser fallback DOM metrics |
 | 设置 → 外观 → 紧凑 | 窗口收缩且内容仍可操作 | 最新包切换后约 `1066×666`，紧凑 radio 状态正确，Home、时间线、预览、Inspector 和 Motion Studio 均可见 | 通过 | `settingsStore` + Home/SplitPane/Settings 50 tests；最新包 Computer Use 紧凑档截图 |
 | Home → 设置 | 设置面板可见、可操作 | 复现时曾抓到 AX 已更新但截图未重绘；关闭/重开后及当前复测设置面板可见，判定为 Computer Use 重绘时序风险，不先当产品黑屏根因 | 部分 | 当前复测 AX + 设置截图 |
 
@@ -133,6 +133,7 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - `2026-08-21T10:06:00+08:00` — 首轮安装版 UI 巡检；记录窗口、导入、分割和真实回归边界。
 - `2026-08-22T11:19:00+08:00` — 修复前端将 Lottie 时间轴误判为 unsupported 的路由缺口：Lottie 现在走 Rust native compositor；新增 route/Preview 回归，Web 全量 152/1424、tsc/build 和安装包均通过；Computer Use 在 QA 工程中验证 Lottie 素材预览、双击落轨、最近项目重开、时间轴画面和播放头推进。
 - `2026-08-22T11:33:00+08:00` — 修复 ExportDialog 在进度订阅尚未返回时丢失取消意图的竞态；新增 pending-listener RED→GREEN 回归，Shell export 39/39、Web 全量 152/1425、tsc/build 和新安装包 `2a5f8d72…0034e` 通过。Mac 仍锁屏，导出中途取消保留为屏幕待验收。
+- `2026-08-22T11:51:58+08:00` — Mac 仍锁屏期间使用项目 Browser fallback 做布局补证：1280×720 视口 `bodyScrollWidth=1280`、`bodyScrollHeight=720`，无横向/纵向溢出；示例项目和文本添加仍明确依赖 Tauri，未替代原生屏幕验收。
 - `2026-08-21T12:09:35+08:00` — 写回 Preview tabs、文件/文件夹/relink 导入和主线 fresh verification 结果。
 - `2026-08-21T13:12:31+08:00` — 写回媒体 folder/flat/grouped 三态、网格/列表密度、文件夹导航及音频子页的安装版验收结果。
 - `2026-08-21T14:51:41+08:00` — 写回 audio full-track 解码修复、compositor temporal preview/native parity、最新安装包和全量 Web/Rust 门禁结果。
