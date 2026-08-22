@@ -350,7 +350,7 @@ describe("Preview timeline rendering", () => {
     expect(html.match(/data-rust-frame-slot=/g)).toHaveLength(2);
   });
 
-  it("renders a user visible unsupported surface instead of incomplete DOM media", () => {
+  it("renders Lottie timelines through the native compositor", () => {
     store.timeline = timeline([
       track({
         id: "v1",
@@ -361,8 +361,8 @@ describe("Preview timeline rendering", () => {
 
     const html = renderToStaticMarkup(<Preview />);
 
-    expect(html).toContain('data-testid="unsupported-playback-surface"');
-    expect(html).toContain("当前时间线无法完整预览");
+    expect(html).not.toContain('data-testid="unsupported-playback-surface"');
+    expect(html).toContain('data-playback-surface="native"');
     expect(html).not.toContain("<video");
   });
 
@@ -389,7 +389,7 @@ describe("Preview timeline rendering", () => {
     expect(html).toMatch(/aria-label="截取当前帧到素材库"[^>]*disabled/);
   });
 
-  it("disables play and capture for unsupported playback", () => {
+  it("keeps play and capture enabled for native Lottie playback", () => {
     store.timeline = timeline([
       track({
         id: "v1",
@@ -400,8 +400,8 @@ describe("Preview timeline rendering", () => {
 
     const html = renderToStaticMarkup(<Preview />);
 
-    expect(html).toMatch(/aria-label="播放\/暂停 \(空格\)"[^>]*disabled/);
-    expect(html).toMatch(/aria-label="截取当前帧到素材库"[^>]*disabled/);
+    expect(html).not.toMatch(/aria-label="播放\/暂停 \(空格\)"[^>]*disabled/);
+    expect(html).not.toMatch(/aria-label="截取当前帧到素材库"[^>]*disabled/);
   });
 
   it("keeps play available so a compositor-only timeline can retry native startup", () => {

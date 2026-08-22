@@ -230,6 +230,15 @@ describe("resolveTimelinePlaybackRoute", () => {
     }
   });
 
+  it("routes Lottie clips through the native compositor", () => {
+    expect(
+      resolveTimelinePlaybackRoute(
+        timeline(clip({ id: "lottie", mediaType: "lottie", sourceClipType: "lottie" })),
+        runtime,
+      ),
+    ).toEqual({ kind: "rust", reasons: [] });
+  });
+
   it("routes temporal compositor timelines through Rust when native playback is available", () => {
     const temporalCompositorCases = [
       clip({ id: "text-reversed", mediaType: "text", sourceClipType: "text", reversed: true }),
@@ -371,7 +380,6 @@ describe("resolveTimelinePlaybackRoute", () => {
     ).toEqual({ kind: "rust", reasons: [] });
 
     const cases: Array<[Clip, string]> = [
-      [clip({ mediaType: "lottie", sourceClipType: "lottie" }), "lottie"],
       [clip({ effects: [{ name: "blur", params: {}, enabled: true }] }), "unknown-effect"],
       [
         clip({
@@ -401,7 +409,7 @@ describe("resolveTimelinePlaybackRoute", () => {
         timeline(clip({ mediaType: "lottie", sourceClipType: "lottie" })),
         preferRust,
       ).kind,
-    ).toBe("unsupported");
+    ).toBe("rust");
   });
 
   it("returns Unsupported when Rust is unavailable and WebKit lacks parity", () => {

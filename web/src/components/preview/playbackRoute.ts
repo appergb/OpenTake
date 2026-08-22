@@ -50,6 +50,7 @@ function inspectClip(
   const enabledEffects = effects.filter((effect) => effect.enabled);
   const isLottie = clip.mediaType === "lottie" || clip.sourceClipType === "lottie";
   const needsRust =
+    isLottie ||
     clip.mediaType === "text" ||
     clip.sourceClipType === "text" ||
     clip.colorGrade !== undefined ||
@@ -58,7 +59,6 @@ function inspectClip(
     masks.length > 0 ||
     enabledEffects.length > 0;
 
-  if (isLottie) reasons.push({ code: "lottie", clipId: clip.id });
   for (const effect of effects) {
     if (!isAdvertisedEffectName(effect.name)) {
       reasons.push({ code: "unknown-effect", clipId: clip.id, effect: effect.name });
