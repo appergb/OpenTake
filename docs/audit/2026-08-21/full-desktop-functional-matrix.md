@@ -76,6 +76,7 @@ tags:
 | Media | Relink | 选择原始 MP4 后离线媒体恢复，Preview tab 和 Inspector 路径更新 | 通过 | 新构建 app packaged relink 验收 |
 | Media | 素材预览 | 导入后真实 MP4 缩略图/画面可见，PNG 也能作为 source preview 打开 | 通过 | Computer Use：素材 tab、Preview tab、Inspector 来源/尺寸/路径 |
 | Media | Lottie JSON / `.lottie` 导入 | 普通媒体入口和 MCP path 入口现在接受 `.json` / `.lottie`；Velato 校验 JSON，ZIP 容器读取 `animations/*.json`，导入后保存宽高、帧率和时长；坏 Lottie 在批量入口跳过、MCP 单文件返回明确错误；安装版 JSON 卡片、素材预览、双击落轨和最近项目重开均通过；`.lottie` 容器仍以自动化为主 | 部分（JSON 屏幕 + 容器代码/自动化） | 补 `.lottie` 容器安装版落轨/重开对拍 |
+| Media | 主标签与 OpenTake 扩展占位 | 对照上游 `MediaPanelView.swift`，上游真实面板只有 Media/Captions/Music；OpenTake 当前额外显示 Text/Sticker/Effect/Transition/Smart Pack，其中 Text/Sticker/Effect 明确置灰为未实现占位，Transition/Subtitle/Smart Pack 另有本地实现 | 部分（上游对齐无缺口；OpenTake 扩展未全实现） | 继续为置灰扩展建立明确实现切片，不能把占位标签计入“全功能通过” |
 | Timeline | 播放/暂停 | 播放头从 0 推进到约 54，时间从 00:00:00 推进到约 00:01:24 | 通过 | 增加暂停/恢复/seek/尾帧证据 |
 | Timeline | 选中片段 | 选中 `sample-text-0` 后 Inspector 切换到文本属性 | 通过 | 补选区、拖拽、删除和 undo |
 | Timeline | 播放头处分割 | 初始在帧 0 或片段外尝试时无变化；补齐有效前置条件（选中 `sample-text-0`、播放头推进到帧 15）后成功新增片段、撤销变可用 | 通过（有效前置条件） | 新构建 app AX：分割后出现 UUID 片段；`cargo test -p opentake-ops split_clip_distributes_keyframes_at_cut` 通过 |
