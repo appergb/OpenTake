@@ -401,10 +401,11 @@ function EffectTab() {
   const selectedClipIds = useEditorUiStore((state) => state.selectedClipIds);
   const pushToast = useEditorUiStore((state) => state.pushToast);
   const [pending, setPending] = useState<AdvertisedEffectName | null>(null);
-  const selectedClip = selectedClipIds.size === 1
-    ? timeline.tracks.flatMap((track) => track.clips).find((clip) => selectedClipIds.has(clip.id))
-    : undefined;
-  const editable = selectedClip !== undefined && selectedClip.mediaType !== "audio";
+  const selectedVisualClips = timeline.tracks
+    .flatMap((track) => track.clips)
+    .filter((clip) => selectedClipIds.has(clip.id) && clip.mediaType !== "audio");
+  const selectedClip = selectedVisualClips.length === 1 ? selectedVisualClips[0] : undefined;
+  const editable = selectedClip !== undefined;
 
   const onAddEffect = async (name: AdvertisedEffectName) => {
     if (!selectedClip || !editable || pending) return;

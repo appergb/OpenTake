@@ -1665,25 +1665,36 @@ describe("MediaPanel accessibility contracts", () => {
 
   it("routes an effect preset to the selected clip effect chain", async () => {
     const selectedClip = { id: "clip-1", mediaType: "video", effects: [] } as unknown as Clip;
+    const linkedAudio = { id: "audio-1", mediaType: "audio", effects: [] } as unknown as Clip;
     const timeline = {
       fps: 30,
       width: 1920,
       height: 1080,
       settingsConfigured: true,
-      tracks: [{
-        id: "track-1",
-        type: "video",
-        muted: false,
-        hidden: false,
-        syncLocked: true,
-        clips: [selectedClip],
-      }],
+      tracks: [
+        {
+          id: "track-1",
+          type: "video",
+          muted: false,
+          hidden: false,
+          syncLocked: true,
+          clips: [selectedClip],
+        },
+        {
+          id: "track-a1",
+          type: "audio",
+          muted: false,
+          hidden: false,
+          syncLocked: true,
+          clips: [linkedAudio],
+        },
+      ],
     } as Timeline;
     useProjectStore.setState({ timeline });
     useEditorUiStore.setState({
       view: "editor",
       mediaTab: "effect",
-      selectedClipIds: new Set(["clip-1"]),
+      selectedClipIds: new Set(["clip-1", "audio-1"]),
     });
     vi.mocked(editActions.setEffects).mockResolvedValue(undefined);
 

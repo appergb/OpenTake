@@ -16,6 +16,8 @@
 
 **Latest slice (2026-08-22 12:05):** Effect MediaPanel 标签已接入 grayscale/sepia/invert 预设，追加到选中片段效果链并复用 `setEffects()`；MediaTabBar/MediaPanel 56/56、Web 全量 152/1429、tsc/build 和新安装包 `8031c640…3fd44` 通过。Sticker 仍未实现，原生屏幕验收仍受 Mac 锁屏影响。
 
+**Latest slice (2026-08-22 12:22):** 修复 Effect 面板对 linked V1/A1 选择的错误禁用，只筛选视觉片段；新安装包 `eaad6fb3…9e57` 已验证入口按钮启用。点击后截图持续全黑且 Undo 未观察到，效果真实提交仍保留为未闭环风险。
+
 ## Global Constraints
 
 - 只修改 `/Users/trip/TRUE 开发/PRIMARY-CN/OpenTake-generation`；`OpenTake/` 只作对照；`palmier-pro-upstream/` 永远只读。

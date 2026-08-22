@@ -78,7 +78,7 @@ tags:
 - 文件级证据：`/private/tmp/opentake-audio-desktop-qa-L8Nvwh/audio-preview-export-qa.opentake/media/motion-0e4cacc9-161a-4704-a790-7e233397c8c4.mov` 被 `ffprobe` 识别为 `prores` profile `4444`、tag `ap4h`、pixel format `yuva444p12le`、90 帧/3.000s；`ffmpeg -vf alphaextract` 成功，抽样 alpha 平面为非全黑值；对应 `media.json` 的 `generationInput.transparent` 为 `true`。
 - 安装包：当前 `/Applications/OpenTake.app` 二进制 SHA-256 `2a5f8d72b8bac29c1f92d85c418a4987e8748eabe1fabd3b157f038db720034e`，包含 WebKit >0 dB GainNode、Lottie native timeline route 和 ExportDialog cancel-race 修复；本轮已完成 JSON Lottie 卡片/预览/落轨/最近项目重开/时间轴画面/播放头屏幕验收。透明 ProRes 4444 SavePanel、字幕 SRT/VTT SavePanel 已打开并取消；GainNode 听感、可交互取消屏幕和 `.lottie` 容器屏幕仍保持 partial。
 
-最新安装版（2026-08-22 12:05）：`/Applications/OpenTake.app` SHA-256 `8031c640164d10f04f7b8ab56e0a0e289ae0fc7125a7f41a3d8b797f1413fd44`，包含 Text/Effect 面板接线；Text/Effect 自动化通过，Sticker 仍为占位。
+最新安装版（2026-08-22 12:22）：`/Applications/OpenTake.app` SHA-256 `eaad6fb35b43e39884b8b756090548eace9559e366c1bd3eedcc37b6fb599e57`，包含 Text/Effect 面板接线和 linked V1/A1 Effect 筛选修复；Text/Effect 自动化通过，Effect 入口按钮已实机启用，但点击后截图/Undo 尚未闭环，Sticker 仍为占位。
 
 ## 上游 linked A/V parity 当前切片
 
@@ -197,3 +197,4 @@ tags:
 - `2026-08-22T11:33:00+08:00` — 修复 ExportDialog 在 progress listener 尚未返回时丢失取消意图的竞态；Shell export 3 files / 39 tests、Web 全量 152/1425、tsc/build 和新安装包 `2a5f8d72…0034e` 通过；导出中途取消仍需屏幕解锁后验证。
 - `2026-08-22T11:58:52+08:00` — MediaPanel Text 标签接入已有 `addTextClip()` 和 Inspector Text 流程；MediaTabBar/MediaPanel 54/54、Web 全量 152/1427、tsc/build 和新安装包 `61dbb3e4…703e0` 通过；Sticker/Effect 继续保留为明确未实现占位。
 - `2026-08-22T12:05:54+08:00` — Effect 标签接入 grayscale/sepia/invert 预设，追加到选中片段效果链并复用 `setEffects()`；MediaTabBar/MediaPanel 56/56、Web 全量 152/1429、tsc/build 和新安装包 `8031c640…3fd44` 通过；Sticker 继续保留为明确未实现占位。
+- `2026-08-22T12:22:40+08:00` — 修复 Effect 面板对 linked V1/A1 选择的错误禁用，只筛选视觉片段；新包 `eaad6fb3…9e57` 已安装。实机按钮启用，但点击后黑屏/Undo 证据未闭环，保持 partial。

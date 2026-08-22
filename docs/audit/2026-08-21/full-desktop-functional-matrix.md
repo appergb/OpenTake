@@ -76,7 +76,7 @@ tags:
 | Media | Relink | 选择原始 MP4 后离线媒体恢复，Preview tab 和 Inspector 路径更新 | 通过 | 新构建 app packaged relink 验收 |
 | Media | 素材预览 | 导入后真实 MP4 缩略图/画面可见，PNG 也能作为 source preview 打开 | 通过 | Computer Use：素材 tab、Preview tab、Inspector 来源/尺寸/路径 |
 | Media | Lottie JSON / `.lottie` 导入 | 普通媒体入口和 MCP path 入口现在接受 `.json` / `.lottie`；Velato 校验 JSON，ZIP 容器读取 `animations/*.json`，导入后保存宽高、帧率和时长；坏 Lottie 在批量入口跳过、MCP 单文件返回明确错误；安装版 JSON 卡片、素材预览、双击落轨和最近项目重开均通过；`.lottie` 容器仍以自动化为主 | 部分（JSON 屏幕 + 容器代码/自动化） | 补 `.lottie` 容器安装版落轨/重开对拍 |
-| Media | 主标签与 OpenTake 扩展占位 | 对照上游 `MediaPanelView.swift`，上游真实面板只有 Media/Captions/Music；OpenTake 当前额外显示 Text/Sticker/Effect/Transition/Smart Pack。Text 已接入现有 `addTextClip()` 可撤销命令并提供“添加文本”面板；Effect 已接入 grayscale/sepia/invert 预设并追加到当前片段效果链；Sticker 仍是置灰占位，Transition/Subtitle/Smart Pack 另有本地实现 | 部分（Text/Effect 已接通；Sticker 未实现） | 继续为 Sticker 建立明确实现切片，不能把占位标签计入“全功能通过” |
+| Media | 主标签与 OpenTake 扩展占位 | 对照上游 `MediaPanelView.swift`，上游真实面板只有 Media/Captions/Music；OpenTake 当前额外显示 Text/Sticker/Effect/Transition/Smart Pack。Text 已接入现有 `addTextClip()` 可撤销命令并提供“添加文本”面板；Effect 已接入 grayscale/sepia/invert 预设并追加到当前片段效果链；最新包普通音视频 QA 中 linked V1/A1 选择后三个效果按钮可见且启用，但点击后 AX 未观察到撤销状态，截图同时出现全黑，故不升级为完整通过；Sticker 仍是置灰占位 | 部分（Text 自动化通过；Effect 代码/入口通过，实机提交待复验；Sticker 未实现） | 解锁后复测 Effect 实际提交/Undo；继续为 Sticker 建立明确实现切片 |
 | Timeline | 播放/暂停 | 播放头从 0 推进到约 54，时间从 00:00:00 推进到约 00:01:24 | 通过 | 增加暂停/恢复/seek/尾帧证据 |
 | Timeline | 选中片段 | 选中 `sample-text-0` 后 Inspector 切换到文本属性 | 通过 | 补选区、拖拽、删除和 undo |
 | Timeline | 播放头处分割 | 初始在帧 0 或片段外尝试时无变化；补齐有效前置条件（选中 `sample-text-0`、播放头推进到帧 15）后成功新增片段、撤销变可用 | 通过（有效前置条件） | 新构建 app AX：分割后出现 UUID 片段；`cargo test -p opentake-ops split_clip_distributes_keyframes_at_cut` 通过 |
@@ -120,7 +120,7 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - 全量 Web 串行门禁：`NODE_OPTIONS=--localstorage-file=/tmp/opentake-vitest-range-refresh-full.json pnpm exec vitest run --pool=forks --maxWorkers=1` → 151 files / 1415 tests passed；`pnpm build` exit 0。
 - Rust workspace：此前顺序全量曾通过；本轮受影响门禁仍全绿：Agent lib 417/417、ops lib 209/209、Tauri lib 726/726，字幕 16/16 + 5/5，Lottie JSON/容器/MCP path 定向测试通过，`cargo fmt --all -- --check` 通过。2026-08-22 再跑 `cargo test --workspace --jobs 1 -- --test-threads=1` 在既有 `opentake-motion/tests/chromium.rs::four_k_single_frame_opaque_and_transparent_budget_smoke` 处超时 180s，随后同 gate 的 3 个测试因 poison 连带失败；本次 diff 未修改 `opentake-motion`，保留为当前机器 Chromium/GPU/环境风险，不宣称 workspace 全量本轮通过。全 workspace clippy 仍被既有 `chunks_exact`/`chunks_exact_mut` lint 阻塞，当前输出涉及 `opentake-media`、`opentake-motion` 等旧模块。
 - Web：Lottie、导出取消竞态和 Text/Effect 面板接线后的串行全量 `152 files / 1429 tests` 通过，`pnpm build`/tsc 通过；MediaTabBar/MediaPanel 定向 56/56，Preview 目录为 `20 files / 196 tests`，Shell export 3 files / 39 tests 通过。
-- 最终 `.app`：`web/node_modules/.bin/tauri build --bundles app` exit 0；当前安装包二进制 SHA-256 `8031c640164d10f04f7b8ab56e0a0e289ae0fc7125a7f41a3d8b797f1413fd44`，包含 Lottie native timeline route、导出取消竞态和 Text/Effect 面板接线；本轮新增 Text/Effect 自动化证据。透明 ProRes 4444 SavePanel 已打开并取消，字幕 SRT/VTT SavePanel 已打开并取消；Option 修饰键、实时音画级同步、可交互取消屏幕、`.lottie` 容器屏幕仍保持 partial。
+- 最终 `.app`：`web/node_modules/.bin/tauri build --bundles app` exit 0；当前安装包二进制 SHA-256 `eaad6fb35b43e39884b8b756090548eace9559e366c1bd3eedcc37b6fb599e57`，包含 Lottie native timeline route、导出取消竞态和 Text/Effect 面板接线；本轮新增 Text/Effect 自动化证据及 Effect linked V1/A1 入口屏幕证据，但效果点击后的截图/Undo 仍未闭环。透明 ProRes 4444 SavePanel 已打开并取消，字幕 SRT/VTT SavePanel 已打开并取消；Option 修饰键、实时音画级同步、可交互取消屏幕、`.lottie` 容器屏幕仍保持 partial。
 
 ## Related Documents
 
@@ -136,6 +136,7 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - `2026-08-22T11:51:58+08:00` — Mac 仍锁屏期间使用项目 Browser fallback 做布局补证：1280×720 视口 `bodyScrollWidth=1280`、`bodyScrollHeight=720`，无横向/纵向溢出；示例项目和文本添加仍明确依赖 Tauri，未替代原生屏幕验收。
 - `2026-08-22T11:58:52+08:00` — 复用已有 `addTextClip()` 接通 MediaPanel 的 Text 标签和添加按钮；MediaTabBar/MediaPanel 54/54、Web 全量 152/1427、tsc/build 和新安装包 `61dbb3e4…703e0` 通过。Sticker/Effect 仍保持置灰占位。
 - `2026-08-22T12:05:54+08:00` — 接通 Effect 标签的 grayscale/sepia/invert 预设，追加到选中片段效果链并复用 `setEffects()` 撤销命令；MediaTabBar/MediaPanel 56/56、Web 全量 152/1429、tsc/build 和新安装包 `8031c640…3fd44` 通过。Sticker 仍保持置灰占位。
+- `2026-08-22T12:22:40+08:00` — 修复 Effect 面板对 linked V1/A1 选择的错误禁用：只筛选视觉片段；定向 56/56、Web 全量 152/1429、tsc/build 和新安装包 `eaad6fb3…9e57` 通过。原生入口按钮可见/启用，但点击后截图全黑且 Undo 未观察到，继续保留实机闭环风险。
 - `2026-08-21T12:09:35+08:00` — 写回 Preview tabs、文件/文件夹/relink 导入和主线 fresh verification 结果。
 - `2026-08-21T13:12:31+08:00` — 写回媒体 folder/flat/grouped 三态、网格/列表密度、文件夹导航及音频子页的安装版验收结果。
 - `2026-08-21T14:51:41+08:00` — 写回 audio full-track 解码修复、compositor temporal preview/native parity、最新安装包和全量 Web/Rust 门禁结果。
