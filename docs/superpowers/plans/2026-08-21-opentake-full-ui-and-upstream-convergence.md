@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-07-10-opentake-full-convergence-design.md`、`docs/superpowers/specs/2026-08-13-opentake-beta5-design.md` 与本轮用户目标。
 
-**Current checkpoint (2026-08-22, Asia/Shanghai):** 受影响 crate/Tauri/Web 定向门禁保持全绿；最新安装包二进制 SHA-256 `6bcbfa0fd72c0b69380e10c9742a0a4d0042ef34ea3f15d97ea1acd3977dec14`，已重新打包并安装，包含 WebKit >0 dB GainNode 和 Lottie native timeline route 修复。此前包已完成小屏、媒体/预览、时间轴范围删除与 Undo、H.264/H.265/ProRes 422、Motion 透明发布的既有屏幕证据；本轮又完成 JSON Lottie 卡片/素材预览/双击落轨/最近项目重开/时间轴画面/播放头推进屏幕证据，以及 SRT/VTT/透明 ProRes SavePanel 打开后取消。上游审计确认的两个缺口已在代码侧补齐：Agent 文件夹批量 `entries` 单步 Undo，以及 JSON/`.lottie` Lottie 导入、Velato 校验和 metadata。Option trim、GainNode 听感、实时音画同步、可交互取消和 `.lottie` 容器屏幕仍保持 partial。2026-08-22 workspace 全量复跑在既有 4K Chromium budget smoke 超时并 poison gate，已确认与本次 diff 无直接关系；clippy 仍被既有 `chunks_exact` lint 阻塞。工作区只保留用户已有审计素材的 dirty/untracked 状态。
+**Current checkpoint (2026-08-22, Asia/Shanghai):** 受影响 crate/Tauri/Web 定向门禁保持全绿；最新安装包二进制 SHA-256 `2a5f8d72b8bac29c1f92d85c418a4987e8748eabe1fabd3b157f038db720034e`，已重新打包并安装，包含 WebKit >0 dB GainNode、Lottie native timeline route 和 ExportDialog cancel-race 修复。此前包已完成小屏、媒体/预览、时间轴范围删除与 Undo、H.264/H.265/ProRes 422、Motion 透明发布的既有屏幕证据；本轮又完成 JSON Lottie 卡片/素材预览/双击落轨/最近项目重开/时间轴画面/播放头推进屏幕证据，以及 SRT/VTT/透明 ProRes SavePanel 打开后取消。导出取消的进度订阅竞态已有 RED→GREEN 自动化覆盖，Shell export 39/39、Web 全量 152/1425、tsc/build 通过。上游审计确认的两个缺口已在代码侧补齐：Agent 文件夹批量 `entries` 单步 Undo，以及 JSON/`.lottie` Lottie 导入、Velato 校验和 metadata。Option trim、GainNode 听感、实时音画同步、可交互取消屏幕和 `.lottie` 容器屏幕仍保持 partial。2026-08-22 workspace 全量复跑在既有 4K Chromium budget smoke 超时并 poison gate，已确认与本次 diff 无直接关系；clippy 仍被既有 `chunks_exact` lint 阻塞。工作区只保留用户已有审计素材的 dirty/untracked 状态。
 
 ## Global Constraints
 
@@ -275,6 +275,8 @@
   2026-08-22 上游审计又确认并修复两个入口缺口：批量文件夹参数此前已广告但 dispatcher 返回 not implemented，现改为单事务 `CreateFolders` / `MoveToFolders`；普通媒体导入此前排除 JSON/Lottie，现已接入 Lottie JSON 和 `.lottie` ZIP container，坏文档 fail-soft。剩余 Agent/MCP 重点是安装版本地调用证据与安全失败边界，不再把已确认的两个缺口留在“待实现”。
 
   2026-08-22 屏幕回归发现前端 `resolveTimelinePlaybackRoute` 仍把 Lottie 直接列为 unsupported，和已有 Rust `TextureSource::Lottie` 播放 resolver 冲突；按 RED→GREEN 修复为 native compositor 路由。新增 route/Preview 回归后，Preview 目录 20 files / 196 tests、Web 全量 152 files / 1424 tests、tsc/build 和安装包均通过；安装版在 02:40 显示 Lottie 画面并推进到 02:50，播放/截帧可用。
+
+  2026-08-22 导出屏幕复盘发现 ExportDialog 在 progress listener 尚未返回时会丢失取消意图；新增 pending-listener RED→GREEN 测试并修复状态机。Shell export 3 files / 39 tests、Web 全量 152/1425、tsc/build、新安装包 `2a5f8d72…0034e` 通过；真实导出中途取消仍需解锁后做桌面验收。
 
 - [ ] **Step 2: 验证 MCP 安全边界**
 

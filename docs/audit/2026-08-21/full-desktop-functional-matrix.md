@@ -79,11 +79,11 @@ tags:
 | Timeline | 播放/暂停 | 播放头从 0 推进到约 54，时间从 00:00:00 推进到约 00:01:24 | 通过 | 增加暂停/恢复/seek/尾帧证据 |
 | Timeline | 选中片段 | 选中 `sample-text-0` 后 Inspector 切换到文本属性 | 通过 | 补选区、拖拽、删除和 undo |
 | Timeline | 播放头处分割 | 初始在帧 0 或片段外尝试时无变化；补齐有效前置条件（选中 `sample-text-0`、播放头推进到帧 15）后成功新增片段、撤销变可用 | 通过（有效前置条件） | 新构建 app AX：分割后出现 UUID 片段；`cargo test -p opentake-ops split_clip_distributes_keyframes_at_cut` 通过 |
-| Timeline | 入点/出点范围与范围边缘 | `TimelineContainer` 已接入 Shift+标尺 range mark、已有范围 start/end 边缘命中与拖动、clip-edge/playhead snap、pointercancel 回滚和同帧清除；Option trim 改为只修剪主 clip，普通 trim 保持 linked propagation；安装版普通右边缘修剪让联动 V1/A1 从 07:21 变为 07:04，Undo 恢复；最新包按上游顺序完成 I/O 标记整段范围→再选 V1 锚点→Shift+Backspace，V1/A1 联动删除、Motion 保留，删除后播放头从 7.7s 合法收敛到 3.0s，Undo 恢复三条轨道；Web 全量 152 files / 1424 tests 通过 | 通过（普通 trim、范围删除/Undo/播放头屏幕对拍；Option 修饰键仍 partial） | 继续补可复现的安装版 Option trim；桌面驱动器不提供按住 Option 拖拽接口，altKey 自动化测试已覆盖 |
+| Timeline | 入点/出点范围与范围边缘 | `TimelineContainer` 已接入 Shift+标尺 range mark、已有范围 start/end 边缘命中与拖动、clip-edge/playhead snap、pointercancel 回滚和同帧清除；Option trim 改为只修剪主 clip，普通 trim 保持 linked propagation；安装版普通右边缘修剪让联动 V1/A1 从 07:21 变为 07:04，Undo 恢复；最新包按上游顺序完成 I/O 标记整段范围→再选 V1 锚点→Shift+Backspace，V1/A1 联动删除、Motion 保留，删除后播放头从 7.7s 合法收敛到 3.0s，Undo 恢复三条轨道；Web 全量 152 files / 1425 tests 通过 | 通过（普通 trim、范围删除/Undo/播放头屏幕对拍；Option 修饰键仍 partial） | 继续补可复现的安装版 Option trim；桌面驱动器不提供按住 Option 拖拽接口，altKey 自动化测试已覆盖 |
 | Inspector | 片段属性与 AI 编辑 | 选中 V1 后视频 Inspector 展开 131 项，覆盖变换、裁剪、翻转、淡入淡出、运动追踪、防抖、RVM 抠像、速度和调色；水平翻转可切换并由 Undo 恢复；音频页能显示音量/响度/降噪/人声分离；AI 编辑页能生成本地建议，应用后显示“可撤销编辑命令”，撤销成功 | 通过（入口/可撤销行为） | 数值控件逐项边界、关键帧落盘重开和本地模型分析仍待 |
 | Preview | 带音频 fixture 的导入/波形/seek/暂停与增益 | `nested-timeline-compound-export-2026-07-31.mp4`：7.700s、H.264 1280×720/30fps/231帧 + AAC 48kHz 单声道；安装版出现 V1+A1、A1 波形和音频 Inspector，已操作起点/中点/终点 seek，连续暂停状态稳定；WebKit 预览新增 GainNode 路由，>0 dB 增益不再被 HTMLMediaElement.volume 截断，预览相关 58 tests 与 Web 全量 1423 tests 通过 | 部分 | Mac 解锁后补实时听感级同步、最新包增益听感和 cleanup 包导出复测 |
 | Preview | compositor temporal 预览 | 最新安装版在 QA 工程中设置 `speed=1.5` 和曝光 `0.50` compositor 属性后不再出现 unsupported surface；画面可见，播放头可到尾帧，暂停后抓帧按钮保持可用；speed/reversed 的首次 native render、JPEG publication、source-frame 映射由 Rust integration tests 锁定 | 通过（代码/native/屏幕组合证据） | 预览与导出起/中/尾帧、音频同步和取消仍在后续闭环 |
-| Preview | Lottie 时间轴合成与播放 | 修复前端 route 将 Lottie 误判为 unsupported 的缺口；Rust playback resolver 已有 `TextureSource::Lottie`，现在安装版时间轴走 native surface，02:40 首帧真实显示 Lottie 画面，播放头推进到 02:50，播放/截帧按钮可用，重启后最近项目仍保留落轨状态；路由/Preview 定向 20 files / 196 tests、Web 全量 152 files / 1424 tests 通过 | 通过（JSON 安装版屏幕；`.lottie` 容器屏幕仍待） | 补 `.lottie` 容器屏幕对拍，并继续验证 Lottie 与视频叠加/导出一致性 |
+| Preview | Lottie 时间轴合成与播放 | 修复前端 route 将 Lottie 误判为 unsupported 的缺口；Rust playback resolver 已有 `TextureSource::Lottie`，现在安装版时间轴走 native surface，02:40 首帧真实显示 Lottie 画面，播放头推进到 02:50，播放/截帧按钮可用，重启后最近项目仍保留落轨状态；路由/Preview 定向 20 files / 196 tests、Web 全量 152 files / 1425 tests 通过 | 通过（JSON 安装版屏幕；`.lottie` 容器屏幕仍待） | 补 `.lottie` 容器屏幕对拍，并继续验证 Lottie 与视频叠加/导出一致性 |
 | Preview | 多素材 tabs | 打开 `audit-4k60-h264` 与 `export-h264-frame30` 后显示 Timeline/两个媒体 tab；关闭第二个回退第一个 | 通过 | 安装版 AX：两个 Close 按钮；Preview slice 4 files / 91 tests |
 | Agent | 面板、对话标签和本地边界 | Agent 面板可打开；新建/关闭对话标签成功；无配置通道时输入框存在但发送按钮禁用；用 `⌘⌥A` 可收起并恢复编辑器布局 | 通过（入口/本地边界） | 不发送外部消息；MCP 握手、失败/取消、真实工具调用仍待 |
 | Agent / MCP | 文件夹批量工具 | `create_folder.entries` 返回创建出的 folder records，`move_to_folder.entries` 支持多个资产到不同目录；两者都通过单一 EditCommand 事务和单步 Undo，417 个 Agent lib 测试全绿 | 通过（代码/自动化） | 屏幕层无独立入口；继续用安装包 Agent/MCP 本地工具调用做一次不发送外部消息的验收 |
@@ -95,7 +95,7 @@ tags:
 | Export | 带音频 H.264/AAC 实际导出 | 最新包 `918eac84…9551b` 通过 SavePanel 导出 `/private/tmp/opentake-audio-desktop-qa-L8Nvwh/opentake-latest-smoke.mp4`；ffprobe：H.264 1280×720/30fps/231 帧、AAC 48kHz 单声道/362 包、7.700s；完整 `ffmpeg -xerror` 通过 | 通过（最新包） | H.265/ProRes、字幕、取消和实时音画同步仍待矩阵化 |
 | Export | 带音频 H.265/HEVC 实际导出 | 最新包 `893b6ed0…d0ba` 通过视频导出面板选择 `H.265 / .mp4`，SavePanel 保存 `/private/tmp/opentake-audio-desktop-qa-L8Nvwh/audio-preview-export-qa.mp4`；ffprobe：HEVC `hev1` Main、1280×720/30fps/231 帧、AAC 48kHz/362 包、7.700s；完整 `ffmpeg -xerror` 通过；安装版状态显示“导出完成 · 1280×720 · 231 帧” | 通过（屏幕/文件） | 取消、首中尾帧对拍和实时音画同步仍待 |
 | Export | 带音频 ProRes 422 HQ 实际导出 | 最新包选择 `ProRes 422 / .mov` 后 SavePanel 保存 `/private/tmp/opentake-audio-desktop-qa-L8Nvwh/audio-preview-export-qa.mov`；ffprobe：ProRes HQ `apch`、`yuv422p10le`、1280×720/30fps/231 帧、PCM `sowt` 16-bit、7.700s；完整 `ffmpeg -xerror` 通过；应用返回编辑器 | 通过（屏幕/文件） | 透明 ProRes 4444 专用导出、取消和首中尾帧对拍仍待 |
-| Export | 失败/取消输出清理 | `0bae80e` 增加普通输出 identity-safe guard、replacement race、双 cancel source fail-closed；`a7d98d6` 增加 symlink/reparse 最终路径拒绝；export unit 72/72、media cancel 18/18、audio/video integration 6/6；安装版短工程新文件名导出完成并显示 `1280×720 · 160 帧`，但渲染期间桌面状态暂时无响应，未能点到取消按钮，也未覆盖既有文件 | 部分（代码/自动化 + 导出完成屏幕） | 需要可交互的长渲染取消场景，确认 UI toast 和部分输出文件清理；不把自动化取消证据当成桌面取消证据 |
+| Export | 失败/取消输出清理 | `0bae80e` 增加普通输出 identity-safe guard、replacement race、双 cancel source fail-closed；`a7d98d6` 增加 symlink/reparse 最终路径拒绝；本轮又修复前端 progress listener 尚未返回时的 cancel race，避免取消意图被静默丢弃；export unit 72/72、media cancel 18/18、Shell export 39/39；安装版短工程新文件名导出完成并显示 `1280×720 · 160 帧`，但渲染期间桌面状态暂时无响应，未能点到取消按钮，也未覆盖既有文件 | 部分（代码/自动化 + 导出完成屏幕） | 需要可交互的长渲染取消场景，确认 UI toast 和部分输出文件清理；不把自动化取消证据当成桌面取消证据 |
 | Help | 菜单 | 快捷键/MCP 说明可展开；教程/反馈显示 Beta 禁用 | 通过 | 记录禁用原因和可用边界 |
 | Library | 全局素材库 | AX 可读分类、搜索、排序；部分截图曾未重绘，当前复测仍需重复 | 部分 | 在窗口修复后重跑可见性和空态 |
 
@@ -118,8 +118,8 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 - 本轮主线 fresh verification：Preview/Store/Media 4 files / 91 tests passed；MediaActions/MediaPanel 2 files / 59 tests passed；`pnpm build` exit 0。
 - 全量 Web 串行门禁：`NODE_OPTIONS=--localstorage-file=/tmp/opentake-vitest-range-refresh-full.json pnpm exec vitest run --pool=forks --maxWorkers=1` → 151 files / 1415 tests passed；`pnpm build` exit 0。
 - Rust workspace：此前顺序全量曾通过；本轮受影响门禁仍全绿：Agent lib 417/417、ops lib 209/209、Tauri lib 726/726，字幕 16/16 + 5/5，Lottie JSON/容器/MCP path 定向测试通过，`cargo fmt --all -- --check` 通过。2026-08-22 再跑 `cargo test --workspace --jobs 1 -- --test-threads=1` 在既有 `opentake-motion/tests/chromium.rs::four_k_single_frame_opaque_and_transparent_budget_smoke` 处超时 180s，随后同 gate 的 3 个测试因 poison 连带失败；本次 diff 未修改 `opentake-motion`，保留为当前机器 Chromium/GPU/环境风险，不宣称 workspace 全量本轮通过。全 workspace clippy 仍被既有 `chunks_exact`/`chunks_exact_mut` lint 阻塞，当前输出涉及 `opentake-media`、`opentake-motion` 等旧模块。
-- Web：Lottie 修复后的串行全量 `152 files / 1424 tests` 通过，`pnpm build`/tsc 通过；Preview 目录为 `20 files / 196 tests`。
-- 最终 `.app`：`web/node_modules/.bin/tauri build --bundles app` exit 0；当前安装包二进制 SHA-256 `6bcbfa0fd72c0b69380e10c9742a0a4d0042ef34ea3f15d97ea1acd3977dec14`，已重新安装并包含 Lottie native timeline route 修复；本轮新增 JSON Lottie 素材卡片/预览/落轨/最近项目重开/时间轴预览屏幕证据。透明 ProRes 4444 SavePanel 已打开并取消，字幕 SRT/VTT SavePanel 已打开并取消；Option 修饰键、实时听感级同步、可交互取消和 `.lottie` 容器屏幕仍保持 partial。
+- Web：Lottie 与导出取消竞态修复后的串行全量 `152 files / 1425 tests` 通过，`pnpm build`/tsc 通过；Preview 目录为 `20 files / 196 tests`，Shell export 3 files / 39 tests 通过。
+- 最终 `.app`：`web/node_modules/.bin/tauri build --bundles app` exit 0；当前安装包二进制 SHA-256 `2a5f8d72b8bac29c1f92d85c418a4987e8748eabe1fabd3b157f038db720034e`，包含 Lottie native timeline route 和导出取消竞态修复；本轮新增 JSON Lottie 素材卡片/预览/落轨/最近项目重开/时间轴预览屏幕证据。透明 ProRes 4444 SavePanel 已打开并取消，字幕 SRT/VTT SavePanel 已打开并取消；Option 修饰键、实时听感级同步、可交互取消屏幕、`.lottie` 容器屏幕仍保持 partial。
 
 ## Related Documents
 
@@ -131,6 +131,7 @@ AX tree 只能证明节点存在，不能证明用户看到或能操作；截图
 
 - `2026-08-21T10:06:00+08:00` — 首轮安装版 UI 巡检；记录窗口、导入、分割和真实回归边界。
 - `2026-08-22T11:19:00+08:00` — 修复前端将 Lottie 时间轴误判为 unsupported 的路由缺口：Lottie 现在走 Rust native compositor；新增 route/Preview 回归，Web 全量 152/1424、tsc/build 和安装包均通过；Computer Use 在 QA 工程中验证 Lottie 素材预览、双击落轨、最近项目重开、时间轴画面和播放头推进。
+- `2026-08-22T11:33:00+08:00` — 修复 ExportDialog 在进度订阅尚未返回时丢失取消意图的竞态；新增 pending-listener RED→GREEN 回归，Shell export 39/39、Web 全量 152/1425、tsc/build 和新安装包 `2a5f8d72…0034e` 通过。Mac 仍锁屏，导出中途取消保留为屏幕待验收。
 - `2026-08-21T12:09:35+08:00` — 写回 Preview tabs、文件/文件夹/relink 导入和主线 fresh verification 结果。
 - `2026-08-21T13:12:31+08:00` — 写回媒体 folder/flat/grouped 三态、网格/列表密度、文件夹导航及音频子页的安装版验收结果。
 - `2026-08-21T14:51:41+08:00` — 写回 audio full-track 解码修复、compositor temporal preview/native parity、最新安装包和全量 Web/Rust 门禁结果。

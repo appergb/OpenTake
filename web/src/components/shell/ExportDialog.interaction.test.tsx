@@ -285,6 +285,38 @@ describe("ExportDialog control acceptance", () => {
     expect(useEditorUiStore.getState().toast?.message).toBe("export.failed");
   });
 
+  it("cancels an export requested while progress subscription is still pending", async () => {
+    let resolveProgressListener: (() => void) | undefined;
+    mocks.onExportProgress.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveProgressListener = () => resolve(mocks.unlisten);
+        }),
+    );
+    await renderDialog();
+
+    await act(async () => {
+      buttonWithText("export.run").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(buttonWithText("export.cancel")).toBeDefined();
+
+    await act(async () => {
+      buttonWithText("export.cancel").click();
+      await Promise.resolve();
+    });
+    resolveProgressListener?.();
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(mocks.exportVideo).not.toHaveBeenCalled();
+    expect(useEditorUiStore.getState().exportDialogOpen).toBe(false);
+    expect(useEditorUiStore.getState().toast?.message).toBe("export.cancelled");
+  });
+
   it("control-543cacc54290eeba start video export", async () => {
     await act(async () => useProjectStore.setState({ projectPath: null }));
     mocks.getDefaultProjectDir.mockResolvedValue("/exports");
