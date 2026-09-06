@@ -58,7 +58,7 @@ use opentake_media::encode::ClipAudio;
 use opentake_media::encode::{mix, MIX_SAMPLE_RATE};
 use opentake_media::{
     decode_frame_at, extract_pcm, extract_pcm_cancellable_with_progress, interpolate_frame_pair,
-    probe, ExportPreset, ExportResolution as EncodeResolution, FrameInterpolationFallback,
+    ExportPreset, ExportResolution as EncodeResolution, FrameInterpolationFallback,
     FrameInterpolationMode, FrameRequest, MediaCancelToken, PcmBuffer, PcmFormat,
     PcmProgressCallback, PcmSpec, RgbaFrame, VideoCodec, VideoEncoder,
 };
@@ -1528,9 +1528,9 @@ impl ExportOutputCleanup {
     }
 
     fn attach_output(&mut self, output: File) {
-        if self.enabled {
-            self.file = Some(output);
-        }
+        // Reserved outputs retain their outer cleanup owner, but this guard
+        // still needs the same file authority for encoding and verification.
+        self.file = Some(output);
     }
 
     fn open_output_file(&self) -> Result<File, String> {
@@ -1547,6 +1547,17 @@ impl ExportOutputCleanup {
             .ok_or_else(|| "export cleanup output handle is not attached".to_string())?
             .try_clone()
             .map_err(|error| format!("clone export output for encoder: {error}"))
+    }
+
+    fn probe_output(&self) -> Result<opentake_media::MediaProbe, String> {
+        let file = self
+            .file
+            .as_ref()
+            .ok_or_else(|| "export output handle is not attached".to_string())?;
+        // In particular on Windows, a DELETE-capable pinned handle may not be
+        // reopened by ffprobe's CRT sharing mode. Probe the retained authority.
+        opentake_media::probe::probe_file(file)
+            .map_err(|error| format!("output validation failed: {error}"))
     }
 
     fn mark_success(&mut self) {
@@ -1682,14 +1693,12 @@ pub(crate) fn run_export_with_control(
     // Declare this before the encoder so Rust drops the encoder first (which
     // reaps ffmpeg) and only then removes an error/cancelled partial output.
     let mut output_cleanup = ExportOutputCleanup::new(out_path.clone(), !reserved_output)?;
-    let encoder_output = match options.output_file.take() {
+    let output = match options.output_file.take() {
         Some(output) => output,
-        None => {
-            let output = output_cleanup.open_output_file()?;
-            output_cleanup.attach_output(output);
-            output_cleanup.encoder_file()?
-        }
+        None => output_cleanup.open_output_file()?,
     };
+    output_cleanup.attach_output(output);
+    let encoder_output = output_cleanup.encoder_file()?;
     let mut encoder = VideoEncoder::new_with_file(
         &out_path,
         encoder_output,
@@ -1879,8 +1888,8 @@ pub(crate) fn run_export_with_control(
             expected_duration_secs: range_total as f64 / fps,
             duration_tolerance_secs: 1.5 / fps,
         };
-        let probe_result = probe(&out_path)
-            .map_err(|error| format!("output validation failed: {error}"))
+        let probe_result = output_cleanup
+            .probe_output()
             .and_then(|probe| validate_export_probe(&probe, &expectations));
         probe_result?;
     }
@@ -2292,10 +2301,16 @@ fn open_output_file_in_parent(path: &Path, _parent: &File) -> Result<File, Strin
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
+        const DELETE: u32 = 0x0001_0000;
+        const GENERIC_READ: u32 = 0x8000_0000;
+        const GENERIC_WRITE: u32 = 0x4000_0000;
         const FILE_SHARE_READ: u32 = 0x1;
         const FILE_SHARE_WRITE: u32 = 0x2;
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
         options
+            // Our retained handle performs deletion on cancellation; denying
+            // delete sharing still prevents other handles replacing the name.
+            .access_mode(GENERIC_READ | GENERIC_WRITE | DELETE)
             .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
             .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
@@ -3924,19 +3939,68 @@ mod tests {
     fn export_output_cleanup_removes_active_partial_output_on_drop() {
         let project = tempfile::tempdir().expect("project");
         let output = project.path().join("partial.mp4");
-        fs::write(&output, b"partial").expect("partial output");
-        let output_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&output)
-            .expect("open partial output");
-
         let mut cleanup = ExportOutputCleanup::new(output.clone(), true).expect("create cleanup");
+        let mut output_file = cleanup
+            .open_output_file()
+            .expect("production output handle");
+        output_file.write_all(b"partial").expect("partial output");
         cleanup.attach_output(output_file);
-        let _encoder_file = cleanup.encoder_file().expect("clone encoder file");
+        let encoder_file = cleanup.encoder_file().expect("clone encoder file");
         drop(cleanup);
-
+        assert_eq!(encoder_file.metadata().unwrap().len(), 0);
+        // Windows finalizes delete disposition after the last duplicated
+        // encoder handle closes; the payload must already have been destroyed.
+        drop(encoder_file);
         assert!(!output.exists());
+    }
+
+    #[test]
+    fn export_output_probe_reads_the_retained_file_before_cleanup() {
+        let project = tempfile::tempdir().unwrap();
+        let output = project.path().join("retained.wav");
+        let mut cleanup = ExportOutputCleanup::new(output.clone(), true).unwrap();
+        let mut file = cleanup.open_output_file().unwrap();
+        write_wav_s16le_cancellable_to_file(
+            &vec![0.0; 4800],
+            48_000,
+            &mut file,
+            &MediaCancelToken::new(),
+            None,
+            None,
+        )
+        .unwrap();
+        cleanup.attach_output(file);
+        let parsed = cleanup
+            .probe_output()
+            .expect("probe retained output without reopening its name");
+        assert!(parsed.has_audio);
+        assert!((parsed.duration_secs - 0.1).abs() < 0.01);
+        drop(cleanup);
+        assert!(!output.exists());
+
+        let reserved = reserve_project_media_output(project.path(), "probe", "wav").unwrap();
+        let reserved_path = reserved.path().to_path_buf();
+        let mut writer = reserved.writer().unwrap();
+        write_wav_s16le_cancellable_to_file(
+            &vec![0.0; 4800],
+            48_000,
+            &mut writer,
+            &MediaCancelToken::new(),
+            None,
+            None,
+        )
+        .unwrap();
+        drop(writer);
+        let mut verification = ExportOutputCleanup::new(reserved_path.clone(), false).unwrap();
+        verification.attach_output(reserved.writer().unwrap());
+        assert!(verification.probe_output().unwrap().has_audio);
+        drop(verification);
+        assert!(
+            reserved_path.exists(),
+            "outer reservation retains cleanup ownership"
+        );
+        drop(reserved);
+        assert!(!reserved_path.exists());
     }
 
     #[test]

@@ -86,3 +86,9 @@ Rust fmt、workspace clippy、minimal clippy均通过；80组workspace测试合�
 第三轮 Windows trace 的三个启动帧全部是旧帧，seed 也可能被丢弃。新补丁在任何变更之前启动并消费/ACK 旧帧，然后逐项提交 seed、作者 marker、transition、desired，每个匹配检查后排空当前 session 的已排队 ACK。Linux 模拟测试的真实 deadline 为 1 秒；原 socket 未启用生产连接的 TCP_NODELAY，连续小消息的延迟累积导致失败。测试传输已对齐，deadline 未延长，错误预算标签同步为 1 秒。
 
 作者完成 97 项 Motion 单测与 7 项实际 Chromium 集成，4K opaque/transparent 为 7.31/12.09 秒，trace 关闭，原 4K、alpha、CSP 验收文件未修改。独立只读复核通过。新增独立 Windows/Linux 资格 workflow 绑定精确 SHA，强制实际执行 97+7 和两个 4K 路径并保存日志，原 CI/release 合同未改；提交后的远端结果待回读。
+
+第四轮 `d1a020e` 的 Motion 专项 `34052875635` 已真实双平台通过 97+7（0 failed/ignored）：Linux 4K 10.200/17.805 秒，Windows 13.821/23.327 秒。模型资格 `34052875624` 也双平台成功，完整 CI 的 Rust 及其余 7 个任务通过。Windows full-product 在最后 Tauri 单测仅普通输出清理失败（689 passed/1 failed），Motion 阻塞已经解除。
+
+当前处理这项 Windows 清理缺口：普通输出补 DELETE 访问权，保留 deny-delete-sharing；验证复用打开的文件而非重开路径。详细依据见 [Windows 输出句柄记录](../../knowledge/2026-09-07-windows-export-handles.md)。未关闭测试、未绕过失败，未创建公开 tag。
+
+这项修复的本地 Tauri clippy、75 项 export 单测（含 reserved 外层所有权断言）和 6 项真实 export_integration 已通过，后者覆盖完整视频、音频 mux、HDR、文字、4K 和 ProRes 4444 alpha。新增精确 SHA 的 Windows export qualification，使用锁定 sidecars，强制两个句柄回归实际通过并保存日志；最终 Windows 结果待回读。

@@ -1,0 +1,101 @@
+name: Windows export qualification
+
+on:
+  push:
+    branches: ['release/**']
+    paths:
+      - 'src-tauri/src/export.rs'
+      - '.github/workflows/windows-export-qualification.yml'
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Exact candidate commit for Windows export qualification
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  windows-export:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    env:
+      SOURCE_SHA: ${{ inputs.commit_sha || github.sha }}
+      CARGO_BUILD_JOBS: 2
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Validate immutable source input
+        run: |
+          if ($env:SOURCE_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'Expected exact 40-hex source SHA' }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - name: Cache Cargo target and dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-export-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}
+      - name: Bind source and provision locked Windows sidecars
+        run: |
+          $actual = (git rev-parse HEAD).Trim()
+          if ($actual -cne $env:SOURCE_SHA) { throw 'Source SHA mismatch' }
+          "source_sha=$actual" | Set-Content -Encoding utf8 windows-export-qualification.log
+          $provision = python scripts/provision_ffmpeg_sidecars.py --target x86_64-pc-windows-msvc 2>&1
+          $provisionExit = $LASTEXITCODE
+          $provision | Set-Content -Encoding utf8 windows-export-provision.log
+          $provision | ForEach-Object { Write-Output $_ }
+          if ($provisionExit -ne 0) { throw 'Pinned FFmpeg provisioning failed' }
+          $toolsDir = Join-Path $env:RUNNER_TEMP 'opentake-export-ffmpeg'
+          New-Item -ItemType Directory -Force $toolsDir | Out-Null
+          foreach ($tool in @('ffmpeg', 'ffprobe')) {
+            $sidecar = Join-Path $env:GITHUB_WORKSPACE "src-tauri/binaries/$tool-x86_64-pc-windows-msvc.exe"
+            if (-not (Test-Path -LiteralPath $sidecar -PathType Leaf)) { throw "Missing pinned sidecar: $tool" }
+            $envName = 'OPENTAKE_' + $tool.ToUpperInvariant()
+            "$envName=$sidecar" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            # Legacy test helpers use bare executable names; keep them on the
+            # same provisioned bytes rather than the runner's unrelated FFmpeg.
+            Copy-Item -LiteralPath $sidecar -Destination (Join-Path $toolsDir "$tool.exe") -Force
+          }
+          $toolsDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Run debug Tauri export tests and verify required regressions
+        run: |
+          foreach ($sidecar in @($env:OPENTAKE_FFMPEG, $env:OPENTAKE_FFPROBE)) {
+            $version = & $sidecar -version 2>&1
+            $versionExit = $LASTEXITCODE
+            $version | Add-Content -Encoding utf8 windows-export-sidecars.log
+            $version | ForEach-Object { Write-Output $_ }
+            if ($versionExit -ne 0) { throw 'Pinned FFmpeg sidecar is not runnable' }
+          }
+          $output = cargo test --locked -p opentake-tauri --lib export::tests --jobs 2 -- --nocapture --test-threads=1 2>&1
+          $testExit = $LASTEXITCODE
+          $lines = @($output | ForEach-Object { "$_" })
+          $lines | Add-Content -Encoding utf8 windows-export-qualification.log
+          $lines | ForEach-Object { Write-Output $_ }
+          if ($testExit -ne 0) { throw 'Tauri export qualification failed' }
+          $text = [regex]::Replace(($lines -join "`n"), '\x1b\[[0-?]*[ -/]*[@-~]', '')
+          foreach ($name in @(
+            'export_output_cleanup_removes_active_partial_output_on_drop',
+            'export_output_probe_reads_the_retained_file_before_cleanup'
+          )) {
+            $pattern = '(?m)^test export::tests::' + [regex]::Escape($name) + ' \.\.\. ok\s*$'
+            if ($text -notmatch $pattern) { throw "Required regression did not actually pass: $name" }
+          }
+          if ($text -notmatch '(?m)^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;') {
+            throw 'Expected a nonempty export test group with zero failures and zero ignored tests'
+          }
+      - name: Preserve qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-export-${{ env.SOURCE_SHA }}
+          path: |
+            windows-export-qualification.log
+            windows-export-provision.log
+            windows-export-sidecars.log
