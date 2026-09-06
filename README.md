@@ -26,11 +26,11 @@
   </p>
 </div>
 
-**Release status (2026-09-06):** Beta 1–5 are published. The working tree is now `release/v1.0.0-beta.6`, with manifest version `1.0.0-beta.6`; Beta 6 is an **unpublished candidate**. See the [active plan](docs/plans/active/2026-09-06-public-beta.md), [candidate notes](docs/releases/1.0.0-beta.6.md) and [documentation/source review](docs/documentation-sync-2026-09-06.md).
+**Source version: `1.0.0-beta.6`.** Published versions and downloads are maintained in [GitHub Releases](https://github.com/appergb/OpenTake/releases). See the [execution plan](docs/plans/active/2026-09-06-public-beta.md), [version notes](docs/releases/1.0.0-beta.6.md) and [documentation/source review](docs/documentation-sync-2026-09-06.md).
 
-The candidate source includes multiple media preview tabs, folder/flat/grouped media views, temporal compositor routing, transparent Motion publishing and ProRes 4444 export. The Text panel adds text clips; the Effect panel applies presets to one selected visual clip while preserving existing effects. Sticker now supports project image/Lottie assets, local import, selection/preview and placement on the timeline. [Sticker validation](docs/audit/2026-09-06/sticker-panel.md) records focused tests; native package GUI acceptance is pending. These are source-level capabilities; native GUI, provider and package validation is recorded separately.
+The source includes multiple media preview tabs, folder/flat/grouped media views, temporal compositor routing, transparent Motion publishing and ProRes 4444 export. The Text panel adds text clips; the Effect panel applies presets to one selected visual clip while preserving existing effects. Sticker supports project image/Lottie assets, local import, selection/preview and placement on the timeline. Focused tests and macOS package GUI checks are recorded in the [validation report](docs/audit/2026-09-06/public-beta-validation.md); provider and platform coverage remains tied to the corresponding evidence.
 
-Semantic search model installation is implemented. Fixed-revision assets (about 1.5 GB) passed checksum validation, and the real macOS Rust path passed offline installation, image/text embedding and ranking checks. A model installation is required before use. The real model qualification passed on both macOS and Windows; Windows uses fixed input facts with the locked Tract engine. New package UI acceptance is recorded separately; see the [semantic model audit](docs/audit/2026-09-06/semantic-search-model.md).
+Semantic search uses fixed-revision assets (about 1.5 GB) with checksum validation and offline installation. Real image/text embedding and ranking passed on macOS and Windows; Windows uses fixed input facts with the locked Tract engine. The macOS package also passed actual model download, indexing and Chinese visual queries. A model installation is required before use; see the [semantic model audit](docs/audit/2026-09-06/semantic-search-model.md).
 
 ## Table of Contents
 
@@ -311,7 +311,7 @@ The sibling directory `palmier-pro-upstream/` contains upstream Swift sources fo
 | `1.0.0-beta.3` | 2026-08-09 | Playback Beta: app-wide Space transport, native HEVC source preview and release-pipeline hardening |
 | `1.0.0-beta.4` | 2026-08-10 | Release candidate: timing and transition persistence, export consistency, signed updater and Windows tract security upgrade |
 | `1.0.0-beta.5` | 2026-08-14 | Agent workflow Beta: persistent authenticated MCP, ordered inline tools, Motion Studio, project previews and interface polish |
-| `1.0.0-beta.6` | Unpublished candidate | Transparent Motion, ProRes 4444, preview tabs, media views and Text/Effect panels; validation ongoing |
+| `1.0.0-beta.6` | [Version record](docs/releases/1.0.0-beta.6.md) | Transparent Motion, ProRes 4444, preview tabs, media views, text/effects/stickers and verified semantic search |
 | *(planned)* `1.0.0` | TBD | Phase 10: Full release — CapCut parity + deep Agent integration |
 
 📖 [Full Roadmap](docs/architecture/ROADMAP.md)

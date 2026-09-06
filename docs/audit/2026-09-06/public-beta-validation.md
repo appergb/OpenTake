@@ -72,3 +72,17 @@ CI `34041435244` 的 Linux Rust 格式/clippy成功，workspace在实际 `facade
 Rust fmt、workspace clippy、minimal clippy均通过；80组workspace测试合计2899 passed/0 failed/10 ignored，全部命令exit0。Web153文件1466测试、TypeScript和生产构建通过。源码最后只读审查关闭，Motion/Poster两片无确定P1/P2。Release与Windows工作流合同通过，408篇Markdown本地链接检查无错误。新包仍须复验poster冷导入及后台导出进度/取消；旧首包的完成导出不能代替这两项。
 
 独立首包QA已通过原生Open选择器重新打开保存工程，15秒、V2文本+V1视频/图片+A1音频四片段全部保留。未将Home最近工程tile双击无变化记为重开成功，也未把AX range setter当成成功seek。
+
+## aa40672 新包与远端结果
+
+新包二进制 SHA256 为 `80e9018cd85a6cef822de5a268dc7cc1633bd3f39e3417dbeec06fdf0d2f5099`，原测试进程 92542 已退出，新进程 25806；用户旧安装包进程 59956 保持运行。新建 `Beta6-Final-QA` 后冷导入 `cold-playback-2s.mp4`，卡片实际显示完整缩略图。2 秒和 10 秒 1080p H.264/AAC 导出已完成，分别为 60/300 帧、724357/3621960 bytes。随后在 1% 进行中状态立即取消，UI 显示“已取消导出”，`Beta6-final-cancel-confirmed.mp4` 不存在。前两次点击晚于导出结束，未冒充取消通过；文件已改名为 `short-completed` / `long-completed`。
+
+桌面 UI 已实际下载安装 1.54 GB 视觉模型并进入“建立索引”阶段。新候选模型资格 [34047980719](https://github.com/appergb/OpenTake/actions/runs/34047980719) 再次在 macOS/Windows 成功。常规 CI [34047983006](https://github.com/appergb/OpenTake/actions/runs/34047983006) 仍有 Motion 跨平台阻塞：Windows 实际 4K opaque 180 秒超时；Linux 模拟透明协议用例等待 ACK 超时。其余 7 项通过，PCM 原失败场景已通过。Carver 继续同一协议切片；当前仍为候选，未创建 tag 或公开 Release。
+
+最终安装包还完成了原生双文件导入、真实视觉索引和查询：`semantic-cats.png` / `semantic-parrots.png` 经模型实际处理，“沙发上的两只猫”在“画面”组返回 `semantic-cats`，“彩色鹦鹉”返回 `semantic-parrots`，`a photo of an airplane` 显示无匹配。中文查询不匹配英文文件名，不能将其误当作 Files 回退结果。卡片和实际画面均已查看。完成/取消导出文件已分别通过 probe、完整解码或不存在检查。测试工程已保存，测试进程 25806 已退出，用户旧安装实例不变。
+
+## Motion 第四轮候选
+
+第三轮 Windows trace 的三个启动帧全部是旧帧，seed 也可能被丢弃。新补丁在任何变更之前启动并消费/ACK 旧帧，然后逐项提交 seed、作者 marker、transition、desired，每个匹配检查后排空当前 session 的已排队 ACK。Linux 模拟测试的真实 deadline 为 1 秒；原 socket 未启用生产连接的 TCP_NODELAY，连续小消息的延迟累积导致失败。测试传输已对齐，deadline 未延长，错误预算标签同步为 1 秒。
+
+作者完成 97 项 Motion 单测与 7 项实际 Chromium 集成，4K opaque/transparent 为 7.31/12.09 秒，trace 关闭，原 4K、alpha、CSP 验收文件未修改。独立只读复核通过。新增独立 Windows/Linux 资格 workflow 绑定精确 SHA，强制实际执行 97+7 和两个 4K 路径并保存日志，原 CI/release 合同未改；提交后的远端结果待回读。

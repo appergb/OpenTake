@@ -12,11 +12,11 @@
   </p>
 </div>
 
-**发布状态（2026-09-06）：** Beta 1–5 已发布。当前工作树已进入 `release/v1.0.0-beta.6`，清单版本为 `1.0.0-beta.6`；Beta 6 仍是**未发布候选**。当前工作见[活动计划](docs/plans/active/2026-09-06-public-beta.md)、[候选说明](docs/releases/1.0.0-beta.6.md)和[文档/源码核对记录](docs/documentation-sync-2026-09-06.md)。
+**源码版本：`1.0.0-beta.6`。** 公开版本与下载以 [GitHub Releases](https://github.com/appergb/OpenTake/releases) 为准。执行与验证见[活动计划](docs/plans/active/2026-09-06-public-beta.md)、[版本说明](docs/releases/1.0.0-beta.6.md)和[文档/源码核对记录](docs/documentation-sync-2026-09-06.md)。
 
-候选源码已包含多素材预览 tab、文件夹/平铺/分组媒体视图、temporal compositor 路由、透明 Motion 发布和 ProRes 4444 导出。文本面板可以添加文字片段；特效面板为单个选中视觉片段追加预设并保留既有特效。Sticker 已支持项目图片/Lottie 素材、本地导入、选择/预览、拖拽与落轨；[专项测试记录](docs/audit/2026-09-06/sticker-panel.md)已完成，新包原生 GUI 验收待执行。这些是源码接线状态，原生 GUI、provider 与安装包验证另按证据记录。
+源码包含多素材预览 tab、文件夹/平铺/分组媒体视图、temporal compositor 路由、透明 Motion 发布和 ProRes 4444 导出。文本面板可以添加文字片段；特效面板为单个选中视觉片段追加预设并保留既有特效。贴纸支持项目图片/Lottie 素材、本地导入、选择/预览、拖拽与落轨；定向测试与 macOS 安装包实际操作见[验证记录](docs/audit/2026-09-06/public-beta-validation.md)。平台与 provider 的验证范围按对应证据记录。
 
-语义搜索模型安装已实现，约 1.5 GB 的固定 revision 资产已通过校验，macOS 真实 Rust 链路已验证离线安装、图文 embedding 与排名。使用前需安装模型；macOS 与 Windows 已通过真实模型平台资格，Windows 使用固定输入的锁定 Tract 引擎；新包 UI 按总记录另行验收，详见[语义模型专项审计](docs/audit/2026-09-06/semantic-search-model.md)。
+语义搜索使用约 1.5 GB 的固定版本模型，经过校验并支持离线安装。macOS 与 Windows 已通过真实图文推理和排名验证，Windows 使用固定输入的锁定 Tract 引擎；macOS 安装包还实际完成了模型下载、索引和中文画面搜索。使用前需安装模型，详见[语义模型专项审计](docs/audit/2026-09-06/semantic-search-model.md)。
 
 - [项目介绍](#-项目介绍)
 - [为什么选 OpenTake](#-为什么选-opentake)
@@ -272,7 +272,7 @@ cd .. && cargo tauri dev
 | `1.0.0-beta.3` | 2026-08-09 | 空格播放、HEVC 原生预览与发布流水线修复 |
 | `1.0.0-beta.4` | 2026-08-10 | 时间/转场持久化、导出一致性与更新器 |
 | `1.0.0-beta.5` | 2026-08-14 | 外部 MCP 配对、有序 Agent 对话与 Motion Studio |
-| `1.0.0-beta.6` | 未发布候选 | 透明 Motion、ProRes 4444、多预览 tab、媒体视图与文本/特效入口；验证进行中 |
+| `1.0.0-beta.6` | [版本记录](docs/releases/1.0.0-beta.6.md) | 透明 Motion、ProRes 4444、多预览、媒体视图、文本/特效/贴纸与真实语义搜索 |
 | *(planned)* `1.0.0` | TBD | Phase 10: 全功能发布 — 对标剪映 + Agent 深度集成 |
 
 📖 [完整路线图](docs/architecture/ROADMAP.md)

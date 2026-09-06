@@ -1,0 +1,72 @@
+name: Motion readback qualification
+
+on:
+  push:
+    branches: ['release/**']
+    paths:
+      - 'crates/opentake-motion/**'
+      - '.github/workflows/motion-readback-qualification.yml'
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Exact candidate commit for Motion readback qualification
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  motion-readback:
+    name: Motion readback (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 2
+      OPENTAKE_MOTION_TRACE: '1'
+    steps:
+      - name: Validate immutable source input
+        shell: pwsh
+        env:
+          SOURCE_SHA: ${{ inputs.commit_sha || github.sha }}
+        run: |
+          if ($env:SOURCE_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'Expected exact 40-hex source SHA' }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.commit_sha || github.sha }}
+          persist-credentials: false
+      - name: Cache qualification dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: motion-readback-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}
+      - name: Assert source and run complete Motion qualification
+        shell: pwsh
+        env:
+          SOURCE_SHA: ${{ inputs.commit_sha || github.sha }}
+        run: |
+          if ((git rev-parse HEAD).Trim() -cne $env:SOURCE_SHA) { throw 'Source SHA mismatch' }
+          rustc --version
+          cargo --version
+          $output = cargo test --locked -p opentake-motion --features chromium --lib --test chromium --jobs 2 -- --nocapture --test-threads=1 2>&1
+          $testExit = $LASTEXITCODE
+          $output | Set-Content -Encoding utf8 motion-readback-qualification.log
+          $output | ForEach-Object { Write-Output $_ }
+          if ($testExit -ne 0) { throw 'Motion readback qualification failed' }
+          $text = $output -join "`n"
+          if ($text -notmatch 'test result: ok\. 97 passed; 0 failed; 0 ignored;') { throw 'Expected all 97 Motion unit tests' }
+          if ($text -notmatch 'test result: ok\. 7 passed; 0 failed; 0 ignored;') { throw 'Expected all 7 Chromium integration tests' }
+          if ($text -notmatch '4K opaque single-frame elapsed_ms=\d+' -or $text -notmatch '4K transparent single-frame elapsed_ms=\d+') { throw 'Both real 4K paths must execute' }
+      - name: Preserve qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: motion-readback-${{ matrix.os }}-${{ inputs.commit_sha || github.sha }}
+          path: motion-readback-qualification.log

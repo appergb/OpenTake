@@ -4,7 +4,7 @@ stage: final-verified
 ---
 # OpenTake Public Beta 官方宣传片
 
-本目录是独立营销交付，不修改产品代码、不推送、不发布。
+本目录包含官方宣传片和可复现工程，与产品代码、安装包分别维护。
 
 成片：`deliverables/OpenTake-beta6-official-1080p.mp4`。封面：`deliverables/OpenTake-beta6-cover.png`。
 可移植源资产包：`deliverables/OpenTake-beta6-source.tar.gz`（不含 node_modules）。
@@ -62,4 +62,4 @@ ffmpeg -y -i public/assets/original-score.wav -af loudnorm=I=-18:TP=-2:LRA=9 -c:
 - [执行记录](PLAN.md)
 - 验收文件在 `review/`，最终结果见 `VALIDATION.md`。
 
-宣传版本为候选 `1.0.0-beta.6 · Public Beta`；未称已发布或稳定版。界面镜头有历史日期，不代表本次 beta.6 的 GUI 验收通过。影片是历史实拍静帧动效 + 真实历史输出片段的宣传剪辑，不是最新版本连续操作录屏。
+影片标记版本为 `1.0.0-beta.6 · Public Beta`，公开发行状态见 [GitHub Releases](https://github.com/appergb/OpenTake/releases)。界面镜头有历史日期，不能代替本轮安装包的 GUI 验收记录。影片使用历史实拍静帧和真实历史输出片段制作。

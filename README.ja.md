@@ -12,11 +12,11 @@
   </p>
 </div>
 
-**リリース状況（2026-09-06）：** Beta 1–5 は公開済みです。作業ツリーは `release/v1.0.0-beta.6`、マニフェストは `1.0.0-beta.6` になりました。Beta 6 は**未公開の候補版**です。[実行計画](docs/plans/active/2026-09-06-public-beta.md)、[候補版ノート](docs/releases/1.0.0-beta.6.md)、[文書とソースの確認記録](docs/documentation-sync-2026-09-06.md)を参照してください。
+**ソースバージョン：`1.0.0-beta.6`。** 公開状況とダウンロードは [GitHub Releases](https://github.com/appergb/OpenTake/releases) を参照してください。[実行計画](docs/plans/active/2026-09-06-public-beta.md)、[バージョンノート](docs/releases/1.0.0-beta.6.md)、[文書とソースの確認記録](docs/documentation-sync-2026-09-06.md)に実装と検証を記録しています。
 
-候補版ソースには、複数のメディアプレビュータブ、フォルダー/フラット/グループ表示、temporal compositor、透明 Motion 出力、ProRes 4444 書き出しが含まれます。Text パネルはテキストクリップを追加し、Effect パネルは選択した単一の映像クリップに既存の効果を保持してプリセットを追加します。Sticker はプロジェクトの画像/Lottie 素材、ローカル読み込み、選択/プレビュー、ドラッグとタイムラインへの配置に対応しました。[専用テスト記録](docs/audit/2026-09-06/sticker-panel.md)があり、新しいパッケージのネイティブ GUI 検証は未完了です。ソース上の実装とネイティブ GUI・provider・配布パッケージの検証は別々に記録します。
+ソースには、複数のメディアプレビュータブ、フォルダー/フラット/グループ表示、temporal compositor、透明 Motion 出力、ProRes 4444 書き出しが含まれます。Text パネルはテキストクリップを追加し、Effect パネルは既存の効果を保持してプリセットを追加します。Sticker は画像/Lottie 素材の読み込み、選択、プレビュー、タイムライン配置に対応しています。単体テストと macOS パッケージの GUI 操作は[検証記録](docs/audit/2026-09-06/public-beta-validation.md)を参照してください。
 
-意味検索のモデルインストールは実装済みです。固定 revision の約 1.5 GB のアセットはチェックサム検証を通過し、macOS の実際の Rust 経路でオフラインインストール、画像・テキスト embedding、ランキングを検証しました。利用前にモデルのインストールが必要です。macOS と Windows の実モデル資格テストは合格しました。Windows は固定入力を指定するロック済み Tract エンジンを使用します。新しいパッケージの UI 検証は別途記録します。[モデル監査記録](docs/audit/2026-09-06/semantic-search-model.md)を参照してください。
+意味検索は固定バージョンの約 1.5 GB のモデルを使用し、チェックサム検証とオフラインインストールに対応しています。macOS と Windows で実際の画像・テキスト推論とランキングを検証しました。Windows は固定入力を指定する Tract エンジンを使用します。macOS パッケージではモデルのダウンロード、索引作成、中国語検索も実行済みです。利用前にモデルをインストールしてください。[モデル監査記録](docs/audit/2026-09-06/semantic-search-model.md)に詳細があります。
 
 - [プロジェクトについて](#-プロジェクトについて)
 - [なぜOpenTakeか](#-なぜopentakeか)
@@ -247,7 +247,7 @@ cd .. && cargo tauri dev
 | `1.0.0-beta.3` | 2026-08-09 | Space 再生、HEVC ネイティブプレビューと配布パイプライン |
 | `1.0.0-beta.4` | 2026-08-10 | 時間/トランジションの保存、書き出し整合性とアップデーター |
 | `1.0.0-beta.5` | 2026-08-14 | 外部 MCP ペアリング、Agent 会話順序と Motion Studio |
-| `1.0.0-beta.6` | 未公開候補 | 透明 Motion、ProRes 4444、複数プレビュー、メディア表示、Text/Effect。検証中 |
+| `1.0.0-beta.6` | [バージョン記録](docs/releases/1.0.0-beta.6.md) | 透明 Motion、ProRes 4444、複数プレビュー、メディア表示、Text/Effect/Sticker、実モデル意味検索 |
 | *(planned)* `1.0.0` | TBD | Phase 10: フルリリース |
 
 📖 [完全なロードマップ](docs/architecture/ROADMAP.md)

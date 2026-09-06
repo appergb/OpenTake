@@ -8,12 +8,12 @@
 
 ## 当前工作与状态
 
-当前分支与清单已进入 Beta 6 候选；Beta 1–5 已发布，Beta 6 尚未发布。源码接线进展与 GUI/安装包验收分别记录。
+源码清单版本为 `1.0.0-beta.6`；公开版本与下载以 [GitHub Releases](https://github.com/appergb/OpenTake/releases) 为准。源码、GUI 和平台安装包验收分别绑定实际证据。
 
 - [公开 Beta 活动计划](plans/active/2026-09-06-public-beta.md)：当前主计划。
-- [Beta 6 候选说明](releases/1.0.0-beta.6.md)：主代理维护，待验证、待发布。
+- [Beta 6 版本说明](releases/1.0.0-beta.6.md)：本轮变化、交付与发布流程。
 - [当日运行验证](audit/2026-09-06/public-beta-validation.md)：主代理维护，未执行门槛仍标为待验证。
-- [Sticker 专项记录](audit/2026-09-06/sticker-panel.md)：已实现并通过定向 Web 检查，待新包原生 GUI 验收。
+- [Sticker 专项记录](audit/2026-09-06/sticker-panel.md)：源码和定向检查；安装包实际操作见当日总验收。
 - [项目规范与意图](project/index.md) · [文档同步报告](documentation-sync-2026-09-06.md)。
 
 ## 🧭 如何使用本文档树

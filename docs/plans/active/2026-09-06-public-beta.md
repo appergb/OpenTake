@@ -71,3 +71,9 @@ updated: 2026-09-06
 - 追加原生收尾分工：Carver负责macOS 4K Motion连续两次180s超时（只写motion renderer/tests及专项记录，禁止放宽超时/跳过guard）；Banach定位到同key小poster同步/预热双生产者发布竞态，负责media.rs poster段和prewarm.rs原子不覆盖发布+屏障测试，保留主线media.rs的两处ExportGuard类型配套。主代理保留export/transcribe/search调度、全量集成、GUI和发布；Bacon只读评审。
 
 - 最终整合本地Gate全部成功：Rust80组2899/0/10、Web153files/1466、fmt/workspace+minimal clippy、生产build、两套workflow合同、408MD链接检查。最后只读审查关闭。准备提交冻结候选，启动最终远端CI并重打包验证poster冷导入和导出期间响应/取消。
+
+- aa40672 已提交并启动第三轮：模型资格 34047980719 双平台成功；常规 CI 34047983006 仅 Motion 两平台失败（Windows 4K opaque 超时；Linux 模拟透明协议 ACK 超时），其余 7 项成功。新包冷缩略图、UI 模型下载、完成导出及 1% 进行中取消/清理已通过。Carver 继续修复协议残余竞态，主代理继续真实搜索 GUI，发布仍等待完整检查。
+
+- aa40672 新包真实 GUI 搜索已通过：双文件导入猫/鹦鹉图，完成索引，两个中文查询分别返回对应画面，飞机查询为空；模型经应用内实际下载安装。测试实例已退出释放图形/模型资源，原用户安装实例保持不变。剩余发布阻塞为 Motion 远端协议检查及随后完整 release pipeline。
+
+- Motion 第四轮补丁已冻结并审查通过：旧启动帧先消费/ACK，之后逐项变更和确认；Linux mock 对齐生产 TCP_NODELAY 和原 1 秒预算标签。97+7 本机通过，原验收标准保留；新增独立 Win/Linux 资格工作流加速原生确认，准备与文档归一一起提交。
