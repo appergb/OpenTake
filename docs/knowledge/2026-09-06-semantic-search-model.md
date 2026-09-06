@@ -48,3 +48,13 @@ confidence: high
 ## 有效性边界
 
 已验证 macOS ARM64 CPU 原生 ONNX Runtime 与 Python ONNX Runtime。Windows 使用项目现有 ort-tract 后端，其对这两个实际图的兼容性需要 Windows 运行证据；不能由 macOS 验证推断已通过。公开 Hugging Face 链路在受限网络可能不可达，离线安装可使用相同字节与校验值。
+
+## Windows 固定输入适配补充（2026-09-06）
+
+同一公开模型现通过 macOS 宿主上的**产品 Windows 搜索分支**真实 tract 推理，原生 Windows CI 仍待验证；完整红绿证据与数值见审计最后一节。
+
+项目 Windows 搜索使用已有锁定 `tract-onnx 0.22.3` 的直接接口，其余 ort-tract 使用者保持原样。必要性来自已下载的发布源代码：`ort-tract 0.2.0+0.22/api.rs` 未实现 ORT 线程配置和 `AddFreeDimensionOverride*`；`ort-sys 2.0.0-rc.11/src/stub.rs` 对这些接口返回 Unimplemented。原生 ORT 可接受的动态图，不能由此推断 ort-tract 包装层可接受。
+
+固定输入后还需重新推导中间动态维度：Tract 对导出 `value_info` 内嵌表达式的除法解析实测产生错误的 batch=0（`batch_size*(height/16)*(width/4096)`），与实际 Reshape 结果冲突。处理只发生在内存图的 shape fact：保留类型、rank、静态维度，绑定固定输入，再执行完整推导及 float32 `[1,768]` 输出检查。算子、权重、原始 ONNX 文件、manifest SHA-256 和模型版本均不改变。
+
+这不是更换模型或升级上游依赖。`Cargo.lock` 仅新增 opentake-media 到既有 tract-onnx 包的直接依赖边；macOS/Linux 仍使用 native ORT。当前结论置信度：宿主同一产品分支运行高；Windows OS/MSVC 原生资格待主线 CI。有效期与本文件元数据一致。

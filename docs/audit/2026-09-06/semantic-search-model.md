@@ -192,3 +192,75 @@ if ($LASTEXITCODE -ne 0) { throw 'Windows semantic model qualification failed' }
 该命令自然选中产品 Windows `ort-tract` 依赖和初始化分支，覆盖实际 hash/安装、预处理、768 维单位向量、f16 索引和五条查询。需在协调修复后真正通过，并保留资源峰值及日志，才能解除 Windows 资格阻塞。这里提供命令，未提交/运行 CI 或改工作流。
 
 本轮原始证据：`/tmp/opentake-tract-qualification/{Cargo.toml,Cargo.lock,metadata.json,lock-comparison.json,build.log,vision.log,text.log,ranking.log,diagnostic-vision.log,diagnostic-text.log,direct-vision.log,direct-text.log}`；可执行文件为 `target/debug/opentake-tract-qualification`，模式分别是 `vision`、`text`、`ranking`、`diagnostic-vision`、`diagnostic-text`、`direct-vision`、`direct-text`，运行时设置 `OPENTAKE_SEARCH_MODEL_TEST_DIR=/tmp/opentake-semantic-model`。
+
+## 2026-09-06 最小 Windows 搜索适配：宿主真实推理通过，等待原生 CI
+
+本节取代上一节“修复前阻塞”作为最新实现状态。代码已冻结待主线统一提交/push；本任务没有打 tag 或发布 Release，原生 Windows 系统资格仍由主线新增平台 workflow 验证。
+
+### 修复选择与实证
+
+1. 线程配置和维度覆盖两类 ORT API 在锁定 ort-tract 包装层都没有实现。`ort::SessionBuilder::with_dimension_override` 调用的 `AddFreeDimensionOverrideByName` 同样落入 `ort-sys` 的 Unimplemented stub，不能用该接口完成固定输入绑定。
+2. 仅设置输入 fact 仍会被中间 `value_info` 的动态 shape 注解阻塞。继续实测发现导出注解被 Tract 0.22.3 解析成 `Mul([Mul([Sym(batch_size), Div(Sym(height), 16)]), Div(Sym(width), 4096)])`；256×256 输入得出错误 batch=0，随后与 Reshape 推导出的 batch=1 冲突。证据 `binding-debug.log`。
+3. 最小修复是在 Windows 搜索编码器内部直接使用**同一锁定的 tract-onnx 0.22.3 引擎**，无需修改 ort-tract 包、其他推理功能或上游模型。固定输入图像 `[1,3,256,256]`、文本 `[1,64]`，只将中间 shape 的动态维度恢复为待推导维度，保留张量类型、rank 与静态维度，随后由 Tract 完成类型/shape 推导及优化。
+4. 加载前检查原图单输入名称、dtype、rank、已有静态尺寸；加载后要求目标 `pooler_output` 是 float32 `[1,768]`；运行时再次检查输入 dtype/shape、输出数量/shape，再进入既有有限值、非零范数、L2 归一化与排名逻辑。没有启用 `ignore_output_types` 或关闭输出检查，没有修改任何算子/权重或落盘模型。
+
+产品写集：
+
+- `crates/opentake-media/src/search/ort_embedder.rs`：Windows 内部 `tract_backend::Encoder` 与固定输入推导；macOS/Linux 保留原生 ORT 实现。
+- `crates/opentake-media/Cargo.toml`：`ort-backend` 开启 Windows-only optional `tract-onnx = "=0.22.3"`，只引用已锁定依赖。
+- `Cargo.lock`：仅为 opentake-media 增加 `tract-onnx` 依赖边，包版本与 checksum 未升级。
+- 本审计与既有模型知识记录。
+
+本轮未修改 config、tokenizer、model_download、src-tauri/search、worker、模型 manifest/哈希/版本、下载资产。主线拥有的查询恢复/缓存过滤/平台 workflow 继续独立处理。
+
+### 测试分支与实际运行
+
+临时 harness 继续使用 `/tmp/opentake-tract-qualification/`，没有使用主 workspace target，Cargo jobs≤2。
+
+为在 macOS 编译**产品文件的 Windows 搜索分支**，只对 `/tmp` 的产品源码副本进行守卫选择转换：
+
+```python
+source = product_ort_embedder_rs.read_text()
+source = source.replace('target_os = "windows"', 'feature = "qualification-tract"')
+```
+
+临时 Cargo manifest 定义 `qualification-tract=[]`，开启该 feature 后构造的就是产品 `OrtEmbedder` 及其同一 `tract_backend::Encoder` 实现。没有设置 rustc `cfg(windows)`，没有改标准库目标平台，没有改函数体/模型运算来取得通过；这个选择仅存在临时 harness，产品仍由真实 `target_os="windows"` 选择。新的直接 tract 路径不调用 ORT API，因而不会碰未实现的线程配置。
+
+两个真实编码器**同时驻留**，产品 `OrtEmbedder` 完成图像预处理、tokenizer、768 维特征检查与归一化，图像向量经 f16 PALMEMB1 编码/解码后交给产品 ranker：
+
+| 查询 | 实际第一名 | 分数 |
+|---|---|---:|
+| a photo of two cats on a couch | cats | 0.15572256 |
+| a photo of colorful parrots | parrots | 0.13344985 |
+| 沙发上的两只猫 | cats | 0.115648665 |
+| 彩色鹦鹉 | parrots | 0.11663527 |
+| a photo of an airplane | 无结果 | 均低于门槛 |
+
+结果 `RESULT=PASS`，退出码 0，内部耗时 13.91 秒；`/usr/bin/time -l` real 14.85 秒、最大 RSS **2,025,848,832 bytes（约 1.89 GiB）**、peak memory footprint 2,653,620,840 bytes。前一版单独加载两个图的原型也通过，但验收采用本次同时持有双编码器的产品路径。两者保留同一公开 FP32 模型，分数与原生 ORT 前轮结果接近，没有换模型或量化。
+
+验证命令和结果：
+
+```sh
+# product-ranking.log，复用上述 feature 构建的产品分支
+OPENTAKE_SEARCH_MODEL_TEST_DIR=/tmp/opentake-semantic-model \
+  /usr/bin/time -l /tmp/opentake-tract-qualification/target/debug/opentake-tract-qualification ranking
+
+# product-unit.log
+CARGO_TARGET_DIR=/tmp/opentake-tract-qualification/target \
+  cargo test --manifest-path /tmp/opentake-tract-qualification/Cargo.toml \
+  --locked --offline --features qualification-tract --jobs 2 \
+  search::ort_embedder -- --nocapture
+```
+
+- Windows 分支相关单测：**4 passed、0 failed**。新增两项分别验证动态维度绑定不放宽静态尺寸、拒绝错误输入名称/类型/rank；另两项验证 I/O 名和向量输出检查。
+- macOS 原生分支：只读复用已编译依赖的独立 `rustc --test`，**72 passed、0 failed**，本轮不重复前轮已完成的原生真实模型测试。
+- `cargo metadata --locked --offline --no-deps` 通过；macOS `cargo tree --locked --offline ... --target aarch64-apple-darwin` 确认未引入 tract。Windows 离线依赖树检查因为本机未缓存 `winapi 0.3.9` 源码停止，不作为 Windows 编译失败或成功的依据。
+- 最后受限文件 rustfmt 与 diff 空白检查通过。产品代码冻结后未再启动 Cargo。
+
+新证据包括 `fixed-ranking.log`、`binding-debug.log`、`product-build.log`、`product-ranking.log`、`product-unit.log`、`native-tests.log`、`tree-macos.log`、`tree-windows.log`。模型仍在原来的 1.7 GiB 临时目录，没有额外下载。独立 tract 临时编译目录复用原有 target。
+
+### 合入复核与发布门槛
+
+复核重点是：Windows cfg 是否只选择新搜索编码器；直接依赖是否仅激活 Windows 且版本仍为 0.22.3；动态 shape 重推导是否保留 dtype/rank/静态尺寸，并在优化后及运行后检查 `[1,768]`；manifest 和模型字节是否保持不变。
+
+**本机已实证收敛三个已知后端阻塞。** 允许进入主线统一 push 后的平台资格流程；仍须在真实 Windows runner 跑主线的 `real_model_offline_install_embeddings_and_ranking` opt-in 测试，并检查确实 `1 passed`，同时满足 macOS 原生资格和主线 release 验收，才能宣布 Windows 发布资格通过。临时 harness 的通过不能替代 OS/MSVC 实测。

@@ -1,0 +1,71 @@
+name: Semantic model qualification
+
+on:
+  push:
+    branches: ['release/**']
+    paths:
+      - '.github/workflows/semantic-model-qualification.yml'
+      - 'crates/opentake-media/src/search/**'
+      - 'crates/opentake-media/Cargo.toml'
+      - 'crates/opentake-media/examples/search_manifest.rs'
+      - 'scripts/prepare_search_model_fixtures.py'
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: Exact candidate commit for real model qualification
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  real-model:
+    name: Real SigLIP2 (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - name: Validate immutable source input
+        shell: pwsh
+        env:
+          SOURCE_SHA: ${{ inputs.commit_sha || github.sha }}
+        run: |
+          if ($env:SOURCE_SHA -cnotmatch '^[0-9a-f]{40}$') { throw 'Expected exact 40-hex source SHA' }
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.commit_sha || github.sha }}
+          persist-credentials: false
+      - name: Cache qualification dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: semantic-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('**/Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}
+      - name: Assert source and export production manifest
+        shell: pwsh
+        env:
+          SOURCE_SHA: ${{ inputs.commit_sha || github.sha }}
+        run: |
+          if ((git rev-parse HEAD).Trim() -cne $env:SOURCE_SHA) { throw 'Source SHA mismatch' }
+          cargo run --locked -p opentake-media --features model-download --example search_manifest --quiet > search-manifest.json
+          if ($LASTEXITCODE -ne 0) { throw 'Production manifest export failed' }
+      - name: Fetch checksum-pinned model and image fixtures
+        shell: pwsh
+        run: |
+          python scripts/prepare_search_model_fixtures.py --manifest search-manifest.json --output "$env:RUNNER_TEMP/search-fixtures"
+          if ($LASTEXITCODE -ne 0) { throw 'Fixture verification failed' }
+      - name: Exercise real installed model, embeddings and ranking
+        shell: pwsh
+        run: |
+          $env:OPENTAKE_SEARCH_MODEL_TEST_DIR = "$env:RUNNER_TEMP/search-fixtures"
+          $output = cargo test --locked -p opentake-media --features model-download,ort-backend --lib real_model_offline_install_embeddings_and_ranking -- --ignored --nocapture --test-threads=1 2>&1
+          $testExit = $LASTEXITCODE
+          $output | ForEach-Object { Write-Output $_ }
+          if ($testExit -ne 0) { throw 'Real model qualification failed' }
+          if (-not ($output -match 'test result: ok\. 1 passed; 0 failed; 0 ignored;')) { throw 'Expected exactly one executed real-model test' }

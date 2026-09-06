@@ -33,12 +33,12 @@ updated: 2026-09-06
 ## 方案与里程碑
 
 - [x] M1：核对工作树、变更、实际公开版本、能力清单；委派视频制作。
-- [ ] M2：本地 baseline：Rust fmt/clippy/workspace test、Web test/build、脚本合同/许可证与依赖审计；按失败点最小修复。
+- [x] M2：本地 baseline：Rust fmt/clippy/workspace test、Web test/build、脚本合同/许可证与依赖审计；按失败点最小修复。
 - [ ] M3：从能力清单逐项完成核心闭环及安装包 GUI 验收，补齐未完成能力，更新可复现证据；未验证项保留明确状态。
 - [ ] M4：统一入口和开发规范、当前发布说明、README 多语言、模块状态、历史元数据、链接/版本一致性；保留历史事实。
 - [ ] M5：候选版本清单、最终 diff 审查、独立必要复核、本地最终构建；完成 PR/远端 exact-SHA CI。
 - [ ] M6：合并已验证候选至 main，创建新的不可变 tag，等待完整 release pipeline；回读发布资产与校验结果。
-- [ ] M7：视频 MP4、封面、可复现源工程、素材来源与视觉/解码验收；发布文档链接到实际交付。
+- [x] M7：视频 MP4、封面、可复现源工程、素材来源与视觉/解码验收；发布文档链接到实际交付。
 
 ## 测试验收
 
@@ -63,3 +63,6 @@ updated: 2026-09-06
 - 2026-09-06：只读确认电脑工具能访问OpenTake；视频代理正在其独立演示工程采集，主代理未干扰其导出操作。已生成独立10s H.264/AAC测试夹具及PNG用于后续验收。
 
 - 2026-09-06 收尾：本轮首个 Rust workspace 全量 2885/0/10（passed/failed/ignored）；原生 FFmpeg/Motion/导出/播放集成、音频时钟探针和真实 Keychain/MCP 两项通过。GPT-6 宣传片 60 秒 1080p 已交付并解码复核。搜索整批索引挤占交互查询的问题增加有界排队与明确 busy 状态；Windows Tract 实际模型兼容阻塞修复中。用户再次明确直接向 GitHub 提交包含全部更新的新版本，授权持续有效。
+
+- GitHub 候选已建立：`3c68cf7` 为本轮完整快照，`4e08454` 排除本地演示锁文件，已推送 `release/v1.0.0-beta.6` 并创建 [PR #249](https://github.com/appergb/OpenTake/pull/249)。随后合入 main 的纯合并提交以满足 strict 分支新鲜度（无产品内容差异），待下一修复统一推送。未创建 Beta 6 tag 或公开 Release。
+- 独立审查确认 Sticker pending、模型修复入口/真实下载大小、视觉错误结果分组及250ms有界排队的问题关闭，无新增确定缺陷。新增独立 SigLIP2 平台资格 workflow：读取生产清单、下载校验真实资产，在 macOS/Windows 绑定exact SHA执行真实图文模型测试，不改既有CI或17项发布资产合同。

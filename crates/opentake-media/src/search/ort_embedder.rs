@@ -1,4 +1,4 @@
-//! ONNX Runtime SigLIP2 embedder (feature `ort-backend`). Real implementation of
+//! SigLIP2 embedder using native ORT or fixed-shape tract on Windows. Implements
 //! the [`Embedder`] trait; the default build and tests use the mock instead.
 //!
 //! Image input is `NCHW` f32 `(1,3,256,256)` (mean/std from
@@ -8,13 +8,18 @@
 //!
 //! IO defaults match the pinned ONNX Community graphs: `pixel_values` /
 //! `input_ids` → `pooler_output`. Features are L2-normalized for cosine ranking.
+//! Windows binds the known input shapes in memory; downloaded assets stay intact.
 
 use std::path::Path;
 use std::sync::Mutex;
 
-use ndarray::{Array2, Array4};
-use ort::session::Session;
-use ort::value::Tensor;
+#[cfg(not(target_os = "windows"))]
+use ndarray::Array2;
+use ndarray::Array4;
+#[cfg(not(target_os = "windows"))]
+use ort::{session::Session, value::Tensor};
+#[cfg(target_os = "windows")]
+use tract_backend::Encoder as Session;
 
 use super::embedder::{
     l2_normalize, preprocess_image, Embedder, EmbedderSpec, SIGLIP_MEAN, SIGLIP_STD,
@@ -51,6 +56,7 @@ pub struct OrtEmbedder {
     text: Mutex<Session>,
     tokenizer: SiglipTokenizer,
     spec: EmbedderSpec,
+    #[cfg(not(target_os = "windows"))]
     io: IoNames,
 }
 
@@ -79,14 +85,35 @@ impl OrtEmbedder {
         spec: EmbedderSpec,
         io: IoNames,
     ) -> Result<Self> {
+        #[cfg(not(target_os = "windows"))]
         let image = build_session(image_encoder)?;
+        #[cfg(not(target_os = "windows"))]
         let text = build_session(text_encoder)?;
+        #[cfg(target_os = "windows")]
+        let image = Session::load(
+            image_encoder,
+            &io.image_input,
+            &io.image_output,
+            tract_onnx::prelude::DatumType::F32,
+            &[1, 3, spec.image_size as usize, spec.image_size as usize],
+            spec.embedding_dim,
+        )?;
+        #[cfg(target_os = "windows")]
+        let text = Session::load(
+            text_encoder,
+            &io.text_input,
+            &io.text_output,
+            tract_onnx::prelude::DatumType::I64,
+            &[1, spec.context_length],
+            spec.embedding_dim,
+        )?;
         let tokenizer = SiglipTokenizer::from_file(tokenizer_json, spec.context_length)?;
         Ok(OrtEmbedder {
             image: Mutex::new(image),
             text: Mutex::new(text),
             tokenizer,
             spec,
+            #[cfg(not(target_os = "windows"))]
             io,
         })
     }
@@ -110,6 +137,7 @@ fn finalize_embedding(mut v: Vec<f32>, spec: &EmbedderSpec) -> Result<Vec<f32>> 
     Ok(v)
 }
 
+#[cfg(not(target_os = "windows"))]
 fn build_session(path: &Path) -> Result<Session> {
     crate::initialize_ort_backend();
     let builder = Session::builder().map_err(|e| MediaError::ModelInstall(format!("ort: {e}")))?;
@@ -126,6 +154,7 @@ fn build_session(path: &Path) -> Result<Session> {
         .map_err(|e| MediaError::ModelInstall(format!("ort load {}: {e}", path.display())))
 }
 
+#[cfg(not(target_os = "windows"))]
 fn extract_vec(value: &ort::value::Value) -> Result<Vec<f32>> {
     let (_, data) = value
         .try_extract_tensor::<f32>()
@@ -141,34 +170,248 @@ impl Embedder for OrtEmbedder {
     fn encode_image(&self, frame: &RgbaFrame) -> Result<Vec<f32>> {
         let tensor: Array4<f32> =
             preprocess_image(frame, self.spec.image_size, SIGLIP_MEAN, SIGLIP_STD);
-        let input = Tensor::from_array(tensor)
-            .map_err(|e| MediaError::Decode(format!("ort tensor: {e}")))?;
-        let mut session = self.image.lock().unwrap();
-        let outputs = session
-            .run(ort::inputs![self.io.image_input.as_str() => input])
-            .map_err(|e| MediaError::Decode(format!("ort run image: {e}")))?;
-        let value = outputs
-            .get(self.io.image_output.as_str())
-            .ok_or(MediaError::BadModelOutput)?;
-        let v = extract_vec(value)?;
+        #[cfg(not(target_os = "windows"))]
+        let v = {
+            let input = Tensor::from_array(tensor)
+                .map_err(|e| MediaError::Decode(format!("ort tensor: {e}")))?;
+            let mut session = self.image.lock().unwrap();
+            let outputs = session
+                .run(ort::inputs![self.io.image_input.as_str() => input])
+                .map_err(|e| MediaError::Decode(format!("ort run image: {e}")))?;
+            let value = outputs
+                .get(self.io.image_output.as_str())
+                .ok_or(MediaError::BadModelOutput)?;
+            extract_vec(value)?
+        };
+        #[cfg(target_os = "windows")]
+        let v = self
+            .image
+            .lock()
+            .map_err(|_| MediaError::ModelInstall("image session poisoned".into()))?
+            .run(
+                tensor.shape(),
+                tensor.as_slice().ok_or(MediaError::BadModelOutput)?,
+            )?;
         self.finalize(v)
     }
 
     fn encode_text(&self, text: &str) -> Result<Vec<f32>> {
         let ids = self.tokenizer.tokenize(text)?;
-        let arr = Array2::from_shape_vec((1, ids.len()), ids)
-            .map_err(|e| MediaError::Decode(format!("ort text shape: {e}")))?;
-        let input =
-            Tensor::from_array(arr).map_err(|e| MediaError::Decode(format!("ort tensor: {e}")))?;
-        let mut session = self.text.lock().unwrap();
-        let outputs = session
-            .run(ort::inputs![self.io.text_input.as_str() => input])
-            .map_err(|e| MediaError::Decode(format!("ort run text: {e}")))?;
-        let value = outputs
-            .get(self.io.text_output.as_str())
-            .ok_or(MediaError::BadModelOutput)?;
-        let v = extract_vec(value)?;
+        #[cfg(not(target_os = "windows"))]
+        let v = {
+            let arr = Array2::from_shape_vec((1, ids.len()), ids)
+                .map_err(|e| MediaError::Decode(format!("ort text shape: {e}")))?;
+            let input = Tensor::from_array(arr)
+                .map_err(|e| MediaError::Decode(format!("ort tensor: {e}")))?;
+            let mut session = self.text.lock().unwrap();
+            let outputs = session
+                .run(ort::inputs![self.io.text_input.as_str() => input])
+                .map_err(|e| MediaError::Decode(format!("ort run text: {e}")))?;
+            let value = outputs
+                .get(self.io.text_output.as_str())
+                .ok_or(MediaError::BadModelOutput)?;
+            extract_vec(value)?
+        };
+        #[cfg(target_os = "windows")]
+        let v = self
+            .text
+            .lock()
+            .map_err(|_| MediaError::ModelInstall("text session poisoned".into()))?
+            .run(&[1, ids.len()], &ids)?;
         self.finalize(v)
+    }
+}
+
+// The ort-tract adapter cannot bind input dimensions and rejects ORT thread
+// options. Use its same pinned tract engine directly for these fixed encoders.
+#[cfg(target_os = "windows")]
+mod tract_backend {
+    use super::*;
+    use tract_onnx::prelude::*;
+    use tract_onnx::tract_hir::infer::{Factoid, ShapeFactoid};
+
+    pub(super) struct Encoder {
+        plan: TypedRunnableModel<TypedModel>,
+        shape: Vec<usize>,
+        datum_type: DatumType,
+        embedding_dim: usize,
+    }
+
+    impl Encoder {
+        pub(super) fn load(
+            path: &Path,
+            input_name: &str,
+            output_name: &str,
+            datum_type: DatumType,
+            shape: &[usize],
+            embedding_dim: usize,
+        ) -> Result<Self> {
+            let result = (|| -> TractResult<Self> {
+                let mut model = tract_onnx::onnx().model_for_path(path)?;
+                bind_input(&mut model, input_name, datum_type, shape)?;
+                let model = model.with_output_names([output_name])?.into_optimized()?;
+                let output = model.output_fact(0)?;
+                anyhow::ensure!(
+                    output.datum_type == DatumType::F32
+                        && output.shape.as_concrete() == Some(&[1, embedding_dim]),
+                    "expected pooled float32 output [1, {embedding_dim}], got {output:?}"
+                );
+                Ok(Self {
+                    plan: model.into_runnable()?,
+                    shape: shape.to_vec(),
+                    datum_type,
+                    embedding_dim,
+                })
+            })();
+            result.map_err(|e| {
+                MediaError::ModelInstall(format!("tract load {}: {e:#}", path.display()))
+            })
+        }
+
+        pub(super) fn run<T: Datum + Copy>(&self, shape: &[usize], data: &[T]) -> Result<Vec<f32>> {
+            if shape != self.shape || T::datum_type() != self.datum_type {
+                return Err(MediaError::BadModelOutput);
+            }
+            let input = tract_onnx::prelude::Tensor::from_shape(shape, data)
+                .map_err(|e| MediaError::Decode(format!("tract input: {e:#}")))?;
+            let output = self
+                .plan
+                .run(tvec!(input.into()))
+                .map_err(|e| MediaError::Decode(format!("tract run: {e:#}")))?;
+            if output.len() != 1 || output[0].shape() != [1, self.embedding_dim] {
+                return Err(MediaError::BadModelOutput);
+            }
+            output[0]
+                .as_slice::<f32>()
+                .map(|v| v.to_vec())
+                .map_err(|_| MediaError::BadModelOutput)
+        }
+    }
+
+    fn bind_input(
+        model: &mut InferenceModel,
+        input_name: &str,
+        datum_type: DatumType,
+        shape: &[usize],
+    ) -> TractResult<()> {
+        let inputs = model.input_outlets()?;
+        anyhow::ensure!(
+            inputs.len() == 1 && model.node(inputs[0].node).name == input_name,
+            "expected a single input named {input_name}"
+        );
+        let input = model.input_fact(0)?;
+        anyhow::ensure!(
+            input.datum_type.concretize() == Some(datum_type),
+            "unexpected input type"
+        );
+        anyhow::ensure!(
+            input.shape.rank().concretize() == Some(shape.len() as i64),
+            "unexpected input rank"
+        );
+        for (dimension, expected) in input.shape.dims().zip(shape) {
+            if let Some(dimension) = dimension.concretize().and_then(|d| d.to_i64().ok()) {
+                anyhow::ensure!(
+                    dimension == *expected as i64,
+                    "input dimension conflicts with model spec"
+                );
+            }
+        }
+        // The exporter includes symbolic expressions in value_info. Tract 0.22
+        // parses their division precedence incorrectly. Re-infer only dynamic
+        // dimensions from the fixed input; retain dtype, rank and static checks.
+        for node in model.nodes_mut() {
+            for output in &mut node.outputs {
+                let dims = output
+                    .fact
+                    .shape
+                    .dims()
+                    .map(|dimension| {
+                        if dimension.concretize().is_some_and(|d| d.to_i64().is_ok()) {
+                            dimension.clone()
+                        } else {
+                            Default::default()
+                        }
+                    })
+                    .collect();
+                output.fact.shape = if output.fact.shape.is_open() {
+                    ShapeFactoid::open(dims)
+                } else {
+                    ShapeFactoid::closed(dims)
+                };
+            }
+        }
+        model.set_input_fact(0, TypedFact::dt_shape(datum_type, shape).into())?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn image_model() -> InferenceModel {
+            let mut model = InferenceModel::default();
+            let batch = model.symbols.sym("batch_size");
+            let shape: [TDim; 4] = [batch.into(), 3.into(), 256.into(), 256.into()];
+            model
+                .add_source("pixel_values", f32::fact(shape).into())
+                .unwrap();
+            model
+        }
+
+        #[test]
+        fn binds_dynamic_input_without_relaxing_static_dimensions() {
+            let mut model = image_model();
+            bind_input(
+                &mut model,
+                "pixel_values",
+                DatumType::F32,
+                &[1, 3, 256, 256],
+            )
+            .unwrap();
+            assert_eq!(
+                model
+                    .input_fact(0)
+                    .unwrap()
+                    .shape
+                    .as_concrete_finite()
+                    .unwrap()
+                    .unwrap()
+                    .as_slice(),
+                &[1, 3, 256, 256]
+            );
+            assert!(bind_input(
+                &mut image_model(),
+                "pixel_values",
+                DatumType::F32,
+                &[1, 3, 128, 128]
+            )
+            .is_err());
+        }
+
+        #[test]
+        fn rejects_wrong_input_name_type_and_rank() {
+            assert!(bind_input(
+                &mut image_model(),
+                "wrong",
+                DatumType::F32,
+                &[1, 3, 256, 256]
+            )
+            .is_err());
+            assert!(bind_input(
+                &mut image_model(),
+                "pixel_values",
+                DatumType::I64,
+                &[1, 3, 256, 256]
+            )
+            .is_err());
+            assert!(bind_input(
+                &mut image_model(),
+                "pixel_values",
+                DatumType::F32,
+                &[1, 768]
+            )
+            .is_err());
+        }
     }
 }
 

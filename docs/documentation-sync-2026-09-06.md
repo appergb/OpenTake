@@ -3,7 +3,7 @@
 > 状态：generated · 阶段：implementation-backed · 文档审计日期：2026-09-06。
 > 本报告记录文档同步与静态源码核对，不代替候选功能、GUI、安装包或远端发布验收。
 
-工作树：`OpenTake-generation/`。起点为 `release/v1.0.0-beta.5` / `33ee8e2`，origin 为 `appergb/OpenTake`。工作期间主代理切到 `release/v1.0.0-beta.6` 并更新版本清单；Beta 1–5 已发布，Beta 6 仍是未发布候选。本文未执行 commit、push、tag 或 release。
+工作树：`OpenTake-generation/`。起点为 `release/v1.0.0-beta.5` / `33ee8e2`，origin 为 `appergb/OpenTake`。工作期间主代理切到 `release/v1.0.0-beta.6` 并更新版本清单；Beta 1–5 已发布，Beta 6 仍是未发布候选。文档子任务未执行发布；主线已将候选提交至 [PR #249](https://github.com/appergb/OpenTake/pull/249)，tag/公开发布状态以当日验证记录为准。
 
 当前入口：[活动计划](plans/active/2026-09-06-public-beta.md) · [Beta 6 候选](releases/1.0.0-beta.6.md) · [当日验证](audit/2026-09-06/public-beta-validation.md) · [文档总目录](INDEX.md) · [开发规范](project/conventions.md)。
 
