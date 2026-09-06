@@ -1,5 +1,8 @@
 # opentake-project — 模块目录
 
+> 状态：draft · 阶段：implementation-backed · 源码同步：2026-09-06。
+> 当前模块状态见 [OVERVIEW.md](OVERVIEW.md)，候选验收见[当日审计](../../audit/2026-09-06/public-beta-validation.md)。规格文档保留设计语义，不作为全功能完成证明。
+
 > 上级：[模块文档树](../INDEX.md) · [docs 总目录](../../INDEX.md)
 >
 > `opentake-project` = 工程持久化层：`.opentake` 目录包读写 + 自包含归档 + XMEML(FCP7 XML) 时间线导出 + 生成日志。依赖只向下：仅依赖 `opentake-domain`，被 `opentake-core` / `src-tauri` 调用。

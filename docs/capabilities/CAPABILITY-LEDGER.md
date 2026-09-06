@@ -18,7 +18,7 @@ skip_when:
   - 仅查看单个内部函数
 priority: must
 freshness_class: project
-last_verified: 2026-08-22T01:03:46+08:00
+last_verified: 2026-09-06
 owners:
   - OpenTake-generation
 source_of_truth:
@@ -36,7 +36,16 @@ tags:
   - evidence
 ---
 
-# 首轮状态
+# Beta 6 当前状态
+
+本轮规范来源仍为 [`requirements.json`](./requirements.json)，实际执行证据见 [2026-09-06 验证记录](../audit/2026-09-06/public-beta-validation.md)。下方八月记录保留历史属性。
+
+- 新增贴纸面板：图片/Lottie 导入、预览、选择、落轨及跨标签请求状态保留，Web 交互验证通过；新包原生 GUI 待验收。
+- 语义搜索：固定公开模型资产与校验清单，真实 macOS 模型推理、图文检索和旧索引隔离已验证；损坏模型提供修复入口，文件名/口播结果不受视觉失败影响。Windows 同版本 Tract 后端发现不支持线程设置和动态形状的问题，修复与实际推理复验进行中。
+- 真实媒体集成、原生音频时钟播放探针、真实 Keychain/MCP 生命周期验证已通过；这些证据各自有范围，不能代替安装包 GUI 或全平台验证。
+- 测试现在使用按测试文件隔离的 Storage；无须历史 NODE_OPTIONS localStorage 文件参数。
+
+# 2026-08-21–22 历史状态
 
 这不是最终完成声明，而是 2026-08-21 的可恢复基线。机器可读条目见 [`requirements.json`](./requirements.json)；安装版 UI 场景见 [`full-desktop-functional-matrix.md`](../audit/2026-08-21/full-desktop-functional-matrix.md)。首轮上游 agent 按实际代码和两条定向测试落锚，未把历史 handoff 当成当前证据。
 
@@ -48,7 +57,7 @@ tags:
 - Motion Studio transparent alpha：Rust/Web 纵切已接通并通过全量自动化；最新包已完成透明开关、发布进度、时间线落轨和保存重开屏幕验收；导出面板已新增透明 ProRes 4444 codec，真实 GPU/FFmpeg integration 已复核 `yuva444` alpha；透明导出屏幕仍待解锁后复验。
 - Agent/MCP linked move parity：`move_clips` 现在和上游约定一致，显式 `toFrame` 会把 frame delta 传播到 linked A/V partner，track-only move 不传播；新增两条 dispatcher 回归测试。最新安装版还验证了 Agent 面板标签生命周期、无通道时发送禁用和快捷键收起布局。
 - 上游收敛新切片：`create_folder.entries` 与 `move_to_folder.entries` 已接入单一 EditCommand/Undo 事务；普通媒体导入现在接受有效 `.json` / `.lottie`，用 Velato 校验并写入 Lottie metadata，坏文档在批量入口跳过，MCP 单文件入口返回明确错误。
-- OpenTake 扩展：MediaPanel 的 Text 标签已接入既有 `addTextClip()`/Inspector Text 工作流并保持单步 Undo；Sticker/Effect 仍是明确置灰占位，不计入已完成能力。
+- OpenTake 扩展：MediaPanel 的 Text 标签已接入既有 `addTextClip()`/Inspector Text 工作流并保持单步 Undo；此处是当时的 Sticker/Effect 占位状态；当前 Sticker 已实现，Effect 预设已接链接选区的视频片段及单步撤销，见本轮候选说明。
 
 ## 首轮明确缺口
 

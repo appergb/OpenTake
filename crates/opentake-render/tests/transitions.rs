@@ -49,7 +49,7 @@ impl TextureResolver for PairResolver<'_> {
             other => panic!("unexpected transition source {other}"),
         };
         let mut rgba = vec![0; 16 * 16 * 4];
-        for pixel in rgba.chunks_exact_mut(4) {
+        for pixel in rgba.as_chunks_mut::<4>().0.iter_mut() {
             pixel.copy_from_slice(&color);
         }
         let frame = DecodedFrame::new(16, 16, rgba, true);

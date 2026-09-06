@@ -1,5 +1,10 @@
 # opentake-media — 模块总览
 
+> 状态：draft · 阶段：implementation-backed · 源码同步：2026-09-06。
+> 本次定向来源：`crates/opentake-media/src/search/config.rs`、`encode/`、`ffmpeg/`。
+> 包含 ProRes 4444、完整轨道 PCM 抽取和媒体索引。语义搜索模型安装修复已完成：约 1.5 GB 固定 revision 资产校验、macOS 真实 Rust 离线安装/图文 embedding/排名已验证。使用前需安装模型；Windows ort-tract 真实图及新包 UI 待验收，见[专项审计](../../audit/2026-09-06/semantic-search-model.md)。
+> 当前验收见[公开 Beta 审计](../../audit/2026-09-06/public-beta-validation.md)；下文历史里程碑和测试记录保留其原时点边界。
+
 > 上级：[模块目录 INDEX.md](INDEX.md) · [模块文档树](../INDEX.md) · [docs 总目录](../../INDEX.md)
 
 ---
@@ -101,15 +106,15 @@ opentake-core / src-tauri / opentake-agent / opentake-render   调用方
 - 探测 / 解码帧 / 抽 PCM / ffmpeg sidecar 封装（含旋转校正、零声道音轨防幻影链接）。
 - 视频缩略图序列 + JPEG 雪碧图磁盘缓存（与上游 key/meta 互读）、图片单缩略图。
 - 波形（ffmpeg PCM → RMS → 归一化 + `.waveform` 缓存）。
-- 编码器 + 预设表（H.264/H.265/ProRes）+ 线性音频混音（逐 clip 偏移 + 增益 + 硬限幅，第二趟 ffmpeg mux AAC / `-shortest`，mux 失败回退视频-only）。
+- 编码器 + 预设表（H.264/H.265/ProRes）+ 线性音频混音（逐 clip 偏移 + 增益 + 硬限幅，第二趟 ffmpeg mux AAC / `-shortest`，mux 失败按错误/清理路径返回，不静默交付无音轨结果）。
 - 转写数据模型 + locale 匹配 + 双层缓存 + 转写内关键词搜索（纯逻辑全测）；whisper 后端在 `whisper-backend` feature 后。
 - 语义搜索全链路纯函数（预处理 / tokenize / 视觉去重抽帧 / 索引累积 / `PALMEMB1` 存储 / 排名 / 模型下载校验）；ort 后端在 `ort-backend` feature 后；默认 build 用 mock 离线可测。
 - 节拍检测、静音检测、自动裁剪（黑边）。
 - 全局素材库（内容寻址去重 + 原子 manifest，#104；Tauri 命令层在 src-tauri，#106）。
 - 后台索引调度内核（`work_needed` / `visual_share` / `ExportPause`）。
 
-**计划中 / 后续版本（Beta 1/2 已交付之外）：**
-- **whisper / ort 后端真实接线**：whisper-rs 本地转写（word/segment 时间戳）已交付；SigLIP2 + ort 语义搜索的推理/索引/排名链路已接入产品路径（Captions / Moments / `search_media`）。⚠️ **SigLIP2 ONNX 模型资产待外部托管**：`search/config.rs` 的 `Manifest` sha256/bytes 仍为空占位（`MODEL_DOWNLOAD_BASE_URL` 指向 `huggingface.co/opentake/siglip2-base-patch16-256-onnx`），在 ONNX 资产正式托管并填实校验值前，`download_search_model`（Tauri 命令）/ `model_download::install` 无法通过 SHA-256 校验完成真实下载——语义搜索**不是开箱即用**，模型首次下载需联网。
+**集成边界与后续核对：**
+- **whisper / ort 后端真实接线**：whisper-rs 本地转写（word/segment 时间戳）已交付；SigLIP2 + ort 语义搜索的推理/索引/排名链路已接入产品路径（Captions / Moments / `search_media`）。**模型安装与真实 Rust 链路已验证**：固定 revision 资产逐文件校验通过；Cargo media search 84 passed / 1 ignored、Tauri search 14 passed，引用实际产品模块的真实模型 Rust harness 72 passed。各组覆盖有重叠，不合计为独立测试数。Windows ort-tract 真实图及新包 UI 尚待验收，证据见[专项审计](../../audit/2026-09-06/semantic-search-model.md)。
 - **自动裁剪升级**：当前 `autocrop` 仅做黑边/透明区扫描，**未集成人脸/显著性 ML**（SPEC 的 `smart_reframe` 完整语义为后续版本）。
 - **编码导出**：H.264/H.265/ProRes + 进度/取消已随 Beta 1 交付（`src-tauri/export.rs`，预览与导出共享 RenderPlan）；音频重采样曲线 / pan / 立体声 / 动态处理为后续。
 - **进阶 AI 推理（ADVANCED-FEATURES B 层，复用 `ort_worker`）**：Beta 1 已交付 RVM 抠像、防抖、补帧、智能擦除、参考色彩匹配与可视化运动追踪；超分 / 真实显著性自动裁剪为后续。

@@ -1,5 +1,9 @@
 我先确认一下任务范围。这是一份纯粹的综合写作任务:你已经给了 5 份详尽的研读 JSON,要求我把它们综合成一份中文 Markdown 文档。我不需要读代码库或验证——所有素材都在 JSON 里。下面直接输出文档本身。
 
+> 状态：historical · 阶段：partial-implementation。原日期、问题与对照结论保留；不作为当前缺口清单。
+> 当前执行与验收：[公开 Beta 计划](../plans/active/2026-09-06-public-beta.md) · [当日验证](../audit/2026-09-06/public-beta-validation.md)。
+
+
 # OpenTake 1:1 复刻差距与实现计划
 
 ## 〇、现状真话：现在能不能完成一次真实剪辑闭环？

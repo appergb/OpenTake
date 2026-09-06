@@ -1077,6 +1077,8 @@ export interface FileHit {
  *  (name), ranked independently and never blended (mirror of Rust
  *  `SearchResultsDto`). */
 export interface SearchResults {
+  /** Visual search failure only; Files and Spoken remain usable. Older backends omit this. */
+  visualError?: string | null;
   moments: MomentHit[];
   spoken: SpokenHit[];
   files: FileHit[];

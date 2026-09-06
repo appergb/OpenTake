@@ -1,5 +1,10 @@
 # src-tauri — 总览
 
+> 状态：draft · 阶段：implementation-backed · 源码同步：2026-09-06。
+> 本次定向来源：`src-tauri/src/export.rs`、`motion.rs`、`external_mcp.rs`、`lib.rs`。
+> 导出支持 H.264、H.265、ProRes 422/4444，进度/取消与失败清理有实现。透明 Motion、Lottie 原生播放、外部 MCP 配对已接入；本次安装包与 GUI 验收另见当日审计。
+> 当前验收见[公开 Beta 审计](../../audit/2026-09-06/public-beta-validation.md)；下文历史里程碑和测试记录保留其原时点边界。
+
 > 上级：[本模块目录](INDEX.md) · [模块文档树](../INDEX.md) · [docs 总目录](../../INDEX.md)
 
 ## 一句话定位
@@ -116,15 +121,15 @@ pub enum EditRequest { … }
 
 | 子系统 | 状态 | 说明 |
 |---|---|---|
-| 命令边界 / `EditRequest` 映射 | ✅ 已实现 | 30 个命令注册；`EditRequest` 覆盖前端 v1 全部编辑变体，带回归测试 |
+| 命令边界 / `EditRequest` 映射 | ✅ 已实现 | 命令集中注册；`EditRequest` 覆盖前端 v1 全部编辑变体，带回归测试 |
 | 事件桥 | ✅ 已实现 | 4 类 CoreEvent 全部转发 |
 | 启动 / 窗口 / FFmpeg 解析 | ✅ 已实现 | 关窗隐藏 + 关窗前 flush 存盘；`RunEvent::Reopen` **仅 macOS** |
 | 单帧预览合成 `composite_frame` | ✅ 已实现 | 视频 + 图片 + 文本 + Lottie 层；预览与导出共享 RenderPlan 像素路径 |
-| 整片导出 `export_video` | ✅ 已实现 | **H.264 / .mp4、H.265 / .mp4、ProRes 422 / .mov** + 线性音频混音；带进度回调 / 取消（`cancel_export`） |
+| 整片导出 `export_video` | ✅ 已实现 | **H.264 / .mp4、H.265 / .mp4、ProRes 422 / 4444 / .mov** + 线性音频混音；带进度回调 / 取消（`cancel_export`） |
 | 媒体导入 / relink / 波形 / 缩略图 | ✅ 已实现 | 导入白名单 + 首帧海报缩略图 + 波形 + 缺失素材重链接 |
 | 全局素材库（7 命令） | ✅ 已实现 | copy-on-favorite，跨工程 |
 | 密钥（BYOK） | ✅ 已实现 | keyring 存储 + 白名单账户（含生成侧 provider） |
-| MCP / Agent 通道 | ✅ 已实现 | 官方 Codex/ChatGPT 逐轮临时 loopback MCP（256-bit Bearer、工程绑定）；固定端口外部 MCP 在 Beta 2 默认关闭 |
+| MCP / Agent 通道 | ✅ 已实现 | 官方 Codex/ChatGPT 逐轮临时 loopback MCP（256-bit Bearer、工程绑定）；外部 MCP 从 Beta 5 起采用显式认证配对，旧未认证入口仍关闭 |
 | 跨平台窗口重显 | 🟡 部分 | `RunEvent::Reopen` 仅 macOS；其它平台靠托盘 / OS 重现是后续项 |
 | FFmpeg 随包分发 | ✅ 已实现 | sidecar 随包打包（macOS/Windows）；Windows CI 校验 exact-SHA |
 

@@ -2,6 +2,24 @@
 
 本文件记录 OpenTake 的重要改动。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/)。
 
+## [Unreleased] — 1.0.0-beta.6 候选
+
+> 状态：draft · 阶段：partial-implementation。当前版本清单已切到 Beta 6，尚未发布。范围核对起点：`aae0ae6..33ee8e2`（74 个提交）；后续源码修复及门槛以[候选说明](docs/releases/1.0.0-beta.6.md)和[活动计划](docs/plans/active/2026-09-06-public-beta.md)为准。
+
+### 新增与修复
+
+- 多素材预览 tab 与旧布局状态归一；文件夹、平铺、分组媒体视图；原生文件导入对话框修复。
+- temporal compositor 播放路由、倒放发布流重置、时间控制和 Lottie 原生时间线播放；不支持或缺失素材组合显式拒绝。
+- 透明 Motion 发布/再次编辑保留 alpha；ProRes 4444 透明导出。
+- 范围选择、按选区分割/播放头修剪、链接移动与 Option 修剪一致性。
+- 导出失败清理、取消传播与输出身份检查；镜像刷新后约束播放头范围。
+- 文本面板接入添加文字；特效面板向单个选中视觉片段追加预设，保留链接视频既有特效。Sticker 本地图片/Lottie 展示、导入、预览、拖拽/落轨与工程身份隔离已实现，待新包原生验收。
+- 文档入口、三语 README、模块路由和历史状态同步，新增无依赖本地 Markdown 链接审计。
+
+### 候选边界
+
+功能接线不等于本候选 GUI/安装包已验收。语义搜索模型分发仍在修复验证中；Web 全量重跑、Clippy 与依赖审计修复由主任务记录。本文不声明整仓检查通过或跨平台已验证发行。
+
 ## [1.0.0-beta.5] — 2026-08-14
 
 ### 新增（Added）
@@ -25,7 +43,15 @@
 ### Beta 已知边界
 
 - macOS 候选包仍为 ad-hoc 签名且未公证；Windows 安装器仍未使用 Authenticode。平台安装与升级证据必须来自候选 exact-SHA CI/实机，不能由 macOS 或浏览器 fallback 替代。
-- 在最终打包 `.app` GUI 验收、远端 main CI 和签名 secret 预检完成前，不创建或发布 `v1.0.0-beta.5`。
+- 以下为 Beta 5 发布时的范围与边界；Beta 5 已发布，其历史验收不替代 Beta 6 候选门槛。
+
+## [1.0.0-beta.4] — 2026-08-10
+
+时间与转场持久化、导出一致性、签名更新流程和 Windows tract 安全升级。具体发布范围与证据见 [Beta 4 历史说明](docs/releases/1.0.0-beta.4.md)。
+
+## [1.0.0-beta.3] — 2026-08-09
+
+全局空格播放/暂停、原生 HEVC 素材预览和发布流水线修复。具体发布范围与证据见 [Beta 3 历史说明](docs/releases/1.0.0-beta.3.md)。
 
 ## [1.0.0-beta.2] — 2026-08-03
 

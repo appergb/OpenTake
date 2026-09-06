@@ -138,7 +138,9 @@ fn text_clip_composites_visible_pixels() {
     if rasterizer.has_fonts() {
         let any_lit = frame
             .rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .any(|px| px[0] > 8 || px[1] > 8 || px[2] > 8);
         assert!(
             any_lit,
@@ -153,7 +155,13 @@ fn text_clip_composites_visible_pixels() {
 }
 
 fn lit_count(frame: &DecodedFrame) -> u32 {
-    frame.rgba.chunks_exact(4).filter(|px| px[3] > 0).count() as u32
+    frame
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|px| px[3] > 0)
+        .count() as u32
 }
 
 fn x_centroid(frame: &DecodedFrame) -> f64 {

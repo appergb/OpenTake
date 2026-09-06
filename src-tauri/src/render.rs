@@ -1214,7 +1214,7 @@ fn paint_empty_timeline_overlay(size: RenderSize, timecode: &str) -> DecodedFram
     let width = size.width as usize;
     let height = size.height as usize;
     let mut rgba = vec![0_u8; width.saturating_mul(height).saturating_mul(4)];
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0.iter_mut() {
         pixel.copy_from_slice(&EMPTY_TIMELINE_BACKGROUND_RGBA);
     }
 

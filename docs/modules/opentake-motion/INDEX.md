@@ -1,10 +1,13 @@
 # opentake-motion — 模块目录
 
+> 状态：draft · 阶段：implementation-backed · 源码同步：2026-09-06。
+> 当前模块状态见 [OVERVIEW.md](OVERVIEW.md)，候选验收见[当日审计](../../audit/2026-09-06/public-beta-validation.md)。规格文档保留设计语义，不作为全功能完成证明。
+
 > 上级：[模块文档树](../INDEX.md) · [docs 总目录](../../INDEX.md)
 >
 > `opentake-motion` = **原生 web 动态图形 fallback 渲染原语层**：把内联 HTML/CSS/JS（或模板 + 参数）确定性逐帧栅格化为磁盘 RGBA PNG 帧序列、内容寻址缓存、安全沙箱，并适配成 `opentake-render` 的 clip source。
 > **Beta v1 已接入桌面**：`plugins/motion-canvas-studio/` 锁定 Motion Canvas 3.17.2，`title-card` 通过官方逐帧 renderer 产帧并编码 `mp4`；本 crate 的离线 Chromium 宿主也承载本地 HTML/CSS fallback。两条路径经 Tauri/Core/Agent/UI 共用的原子导入落轨流程进入普通视频预览与导出。**不是 Lottie 渲染器**（Lottie 在 [opentake-render](../opentake-render/INDEX.md)）。
-> 透明 alpha、任意 TSX 与 frame-sequence source 仍是后续能力；当前 Beta 对它们显式报不支持。
+> 透明 alpha 发布已进入候选源码；任意 TSX 与通用 frame-sequence source 仍属后续范围，不能混为同一未实现项。
 
 ---
 

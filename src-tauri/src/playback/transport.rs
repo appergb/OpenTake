@@ -556,7 +556,7 @@ impl FrameSink for MjpegSink {
 fn encode_jpeg(frame: &DecodedFrame) -> Option<Vec<u8>> {
     // JPEG has no alpha: pack RGBA → RGB.
     let mut rgb = Vec::with_capacity((frame.width * frame.height * 3) as usize);
-    for px in frame.rgba.chunks_exact(4) {
+    for px in frame.rgba.as_chunks::<4>().0.iter() {
         rgb.extend_from_slice(&px[..3]);
     }
     let mut out = Vec::new();

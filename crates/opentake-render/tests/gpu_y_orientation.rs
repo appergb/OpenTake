@@ -61,7 +61,7 @@ impl TextureResolver for SolidResolver<'_> {
     fn resolve(&mut self, _source: &TextureSource, _frame: i64) -> Option<Rc<GpuTexture>> {
         if self.cached.is_none() {
             let mut buf = vec![0u8; 64 * 64 * 4];
-            for px in buf.chunks_exact_mut(4) {
+            for px in buf.as_chunks_mut::<4>().0.iter_mut() {
                 px.copy_from_slice(&self.rgba);
             }
             let frame = DecodedFrame::new(64, 64, buf, true);

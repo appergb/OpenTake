@@ -1,14 +1,12 @@
 //! SigLIP text tokenizer wrapper. Port of `Search/Models/TextTokenizer.swift`.
 //!
 //! SigLIP was trained on `max_length`-padded sequences with **no attention
-//! mask**, so we must reproduce the Python reference exactly: encode, truncate to
-//! `context_length`, then right-pad with `pad_token = 0` to the fixed length. We
-//! disable the tokenizer's own padding/truncation and do it manually so the
-//! behavior is deterministic and unit-testable.
+//! mask**. Truncate before special-token processing so EOS survives long
+//! queries, then right-pad with `pad_token = 0` to the fixed context length.
 
 use std::path::Path;
 
-use tokenizers::Tokenizer;
+use tokenizers::{Tokenizer, TruncationParams};
 
 use crate::error::{MediaError, Result};
 
@@ -26,9 +24,18 @@ impl SiglipTokenizer {
     pub fn from_file(path: &Path, context_length: usize) -> Result<Self> {
         let mut inner = Tokenizer::from_file(path)
             .map_err(|e| MediaError::ModelInstall(format!("tokenizer load: {e}")))?;
-        // We pad/truncate manually; turn off the tokenizer's own behavior.
+        if context_length == 0 {
+            return Err(MediaError::ModelInstall(
+                "tokenizer context length must be positive".into(),
+            ));
+        }
         inner.with_padding(None);
-        let _ = inner.with_truncation(None);
+        inner
+            .with_truncation(Some(TruncationParams {
+                max_length: context_length,
+                ..Default::default()
+            }))
+            .map_err(|e| MediaError::ModelInstall(format!("tokenizer truncation: {e}")))?;
         Ok(SiglipTokenizer {
             inner,
             context_length,
@@ -41,7 +48,7 @@ impl SiglipTokenizer {
 
     /// Tokenize `text`: encode (with special tokens), truncate to
     /// `context_length`, right-pad with `PAD_TOKEN`. Output length is always
-    /// exactly `context_length`. Verbatim port of `TextTokenizer.tokenize`.
+    /// exactly `context_length`; truncation preserves the model's EOS token.
     pub fn tokenize(&self, text: &str) -> Result<Vec<i64>> {
         let encoding = self
             .inner
@@ -96,5 +103,36 @@ mod tests {
     #[test]
     fn pad_token_is_zero() {
         assert_eq!(PAD_TOKEN, 0);
+    }
+    #[test]
+    fn truncation_preserves_eos_in_the_last_context_slot() {
+        let mut inner = Tokenizer::new(
+            tokenizers::models::wordlevel::WordLevel::builder()
+                .vocab(
+                    [("<unk>".into(), 0), ("cat".into(), 2), ("<eos>".into(), 1)]
+                        .into_iter()
+                        .collect(),
+                )
+                .unk_token("<unk>".into())
+                .build()
+                .unwrap(),
+        );
+        inner.with_pre_tokenizer(Some(tokenizers::pre_tokenizers::whitespace::Whitespace {}));
+        inner.with_post_processor(Some(
+            tokenizers::processors::template::TemplateProcessing::builder()
+                .try_single("$A <eos>")
+                .unwrap()
+                .special_tokens(vec![("<eos>", 1)])
+                .build()
+                .unwrap(),
+        ));
+        let file = tempfile::NamedTempFile::new().unwrap();
+        inner.save(file.path(), false).unwrap();
+        let tokenizer = SiglipTokenizer::from_file(file.path(), 4).unwrap();
+        assert_eq!(
+            tokenizer.tokenize("cat cat cat cat cat").unwrap(),
+            vec![2, 2, 2, 1]
+        );
+        assert_eq!(tokenizer.tokenize("cat").unwrap(), vec![2, 1, 0, 0]);
     }
 }

@@ -6,9 +6,8 @@
 //! right-padded with 0. Output is a `(1, embedding_dim)` f32 vector; we assert
 //! the length matches the spec, mirroring upstream `vector(from:dim:)`.
 //!
-//! IO tensor names default to the SigLIP CoreML names (`image`/`tokens` →
-//! `embedding`); ONNX exports often use `pixel_values`/`input_ids` →
-//! `image_embeds`/`text_embeds`. `IoNames` makes them configurable.
+//! IO defaults match the pinned ONNX Community graphs: `pixel_values` /
+//! `input_ids` → `pooler_output`. Features are L2-normalized for cosine ranking.
 
 use std::path::Path;
 use std::sync::Mutex;
@@ -35,12 +34,12 @@ pub struct IoNames {
 
 impl Default for IoNames {
     fn default() -> Self {
-        // SigLIP CoreML names (upstream `VisualEmbedder`).
+        // ONNX Community separate encoder graphs expose pooled, unnormalized features.
         IoNames {
-            image_input: "image".into(),
-            image_output: "embedding".into(),
-            text_input: "tokens".into(),
-            text_output: "embedding".into(),
+            image_input: "pixel_values".into(),
+            image_output: "pooler_output".into(),
+            text_input: "input_ids".into(),
+            text_output: "pooler_output".into(),
         }
     }
 }
@@ -92,20 +91,23 @@ impl OrtEmbedder {
         })
     }
 
-    fn finalize(&self, mut v: Vec<f32>) -> Result<Vec<f32>> {
-        if v.len() != self.spec.embedding_dim {
-            return Err(MediaError::BadModelOutput);
-        }
-        if self.spec.normalized {
-            // Model already normalizes — leave as-is.
-        } else {
-            // Upstream default assumes in-graph normalization; only normalize
-            // when the spec explicitly requests external normalization (kept
-            // here for the calibration path, SPEC §0.8). Currently a no-op.
-            let _ = &mut v;
-        }
-        Ok(v)
+    fn finalize(&self, v: Vec<f32>) -> Result<Vec<f32>> {
+        finalize_embedding(v, &self.spec)
     }
+}
+
+fn finalize_embedding(mut v: Vec<f32>, spec: &EmbedderSpec) -> Result<Vec<f32>> {
+    if v.len() != spec.embedding_dim || v.iter().any(|x| !x.is_finite()) {
+        return Err(MediaError::BadModelOutput);
+    }
+    let norm_squared = v.iter().map(|x| x * x).sum::<f32>();
+    if !norm_squared.is_finite() || norm_squared <= f32::EPSILON {
+        return Err(MediaError::BadModelOutput);
+    }
+    if !spec.normalized {
+        l2_normalize(&mut v);
+    }
+    Ok(v)
 }
 
 fn build_session(path: &Path) -> Result<Session> {
@@ -170,22 +172,101 @@ impl Embedder for OrtEmbedder {
     }
 }
 
-// Keep `l2_normalize` referenced for the calibration path even while the default
-// (in-graph-normalized) configuration does not call it.
-#[allow(dead_code)]
-fn _normalize_for_calibration(v: &mut [f32]) {
-    l2_normalize(v);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn default_io_names_match_upstream_coreml() {
+    fn default_io_names_match_pinned_onnx() {
         let io = IoNames::default();
-        assert_eq!(io.image_input, "image");
-        assert_eq!(io.text_input, "tokens");
-        assert_eq!(io.image_output, "embedding");
+        assert_eq!(io.image_input, "pixel_values");
+        assert_eq!(io.text_input, "input_ids");
+        assert_eq!(io.image_output, "pooler_output");
+    }
+    #[test]
+    fn pooled_features_are_normalized_and_invalid_outputs_rejected() {
+        let mut spec = crate::search::config::embedder_spec();
+        spec.embedding_dim = 2;
+        let v = finalize_embedding(vec![3.0, 4.0], &spec).unwrap();
+        assert!((v[0] - 0.6).abs() < 1e-6);
+        assert!((v[1] - 0.8).abs() < 1e-6);
+        for invalid in [vec![f32::NAN, 1.0], vec![0.0, 0.0], vec![1.0]] {
+            assert!(finalize_embedding(invalid, &spec).is_err());
+        }
+    }
+
+    /// Opt-in real-asset check; never downloads as part of the default suite.
+    /// The directory contains the three pinned repository-relative files plus
+    /// cats.png and parrots.png from the audit's public fixtures.
+    #[cfg(feature = "model-download")]
+    #[test]
+    #[ignore = "requires OPENTAKE_SEARCH_MODEL_TEST_DIR with verified public model assets and two images"]
+    fn real_model_offline_install_embeddings_and_ranking() {
+        use crate::search::{config, embed_store, model_download, ranker};
+        let source = std::path::PathBuf::from(
+            std::env::var("OPENTAKE_SEARCH_MODEL_TEST_DIR").expect("model test directory"),
+        );
+        let models = tempfile::tempdir().unwrap();
+        let manifest = config::manifest();
+        let installed =
+            model_download::install_from_directory(models.path(), &manifest, &source).unwrap();
+        let verified = model_download::verify_installed(models.path(), &manifest).unwrap();
+        assert_eq!(installed, verified);
+        let embedder = OrtEmbedder::new(
+            &installed.image_encoder,
+            &installed.text_encoder,
+            &installed.tokenizer_folder.join("tokenizer.json"),
+            installed.spec,
+        )
+        .unwrap();
+        let check_vector = |v: &[f32]| {
+            assert_eq!(v.len(), 768);
+            assert!(v.iter().all(|x| x.is_finite()));
+            assert!((v.iter().map(|x| x * x).sum::<f32>() - 1.0).abs() < 1e-4);
+        };
+        let mut indexes = Vec::new();
+        for name in ["cats", "parrots"] {
+            let image = image::open(source.join(format!("{name}.png")))
+                .unwrap()
+                .to_rgba8();
+            let frame = RgbaFrame::new(image.width(), image.height(), image.into_raw());
+            let vector = embedder.encode_image(&frame).unwrap();
+            check_vector(&vector);
+            let header = embed_store::Header {
+                model: manifest.model.clone(),
+                model_version: manifest.version,
+                sampler_version: 1,
+                dim: 768,
+                count: 1,
+            };
+            let rows = [embed_store::Row {
+                time: 0.0,
+                shot_start: 0.0,
+                shot_end: 0.0,
+            }];
+            // Exercise the same f16 representation used by persisted search indexes.
+            let index = embed_store::decode(&embed_store::encode(&header, &rows, &vector).unwrap())
+                .unwrap();
+            indexes.push((name.to_owned(), index));
+        }
+        for (query, expected) in [
+            ("a photo of two cats on a couch", Some("cats")),
+            ("a photo of colorful parrots", Some("parrots")),
+            ("沙发上的两只猫", Some("cats")),
+            ("彩色鹦鹉", Some("parrots")),
+            ("a photo of an airplane", None),
+        ] {
+            let vector = embedder.encode_text(query).unwrap();
+            check_vector(&vector);
+            let hits = ranker::search(
+                &vector,
+                &indexes,
+                config::SEARCH_LIMIT,
+                config::RELATIVE_CUTOFF,
+                Some(config::VISUAL_MATCH_COSINE_FLOOR),
+            );
+            println!("query={query:?} hits={hits:?}");
+            assert_eq!(hits.first().map(|h| h.asset_id.as_str()), expected);
+        }
     }
 }

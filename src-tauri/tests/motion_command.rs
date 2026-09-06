@@ -131,7 +131,9 @@ fn sandbox_progress_cancel_validated_mp4_result() {
     );
     let distinct_colors = animated
         .rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|pixel| [pixel[0], pixel[1], pixel[2]])
         .collect::<std::collections::HashSet<_>>();
     assert!(
@@ -173,7 +175,9 @@ fn sandbox_progress_cancel_validated_mp4_result() {
             assert!(
                 motion
                     .rgba
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .map(|pixel| [pixel[0], pixel[1], pixel[2]])
                     .collect::<std::collections::HashSet<_>>()
                     .len()
@@ -435,6 +439,6 @@ fn transparent_motion_publishes_prores_alpha_and_marks_manifest() {
         .output()
         .expect("decode transparent motion alpha");
     assert!(alpha.status.success(), "decode alpha: {:?}", alpha.stderr);
-    assert!(alpha.stdout.iter().any(|value| *value == 0));
+    assert!(alpha.stdout.contains(&0));
     assert!(alpha.stdout.iter().any(|value| *value > 0 && *value < 255));
 }

@@ -1,6 +1,6 @@
 # Motion Canvas 动效 / AI Video 插件设计与 Beta v1 实施记录
 
-> 状态:**Beta v1 已实现并通过代码/原生集成验收（2026-08-01）**。固定 `title-card` 使用 Motion Canvas 3.17.2；HTML/CSS 路径保留为受限 fallback，透明/frame-sequence 属后续版本。
+> 状态:**Beta v1 已实现并通过代码/原生集成验收（2026-08-01）**。固定 `title-card` 使用 Motion Canvas 3.17.2；HTML/CSS 路径保留为受限 fallback，这是 2026-08-01 的历史范围。2026-09-06 候选已有透明 Motion/ProRes 4444 路径，通用 frame-sequence 仍为后续目标；当前状态见[模块总览](OVERVIEW.md)。
 > Issue trail:#34 motion dispatch / motion graphics;已认领实现切片。
 > 决策:先 fork / vendor Motion Canvas(MIT)做独立外部模块或内置插件,让它产出可导入的视频文件;OpenTake 负责一站式导入、落轨、预览和导出。
 

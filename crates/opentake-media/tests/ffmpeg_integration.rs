@@ -388,7 +388,7 @@ fn encode_roundtrip_produces_playable_video() {
     // Push 10 frames of solid color.
     for i in 0..10u8 {
         let mut rgba = vec![0u8; (w * h * 4) as usize];
-        for px in rgba.chunks_exact_mut(4) {
+        for px in rgba.as_chunks_mut::<4>().0.iter_mut() {
             px[0] = i * 20;
             px[1] = 100;
             px[2] = 200;
@@ -421,7 +421,7 @@ fn encode_codec_roundtrip(codec: VideoCodec, extension: &str, expected_codec: &s
     let mut encoder = VideoEncoder::new(&out, width, height, 10, &preset).unwrap();
     for index in 0..6_u8 {
         let mut rgba = vec![0_u8; (width * height * 4) as usize];
-        for pixel in rgba.chunks_exact_mut(4) {
+        for pixel in rgba.as_chunks_mut::<4>().0.iter_mut() {
             pixel.copy_from_slice(&[index.saturating_mul(30), 80, 180, 255]);
         }
         encoder
@@ -516,7 +516,9 @@ fn prores_4444_roundtrip_preserves_alpha_plane() {
     .1;
     let alpha = decoded
         .rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|pixel| pixel[3])
         .collect::<Vec<_>>();
     for (actual, expected) in alpha.iter().zip([0_u8, 85, 170, 255]) {
@@ -548,7 +550,9 @@ fn continuous_decode_scales_real_main10_frames_without_corruption() {
         let neon_green = decoded
             .frame
             .rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|pixel| pixel[0] < 32 && pixel[1] > 224 && pixel[2] < 32)
             .count();
         assert!(

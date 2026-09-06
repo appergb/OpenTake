@@ -1,5 +1,8 @@
 # opentake-render — 模块目录
 
+> 状态：draft · 阶段：implementation-backed · 源码同步：2026-09-06。
+> 当前模块状态见 [OVERVIEW.md](OVERVIEW.md)，候选验收见[当日审计](../../audit/2026-09-06/public-beta-validation.md)。规格文档保留设计语义，不作为全功能完成证明。
+
 > 上级：[模块文档树](../INDEX.md) · [docs 总目录](../../INDEX.md)
 >
 > `opentake-render` = RenderPlan（纯函数 `Timeline → 每帧属性`）+ wgpu 帧合成器 + 文本栅格化。**预览与导出共用同一条 RenderPlan + 同一个合成器，保证像素一致**。依赖只向下：仅依赖 `opentake-domain`，被 `opentake-core` / `src-tauri` 的预览与导出后端调用。

@@ -1,5 +1,11 @@
 # opentake-domain — 总览
 
+> 状态：draft · 阶段：implementation-backed · 源码同步：2026-09-06。
+> 本次定向来源：`crates/opentake-domain/Cargo.toml`、`src/clip.rs`、`src/timeline.rs`。
+> 领域 crate 无 I/O、仅依赖 serde（开发依赖另计）；它不是零依赖 crate。帧/关键帧与兼容模型是值层契约，不承担 GUI 与发布验收。
+> 当前验收见[公开 Beta 审计](../../audit/2026-09-06/public-beta-validation.md)；下文历史里程碑和测试记录保留其原时点边界。
+
+
 > 模块目录：[INDEX.md](INDEX.md) · 上级：[模块文档树](../INDEX.md) · [docs 总目录](../../INDEX.md)
 
 ---

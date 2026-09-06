@@ -1,5 +1,10 @@
 # opentake-ops 总览
 
+> 状态：draft · 阶段：implementation-backed · 源码同步：2026-09-06。
+> 本次定向来源：`crates/opentake-ops/src/ops/`、`web/src/store/editActions.ts`。
+> 编辑仍经过 Rust 命令与撤销事务；本轮选区驱动 split/trim、链接移动、Option trim 和范围选择的接线进展见同步报告。旧 GAP 文档不是当前未实现列表。
+> 当前验收见[公开 Beta 审计](../../audit/2026-09-06/public-beta-validation.md)；下文历史里程碑和测试记录保留其原时点边界。
+
 > 上级：[模块文档树](../INDEX.md) · [docs 总目录](../../INDEX.md) · 本模块目录：[INDEX.md](INDEX.md)
 
 ## 一句话定位
@@ -95,7 +100,7 @@ UI 手势 / Agent / MCP 工具
 - 命令层属性类操作：`SetClipProperties` / 关键帧族（`SetKeyframes` / `StampKeyframe` / `RemoveKeyframe` / `MoveKeyframe` / `SetKeyframeInterpolation`）/ `SetColorGrade` / `SetChromaKey` / `SetMasks` / `SetEffects` / `SetTrackProps` / `SwapMedia`。
 - `intent.rs` 高层意图预检：自动建轨放置、卡点放置、修剪到播放头、单区间波纹删除、smart-reframe。
 
-**计划中（仅 ROADMAP / GAP 规划，本 crate 代码尚未落地）：**
+**设计与后续核对（旧 ROADMAP / GAP 仅作来源，不能直接判定未实现）：**
 - 与上游 1:1 的若干接线层 / 模型扩展缺口主要在**前端与 domain**，不在本 crate（见 [EDITING-ENGINE-PLAN.md](../../architecture/EDITING-ENGINE-PLAN.md) §3）：如 fade knee 拖拽态、隐藏轨 hitTest 过滤、`Clip.isSoloed` 字段（需前后端 DTO 扩展）、轨间插入阈值 `insertThreshold`、Snap 容差按 DPI 缩放。
 - 曲线变速（speed 升级为关键帧轨）、复合片段嵌套等属 ROADMAP 后期能力，本 crate 当前无对应命令。
 

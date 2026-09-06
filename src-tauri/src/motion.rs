@@ -2149,7 +2149,7 @@ mod tests {
             .output()
             .expect("decode alpha plane");
         assert!(alpha.status.success(), "decode alpha: {:?}", alpha.stderr);
-        assert!(alpha.stdout.iter().any(|value| *value == 0));
+        assert!(alpha.stdout.contains(&0));
         assert!(alpha.stdout.iter().any(|value| *value > 0 && *value < 255));
     }
 

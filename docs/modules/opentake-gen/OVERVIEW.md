@@ -1,5 +1,10 @@
 # opentake-gen — 模块总览
 
+> 状态：draft · 阶段：implementation-backed · 源码同步：2026-09-06。
+> 本次定向来源：`crates/opentake-gen/src/`、`src-tauri/src/generation.rs`。
+> provider adapter、能力/凭据检查与生成作业实现和真实付费 provider 验收分开记录；无需因本轮文档同步重跑付费任务。源代码中的 provider 接入不能写成全部账号开箱即用。
+> 当前验收见[公开 Beta 审计](../../audit/2026-09-06/public-beta-validation.md)；下文历史里程碑和测试记录保留其原时点边界。
+
 > 上级：[opentake-gen 目录](INDEX.md) · [模块文档树](../INDEX.md) · [docs 总目录](../../INDEX.md)
 >
 > 模块/子系统级总览（不逐函数）。完整规格见 [SPEC.md](SPEC.md)（只读，本总览只链接、不复述）。
@@ -94,7 +99,7 @@ GenerationInput(持久化) + uploaded URLs
 - `HttpTransport` + `ReqwestTransport` / `MockTransport`（全套测试零 socket）。
 - **已接线**：`list_models` 工具已从存根接到内置静态目录（agent `mcp/gen_catalog.rs`，ROADMAP #111）；BYOK 钥匙串 save/load/delete Tauri 命令（聊天 LLM key）。
 
-**计划中 / 后续版本（Beta 1/2 已交付之外）：**
+**集成边界与后续核对：**
 
 - **`generate_*` / `upscale_media` 已接线**：agent `dispatch.rs` 的四个生成工具经 `GenerationBridge`（异步 job + BYOK/托管授权 + 成本确认 + 进度/取消/重试/恢复 + 产物安全下载落库）接入；存在兼容凭据时动态进入 MCP/Chat 发现面，无凭据 fail-closed 隐藏（ROADMAP Phase 9 / Phase 7 进度注记）。
 - **托管 proxy `opentake-gen-proxy` 未实现**（Phase 9 自建后端：`/v1/models`、`/v1/generations`、`/v1/uploads/sign`、SSE stream、对象存储预签名、可选积分计费；SPEC §3）。客户端侧已就绪，等服务端；Beta 阶段以 BYOK 直连为准。

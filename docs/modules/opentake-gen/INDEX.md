@@ -1,5 +1,8 @@
 # opentake-gen — 模块目录
 
+> 状态：draft · 阶段：implementation-backed · 源码同步：2026-09-06。
+> 当前模块状态见 [OVERVIEW.md](OVERVIEW.md)，候选验收见[当日审计](../../audit/2026-09-06/public-beta-validation.md)。规格文档保留设计语义，不作为全功能完成证明。
+
 > 上级：[模块文档树](../INDEX.md) · [docs 总目录](../../INDEX.md)
 >
 > 生成式 AI 客户端（**BYOK 无后端**：自带 key 直连 fal.ai/Replicate/OpenAI/ElevenLabs + 内置静态模型目录；可选托管 proxy）。能力层叶子 crate，仅依赖 `opentake-domain`，被 `opentake-agent` / `src-tauri` 调用。

@@ -1,5 +1,8 @@
 # opentake-core 历史合订规格(Issue #11)
 
+> 状态：draft · 阶段：partial-implementation · 设计与早期实现来源保留；原文日期、行号和“待做”属于设计时点。2026-09-06 当前实现见本模块 [OVERVIEW.md](OVERVIEW.md)，当前验收见[公开 Beta 记录](../../audit/2026-09-06/public-beta-validation.md)。
+
+
 > **状态：历史快照，不是当前实现的权威来源。** 本文件保留 Issue #11 时的原始合订设计，部分类型名、字段草案和 Undo/Redo 形态已与代码不同。当前可执行规格以 [`docs/specs/core/`](../../specs/core/) 的拆分文件为准；共享编辑状态与命令路由请直接阅读 [`1-editor-state.md`](../../specs/core/1-editor-state.md) 和 [`2-command-routing.md`](../../specs/core/2-command-routing.md)。审计与验收不得用本历史快照覆盖拆分规格或当前代码证据。
 
 > **范围**:`crates/opentake-core/` —— EditorState 组装、命令路由(= 上游单一能力层)、事件总线、Tauri 边界契约。
@@ -17,7 +20,7 @@
 > - `Utilities/Constants.swift:105-115`(工程目录包文件名常量)
 > - `Export/ExportService.swift` + `Export/ExportView.swift:13-26`(导出表面)
 > - `Agent/Tools/ToolExecutor+Clips.swift:129-209`(写工具样板:decode→validate→withUndoGroup→mutate)
-> 以及 `docs/ARCHITECTURE.md` §2/§5/§7 与 `docs/ROADMAP.md` Phase 6/7。
+> 以及 `docs/architecture/ARCHITECTURE.md` §2/§5/§7 与 `docs/architecture/ROADMAP.md` Phase 6/7。
 
 ---
 
@@ -371,7 +374,7 @@ impl EditorCore {
 
 ## 5. 与 ops / project / render / agent 的装配关系
 
-`opentake-core` 是**装配中枢**(ARCHITECTURE §3:「`opentake-core/` # 组装:EditorState…、command 路由、事件总线」)。依赖法则(ARCHITECTURE §3 末「依赖法则」):`domain` 零依赖叶子;`ops` 只依赖 `domain`;`command` 是唯一编辑入口;UI/Agent/MCP 是三个对等客户端。
+`opentake-core` 是**装配中枢**(ARCHITECTURE §3:「`opentake-core/` # 组装:EditorState…、command 路由、事件总线」)。依赖法则(ARCHITECTURE §3 末「依赖法则」):`domain` 无 I/O 叶子;`ops` 只依赖 `domain`;`command` 是唯一编辑入口;UI/Agent/MCP 是三个对等客户端。
 
 ### 5.1 依赖方向(谁依赖谁)
 

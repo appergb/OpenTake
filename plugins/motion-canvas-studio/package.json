@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "license": "MIT",
+  "overrides": {
+    "@xmldom/xmldom": "0.9.12"
+  },
   "scripts": {
     "build": "tsc --noEmit && vite build && vite build --config vite.runner.config.ts && node scripts/normalize-bundle.mjs",
     "test": "node --experimental-strip-types --test src/job.test.ts",

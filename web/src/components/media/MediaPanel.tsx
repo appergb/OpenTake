@@ -31,6 +31,9 @@ import { Icon } from "../ui/Icon";
 import { HoverButton } from "../ui/HoverButton";
 import { useEditorUiStore, type MediaSubTabId } from "../../store/uiStore";
 import {
+  beginMediaImport,
+  endMediaImport,
+  refreshMedia,
   applyMediaErrorForProject,
   applyMediaListForProject,
   captureMediaProjectIdentity,
@@ -59,6 +62,7 @@ import {
   derivedResourceScheduler,
 } from "../../lib/derivedResourceScheduler";
 import { folderTrail } from "../../lib/folderTree";
+import { useSettingsStore } from "../../store/settingsStore";
 import { useProjectStore } from "../../store/projectStore";
 import {
   addMediaToTimeline,
@@ -73,6 +77,7 @@ import {
   deleteSelectedMediaAssets,
 } from "../../store/mediaDeleteActions";
 import {
+  importMedia,
   cancelGeneration,
   retryGeneration,
   extractAudio,
@@ -81,7 +86,7 @@ import {
   preloadMedia,
   toggleFavorite,
 } from "../../lib/api";
-import { saveDialog } from "../../lib/dialog";
+import { openDialog, saveDialog } from "../../lib/dialog";
 import type { MediaFolder, MediaItem } from "../../lib/types";
 import {
   AUDIO_SUB_TABS,
@@ -314,7 +319,9 @@ export function MediaPanel() {
                 : { display: "none" }
             }
           >
-            {active ? (
+            {tab === "sticker" ? (
+              <StickerPanel key={`${projectEpoch}:${projectPath}`} active={active} />
+            ) : active ? (
               tab === "material" || tab === "audio" ? (
                 <MediaTab kind={tab as MediaTabKind} />
               ) : tab === "music" ? (
@@ -336,6 +343,144 @@ export function MediaPanel() {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+// Matches the existing Rust image/Lottie importer; JSON validity stays in Rust.
+const STICKER_EXTENSIONS = ["png", "jpg", "jpeg", "tiff", "heic", "webp", "json", "lottie"];
+
+/** A filtered project mirror, with the same preview and atomic placement as Media. */
+function StickerPanel({ active }: { active: boolean }) {
+  const t = useT();
+  const items = useMediaStore((s) => s.items);
+  const importing = useMediaStore((s) => s.importing);
+  const importError = useMediaStore((s) => s.error);
+  const projectPath = useProjectStore((s) => s.projectPath);
+  const readOnly = useProjectStore((s) => s.compatibilityReadOnly);
+  const selectedIds = useEditorUiStore((s) => s.selectedMediaAssetIds);
+  const [placing, setPlacing] = useState(false);
+  const placementPending = useRef(false);
+  const [placementError, setPlacementError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const alive = useRef(true);
+  const hintId = useId();
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
+  const stickers = items.filter((item) => item.type === "image" || item.type === "lottie");
+  const selected = selectedIds.size === 1
+    ? stickers.find((item) => selectedIds.has(item.id))
+    : undefined;
+  const projectDisabled = !projectPath ? t("sticker.noProject") : readOnly ? t("sticker.readOnly") : undefined;
+  const busyReason = importing ? t("media.importing") : placing ? t("sticker.placing") : undefined;
+  const unavailable = (item: MediaItem): string | undefined => {
+    if (item.missing) return t("sticker.missing");
+    if (item.generationStatus === "generating" || item.generationStatus === "downloading") return t("sticker.processing");
+    if (item.generationStatus === "failed" || item.generationStatus === "cancelled") return t("sticker.failed");
+    return undefined;
+  };
+  const selectedReason = projectDisabled ?? busyReason ?? (selected ? unavailable(selected) : t("sticker.select"));
+
+  const onImport = async () => {
+    if (projectDisabled || placementPending.current || useMediaStore.getState().importing) return;
+    const project = captureMediaProjectIdentity();
+    // Own the entire gesture, including the picker, so changing tabs cannot open
+    // a second picker. The store's operation token also isolates project changes.
+    const operation = beginMediaImport();
+    useMediaStore.getState().setError(null);
+    setNotice(null);
+    try {
+      const open = await openDialog();
+      if (!isCurrentMediaProject(project)) return;
+      if (!open) throw new Error(t("sticker.desktopRequired"));
+      const picked = await open({
+        title: t("sticker.import"),
+        directory: false,
+        multiple: true,
+        defaultPath: useSettingsStore.getState().defaultImportFolder ?? undefined,
+        filters: [{ name: t("media.tab.sticker"), extensions: STICKER_EXTENSIONS }],
+      });
+      if (!isCurrentMediaProject(project) || useProjectStore.getState().compatibilityReadOnly) return;
+      const paths = Array.isArray(picked) ? picked : picked ? [picked] : [];
+      const supported = paths.filter((path) => STICKER_EXTENSIONS.includes(path.split(".").pop()?.toLowerCase() ?? ""));
+      let skipped = paths.length - supported.length;
+      if (supported.length > 0) {
+        const list = await importMedia(supported);
+        if (!isCurrentMediaProject(project)) return;
+        skipped += list.skipped?.length ?? 0;
+        await refreshMedia();
+      }
+      if (alive.current && isCurrentMediaProject(project) && skipped > 0) {
+        setNotice(t("media.importSkipped", { count: skipped }));
+      }
+    } catch (error) {
+      applyMediaErrorForProject(project, error instanceof Error ? error.message : String(error));
+    } finally {
+      endMediaImport(operation);
+    }
+  };
+
+  const onPlace = async (item: MediaItem) => {
+    if (projectDisabled || useMediaStore.getState().importing || placementPending.current || unavailable(item)) return;
+    const project = captureMediaProjectIdentity();
+    placementPending.current = true;
+    setPlacing(true);
+    setPlacementError(null);
+    try {
+      await addMediaToTimeline(item);
+    } catch (error) {
+      if (alive.current && isCurrentMediaProject(project)) {
+        setPlacementError(t("media.placeFailed", { error: error instanceof Error ? error.message : String(error) }));
+      }
+    } finally {
+      placementPending.current = false;
+      if (alive.current && isCurrentMediaProject(project)) setPlacing(false);
+    }
+  };
+
+  // Keep the operation state alive across tabs, while unmounting hidden cards.
+  // The parent project key resets this state only when the project changes.
+  if (!active) return null;
+
+  const buttonStyle = {
+    minHeight: 30,
+    padding: "var(--space-xs) var(--space-sm)",
+    borderRadius: "var(--radius-sm)",
+    border: "var(--bw-thin) solid var(--border-primary)",
+    background: "var(--bg-raised)",
+    color: "var(--text-primary)",
+    fontSize: "var(--fs-sm)",
+  };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, gap: "var(--space-sm)", padding: "var(--space-sm)" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "var(--space-sm)" }}>
+        <button type="button" disabled={!!projectDisabled || importing || placing} aria-busy={importing} aria-describedby={hintId}
+          onClick={() => void onImport()} style={{ ...buttonStyle, opacity: projectDisabled || importing || placing ? 0.5 : 1 }}>
+          {t("sticker.import")}
+        </button>
+        <button type="button" disabled={!!selectedReason} aria-busy={placing} aria-describedby={hintId}
+          onClick={() => { if (selected) void onPlace(selected); }} style={{ ...buttonStyle, opacity: selectedReason ? 0.5 : 1 }}>
+          {t("sticker.add")}
+        </button>
+      </div>
+      <p style={{ margin: 0, color: "var(--text-secondary)", fontSize: "var(--fs-sm)" }}>{t("sticker.hint")}</p>
+      <div id={hintId} role="status" style={{ color: "var(--text-secondary)", fontSize: "var(--fs-sm)" }}>
+        {selectedReason ?? ""}
+        {notice && <p>{notice}</p>}
+        {stickers.length === 0 && <p>{t("sticker.empty")}</p>}
+      </div>
+      {(importError || placementError) && <div role="alert" style={{ color: "var(--text-secondary)", fontSize: "var(--fs-sm)" }}>{importError && <p>{importError}</p>}{placementError && <p>{placementError}</p>}</div>}
+      <div role="grid" data-media-roving-container="true" aria-label={t("media.tab.sticker")} aria-busy={importing || placing}
+        style={{ overflowY: "auto", minHeight: 0, display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(100px, 1fr))", alignContent: "start", gap: "var(--space-sm)" }}>
+        {stickers.map((item, index) => (
+          <div role="row" key={item.id}>
+            <MediaCard item={item} rovingTabIndex={selected ? (selected.id === item.id ? 0 : -1) : index === 0 ? 0 : -1}
+              disabledReason={projectDisabled ?? busyReason ?? unavailable(item)} onPlace={(media) => void onPlace(media)} />
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -2073,7 +2218,10 @@ export function handleMediaTileArrowNavigation(
   const folderId = next.dataset.mediaFolderId;
   const mediaId = next.dataset.mediaAssetId;
   if (folderId) selectMediaFolder(folderId);
-  else if (mediaId) selectMediaForPreview(mediaId);
+  else if (mediaId) {
+    if (next.getAttribute("aria-disabled") === "true") selectMediaAsset(mediaId);
+    else selectMediaForPreview(mediaId);
+  }
   next.focus();
   next.scrollIntoView?.({ block: "nearest", inline: "nearest" });
   return true;
@@ -2226,9 +2374,13 @@ export function FolderTile({
 export function MediaCard({
   item,
   rovingTabIndex = 0,
+  onPlace,
+  disabledReason,
 }: {
   item: MediaItem;
   rovingTabIndex?: number;
+  onPlace?: (item: MediaItem) => void;
+  disabledReason?: string;
 }) {
   const t = useT();
   const cardRef = useRef<HTMLDivElement | null>(null);
@@ -2256,7 +2408,7 @@ export function MediaCard({
 
   const activate = () => {
     selectMediaAsset(item.id);
-    if (generationActive) return;
+    if (generationActive || disabledReason) return;
     useEditorUiStore.getState().setPreviewMedia(item.id);
     // Warm poster/sprite/waveform caches so preview + a later timeline drop
     // are instant instead of decoding on the interaction path.
@@ -2358,6 +2510,10 @@ export function MediaCard({
   }, [item.id, item.type, item.missing]);
 
   const onDragStart = (e: React.DragEvent) => {
+    if (disabledReason) {
+      e.preventDefault();
+      return;
+    }
     e.dataTransfer.setData(MEDIA_DND_TYPE, item.id);
     e.dataTransfer.effectAllowed = "copy";
     if (thumbnailRef.current) {
@@ -2408,7 +2564,7 @@ export function MediaCard({
   return (
     <div
       ref={cardRef}
-      draggable={!generationActive}
+      draggable={!generationActive && !disabledReason}
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
       onClick={(event) => {
@@ -2416,8 +2572,9 @@ export function MediaCard({
         activate();
       }}
       onDoubleClick={() => {
-        if (!generationActive && !generationFailed) {
-          void addMediaToTimeline(item).catch(reportMediaPlacementFailure);
+        if (!generationActive && !generationFailed && !disabledReason) {
+          if (onPlace) onPlace(item);
+          else void addMediaToTimeline(item).catch(reportMediaPlacementFailure);
         }
       }}
       onMouseEnter={() => setHovered(true)}
@@ -2458,7 +2615,8 @@ export function MediaCard({
           });
         }
       }}
-      title={item.name}
+      title={disabledReason ? `${item.name}: ${disabledReason}` : item.name}
+      aria-disabled={disabledReason ? true : undefined}
       role="gridcell"
       tabIndex={rovingTabIndex}
       aria-selected={selected}
@@ -2469,7 +2627,7 @@ export function MediaCard({
         display: "flex",
         flexDirection: "column",
         gap: 4,
-        cursor: generationActive ? "progress" : generationFailed ? "default" : "grab",
+        cursor: disabledReason ? "not-allowed" : generationActive ? "progress" : generationFailed ? "default" : "grab",
         borderRadius: "var(--radius-sm)",
         outline: focused ? "2px solid var(--accent-primary)" : "none",
         outlineOffset: 2,

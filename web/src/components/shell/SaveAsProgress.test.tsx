@@ -3,17 +3,26 @@
 import React from "react";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({ cancelSaveAsMedia: vi.fn() }));
 vi.mock("../../store/editActions", () => ({ cancelSaveAsMedia: mocks.cancelSaveAsMedia }));
 
 import { SaveAsProgressView } from "./SaveAsProgress";
+import { useI18nStore } from "../../i18n";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
 
-afterEach(() => document.body.replaceChildren());
+const originalLocale = useI18nStore.getState().locale;
+beforeEach(() => {
+  useI18nStore.getState().setLocale("zh-CN");
+  vi.clearAllMocks();
+});
+afterEach(() => {
+  document.body.replaceChildren();
+  useI18nStore.getState().setLocale(originalLocale);
+});
 
 describe("SaveAsProgress", () => {
   it("renders visible progress and an enabled cancel button", async () => {

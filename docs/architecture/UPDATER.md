@@ -1,5 +1,9 @@
 # OpenTake 自动更新架构
 
+> 状态：draft · 阶段：partial-implementation · 路由同步：2026-09-06。本文包含设计目标与已有实现；须按源码和日期化证据逐项判断。
+> 当前执行与验收：[公开 Beta 计划](../plans/active/2026-09-06-public-beta.md) · [当日验证](../audit/2026-09-06/public-beta-validation.md)。
+
+
 OpenTake 使用 Tauri v2 官方 updater 完成「检查 → 下载 → 签名验证 → 安装 → 安全重启」。更新源只允许独立仓库 `appergb/OpenTake`，不复用 OpenLess 的 URL 或签名密钥。
 
 ## 发布与发现契约

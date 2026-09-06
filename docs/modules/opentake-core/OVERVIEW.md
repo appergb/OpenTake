@@ -1,5 +1,10 @@
 # opentake-core 总览
 
+> 状态：draft · 阶段：implementation-backed · 源码同步：2026-09-06。
+> 本次定向来源：`crates/opentake-core/src/`。
+> 继续持有工程/会话、命令编排和能力桥；本轮 Motion 媒体目录保留及链接行为修复沿用工程身份与事务边界。下文较早 API 列表是结构参考，完整注册/变体以源码为准。
+> 当前验收见[公开 Beta 审计](../../audit/2026-09-06/public-beta-validation.md)；下文历史里程碑和测试记录保留其原时点边界。
+
 > 上级：[模块文档树](../INDEX.md) · [docs 总目录](../../INDEX.md) · 本模块目录：[INDEX.md](INDEX.md)
 
 ## 一句话定位

@@ -45,7 +45,7 @@ struct SmallTexResolver<'d> {
 impl TextureResolver for SmallTexResolver<'_> {
     fn resolve(&mut self, _s: &TextureSource, _f: i64) -> Option<Rc<GpuTexture>> {
         let mut buf = vec![0u8; 4 * 4 * 4];
-        for px in buf.chunks_exact_mut(4) {
+        for px in buf.as_chunks_mut::<4>().0.iter_mut() {
             px.copy_from_slice(&self.rgba);
         }
         let frame = DecodedFrame::new(4, 4, buf, true); // premultiplied solid
@@ -102,7 +102,7 @@ fn downscaled_texture_full_canvas_still_fills_whole_frame() {
     // source color. Before the fix the content rendered only in the bottom-left
     // 4×4 quarter (quad scaled by tex 4 instead of nat 16), leaving the rest
     // opaque black — so any pixel being black catches the regression.
-    for (i, px) in frame.rgba.chunks_exact(4).enumerate() {
+    for (i, px) in frame.rgba.as_chunks::<4>().0.iter().enumerate() {
         assert_eq!(
             px,
             &[40, 200, 80, 255],

@@ -264,7 +264,7 @@ pub fn separate_stems(
         .try_reserve_exact(input.len())
         .map_err(|error| MediaError::Decode(format!("stem_audio_allocation_failed: {error}")))?;
     let mut side_energy = 0.0_f64;
-    for (index, frame) in input.chunks_exact(2).enumerate() {
+    for (index, frame) in input.as_chunks::<2>().0.iter().enumerate() {
         if index.is_multiple_of(8 * 1024) {
             if cancel.checkpoint() {
                 return Err(MediaError::Cancelled);

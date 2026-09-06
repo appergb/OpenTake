@@ -108,7 +108,7 @@ describe("MediaTabBar keyboard semantics", () => {
 
     expect(materialTab.tabIndex).toBe(0);
     await act(async () => materialTab.focus());
-    for (let step = 0; step < 5; step += 1) {
+    for (let step = 0; step < 6; step += 1) {
       await act(async () =>
         document.activeElement!.dispatchEvent(
           new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }),

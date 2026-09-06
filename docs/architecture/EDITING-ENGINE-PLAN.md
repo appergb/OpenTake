@@ -1,5 +1,9 @@
 # 剪辑引擎实现现状与规划(EDITING-ENGINE-PLAN)
 
+> 状态：draft · 阶段：partial-implementation · 路由同步：2026-09-06。本文包含设计目标与已有实现；须按源码和日期化证据逐项判断。
+> 当前执行与验收：[公开 Beta 计划](../plans/active/2026-09-06-public-beta.md) · [当日验证](../audit/2026-09-06/public-beta-validation.md)。
+
+
 > **2026-08-03 状态注记：**本文是剪辑引擎的测绘文档。剪辑「算法核」（`ops/*` + `engines/*`）
 > 已 1:1 写通并随 Beta 1 交付；本文所述「前端接线层缺口」已收口（时间线手势单事务、原子分割 /
 > Transform、撤销/重做）。Beta 2 范围与发布门槛见 `docs/releases/1.0.0-beta.2.md`。

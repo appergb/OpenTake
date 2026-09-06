@@ -128,7 +128,7 @@ pub(crate) mod test_support {
             // Average channel intensities → 4-vec [r,g,b,brightness], normalized.
             let mut acc = [0.0f64; 4];
             let mut n = 0.0f64;
-            for px in frame.rgba.chunks_exact(4) {
+            for px in frame.rgba.as_chunks::<4>().0.iter() {
                 acc[0] += px[0] as f64;
                 acc[1] += px[1] as f64;
                 acc[2] += px[2] as f64;

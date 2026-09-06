@@ -1,5 +1,9 @@
 # OpenTake vs palmier-pro-upstream 全项目扫描报告
 
+> 状态：historical · 阶段：partial-implementation。原日期、问题与对照结论保留；不作为当前缺口清单。
+> 当前执行与验收：[公开 Beta 计划](../plans/active/2026-09-06-public-beta.md) · [当日验证](../audit/2026-09-06/public-beta-validation.md)。
+
+
 **扫描日期**: 2026-06-26  
 **最后更新**: 2026-06-26 (经代码验证修正)  
 **指令**: 仅只读扫描（read-only），使用多 Agent 模式并行探索 + 直接工具调用。**禁止任何代码修改**。  

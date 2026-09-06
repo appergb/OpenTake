@@ -120,7 +120,9 @@ fn studio_document_publish_is_visible_atomic_editable_and_reopenable() {
     );
     assert!(
         middle
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|pixel| [pixel[0], pixel[1], pixel[2]])
             .collect::<std::collections::HashSet<_>>()
             .len()

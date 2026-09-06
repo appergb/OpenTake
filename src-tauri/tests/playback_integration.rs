@@ -145,7 +145,9 @@ fn try_render_loop(
 }
 
 fn has_visible_rgb(rgba: &[u8]) -> bool {
-    rgba.chunks_exact(4)
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
         .any(|pixel| pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)
 }
 

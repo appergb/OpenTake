@@ -3059,7 +3059,12 @@ mod chromium_backend {
         }
 
         let mut recovered = Vec::with_capacity(black.len());
-        for (black, white) in black.chunks_exact(4).zip(white.chunks_exact(4)) {
+        for (black, white) in black
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(white.as_chunks::<4>().0)
+        {
             let mut deltas = [
                 white[0].saturating_sub(black[0]),
                 white[1].saturating_sub(black[1]),

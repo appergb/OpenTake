@@ -1,5 +1,8 @@
 # 前端 React UI —— 1:1 复刻上游 实现就绪规格 (Issue #12)
 
+> 状态：draft · 阶段：partial-implementation · 设计与早期实现来源保留；原文日期、行号和“待做”属于设计时点。2026-09-06 当前实现见本模块 [OVERVIEW.md](OVERVIEW.md)，当前验收见[公开 Beta 记录](../../audit/2026-09-06/public-beta-validation.md)。
+
+
 > **状态**:v1 硬要求规格。**已有功能的 UI 与交互必须 1:1 复刻上游 palmier-pro。**
 > **范围**:`web/`（React + TypeScript + Vite + Zustand）的全部可视层与交互层。**不含** Rust core / Tauri command 的内部实现（只定义对接契约）。
 > **证据基准**:全部数值/行为均引自 `palmier-pro-upstream/Sources/PalmierPro/`，并标注 `文件:行号`。凡本规格与上游源码冲突，**以上游源码为准**。
@@ -1360,4 +1363,4 @@ Tauri envelope；Rust `every_frontend_edit_request_deserializes_to_intended_comm
 | Preview | `Preview/PreviewContainerView.swift` + `PreviewTab.swift` + overlays |
 | 数据模型 | `Models/Timeline.swift` / `Keyframe.swift` / `ClipType.swift` |
 | 小组件 | `UI/HoverHighlight.swift` / `CapsuleButton.swift` |
-| 目标架构(Tauri/React/Zustand/命令-事件) | `OpenTake/docs/ARCHITECTURE.md` |
+| 目标架构(Tauri/React/Zustand/命令-事件) | `OpenTake/docs/architecture/ARCHITECTURE.md` |

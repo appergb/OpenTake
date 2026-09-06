@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "catalog_status": "initial-triage",
-  "last_verified": "2026-08-22T12:22:40+08:00",
-  "scope": "首轮模块级能力清单；完整 UP-* 行为级拆分由长期计划 Task 1 继续展开。",
+  "catalog_status": "beta6-candidate",
+  "last_verified": "2026-09-06",
+  "scope": "Beta 6 候选代码与实际证据同步；既有 verified 条目保留其历史验收日期，不能自动作为当前安装包或全平台证明。",
   "capabilities": [
     {"id":"UP-MODELS-TIMELINE","area":"models","title":"Timeline/Track/Clip/Keyframe/Transform/TextStyle","status":"implemented","priority":"P1","source":"palmier-pro-upstream/Sources/PalmierPro/Models/","opentake":"crates/opentake-domain/src/","tests":["cargo test -p opentake-domain"]},
     {"id":"UP-EDITOR-COMMAND-TRANSACTION","area":"editor","title":"Single EditCommand entry and undo/redo","status":"implemented","priority":"P0","source":"palmier-pro-upstream/Sources/PalmierPro/Editor/EditorViewModel.swift","opentake":"crates/opentake-ops/src/command.rs;crates/opentake-core/src/session.rs","tests":["cargo test -p opentake-ops","cargo test -p opentake-core"]},
@@ -23,6 +23,8 @@
     {"id":"UP-ACCOUNT-CLOUD-BOUNDARY","area":"account-generation","title":"Palmier account/subscription/cloud generation contract","status":"blocked","priority":"P0","source":"palmier-pro-upstream/Sources/PalmierPro/Account/;Generation/","opentake":"crates/opentake-gen/src/;src-tauri/src/advanced.rs;src-tauri/src/secret.rs","tests":[]},
     {"id":"UP-SETTINGS-TAXONOMY","area":"settings","title":"Account/general/models/agent/storage settings taxonomy","status":"partial","priority":"P2","source":"palmier-pro-upstream/Sources/PalmierPro/Settings/","opentake":"web/src/components/settings/","tests":["web/src/components/settings/SettingsView.interaction.test.tsx"]},
     {"id":"OT-WINDOW-SMALL-SCREEN","area":"shell","title":"Window size and responsive shell on small screens","status":"verified","priority":"P0","source":"User goal 2026-08-21","opentake":"src-tauri/tauri.conf.json;web/src/store/settingsStore.ts;web/src/components/shell/;web/src/components/home/","tests":["web/src/store/settingsStore.test.ts","docs/audit/2026-08-21/full-desktop-functional-matrix.md"]},
+    {"id":"OT-MEDIA-STICKERS","area":"media","title":"Project image/Lottie sticker import, preview and timeline insertion","status":"implemented","priority":"P1","source":"OpenTake requirement","opentake":"web/src/components/media/MediaPanel.tsx","tests":["web/src/components/media/StickerPanel.test.tsx","docs/audit/2026-09-06/sticker-panel.md"]},
+    {"id":"UP-SEMANTIC-SEARCH-MODEL","area":"intelligence","title":"Verified SigLIP2 assets, offline install, text/image inference and recoverable search","status":"partial","priority":"P1","source":"palmier-pro-upstream/Sources/PalmierPro/Search/","opentake":"crates/opentake-media/src/search/;src-tauri/src/search.rs;web/src/components/media/MediaSearch.tsx","tests":["docs/audit/2026-09-06/semantic-search-model.md","docs/audit/2026-09-06/search-model-recovery.md","cargo test -p opentake-tauri --lib search::tests"]},
     {"id":"OT-DESKTOP-FUNCTIONAL-QA","area":"qa","title":"Installed-app modular functional verification","status":"partial","priority":"P0","source":"User goal 2026-08-21","opentake":"docs/audit/2026-08-21/full-desktop-functional-matrix.md","tests":["Computer Use @oai/sky"]}
   ]
 }

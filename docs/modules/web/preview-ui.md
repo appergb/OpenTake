@@ -1,5 +1,8 @@
 # preview-ui — 预览与播放（components/preview）
 
+> 状态：draft · 阶段：implementation-backed · 源码同步：2026-09-06。
+> Preview 已支持多个素材 tab、激活历史、关闭/恢复与旧状态归一（`uiStore.ts`）；temporal compositor 支持合成时间线倒放/变速，Lottie 走 Rust 原生路由。下文早期单素材描述表示显示模式，不是只能打开一个素材 tab。最新路由见[播放架构](../../architecture/PLAYBACK-ENGINE.md)，测试/GUI 边界见[当日审计](../../audit/2026-09-06/public-beta-validation.md)。
+
 > 上级：[本模块目录](INDEX.md) · [模块文档树](../INDEX.md) · [docs 总目录](../../INDEX.md)
 >
 > 覆盖 `web/src/components/preview/`。预览面板按**单表面 + 单时钟**模型工作：播放/暂停/拖拽共用同一组 `<video>/<audio>` DOM 元素，由唯一一个 `requestAnimationFrame` 循环驱动（对标上游 `AVPlayerLayer`）。

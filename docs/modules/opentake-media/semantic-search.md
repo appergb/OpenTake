@@ -167,7 +167,7 @@ pub async fn install(models_dir, m, base_url, on_progress) -> Result<...>;  // f
 ```
 - 幂等下载 image/text encoder + tokenizer → 逐个 **SHA-256 流式校验**（1MiB 块）→ tokenizer.zip 解压单顶层目录 → 原子 rename 到最终位置 → 写 spec.json。`installed` 按三件 + `tokenizer/tokenizer.json` 存在性判定。
 - 相比上游去掉了 `MLModel.compileModel`（ONNX 无需编译）。
-- ⚠️ **占位待填**：`Manifest` 的 sha256/bytes 当前为空字符串/0，待实际 ONNX 资产托管后填实（[ROADMAP.md](../../architecture/ROADMAP.md) Phase 8）。
+- **模型安装修复已完成并验证（2026-09-06）**：原空 sha256/bytes 占位已替换为固定 revision 资产清单，约 1.5 GB 文件已逐一校验。macOS 真实 Rust 路径已验证离线安装、图文 embedding、归一化、PALMEMB1 f16 往返和排名；Windows ort-tract 真实图及新包 UI 仍待验收。详见[模型专项审计](../../audit/2026-09-06/semantic-search-model.md)，完整 revision/校验值由审计链接的知识记录统一维护。
 
 ---
 
@@ -176,7 +176,7 @@ pub async fn install(models_dir, m, base_url, on_progress) -> Result<...>;  // f
 ort-backend    = ["ort", "ndarray"]       # 默认 build 不含；启用后真实 SigLIP2 推理
 model-download = ["reqwest", "zip", ...]  # 启用后下载
 ```
-全链路纯函数 + mock **已实现并全测**；真实 ort 推理 + 模型托管属 Phase 8 计划中。改任何烧印常量（promoteDiff/coverageFloor/dim/imageSize…）须两侧同步。
+模型安装与真实后端纵向链路已实现并验证：正式 Cargo media search 为 84 passed / 1 ignored，Tauri search 为 14 passed；引用实际产品模块并运行真实模型的 Rust harness 为 72 passed / 0 ignored，包含离线安装、图文 embedding 与排名。后者不是 Python 推理替代，也不是已执行正式 Cargo opt-in 命令；复现方式与证据见[专项审计](../../audit/2026-09-06/semantic-search-model.md)。三组测试覆盖有重叠，不相加为独立测试数。Windows ort-tract 真实图、新包 UI 与整仓发布门槛仍由主线验收。改任何烧印常量（promoteDiff/coverageFloor/dim/imageSize…）须两侧同步。
 
 ## 测试
 预处理（黑→-1/白→+1/squash/alpha 合成）、pad_or_truncate、候选时间（stride/回退/零 duration）、luma_grid（黑/白/Rec.601）、ShotDetector 状态机（首帧/去重/镜头切/覆盖下限/grid 总更新）、accumulate_rows（首镜头归零/链接/幂等）、PALMEMB1 往返（f16 量化/版本校验/多字节拒绝）、排名（点积排序/best-per-shot/limit-then-floor/空索引）、install_dir/installed/SHA256、ort_worker 张量互转；端到端 `index_then_rank_finds_brightest_match`（mock 流）。

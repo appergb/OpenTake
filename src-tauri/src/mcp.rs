@@ -1534,20 +1534,38 @@ impl MediaBridge for TauriMediaBridge {
             } else {
                 SearchIndexState::Ready
             };
-            let moments: Vec<SearchVisualHit> =
-                crate::search::visual_hits_by_id(&self.engine, &visual_paths, query, fps, limit)
-                    .into_iter()
-                    .map(|h| SearchVisualHit {
-                        media_ref: h.media_id,
-                        start_seconds: h.start_sec,
-                        end_seconds: h.end_sec,
-                        score: h.score,
-                        is_image: h.is_image,
-                    })
-                    .collect();
+            let (visual_hits, visual_failed) = match crate::search::visual_hits_by_id(
+                &self.engine,
+                &visual_paths,
+                query,
+                fps,
+                limit,
+            ) {
+                Ok(hits) => (hits, false),
+                Err(_) => (Vec::new(), true),
+            };
+            let status = if visual_failed {
+                SearchIndexState::Failed
+            } else {
+                status
+            };
+            let moments: Vec<SearchVisualHit> = visual_hits
+                .into_iter()
+                .map(|h| SearchVisualHit {
+                    media_ref: h.media_id,
+                    start_seconds: h.start_sec,
+                    end_seconds: h.end_sec,
+                    score: h.score,
+                    is_image: h.is_image,
+                })
+                .collect();
             // `indexedAssets` is only meaningful when the model is loaded
             // (upstream sets it only when an embedder spec exists).
-            let indexed_opt = if installed { Some(indexed) } else { None };
+            let indexed_opt = if installed && !visual_failed {
+                Some(indexed)
+            } else {
+                None
+            };
             (status, indexable, indexed_opt, moments)
         };
 
@@ -2935,7 +2953,7 @@ fn encode_jpeg(frame: &DecodedFrame) -> Option<Vec<u8>> {
 /// to feed the alpha-less JPEG encoder.
 fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
     let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0.iter() {
         rgb.extend_from_slice(&px[..3]);
     }
     rgb

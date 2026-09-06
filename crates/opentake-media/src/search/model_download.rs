@@ -69,23 +69,100 @@ pub fn install_dir(models_dir: &Path, m: &Manifest) -> PathBuf {
     models_dir.join(format!("{}-v{}", m.model, m.version))
 }
 
-/// Return the installed model if all three artifacts (and `tokenizer.json`)
-/// exist. Port of `installed(for:)` adapted to ONNX filenames.
+/// Fast installed-state check. A receipt is written only after all checks pass.
+/// Full hashes are rechecked by `verify_installed` before loading a model.
 pub fn installed(models_dir: &Path, m: &Manifest) -> Option<InstalledModel> {
     let dir = install_dir(models_dir, m);
+    let receipt: Manifest =
+        serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).ok()?).ok()?;
+    if receipt != *m {
+        return None;
+    }
     let image = dir.join("image_encoder.onnx");
     let text = dir.join("text_encoder.onnx");
     let tokenizer = dir.join("tokenizer");
-    if image.exists() && text.exists() && tokenizer.join("tokenizer.json").exists() {
-        Some(InstalledModel {
-            image_encoder: image,
-            text_encoder: text,
-            tokenizer_folder: tokenizer,
-            spec: m.spec(),
-        })
-    } else {
-        None
+    for (path, file) in [(&image, &m.image_encoder), (&text, &m.text_encoder)] {
+        if !matches_size(path, file) {
+            return None;
+        }
     }
+    let token = tokenizer.join("tokenizer.json");
+    if !token.is_file()
+        || (m.tokenizer.name.ends_with(".json") && !matches_size(&token, &m.tokenizer))
+    {
+        return None;
+    }
+    Some(InstalledModel {
+        image_encoder: image,
+        text_encoder: text,
+        tokenizer_folder: tokenizer,
+        spec: m.spec(),
+    })
+}
+
+fn matches_size(path: &Path, file: &ManifestFile) -> bool {
+    file.bytes > 0
+        && std::fs::metadata(path)
+            .is_ok_and(|meta| meta.is_file() && meta.len() == file.bytes as u64)
+}
+
+/// Verify the actual installed bytes before inference, including offline copies.
+pub fn verify_installed(models_dir: &Path, m: &Manifest) -> Result<InstalledModel> {
+    let model = installed(models_dir, m)
+        .ok_or_else(|| MediaError::ModelInstall("model missing or incomplete".into()))?;
+    verify_sha256(&model.image_encoder, &m.image_encoder.sha256)?;
+    verify_sha256(&model.text_encoder, &m.text_encoder.sha256)?;
+    if m.tokenizer.name.ends_with(".json") {
+        verify_sha256(
+            &model.tokenizer_folder.join("tokenizer.json"),
+            &m.tokenizer.sha256,
+        )?;
+    }
+    Ok(model)
+}
+
+#[cfg(feature = "model-download")]
+fn validate_manifest(m: &Manifest) -> Result<()> {
+    use std::path::Component;
+    if m.model.is_empty()
+        || !m
+            .model
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(MediaError::ModelInstall("invalid model name".into()));
+    }
+    for f in [&m.image_encoder, &m.text_encoder, &m.tokenizer] {
+        if f.name.is_empty()
+            || !Path::new(&f.name)
+                .components()
+                .all(|p| matches!(p, Component::Normal(_)))
+            || f.name.contains('\\')
+            || f.bytes <= 0
+            || f.sha256.len() != 64
+            || !f
+                .sha256
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        {
+            return Err(MediaError::ModelInstall(format!(
+                "invalid manifest entry: {}",
+                f.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "model-download")]
+fn verify_file(path: &Path, file: &ManifestFile) -> Result<()> {
+    if !matches_size(path, file) {
+        return Err(MediaError::ModelInstall(format!(
+            "size mismatch: {} (expected {})",
+            file.name, file.bytes
+        )));
+    }
+    verify_sha256(path, &file.sha256)
 }
 
 /// Streaming SHA-256 verification (1 MiB chunks). `Err(Checksum)` on mismatch.
@@ -130,8 +207,8 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     hex
 }
 
-/// Download, verify, unzip, and install the model. Requires the `model-download`
-/// feature (HTTP + zip). Idempotent: returns immediately if already installed.
+/// Download and verify all artifacts before atomically publishing the directory.
+/// Temporary files are removed on errors and cancellation.
 #[cfg(feature = "model-download")]
 pub async fn install(
     models_dir: &Path,
@@ -140,74 +217,142 @@ pub async fn install(
     on_progress: impl Fn(f64),
 ) -> Result<InstalledModel> {
     use futures_util::StreamExt;
-
-    if let Some(existing) = installed(models_dir, m) {
+    validate_manifest(m)?;
+    if let Ok(existing) = verify_installed(models_dir, m) {
+        on_progress(1.0);
         return Ok(existing);
     }
-
-    let staging = std::env::temp_dir().join(format!("opentake-model-{}", uuid_like()));
-    std::fs::create_dir_all(&staging)?;
-
+    std::fs::create_dir_all(models_dir)?;
+    let staging = tempfile::Builder::new()
+        .prefix(".search-download-")
+        .tempdir_in(models_dir)?;
     let files = [&m.image_encoder, &m.text_encoder, &m.tokenizer];
-    let total_bytes: i64 = files.iter().map(|f| f.bytes).sum();
-    let mut done_bytes: i64 = 0;
-    let client = reqwest::Client::new();
-
+    let total_bytes: f64 = files.iter().map(|f| f.bytes as f64).sum();
+    let mut done_bytes = 0.0;
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(3600))
+        .build()
+        .map_err(|e| MediaError::ModelInstall(format!("HTTP client: {e}")))?;
     for file in files {
         let url = format!("{}/{}", base_url.trim_end_matches('/'), file.name);
         let resp = client
             .get(&url)
             .send()
             .await
-            .map_err(|e| MediaError::ModelInstall(format!("GET {url}: {e}")))?;
+            .map_err(|e| MediaError::ModelInstall(format!("GET {}: {e}", file.name)))?;
         if !resp.status().is_success() {
             return Err(MediaError::ModelInstall(format!(
-                "GET {url} -> {}",
+                "GET {} -> {}",
+                file.name,
                 resp.status()
             )));
         }
-        let dest = staging.join(&file.name);
+        let dest = staging.path().join(&file.name);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let mut out = std::fs::File::create(&dest)?;
         let mut stream = resp.bytes_stream();
-        let base = done_bytes as f64;
-        let mut file_done: i64 = 0;
+        let mut file_done = 0u64;
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|e| MediaError::ModelInstall(format!("stream: {e}")))?;
+            let chunk = chunk
+                .map_err(|e| MediaError::ModelInstall(format!("stream {}: {e}", file.name)))?;
+            file_done += chunk.len() as u64;
+            if file_done > file.bytes as u64 {
+                return Err(MediaError::ModelInstall(format!(
+                    "size exceeded: {}",
+                    file.name
+                )));
+            }
             use std::io::Write;
             out.write_all(&chunk)?;
-            file_done += chunk.len() as i64;
-            if total_bytes > 0 {
-                on_progress((base + file_done as f64) / total_bytes as f64);
-            }
+            on_progress(((done_bytes + file_done as f64) / total_bytes).min(0.99));
         }
+        out.sync_all()?;
         drop(out);
-        verify_sha256(&dest, &file.sha256)?;
-        done_bytes += file.bytes;
-        if total_bytes > 0 {
-            on_progress(done_bytes as f64 / total_bytes as f64);
-        }
+        verify_file(&dest, file)?;
+        done_bytes += file.bytes as f64;
     }
+    let model = publish_staging(models_dir, m, staging.path())?;
+    on_progress(1.0);
+    Ok(model)
+}
 
-    // Encoders are plain .onnx; the tokenizer ships as a zip with one top-level
-    // folder. Unzip it.
-    let tokenizer_zip = staging.join(&m.tokenizer.name);
-    let tokenizer_extracted = unzip_single_top_level(&tokenizer_zip, &staging)?;
+/// Offline installation from the same repository-relative files as the download.
+/// Does not contact the network. Checks source hashes before copying, then checks
+/// the staged copies; an existing installation is untouched on verification errors.
+#[cfg(feature = "model-download")]
+pub fn install_from_directory(
+    models_dir: &Path,
+    m: &Manifest,
+    source: &Path,
+) -> Result<InstalledModel> {
+    validate_manifest(m)?;
+    let files = [&m.image_encoder, &m.text_encoder, &m.tokenizer];
+    for file in files {
+        verify_file(&source.join(&file.name), file)?;
+    }
+    if let Ok(existing) = verify_installed(models_dir, m) {
+        return Ok(existing);
+    }
+    std::fs::create_dir_all(models_dir)?;
+    let staging = tempfile::Builder::new()
+        .prefix(".search-offline-")
+        .tempdir_in(models_dir)?;
+    for file in files {
+        let dest = staging.path().join(&file.name);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(source.join(&file.name), &dest)?;
+        verify_file(&dest, file)?;
+    }
+    publish_staging(models_dir, m, staging.path())
+}
 
-    let dir = install_dir(models_dir, m);
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir)?;
+#[cfg(feature = "model-download")]
+fn publish_staging(models_dir: &Path, m: &Manifest, staging: &Path) -> Result<InstalledModel> {
+    let prepared = staging.join("installed");
+    std::fs::create_dir(&prepared)?;
     std::fs::rename(
         staging.join(&m.image_encoder.name),
-        dir.join("image_encoder.onnx"),
+        prepared.join("image_encoder.onnx"),
     )?;
     std::fs::rename(
         staging.join(&m.text_encoder.name),
-        dir.join("text_encoder.onnx"),
+        prepared.join("text_encoder.onnx"),
     )?;
-    std::fs::rename(tokenizer_extracted, dir.join("tokenizer"))?;
-    std::fs::write(dir.join("spec.json"), serde_json::to_vec(&m.spec())?)?;
-
-    let _ = std::fs::remove_dir_all(&staging);
+    if m.tokenizer.name.ends_with(".json") {
+        std::fs::create_dir(prepared.join("tokenizer"))?;
+        std::fs::rename(
+            staging.join(&m.tokenizer.name),
+            prepared.join("tokenizer/tokenizer.json"),
+        )?;
+    } else {
+        let extracted = unzip_single_top_level(&staging.join(&m.tokenizer.name), staging)?;
+        if !extracted.join("tokenizer.json").is_file() {
+            return Err(MediaError::ModelInstall(
+                "tokenizer.json missing from archive".into(),
+            ));
+        }
+        std::fs::rename(extracted, prepared.join("tokenizer"))?;
+    }
+    std::fs::write(prepared.join("spec.json"), serde_json::to_vec(&m.spec())?)?;
+    std::fs::write(prepared.join("manifest.json"), serde_json::to_vec(m)?)?;
+    let dir = install_dir(models_dir, m);
+    // Preserve a previous (incomplete/corrupt) directory until replacement succeeds.
+    let backup = staging.join("previous");
+    let previous = dir.exists();
+    if previous {
+        std::fs::rename(&dir, &backup)?;
+    }
+    if let Err(error) = std::fs::rename(&prepared, &dir) {
+        if previous {
+            std::fs::rename(&backup, &dir)?;
+        }
+        return Err(error.into());
+    }
     installed(models_dir, m).ok_or_else(|| MediaError::ModelInstall("post-install missing".into()))
 }
 
@@ -251,17 +396,6 @@ fn unzip_single_top_level(zip_path: &Path, into: &Path) -> Result<PathBuf> {
         )));
     }
     Ok(out_root.join(top_levels.into_iter().next().unwrap()))
-}
-
-/// Tiny unique suffix without pulling a uuid dependency.
-#[cfg(feature = "model-download")]
-fn uuid_like() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("{nanos:x}")
 }
 
 #[cfg(test)]
@@ -309,9 +443,12 @@ mod tests {
     #[test]
     fn installed_detected_when_all_artifacts_present() {
         let dir = tempfile::tempdir().unwrap();
-        let m = manifest();
+        let mut m = manifest();
+        m.image_encoder.bytes = 1;
+        m.text_encoder.bytes = 1;
         let id = install_dir(dir.path(), &m);
         std::fs::create_dir_all(id.join("tokenizer")).unwrap();
+        std::fs::write(id.join("manifest.json"), serde_json::to_vec(&m).unwrap()).unwrap();
         std::fs::write(id.join("image_encoder.onnx"), b"i").unwrap();
         std::fs::write(id.join("text_encoder.onnx"), b"t").unwrap();
         std::fs::write(id.join("tokenizer/tokenizer.json"), b"{}").unwrap();
@@ -358,5 +495,175 @@ mod tests {
         assert!(json.contains("embeddingDim"));
         let back: Manifest = serde_json::from_str(&json).unwrap();
         assert_eq!(m, back);
+    }
+    #[test]
+    fn installed_rejects_unverified_loose_files() {
+        let root = tempfile::tempdir().unwrap();
+        let m = manifest();
+        let dir = install_dir(root.path(), &m);
+        std::fs::create_dir_all(dir.join("tokenizer")).unwrap();
+        std::fs::write(dir.join("image_encoder.onnx"), b"i").unwrap();
+        std::fs::write(dir.join("text_encoder.onnx"), b"t").unwrap();
+        std::fs::write(dir.join("tokenizer/tokenizer.json"), b"{}").unwrap();
+        assert!(installed(root.path(), &m).is_none());
+    }
+
+    #[cfg(feature = "model-download")]
+    #[tokio::test]
+    async fn downloads_nested_onnx_and_raw_tokenizer() {
+        use std::io::Read;
+        let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.local_addr().unwrap());
+        let mut m = manifest();
+        for (f, name, bytes) in [
+            (
+                &mut m.image_encoder,
+                "onnx/vision_model.onnx",
+                b"image".as_slice(),
+            ),
+            (
+                &mut m.text_encoder,
+                "onnx/text_model.onnx",
+                b"text".as_slice(),
+            ),
+            (&mut m.tokenizer, "tokenizer.json", b"{}".as_slice()),
+        ] {
+            f.name = name.into();
+            f.sha256 = sha256_hex(bytes);
+            f.bytes = bytes.len() as i64;
+        }
+        let serving = std::thread::spawn(move || {
+            for (path, body) in [
+                ("onnx/vision_model.onnx", "image"),
+                ("onnx/text_model.onnx", "text"),
+                ("tokenizer.json", "{}"),
+            ] {
+                let (mut stream, _) = server.accept().unwrap();
+                let mut request = [0; 4096];
+                let n = stream.read(&mut request).unwrap();
+                assert!(
+                    String::from_utf8_lossy(&request[..n]).starts_with(&format!("GET /{path} "))
+                );
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let root = tempfile::tempdir().unwrap();
+        let result = install(root.path(), &m, &url, |_| {}).await;
+        // If the downloader fails early, do not block waiting for unused requests.
+        assert!(result.is_ok(), "{result:?}");
+        serving.join().unwrap();
+        let got = result.unwrap();
+        assert_eq!(
+            std::fs::read(got.tokenizer_folder.join("tokenizer.json")).unwrap(),
+            b"{}"
+        );
+        assert_eq!(
+            install(root.path(), &m, "http://127.0.0.1:1", |_| {})
+                .await
+                .unwrap(),
+            got
+        );
+    }
+
+    #[cfg(feature = "model-download")]
+    fn offline_fixture(source: &Path) -> Manifest {
+        let mut m = manifest();
+        for (file, name, bytes) in [
+            (
+                &mut m.image_encoder,
+                "onnx/vision_model.onnx",
+                b"image".as_slice(),
+            ),
+            (
+                &mut m.text_encoder,
+                "onnx/text_model.onnx",
+                b"text".as_slice(),
+            ),
+            (&mut m.tokenizer, "tokenizer.json", b"{}".as_slice()),
+        ] {
+            file.name = name.into();
+            file.sha256 = sha256_hex(bytes);
+            file.bytes = bytes.len() as i64;
+            let path = source.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        m
+    }
+
+    #[cfg(feature = "model-download")]
+    #[test]
+    fn offline_install_verifies_bytes_and_preserves_existing_on_failure() {
+        let source = tempfile::tempdir().unwrap();
+        let models = tempfile::tempdir().unwrap();
+        let m = offline_fixture(source.path());
+        let got = install_from_directory(models.path(), &m, source.path()).unwrap();
+        assert_eq!(verify_installed(models.path(), &m).unwrap(), got);
+        std::fs::write(source.path().join(&m.image_encoder.name), b"wrong").unwrap();
+        assert!(matches!(
+            install_from_directory(models.path(), &m, source.path()),
+            Err(MediaError::Checksum(_))
+        ));
+        assert!(verify_installed(models.path(), &m).is_ok());
+        std::fs::write(&got.image_encoder, b"wrong").unwrap();
+        assert!(verify_installed(models.path(), &m).is_err());
+        std::fs::write(&got.image_encoder, b"i").unwrap();
+        assert!(installed(models.path(), &m).is_none());
+    }
+
+    #[cfg(feature = "model-download")]
+    #[test]
+    fn offline_install_rejects_bad_size_hash_and_traversal() {
+        let source = tempfile::tempdir().unwrap();
+        let models = tempfile::tempdir().unwrap();
+        let m = offline_fixture(source.path());
+        for mutation in 0..3 {
+            let mut bad = m.clone();
+            match mutation {
+                0 => bad.image_encoder.bytes += 1,
+                1 => bad.image_encoder.sha256.clear(),
+                _ => bad.image_encoder.name = "../outside.onnx".into(),
+            }
+            assert!(install_from_directory(models.path(), &bad, source.path()).is_err());
+        }
+        assert_eq!(std::fs::read_dir(models.path()).unwrap().count(), 0);
+    }
+
+    #[cfg(feature = "model-download")]
+    #[tokio::test]
+    async fn http_failure_cleans_staging_and_does_not_install() {
+        use std::io::Read;
+        for (status, body, expected_size) in [
+            ("404 Not Found", "", 5),
+            ("200 OK", "bad", 5),
+            ("200 OK", "wrong", 5),
+            ("200 OK", "toolong", 5),
+        ] {
+            let server = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", server.local_addr().unwrap());
+            let serving = std::thread::spawn(move || {
+                let (mut stream, _) = server.accept().unwrap();
+                let mut request = [0; 4096];
+                let _ = stream.read(&mut request).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            });
+            let source = tempfile::tempdir().unwrap();
+            let models = tempfile::tempdir().unwrap();
+            let mut m = offline_fixture(source.path());
+            m.image_encoder.bytes = expected_size;
+            assert!(install(models.path(), &m, &url, |_| {}).await.is_err());
+            serving.join().unwrap();
+            assert_eq!(std::fs::read_dir(models.path()).unwrap().count(), 0);
+        }
     }
 }

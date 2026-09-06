@@ -1,8 +1,12 @@
 # OpenTake 架构设计
 
+> 状态：draft · 阶段：partial-implementation · 路由同步：2026-09-06。本文包含设计目标与已有实现；须按源码和日期化证据逐项判断。
+> 当前执行与验收：[公开 Beta 计划](../plans/active/2026-09-06-public-beta.md) · [当日验证](../audit/2026-09-06/public-beta-validation.md)。
+
+
 > 基于对 palmier-pro-upstream(Swift macOS 视频编辑器)的逐模块拆解综合得出。
 > 目标:忠实复刻其编辑逻辑,做成跨平台(macOS/Windows/Linux)、开源(GPL-3.0)、内置更强提示词与能力的版本。
-> 详见 `docs/MODULE-PORT-MAP.md`(20 模块逐项规格)与 `docs/_analysis/`(4 份横切报告)。
+> 详见 `docs/architecture/MODULE-PORT-MAP.md`(20 模块逐项规格)与 `docs/_analysis/`(4 份横切报告)。
 
 ## 0. 一句话洞察
 
@@ -64,7 +68,7 @@
 ## 3. Cargo workspace 布局
 
 ```
-OpenTake/
+OpenTake-generation/
 ├── crates/
 │   ├── opentake-domain/      # 值类型模型:Timeline/Track/Clip/Keyframe/Transform/Crop/TextStyle/MediaAsset
 │   │                         #   + 派生函数(end_frame/source_frames_consumed/*_at 采样/fade)。零 IO,纯逻辑,可全单测
@@ -85,9 +89,9 @@ OpenTake/
 └── docs/
 ```
 
-依赖法则(经上游验证):`domain` 零依赖叶子;`ops` 只依赖 `domain`;`command` 是唯一编辑入口;UI/Agent/MCP 是命令层三个对等客户端。
+依赖法则(经上游验证):`domain` 为依赖 serde 的无 I/O 叶子;`ops` 只依赖 `domain`;`command` 是唯一编辑入口;UI/Agent/MCP 是命令层三个对等客户端。
 
-> Motion / AI Video v1 已由 `plugins/motion-canvas-studio/` 落地：锁定 Motion Canvas 3.17.2(MIT)，渲染 materialized mp4 后由 OpenTake 当普通媒体原子导入并落轨。`crates/opentake-motion/` 同时提供离线 Chromium 宿主与 HTML/CSS fallback；透明 alpha / PNG sequence 留给后续版本。
+> Motion / AI Video v1 已由 `plugins/motion-canvas-studio/` 落地：锁定 Motion Canvas 3.17.2(MIT)，渲染 materialized mp4 后由 OpenTake 当普通媒体原子导入并落轨。`crates/opentake-motion/` 同时提供离线 Chromium 宿主与 HTML/CSS fallback；透明 alpha 发布与 ProRes 4444 已进入候选；通用 PNG sequence 仍是独立后续范围。
 
 ## 4. 领域模型(可直接复刻,见 MODULE-PORT-MAP.md「Models」)
 

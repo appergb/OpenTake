@@ -29,13 +29,13 @@ WORKFLOW_PATH = Path(
 RELEASE_NOTES_PATH = Path(
     os.environ.get(
         "OPENTAKE_RELEASE_NOTES_PATH",
-        REPOSITORY_ROOT / "docs" / "releases" / "1.0.0-beta.5.md",
+        REPOSITORY_ROOT / "docs" / "releases" / "1.0.0-beta.6.md",
     )
 ).resolve()
-CURRENT_RELEASE_VERSION = "1.0.0-beta.5"
+CURRENT_RELEASE_VERSION = "1.0.0-beta.6"
 APPROVED_REPOSITORY_IDENTITIES = {
     "1.0.0-beta.4": ("1.0.0.4", "Beta 4"),
-    CURRENT_RELEASE_VERSION: ("1.0.0.5", "Beta 5"),
+    CURRENT_RELEASE_VERSION: ("1.0.0.6", "Beta 6"),
 }
 PINNED_ACTIONS = {
     "actions/checkout": "11d5960a326750d5838078e36cf38b85af677262",
@@ -175,16 +175,16 @@ APPROVED_SIMPLE_RUNS = {
 }
 
 APPROVED_COMPLEX_RUN_SHA256 = {
-    ("validate", "Validate tag, source SHA, versions, and notes"): "eefb9d97ad80e8090b817178093824af2b897ae339a144b2e16a91de3f9f8334",
+    ("validate", "Validate tag, source SHA, versions, and notes"): "ae045c61e3f1a8bb1cb98115ee2c818679fa531766dca64d6f64ab962375d907",
     ("validate", "Reassert exact source after validation"): "953657d26d2eda8490c18e7030c66ddb19aba64a5c8b19808da9a853fd1bfdd2",
     ("quality", "Assert exact checked-out SHA"): "ff0b148eecdf8603712586a6c4a05e752df0b36b5c97a366760f6cba10e58ddd",
     ("quality", "Free disk space"): "5848415c4d0e696f46965d62a2e17c8b7a0dd45ae600d28102af0b04108d9bf6",
     ("quality", "Install system deps (ffmpeg + Tauri/GTK)"): "ee466d2d3fff1c3703d50f9dabe4d21e1cee4b399924d064c6d2714dae34d16b",
     ("quality", "Audit Motion Canvas dependencies and licenses"): "a3517fae1a8663e519138196c9f3721d8f4df19ac8f115c49a079c4aaa60c8b3",
     ("quality", "Test and reproduce Motion Canvas runner"): "8bcd55de9b045f9d7be6343163a5422cba0ab545f7844da50ca1a7c8623fe640",
-    ("quality", "Validate Windows and release workflow contracts"): "76d3d0db11222f5121e5b404470296695c8cfea0b4e41f0c3a1d853612331e7d",
+    ("quality", "Validate Windows and release workflow contracts"): "cb9d3625194c0827915a05a79643547477241cabb1032a4c45485e73717d3c34",
     ("quality", "Provisioner unit tests"): "f57d4d7d6df403d573d31bbda02589804109596040c2cefcca60f3e9352e891a",
-    ("quality", "Validate Web dependency licenses"): "5b914e6aaddab4c9ca0ac03ff0cc03d23b44fc3d66621b8c9fa5eeac07a5cfcd",
+    ("quality", "Validate Web dependency licenses"): "bd7252d73461802613ac259514ee9242afa9e799f47bc46e1b62330ac79ebcf3",
     ("quality", "Live playback transport integration"): "461f79546009551e5e7adbf50f869abb9449c2ae7666a66a425c7cd3c24acea9",
     ("quality", "Reassert exact source after quality gates"): "953657d26d2eda8490c18e7030c66ddb19aba64a5c8b19808da9a853fd1bfdd2",
     ("macos_arm64", "Assert exact checked-out SHA"): "ff0b148eecdf8603712586a6c4a05e752df0b36b5c97a366760f6cba10e58ddd",
@@ -221,8 +221,8 @@ APPROVED_COMPLEX_RUN_SHA256 = {
 }
 
 APPROVED_JOB_SHA256 = {
-    "validate": "ce61e176161ab7ec892d92ed9cf1a3e379c6b5f7b5781bf1addc4f29379a85b2",
-    "quality": "d0078d8cd49919be4a1f71f1208c0d05369282c13f5ae5c38142063d648816c2",
+    "validate": "9dac25c2b76e56677452e781bd5f163c423891646ee5965611d917498cda5fc1",
+    "quality": "5204e0241bbc8c35f2a59d93d6b8d584b3ae7aa5c640a7d5062da168fc2b7f08",
     "macos_arm64": "1785d765c96278190c25e312c9e610070619e17b7b2b0d922f0bd234501df525",
     "windows_x64": "63bd70d85e40a3f1177e9059d4674d7f93d4502181fc378f7706e839af953378",
     "publish": "ea3fe6d18a94c0850d3ac7f21c4e23fb8fcf572189f77f659e5b34eab776bd85",
@@ -1479,8 +1479,8 @@ def validate_workflow(workflow: str) -> list[str]:
             'if event_name == "workflow_dispatch":',
             'expected_version = "1.0.0-beta.4"',
             'expected_wix_version = "1.0.0.4"',
-            'expected_version = "1.0.0-beta.5"',
-            'expected_wix_version = "1.0.0.5"',
+            'expected_version = "1.0.0-beta.6"',
+            'expected_wix_version = "1.0.0.6"',
             'if versions != {version}:',
             'if version != expected_version:',
             'wix_version = tauri["bundle"]["windows"]["wix"]["version"]',
@@ -1494,7 +1494,7 @@ def validate_workflow(workflow: str) -> list[str]:
             'if "+" in tag:',
             'raise SystemExit("SemVer build metadata is unsupported for updater asset URLs")',
             'if SEMVER_RE.fullmatch(tag) is None:',
-            'if version == "1.0.0-beta.5" and not prerelease:',
+            'if version == "1.0.0-beta.6" and not prerelease:',
             'emit("prerelease", "true")',
         ),
     ):
@@ -1595,7 +1595,7 @@ def validate_workflow(workflow: str) -> list[str]:
         license_step,
         (
             'case "$OPENTAKE_EXPECTED_RELEASE_VERSION" in',
-            "1.0.0-beta.5)",
+            "1.0.0-beta.6)",
             "python3 -B -m unittest discover -s scripts -p 'test_check_license_inventory.py'",
             "python3 -B scripts/check_license_inventory.py",
             "1.0.0-beta.4)",
@@ -1637,7 +1637,7 @@ def validate_workflow(workflow: str) -> list[str]:
                 'git cat-file blob "$RELEASE_TOOLING_SHA:scripts/provision_ffmpeg_sidecars.py" \\',
                 'git cat-file blob "$RELEASE_TOOLING_SHA:scripts/tests/test_provision_ffmpeg_sidecars.py" \\',
                 'git cat-file blob "$RELEASE_TOOLING_SHA:.github/workflows/release.yml" \\',
-                'git cat-file blob "$RELEASE_TOOLING_SHA:docs/releases/1.0.0-beta.5.md" \\',
+                'git cat-file blob "$RELEASE_TOOLING_SHA:docs/releases/1.0.0-beta.6.md" \\',
                 'OPENTAKE_REPOSITORY_ROOT="$GITHUB_WORKSPACE" \\',
                 'OPENTAKE_RELEASE_WORKFLOW_PATH="$tooling_root/release.yml" \\',
                 'OPENTAKE_RELEASE_NOTES_PATH="$tooling_root/release-notes.md" \\',
@@ -2545,7 +2545,7 @@ def validate_release_notes_contract(notes_path: Path) -> list[str]:
     try:
         notes = notes_path.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
-        return ["Beta 5 release notes document dual-SHA recovery provenance"]
+        return ["Beta 6 release notes document dual-SHA recovery provenance"]
     normalized = " ".join(notes.split())
     required = (
         "正常 tag push",
@@ -2568,7 +2568,7 @@ def validate_release_notes_contract(notes_path: Path) -> list[str]:
         "notes commit",
     )
     if not notes.strip() or any(marker not in normalized for marker in required):
-        return ["Beta 5 release notes document dual-SHA recovery provenance"]
+        return ["Beta 6 release notes document dual-SHA recovery provenance"]
     return []
 
 

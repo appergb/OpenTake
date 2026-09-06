@@ -25,7 +25,7 @@ impl RgbaFrame {
     /// for tests).
     pub fn black(width: u32, height: u32) -> Self {
         let mut rgba = vec![0u8; width as usize * height as usize * 4];
-        for px in rgba.chunks_exact_mut(4) {
+        for px in rgba.as_chunks_mut::<4>().0.iter_mut() {
             px[3] = 255;
         }
         RgbaFrame {
@@ -64,7 +64,7 @@ mod tests {
         assert_eq!(f.rgba.len(), 3 * 2 * 4);
         assert_eq!(f.pixel_count(), 6);
         // every pixel is (0,0,0,255)
-        for px in f.rgba.chunks_exact(4) {
+        for px in f.rgba.as_chunks::<4>().0.iter() {
             assert_eq!(px, &[0, 0, 0, 255]);
         }
     }

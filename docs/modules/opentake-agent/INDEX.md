@@ -1,8 +1,11 @@
 # opentake-agent — 模块目录
 
+> 状态：draft · 阶段：implementation-backed · 源码同步：2026-09-06。
+> 当前模块状态见 [OVERVIEW.md](OVERVIEW.md)，候选验收见[当日审计](../../audit/2026-09-06/public-beta-validation.md)。规格文档保留设计语义，不作为全功能完成证明。
+
 > 上级：[模块文档树](../INDEX.md) · [docs 总目录](../../INDEX.md)
 >
-> `opentake-agent` = 工具层（= 上游 `ToolExecutor`，**44 个可发布工具：38 基础 + 4 生成 + 2 动效，能力门控后按能力发布；KNOWN wire 名共 54**）+ MCP server（rmcp Streamable-HTTP，`127.0.0.1:19789/mcp`）+ Context Signal + 工作流插件 + 内置 Agent 提示。能力层：依赖 `domain / ops / core / media / gen`，被 `src-tauri` 集成启动。
+> `opentake-agent` = 工具层（= 上游 `ToolExecutor`，**44 个可发布工具：基础 + 生成 + 动效，能力门控后按能力发布；KNOWN wire 名共 54**）+ MCP server（rmcp Streamable-HTTP，`127.0.0.1:19789/mcp`）+ Context Signal + 工作流插件 + 内置 Agent 提示。能力层：依赖 `domain / ops / core / media / gen`，被 `src-tauri` 集成启动。
 
 ---
 

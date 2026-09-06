@@ -23,7 +23,7 @@ WORKFLOW_PATH = Path(
 RELEASE_NOTES_PATH = Path(
     os.environ.get(
         "OPENTAKE_RELEASE_NOTES_PATH",
-        REPOSITORY_ROOT / "docs" / "releases" / "1.0.0-beta.5.md",
+        REPOSITORY_ROOT / "docs" / "releases" / "1.0.0-beta.6.md",
     )
 ).resolve()
 WORKFLOW = WORKFLOW_PATH.read_text(encoding="utf-8") if WORKFLOW_PATH.is_file() else ""
@@ -1227,8 +1227,8 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
     ) -> None:
         mutations = (
             (
-                'git cat-file blob "$RELEASE_TOOLING_SHA:docs/releases/1.0.0-beta.5.md" \\\n',
-                'cp docs/releases/1.0.0-beta.5.md \\\n',
+                'git cat-file blob "$RELEASE_TOOLING_SHA:docs/releases/1.0.0-beta.6.md" \\\n',
+                'cp docs/releases/1.0.0-beta.6.md \\\n',
                 "exact release tooling provenance",
             ),
             (
@@ -1264,7 +1264,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
 
     def test_validation_must_bind_windows_installer_version(self) -> None:
         mutated = self.mutate(
-            'expected_wix_version = "1.0.0.5"',
+            'expected_wix_version = "1.0.0.6"',
             'expected_wix_version = "1.0.0.4"',
         )
         self.assert_rejected(mutated, "Cargo, Tauri, and Web versions match tag")
@@ -1272,7 +1272,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
     def test_recovery_must_bind_the_beta4_installer_identity(self) -> None:
         mutated = self.mutate(
             'expected_wix_version = "1.0.0.4"',
-            'expected_wix_version = "1.0.0.5"',
+            'expected_wix_version = "1.0.0.6"',
         )
         self.assert_rejected(mutated, "Cargo, Tauri, and Web versions match tag")
 
@@ -1284,8 +1284,8 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             'if event_name == "workflow_dispatch":',
             'expected_version = "1.0.0-beta.4"',
             'expected_wix_version = "1.0.0.4"',
-            'expected_version = "1.0.0-beta.5"',
-            'expected_wix_version = "1.0.0.5"',
+            'expected_version = "1.0.0-beta.6"',
+            'expected_wix_version = "1.0.0.6"',
             "if version != expected_version:",
             "if wix_version != expected_wix_version:",
         ):
@@ -1298,9 +1298,9 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         mutated = self.mutate(guard, '          if False:\n')
         self.assert_rejected(mutated, "SemVer build metadata is unsupported")
 
-    def test_beta5_candidate_must_keep_its_explicit_prerelease_guard(self) -> None:
+    def test_beta6_candidate_must_keep_its_explicit_prerelease_guard(self) -> None:
         mutated = self.mutate(
-            'if version == "1.0.0-beta.5" and not prerelease:',
+            'if version == "1.0.0-beta.6" and not prerelease:',
             'if version == "1.0.0-beta.4" and not prerelease:',
         )
         self.assert_rejected(mutated, "SemVer build metadata is unsupported")
@@ -1880,7 +1880,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
             "        run: |\n"
             "          set -euo pipefail\n"
             "          case \"$OPENTAKE_EXPECTED_RELEASE_VERSION\" in\n"
-            "            1.0.0-beta.5)\n"
+            "            1.0.0-beta.6)\n"
             "              python3 -B -m unittest discover -s scripts -p 'test_check_license_inventory.py'\n"
             "              python3 -B scripts/check_license_inventory.py\n"
             "              ;;\n"
@@ -2166,7 +2166,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
         )
         self.assert_rejected(mutated, "verified prerelease publication")
 
-    def test_repository_metadata_is_beta5_and_release_notes_exist(self) -> None:
+    def test_repository_metadata_is_beta6_and_release_notes_exist(self) -> None:
         self.assertEqual(
             [],
             contract.validate_repository_metadata(
@@ -2185,7 +2185,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                 "tag must always equal current main\n", encoding="utf-8"
             )
             self.assertEqual(
-                ["Beta 5 release notes document dual-SHA recovery provenance"],
+                ["Beta 6 release notes document dual-SHA recovery provenance"],
                 contract.validate_release_notes_contract(notes),
             )
         canonical = RELEASE_NOTES_PATH.read_text(encoding="utf-8")
@@ -2204,7 +2204,7 @@ class ReleaseWorkflowContractTests(unittest.TestCase):
                     )
                     self.assertEqual(
                         [
-                            "Beta 5 release notes document dual-SHA recovery provenance"
+                            "Beta 6 release notes document dual-SHA recovery provenance"
                         ],
                         contract.validate_release_notes_contract(notes),
                     )
@@ -2214,8 +2214,8 @@ class ReleaseRepositoryMetadataTests(unittest.TestCase):
     def make_repository(
         self,
         *,
-        version: str = "1.0.0-beta.5",
-        wix_version: str = "1.0.0.5",
+        version: str = "1.0.0-beta.6",
+        wix_version: str = "1.0.0.6",
     ) -> tuple[tempfile.TemporaryDirectory[str], Path]:
         temporary = tempfile.TemporaryDirectory()
         root = Path(temporary.name)
@@ -2258,7 +2258,7 @@ class ReleaseRepositoryMetadataTests(unittest.TestCase):
     def test_release_notes_io_error_returns_a_contract_error(self) -> None:
         temporary, root = self.make_repository()
         self.addCleanup(temporary.cleanup)
-        notes = root / "docs" / "releases" / "1.0.0-beta.5.md"
+        notes = root / "docs" / "releases" / "1.0.0-beta.6.md"
         real_read_text = Path.read_text
 
         def fail_notes(path: Path, *args, **kwargs):
@@ -2268,7 +2268,7 @@ class ReleaseRepositoryMetadataTests(unittest.TestCase):
 
         with mock.patch.object(Path, "read_text", autospec=True, side_effect=fail_notes):
             self.assertEqual(
-                ["Beta 5 release notes exist"],
+                ["Beta 6 release notes exist"],
                 contract.validate_repository_metadata(
                     root, expected_version=contract.CURRENT_RELEASE_VERSION
                 ),
@@ -2280,14 +2280,14 @@ class ReleaseRepositoryMetadataTests(unittest.TestCase):
         (root / "src-tauri" / "tauri.conf.json").write_text(
             json.dumps(
                 {
-                    "version": "1.0.0-beta.5",
+                    "version": "1.0.0-beta.6",
                     "bundle": {"windows": {"wix": {"version": "1.0.0.4"}}},
                 }
             ),
             encoding="utf-8",
         )
         self.assertEqual(
-            ["Windows installer version is 1.0.0.5"],
+            ["Windows installer version is 1.0.0.6"],
             contract.validate_repository_metadata(
                 root, expected_version=contract.CURRENT_RELEASE_VERSION
             ),
@@ -2301,7 +2301,7 @@ class ReleaseRepositoryMetadataTests(unittest.TestCase):
                 json.dumps(
                     {
                         "version": "1.0.0-beta.4",
-                        "bundle": {"windows": {"wix": {"version": "1.0.0.5"}}},
+                        "bundle": {"windows": {"wix": {"version": "1.0.0.6"}}},
                     }
                 ),
             ),
@@ -2313,22 +2313,22 @@ class ReleaseRepositoryMetadataTests(unittest.TestCase):
                 self.addCleanup(temporary.cleanup)
                 (root / relative_path).write_text(contents, encoding="utf-8")
                 self.assertIn(
-                    "repository metadata is OpenTake 1.0.0-beta.5",
+                    "repository metadata is OpenTake 1.0.0-beta.6",
                     contract.validate_repository_metadata(
                         root, expected_version=contract.CURRENT_RELEASE_VERSION
                     ),
                 )
 
-    def test_beta4_notes_do_not_satisfy_the_beta5_release_contract(self) -> None:
+    def test_beta4_notes_do_not_satisfy_the_beta6_release_contract(self) -> None:
         temporary, root = self.make_repository()
         self.addCleanup(temporary.cleanup)
-        (root / "docs" / "releases" / "1.0.0-beta.5.md").unlink()
+        (root / "docs" / "releases" / "1.0.0-beta.6.md").unlink()
         (root / "docs" / "releases" / "1.0.0-beta.4.md").write_text(
             "historical release notes\n", encoding="utf-8"
         )
 
         self.assertEqual(
-            ["Beta 5 release notes exist"],
+            ["Beta 6 release notes exist"],
             contract.validate_repository_metadata(
                 root, expected_version=contract.CURRENT_RELEASE_VERSION
             ),
@@ -2346,10 +2346,10 @@ class ReleaseRepositoryMetadataTests(unittest.TestCase):
             ),
         )
 
-    def test_beta4_and_beta5_identities_cannot_cross_authenticated_paths(self) -> None:
+    def test_beta4_and_beta6_identities_cannot_cross_authenticated_paths(self) -> None:
         cases = (
-            ("1.0.0-beta.4", "1.0.0.4", "1.0.0-beta.5"),
-            ("1.0.0-beta.5", "1.0.0.5", "1.0.0-beta.4"),
+            ("1.0.0-beta.4", "1.0.0.4", "1.0.0-beta.6"),
+            ("1.0.0-beta.6", "1.0.0.6", "1.0.0-beta.4"),
         )
         for source_version, source_wix, expected_version in cases:
             with self.subTest(source=source_version, expected=expected_version):

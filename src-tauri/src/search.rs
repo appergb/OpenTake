@@ -29,7 +29,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use opentake_core::AppCore;
 use opentake_domain::{ClipType, MediaResolver};
@@ -91,6 +91,8 @@ pub struct SearchResultsDto {
     pub moments: Vec<MomentHitDto>,
     pub spoken: Vec<SpokenHitDto>,
     pub files: Vec<FileHitDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visual_error: Option<String>,
 }
 
 /// Whether the SigLIP2 model is installed, plus enough to prompt a download.
@@ -103,7 +105,7 @@ pub struct SearchModelStatusDto {
     /// Human label for the model (`"siglip2-base-patch16-256"`).
     pub model: String,
     /// Approximate combined download size in bytes (image + text encoder +
-    /// tokenizer), for the prompt. `0` until the ONNX assets are hosted.
+    /// tokenizer), for the prompt.
     pub bytes: i64,
 }
 
@@ -344,12 +346,12 @@ fn with_verified_index_assets<T>(
 /// `search://index` progress as each asset completes. Idempotent — already-current
 /// assets are skipped by the indexer. Errors if the model isn't installed
 /// (guiding the UI to `download_search_model`). Runs the CPU/GPU-bound inference
-/// on Tauri's worker thread (the command is sync, so Tauri dispatches it off the
-/// UI thread, matching `transcribe_media`). The ONNX backend is always enabled in
+/// on the bounded inference worker; waiting for its result uses a blocking task
+/// rather than the UI or async executor thread. The ONNX backend is enabled in
 /// the shipped app (`opentake-media`'s `ort-backend` feature), so this calls the
 /// SigLIP2 embedder directly, mirroring how `transcribe.rs` calls whisper.
 #[tauri::command]
-pub fn search_index_start(
+pub async fn search_index_start(
     app: AppHandle,
     core: State<'_, AppCore>,
     media: State<'_, MediaState>,
@@ -411,7 +413,10 @@ pub fn search_index_start(
                 .map_err(|error| error.to_string())
         },
     )?;
-    handle.wait().map_err(|error| error.to_string())
+    tauri::async_runtime::spawn_blocking(move || handle.wait())
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
 }
 
 /// One process-wide production worker. `MediaState` itself is process-wide, so
@@ -433,26 +438,38 @@ fn production_index_worker(
 /// zero-setup fallback. Never errors on a missing model (an empty query returns
 /// empty groups).
 #[tauri::command]
-pub fn search_query(
+pub async fn search_query(
+    app: AppHandle,
     core: State<'_, AppCore>,
-    media: State<'_, MediaState>,
     query: String,
-) -> SearchResultsDto {
+) -> Result<SearchResultsDto, String> {
     let trimmed = query.trim().to_string();
     if trimmed.is_empty() {
-        return SearchResultsDto::default();
+        return Ok(SearchResultsDto::default());
     }
-    let engine = media.engine();
     let snapshot = core.runtime_snapshot();
     let assets = resolve_assets_from_snapshot(&snapshot.media, snapshot.project_dir.as_deref());
     let fps = snapshot.timeline.fps;
+    tauri::async_runtime::spawn_blocking(move || {
+        let media = app.state::<MediaState>();
+        search_assets(media.engine(), &assets, &trimmed, fps)
+    })
+    .await
+    .map_err(|error| error.to_string())
+}
 
+fn search_assets(
+    engine: &MediaEngine,
+    assets: &[ResolvedAsset],
+    query: &str,
+    fps: i32,
+) -> SearchResultsDto {
     // Files: name-substring over every asset (the zero-setup fallback).
     let name_entries: Vec<(String, String)> = assets
         .iter()
         .map(|a| (a.id.clone(), a.name.clone()))
         .collect();
-    let files = file_matches(&name_entries, &trimmed);
+    let files = file_matches(&name_entries, query);
 
     // Spoken: keyword over cached transcripts of video/audio assets.
     let spoken_candidates: Vec<(String, PathBuf)> = assets
@@ -461,18 +478,22 @@ pub fn search_query(
         .map(|a| (a.id.clone(), a.path.clone()))
         .collect();
     let spoken: Vec<SpokenHitDto> = engine
-        .search_spoken(&trimmed, &spoken_candidates, SEARCH_LIMIT)
+        .search_spoken(query, &spoken_candidates, SEARCH_LIMIT)
         .iter()
         .map(spoken_dto)
         .collect();
 
     // Moments: visual rank over on-disk embedding indexes (needs the model).
-    let moments = search_visual(engine, &assets, &trimmed, fps);
+    let (moments, visual_error) = match search_visual(engine, assets, query, fps) {
+        Ok(moments) => (moments, None),
+        Err(error) => (Vec::new(), Some(error)),
+    };
 
     SearchResultsDto {
         moments,
         spoken,
         files,
+        visual_error,
     }
 }
 
@@ -483,7 +504,7 @@ fn search_visual(
     assets: &[ResolvedAsset],
     query: &str,
     fps: i32,
-) -> Vec<MomentHitDto> {
+) -> Result<Vec<MomentHitDto>, String> {
     let id_paths: Vec<(String, PathBuf)> = assets
         .iter()
         .filter(|a| is_visual(a.kind))
@@ -497,7 +518,8 @@ fn search_visual(
 /// installed model, encodes the text query, loads each asset's `.embed` index
 /// (skipping missing/stale), and ranks best-per-shot with the `min_score` floor
 /// then `limit` + relative cutoff — the exact upstream order. Empty when the
-/// model isn't installed, the query can't encode, or nothing is indexed. Shared
+/// model isn't installed or nothing is indexed. Invalid models and inference
+/// failures are explicit errors. Shared
 /// by the panel query and the `search_media` MCP bridge so both rank identically.
 pub(crate) fn visual_hits_by_id(
     engine: &MediaEngine,
@@ -505,41 +527,91 @@ pub(crate) fn visual_hits_by_id(
     query: &str,
     fps: i32,
     limit: usize,
-) -> Vec<MomentHitDto> {
+) -> Result<Vec<MomentHitDto>, String> {
+    if !model_installed(engine) || id_paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let cache_root = engine.cache_root().to_path_buf();
+    let models_dir = engine.models_dir().to_path_buf();
+    let id_paths = id_paths.to_vec();
+    let query = query.to_owned();
+    let spec = search_config::embedder_spec();
+    let source_keys: Vec<_> = id_paths
+        .iter()
+        .map(|(id, path)| (id, opentake_media::search::embed_store::key(path)))
+        .collect();
+    let request = opentake_media::ort_worker::JobRequest::new(
+        opentake_media::ort_worker::JobKind::Search,
+        format!("{}@{}", spec.model, spec.version),
+        format!("search:{cache_root:?}:{models_dir:?}:{query:?}:{source_keys:?}:{fps}:{limit}"),
+        opentake_media::ort_worker::JobPriority::Interactive,
+    );
+    production_index_worker(engine.export_pause())
+        .submit(request, move |models, cancel| {
+            use opentake_media::ort_worker::WorkerError;
+            if cancel.is_cancelled() {
+                return Err(WorkerError::Cancelled);
+            }
+            let job_engine = MediaEngine::new(cache_root, models_dir.clone());
+            let model_key = format!("{}@{}:{}", spec.model, spec.version, models_dir.display());
+            let embedder = models.get_or_try_init(&model_key, || {
+                load_embedder(&job_engine).map_err(WorkerError::Model)
+            })?;
+            if cancel.is_cancelled() {
+                return Err(WorkerError::Cancelled);
+            }
+            let vector = opentake_media::search::Embedder::encode_text(embedder.as_ref(), &query)
+                .map_err(|error| WorkerError::Job(error.to_string()))?;
+            let indexes = current_visual_indexes(job_engine.cache_root(), &id_paths);
+            Ok(opentake_media::search_visual_ranked(
+                &vector,
+                &indexes,
+                limit,
+                RELATIVE_CUTOFF,
+                Some(VISUAL_MATCH_COSINE_FLOOR),
+            )
+            .iter()
+            .map(|hit| moment_dto(hit, fps))
+            .collect::<Vec<_>>())
+        })
+        .map_err(visual_worker_error)?
+        .wait_with_queue_timeout(std::time::Duration::from_millis(250))
+        .map_err(visual_worker_error)
+}
+
+fn visual_worker_error(error: opentake_media::ort_worker::WorkerError) -> String {
+    use opentake_media::ort_worker::WorkerError;
+    match error {
+        WorkerError::QueueFull | WorkerError::QueueTimeout =>
+            "SEARCH_VISUAL_BUSY: inference worker is busy; retry after indexing or playback finishes".into(),
+        error => error.to_string(),
+    }
+}
+
+fn current_visual_indexes(
+    cache_root: &Path,
+    id_paths: &[(String, PathBuf)],
+) -> Vec<(String, opentake_media::search::embed_store::AssetIndex)> {
     use opentake_media::search::embed_store;
+    use opentake_media::search::frame_sampler::SAMPLER_VERSION;
 
-    let Ok(embedder) = load_embedder(engine) else {
-        return Vec::new();
-    };
-    // Encode the text query once; a failure yields no visual hits.
-    let Ok(vector) = opentake_media::search::Embedder::encode_text(&embedder, query) else {
-        return Vec::new();
-    };
-
-    // Load each asset's current index (skip missing/stale silently).
-    let mut indexes: Vec<(String, embed_store::AssetIndex)> = Vec::new();
+    let spec = search_config::embedder_spec();
+    let mut indexes = Vec::new();
     for (id, path) in id_paths {
         let Some(key) = embed_store::key(path) else {
             continue;
         };
-        if let Ok(index) = embed_store::load(engine.cache_root(), &key) {
-            indexes.push((id.clone(), index));
+        if let Ok(index) = embed_store::load(cache_root, &key) {
+            if index.header.model == spec.model
+                && index.header.model_version == spec.version
+                && index.header.sampler_version == SAMPLER_VERSION
+                && index.header.dim == spec.embedding_dim
+            {
+                indexes.push((id.clone(), index));
+            }
         }
     }
-    if indexes.is_empty() {
-        return Vec::new();
-    }
-
-    opentake_media::search_visual_ranked(
-        &vector,
-        &indexes,
-        limit,
-        RELATIVE_CUTOFF,
-        Some(VISUAL_MATCH_COSINE_FLOOR),
-    )
-    .iter()
-    .map(|h| moment_dto(h, fps))
-    .collect()
+    indexes
 }
 
 /// Compute the visual-index coverage for a set of visual asset `(id, path)`
@@ -573,10 +645,10 @@ pub(crate) fn model_installed(engine: &MediaEngine) -> bool {
 fn load_embedder(engine: &MediaEngine) -> Result<opentake_media::search::OrtEmbedder, String> {
     let models_dir = engine.models_dir();
     let manifest = search_config::manifest();
-    let installed = opentake_media::search::model_download::installed(models_dir, &manifest)
-        .ok_or_else(|| {
+    let installed = opentake_media::search::model_download::verify_installed(models_dir, &manifest)
+        .map_err(|e| {
             format!(
-                "visual search model not installed — download '{}' first",
+                "SEARCH_MODEL_REPAIR_REQUIRED: visual search model is missing or invalid; download '{}' again: {e}",
                 manifest.model
             )
         })?;
@@ -764,6 +836,75 @@ fn index_status_snapshot(engine: &MediaEngine, assets: &[ResolvedAsset]) -> Sear
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visual_query_returns_busy_while_project_indexing_runs() {
+        use opentake_media::ort_worker::{
+            JobKind, JobPriority, JobRequest, OrtWorker, WorkerError,
+        };
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc,
+        };
+        use std::time::Duration;
+
+        let worker = OrtWorker::spawn(opentake_media::ExportPause::new(), 4);
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let index = worker
+            .submit(
+                JobRequest::new(
+                    JobKind::Index,
+                    "model",
+                    "blocked-index",
+                    JobPriority::Background,
+                ),
+                move |_, _| {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Ok(())
+                },
+            )
+            .unwrap();
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let ran = Arc::new(AtomicBool::new(false));
+        let query_ran = ran.clone();
+        let query = worker
+            .submit(
+                JobRequest::new(
+                    JobKind::Search,
+                    "model",
+                    "interactive-query",
+                    JobPriority::Interactive,
+                ),
+                move |_, _| {
+                    query_ran.store(true, Ordering::SeqCst);
+                    Ok(42usize)
+                },
+            )
+            .unwrap();
+        let result = query.wait_with_queue_timeout(Duration::from_millis(20));
+        // Release the index even if the assertion fails, so a regression cannot
+        // leave the worker blocked during test teardown.
+        release_tx.send(()).unwrap();
+        assert_eq!(result, Err(WorkerError::QueueTimeout));
+        index.wait().unwrap();
+        assert_eq!(query.wait(), Err(WorkerError::Cancelled));
+        assert!(!ran.load(Ordering::SeqCst));
+        let ready = worker
+            .submit(
+                JobRequest::new(
+                    JobKind::Search,
+                    "model",
+                    "ready-query",
+                    JobPriority::Interactive,
+                ),
+                |_, _| Ok(7usize),
+            )
+            .unwrap();
+        assert_eq!(ready.wait_with_queue_timeout(Duration::from_secs(2)), Ok(7));
+        worker.shutdown().unwrap();
+    }
 
     #[test]
     fn bounded_single_worker_cancels_skips_stale_and_yields_to_playback_export() {
@@ -995,6 +1136,108 @@ mod tests {
     // --- pure DTO / merge / cap logic (no ort, no ffmpeg) ---
 
     #[test]
+    fn visual_queries_exclude_old_and_mismatched_index_headers() {
+        use opentake_media::search::{embed_store, frame_sampler::SAMPLER_VERSION};
+        let root = tempfile::tempdir().unwrap();
+        let spec = search_config::embedder_spec();
+        let current = embed_store::Header {
+            model: spec.model.clone(),
+            model_version: spec.version,
+            sampler_version: SAMPLER_VERSION,
+            dim: spec.embedding_dim,
+            count: 1,
+        };
+        let variants = [
+            (
+                "v1",
+                embed_store::Header {
+                    model_version: 1,
+                    ..current.clone()
+                },
+            ),
+            (
+                "other-model",
+                embed_store::Header {
+                    model: "other".into(),
+                    ..current.clone()
+                },
+            ),
+            (
+                "other-sampler",
+                embed_store::Header {
+                    sampler_version: SAMPLER_VERSION + 1,
+                    ..current.clone()
+                },
+            ),
+            (
+                "other-dimension",
+                embed_store::Header {
+                    dim: 2,
+                    ..current.clone()
+                },
+            ),
+            ("current", current),
+        ];
+        let mut assets = Vec::new();
+        for (id, header) in variants {
+            let path = root.path().join(format!("{id}.png"));
+            std::fs::write(&path, id).unwrap();
+            let key = embed_store::key(&path).unwrap();
+            embed_store::save(
+                root.path(),
+                &key,
+                &header,
+                &[embed_store::Row {
+                    time: 0.0,
+                    shot_start: 0.0,
+                    shot_end: 0.0,
+                }],
+                &vec![0.1; header.dim],
+            )
+            .unwrap();
+            assets.push((id.to_string(), path));
+        }
+        assert!(current_visual_indexes(root.path(), &assets[..1]).is_empty());
+        let indexes = current_visual_indexes(root.path(), &assets);
+        assert_eq!(
+            indexes
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            ["current"]
+        );
+    }
+
+    #[test]
+    fn visual_model_errors_round_trip_without_losing_other_search_groups() {
+        let value = serde_json::json!({
+            "moments": [], "spoken": [],
+            "files": [{"mediaId": "file", "score": 1.0}],
+            "visualError": "SEARCH_MODEL_REPAIR_REQUIRED: checksum failed"
+        });
+        let dto: SearchResultsDto = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(dto).unwrap(), value);
+        let legacy: SearchResultsDto = serde_json::from_value(serde_json::json!({
+            "moments": [], "spoken": [], "files": []
+        }))
+        .unwrap();
+        assert_eq!(legacy, SearchResultsDto::default());
+    }
+
+    #[test]
+    fn invalid_model_load_has_a_stable_repair_error() {
+        let root = tempfile::tempdir().unwrap();
+        let engine = MediaEngine::new(root.path().join("cache"), root.path().join("models"));
+        let error = load_embedder(&engine)
+            .err()
+            .expect("missing model must fail");
+        assert!(
+            error.starts_with("SEARCH_MODEL_REPAIR_REQUIRED:"),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn seconds_to_frame_truncates_like_upstream() {
         // Int(s*fps) truncation, not rounding: 1.99s @ 30fps → 59, not 60.
         assert_eq!(seconds_to_frame(1.99, 30), 59);
@@ -1141,6 +1384,7 @@ mod tests {
                 media_id: "f".into(),
                 score: 1.0,
             }],
+            visual_error: None,
         };
         let json = serde_json::to_string(&dto).unwrap();
         assert!(json.contains("\"moments\":"));
