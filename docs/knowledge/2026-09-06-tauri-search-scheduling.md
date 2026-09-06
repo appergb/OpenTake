@@ -18,3 +18,5 @@ confidence: high
 此文记录官方执行规则和代码改动；真实安装包的响应性以当前候选验收为准。
 
 排队复核补充：现有 worker 不抢占已经开始的整批索引。视觉查询采用 250 ms 的排队等待上限；仍未启动时持有与 worker 状态转换相同的锁取消该查询，返回 SEARCH_VISUAL_BUSY，已开始/完成的任务保留正常结果。队列满也返回相同忙状态。独立源码复核与 channel 阻塞索引的回归用例通过，避免用优先级名称误称存在抢占。
+
+2026-09-07原生GUI进一步确认同一规则影响export_video：进程sample显示主AppKit线程同步运行完整GPU/FFmpeg导出，导致进度和取消无法处理。导出改用async+spawn_blocking并让后台任务持有ExportGuard；转写也沿既有有界推理worker后台执行。同步命令不会自动在worker执行，相关旧注释已纠正。

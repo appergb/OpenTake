@@ -284,6 +284,104 @@ describe("AudioWaveform", () => {
   });
 });
 
+describe("MediaCard thumbnail load recovery", () => {
+  it("retries a failed cached asset URL and keeps the recovered image without regenerating media", async () => {
+    vi.useFakeTimers();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const item = { ...mediaItem("recover-thumb"), thumbnail: "/cache/recover.thumb.png" };
+    try {
+      await act(async () => root.render(<MediaCard item={item} />));
+      const original = container.querySelector("img")!;
+      expect(original.getAttribute("src")).toBe("asset:///cache/recover.thumb.png");
+      await act(async () => original.dispatchEvent(new Event("error")));
+      expect(container.querySelector("img")).toBeNull();
+      await act(async () => vi.advanceTimersByTime(1000));
+      const recovered = container.querySelector("img")!;
+      expect(recovered).not.toBeNull();
+      expect(recovered.getAttribute("src")).toBe("asset:///cache/recover.thumb.png?opentake-thumbnail-retry=1");
+      expect(recovered.alt).toBe("recover-thumb");
+      await act(async () => recovered.dispatchEvent(new Event("load")));
+      await act(async () => vi.advanceTimersByTime(10000));
+      expect(container.querySelector("img")).toBe(recovered);
+      expect(api.generateThumbnail).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds repeated thumbnail failures and leaves the media card usable instead of a broken image", async () => {
+    vi.useFakeTimers();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<MediaCard item={{ ...mediaItem("permanent-thumb"), thumbnail: "/cache/unavailable.png" }} />));
+      for (let failure = 0; failure < 3; failure++) {
+        const img = container.querySelector("img")!;
+        expect(img).not.toBeNull();
+        await act(async () => img.dispatchEvent(new Event("error")));
+        await act(async () => vi.advanceTimersByTime(2000));
+      }
+      expect(container.querySelector("img")).toBeNull();
+      await act(async () => vi.advanceTimersByTime(30000));
+      expect(container.querySelector("img")).toBeNull();
+      expect(api.generateThumbnail).not.toHaveBeenCalled();
+      await act(async () => container.querySelector<HTMLElement>('[role="gridcell"]')!.click());
+      expect(useEditorUiStore.getState().previewMediaId).toBe("permanent-thumb");
+    } finally {
+      await act(async () => root.unmount());
+      vi.useRealTimers();
+    }
+  });
+
+  it("isolates a pending thumbnail retry when project or source changes", async () => {
+    vi.useFakeTimers();
+    useProjectStore.setState({ projectEpoch: 450 });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const item = { ...mediaItem("switched-thumb"), thumbnail: "/cache/shared.png" };
+    try {
+      await act(async () => root.render(<MediaCard item={item} />));
+      await act(async () => container.querySelector("img")!.dispatchEvent(new Event("error")));
+      await act(async () => useProjectStore.setState({ projectEpoch: 451 }));
+      expect(container.querySelector("img")?.getAttribute("src")).toBe("asset:///cache/shared.png");
+      await act(async () => vi.advanceTimersByTime(2000));
+      expect(container.querySelector("img")?.getAttribute("src")).toBe("asset:///cache/shared.png");
+      await act(async () => container.querySelector("img")!.dispatchEvent(new Event("error")));
+      await act(async () => root.render(<MediaCard item={{ ...item, thumbnail: "/cache/relinked.png" }} />));
+      await act(async () => vi.advanceTimersByTime(2000));
+      expect(container.querySelector("img")?.getAttribute("src")).toBe("asset:///cache/relinked.png");
+    } finally {
+      await act(async () => root.unmount());
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels thumbnail retry work on unmount", async () => {
+    vi.useFakeTimers();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<MediaCard item={{ ...mediaItem("disposed-thumb"), thumbnail: "/cache/disposed.png" }} />));
+      await act(async () => container.querySelector("img")!.dispatchEvent(new Event("error")));
+      expect(vi.getTimerCount()).toBe(1);
+      await act(async () => root.unmount());
+      expect(vi.getTimerCount()).toBe(0);
+      await act(async () => vi.advanceTimersByTime(10000));
+      expect(container.querySelector("img")).toBeNull();
+      expect(api.generateThumbnail).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("MediaCard derived-resource lifecycle", () => {
   it("ignores a disconnected thumbnail observer callback from an older project", async () => {
     const callbacks: IntersectionObserverCallback[] = [];

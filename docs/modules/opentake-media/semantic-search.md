@@ -14,11 +14,11 @@
 
 ---
 
-## 常量 `config.rs`（逐字照搬上游 `SearchIndexConfig`）
+## 常量 `config.rs`（检索阈值对齐上游，模型缓存版本按实际 ONNX 契约升级）
 
 ```rust
 pub const MODEL_NAME: &str = "siglip2-base-patch16-256";
-pub const MODEL_VERSION: i32 = 1;
+pub const MODEL_VERSION: i32 = 2;
 pub const EMBEDDING_DIM: usize = 768;
 pub const IMAGE_SIZE: u32 = 256;
 pub const CONTEXT_LENGTH: usize = 64;
@@ -54,15 +54,15 @@ pub const PAD_TOKEN: i64 = 0;
 pub struct SiglipTokenizer { /* HF tokenizers + context_length */ }
 pub fn pad_or_truncate(ids: &[u32], len: usize) -> Vec<i64>;  // 截断到 len，右填 0
 ```
-- HF `tokenizers` crate（与上游 swift-transformers 同源）；**手动**截断到 64 + 右填 0，**关闭** tokenizer 自动 padding/truncation——SigLIP 训练无 attention mask，必须与 Python 参考严格一致。
+- HF `tokenizers` 在特殊 token 后处理前按 context length 截断，保留长查询末尾 EOS，再右填 0 到 64；模型只接收 input_ids，不传 attention mask。通用 `pad_or_truncate` 仍保留，真实 tokenizer 路径先完成上述约束。
 
 ### ort 后端 `ort_embedder.rs`（feature `ort-backend`）
 ```rust
 pub struct OrtEmbedder { image: Mutex<Session>, text: Mutex<Session>, tokenizer: SiglipTokenizer, spec, io: IoNames }
-pub struct IoNames { pub image_input, image_output, text_input, text_output: String }  // 默认 "image"/"embedding"/"tokens"/"embedding"
+pub struct IoNames { pub image_input, image_output, text_input, text_output: String }  // 默认 "pixel_values"/"pooler_output"/"input_ids"/"pooler_output"
 ```
-- 图像输入 NCHW f32、文本输入 `(1,64)` int64；输出断言 `len == dim`，否则 `BadModelOutput`。
-- **L2 归一化开关**：`spec.normalized` 默认 `false`（上游模型图内已归一化），裸点积即等价余弦；当前 `finalize` 仅做长度校验（标定路径保留为后续，[SPEC.md](SPEC.md) §0.8 风险）。务必复用上游同一份导出权重转 ONNX。
+- 图像输入 NCHW f32、文本输入 `(1,64)` int64；输出校验维度、有限值及非零范数。Windows 使用同一锁定 Tract 引擎绑定固定输入并重推导动态维度，保留 dtype/rank/静态尺寸及 `[1,768]` 输出约束；macOS/Linux 使用原生 ORT。
+- **L2 归一化**：`spec.normalized` 表示图输出是否已经归一化。当前固定 ONNX 图输出未归一化，因此该值为 `false`，`finalize` 在校验后执行 L2 归一化；随后点积才可按余弦阈值排名。更换权重或 I/O 契约须重新实测并更新缓存版本。
 
 ---
 
@@ -161,22 +161,24 @@ pub fn rank(query: &[f32], indexes, limit, relative_cutoff, min_score) -> Vec<Hi
 pub struct Manifest { pub model, version, embedding_dim, image_size, context_length,
                       image_encoder: ManifestFile, text_encoder, tokenizer }  // ManifestFile{name, sha256, bytes}
 pub fn install_dir(models_dir, m) -> PathBuf;       // <models_dir>/<model>-v<version>/
-pub fn installed(models_dir, m) -> Option<InstalledModel>;
+pub fn installed(models_dir, m) -> Option<InstalledModel>; // 快速检查回执及长度
+pub fn verify_installed(models_dir, m) -> Result<InstalledModel>; // 加载前重验实际 SHA-256
+pub fn install_from_directory(models_dir, m, source_dir) -> Result<InstalledModel>;
 pub fn verify_sha256(path, expected) -> Result<()>; // 1MiB 流式
 pub async fn install(models_dir, m, base_url, on_progress) -> Result<...>;  // feature model-download
 ```
-- 幂等下载 image/text encoder + tokenizer → 逐个 **SHA-256 流式校验**（1MiB 块）→ tokenizer.zip 解压单顶层目录 → 原子 rename 到最终位置 → 写 spec.json。`installed` 按三件 + `tokenizer/tokenizer.json` 存在性判定。
+- 按固定 revision、长度和 SHA-256 下载两个 encoder 与 tokenizer，支持安全相对子目录。当前直接使用 tokenizer.json，保留旧 ZIP 兼容。先在临时目录完整校验并写 spec/manifest 回执，再发布安装目录，失败时清理或恢复旧目录。`installed` 核对当前回执和准确长度，加载前 `verify_installed` 重新流式验 hash；离线安装走相同校验。
 - 相比上游去掉了 `MLModel.compileModel`（ONNX 无需编译）。
-- **模型安装修复已完成并验证（2026-09-06）**：原空 sha256/bytes 占位已替换为固定 revision 资产清单，约 1.5 GB 文件已逐一校验。macOS 真实 Rust 路径已验证离线安装、图文 embedding、归一化、PALMEMB1 f16 往返和排名；Windows ort-tract 真实图及新包 UI 仍待验收。详见[模型专项审计](../../audit/2026-09-06/semantic-search-model.md)，完整 revision/校验值由审计链接的知识记录统一维护。
+- **模型安装修复已完成并验证（2026-09-06）**：原空 sha256/bytes 占位已替换为固定 revision 资产清单，约 1.5 GB 文件已逐一校验。macOS 真实 Rust 路径已验证离线安装、图文 embedding、归一化、PALMEMB1 f16 往返和排名；Windows/MSVC 与 macOS 原生资格流程已通过真实安装、图文推理和五条检索断言；当前新包 UI 验收另见总记录。详见[模型专项审计](../../audit/2026-09-06/semantic-search-model.md)，完整 revision/校验值由审计链接的知识记录统一维护。
 
 ---
 
 ## feature 与完成状态
 ```toml
-ort-backend    = ["ort", "ndarray"]       # 默认 build 不含；启用后真实 SigLIP2 推理
+ort-backend    = ["dep:ort", "dep:ort-tract", "dep:tract-onnx"] # 依赖按平台激活；默认不启用
 model-download = ["reqwest", "zip", ...]  # 启用后下载
 ```
-模型安装与真实后端纵向链路已实现并验证：正式 Cargo media search 为 84 passed / 1 ignored，Tauri search 为 14 passed；引用实际产品模块并运行真实模型的 Rust harness 为 72 passed / 0 ignored，包含离线安装、图文 embedding 与排名。后者不是 Python 推理替代，也不是已执行正式 Cargo opt-in 命令；复现方式与证据见[专项审计](../../audit/2026-09-06/semantic-search-model.md)。三组测试覆盖有重叠，不相加为独立测试数。Windows ort-tract 真实图、新包 UI 与整仓发布门槛仍由主线验收。改任何烧印常量（promoteDiff/coverageFloor/dim/imageSize…）须两侧同步。
+模型安装与真实后端纵向链路已实现并验证：正式 Cargo media search 为 84 passed / 1 ignored，Tauri search 为 14 passed；引用实际产品模块并运行真实模型的 Rust harness 为 72 passed / 0 ignored，包含离线安装、图文 embedding 与排名。后者不是 Python 推理替代，也不是已执行正式 Cargo opt-in 命令；复现方式与证据见[专项审计](../../audit/2026-09-06/semantic-search-model.md)。三组测试覆盖有重叠，不相加为独立测试数。后续正式平台流程已在 `64dce59` 上于 macOS 与 Windows 各执行同一真实模型 Cargo 用例（1 passed/0 ignored），见 [平台资格结果](https://github.com/appergb/OpenTake/actions/runs/34043674623)。新包 UI 与最终发布状态按总验收记录维护。改任何烧印常量（promoteDiff/coverageFloor/dim/imageSize…）须两侧同步。
 
 ## 测试
 预处理（黑→-1/白→+1/squash/alpha 合成）、pad_or_truncate、候选时间（stride/回退/零 duration）、luma_grid（黑/白/Rec.601）、ShotDetector 状态机（首帧/去重/镜头切/覆盖下限/grid 总更新）、accumulate_rows（首镜头归零/链接/幂等）、PALMEMB1 往返（f16 量化/版本校验/多字节拒绝）、排名（点积排序/best-per-shot/limit-then-floor/空索引）、install_dir/installed/SHA256、ort_worker 张量互转；端到端 `index_then_rank_finds_brightest_match`（mock 流）。

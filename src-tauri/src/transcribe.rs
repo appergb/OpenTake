@@ -13,8 +13,8 @@
 //!   events (mirrors `export_video`'s progress pattern), SHA-1 verified.
 //! - [`transcribe_media`] — transcribe one asset → transcript DTO (segments +
 //!   words with times); cached so a re-transcribe is instant. Runs the blocking
-//!   whisper inference on a worker thread (the command itself is sync, so Tauri
-//!   already dispatches it off the UI thread).
+//!   whisper inference on the bounded inference worker; its async command waits
+//!   outside the UI thread.
 //! - [`transcript_get`] — return a cached transcript if present, without
 //!   transcribing (for the UI to check state).
 //!
@@ -166,17 +166,47 @@ pub async fn download_transcribe_model(
 /// the model isn't installed (guiding the UI to `download_transcribe_model`) or
 /// the asset can't be resolved/decoded.
 #[tauri::command]
-pub fn transcribe_media(
+pub async fn transcribe_media(
     core: State<'_, AppCore>,
     media: State<'_, MediaState>,
     admission: State<'_, crate::updater::InstallAdmissionGate>,
     media_id: String,
     language: Option<String>,
 ) -> Result<TranscriptDto, String> {
-    let _activity = crate::updater::begin_mutating_activity(&admission)?;
+    let activity = crate::updater::begin_mutating_activity(&admission)?;
     let (path, is_video) = resolve_asset(&core, &media_id)?;
-    let result = transcribe_with_cache(media.engine(), &path, is_video, language.as_deref())?;
-    Ok(TranscriptDto::from_result(&media_id, result))
+    let engine = media.engine();
+    let cache_root = engine.cache_root().to_path_buf();
+    let models_dir = engine.models_dir().to_path_buf();
+    if let Some(cached) = opentake_media::transcribe::cache::cached_on_disk(&cache_root, &path) {
+        return Ok(TranscriptDto::from_result(&media_id, cached));
+    }
+    use opentake_media::ort_worker::{JobKind, JobPriority, JobRequest, WorkerError};
+    let source_key = opentake_media::cache_key::file_identity_key(&path);
+    let request = JobRequest::new(
+        JobKind::Transcribe,
+        format!("{}@{}", DEFAULT_WHISPER_MODEL.file_name, DEFAULT_WHISPER_MODEL.sha1),
+        format!("transcribe:{cache_root:?}:{models_dir:?}:{path:?}:{source_key:?}:{media_id:?}:{language:?}"),
+        JobPriority::Background,
+    );
+    let handle = crate::search::production_index_worker(engine.export_pause())
+        .submit(request, move |_, cancel| {
+            // Keep update installation excluded until queued or running work
+            // actually finishes, including when the async caller is dropped.
+            let _activity = activity;
+            if cancel.is_cancelled() {
+                return Err(WorkerError::Cancelled);
+            }
+            let engine = MediaEngine::new(cache_root, models_dir);
+            let result = transcribe_with_cache(&engine, &path, is_video, language.as_deref())
+                .map_err(WorkerError::Job)?;
+            Ok(TranscriptDto::from_result(&media_id, result))
+        })
+        .map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || handle.wait())
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
 }
 
 /// `transcript_get`: return the cached transcript for an asset if one exists on
@@ -246,8 +276,8 @@ pub(crate) fn load_backend(engine: &MediaEngine) -> Result<WhisperTranscriber, S
 
 /// Transcribe `path` with the whisper backend, caching the full transcript.
 /// `is_video` selects audio extraction; `language` is an optional hint. The
-/// whisper inference is CPU-bound and blocking; the Tauri command wrapper is sync
-/// so Tauri already runs it on a worker thread (no UI stall).
+/// whisper inference is CPU-bound and blocking; callers must execute this helper
+/// on a background worker. The Tauri command uses the bounded inference worker.
 ///
 /// A cached full transcript short-circuits before the backend loads (so re-reads
 /// don't even need the model installed). On a miss, the backend transcribes the

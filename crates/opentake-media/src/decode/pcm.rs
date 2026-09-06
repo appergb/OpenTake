@@ -460,17 +460,29 @@ pub(super) fn decode_raw_pcm_cancellable(
     let frame_bytes = usize::from(spec.channels)
         .checked_mul(spec.format.bytes_per_sample())
         .ok_or_else(|| audio_buffer_too_large("PCM frame byte count overflow"))?;
+    // Full-track extraction must preserve decoder output, including padding
+    // excluded from a container's presentation duration. Admit at most one
+    // extra second for that discrepancy; explicit ranges retain one-frame
+    // rounding slack and are trimmed at the requested output sample rate.
+    let slack_frames = if range.is_none() {
+        spec.sample_rate as usize
+    } else {
+        1
+    };
+    let slack_bytes = slack_frames
+        .checked_mul(frame_bytes)
+        .ok_or_else(|| audio_buffer_too_large("PCM padding budget overflow"))?;
     let reader_cap = expected_bytes
-        .checked_add(frame_bytes)
+        .checked_add(slack_bytes)
         .ok_or_else(|| audio_buffer_too_large("PCM reader cap overflow"))?;
 
+    let args = if range.is_some() {
+        bounded_pcm_args(path, spec, range, expected_bytes / frame_bytes)
+    } else {
+        pcm_args(path, spec, None)
+    };
     let mut child = ff::ffmpeg()
-        .args(bounded_pcm_args(
-            path,
-            spec,
-            range,
-            expected_bytes / frame_bytes,
-        ))
+        .args(args)
         .spawn()
         .map_err(|e| MediaError::Ffmpeg(format!("spawn: {e}")))?;
     cancel.child_spawned();

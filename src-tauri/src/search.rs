@@ -422,7 +422,7 @@ pub async fn search_index_start(
 /// One process-wide production worker. `MediaState` itself is process-wide, so
 /// the first command supplies the same shared playback/export pressure counter
 /// observed by every later request.
-fn production_index_worker(
+pub(crate) fn production_index_worker(
     pressure: opentake_media::ExportPause,
 ) -> &'static opentake_media::ort_worker::OrtWorker {
     static WORKER: std::sync::OnceLock<opentake_media::ort_worker::OrtWorker> =

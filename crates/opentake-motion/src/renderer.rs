@@ -2168,6 +2168,24 @@ mod chromium_backend {
                 if let Some((fence, marker)) = author_marker {
                     self.set_author_marker(fence, marker)?;
                 }
+                // Chromium drops new screencast frames while its unacknowledged
+                // send window is full. Commit and ACK the startup generation
+                // before publishing another color; a later ACK does not replay
+                // a transition dropped while the author and seed were painting.
+                trace(format!(
+                    "frame {frame_index}: {background} seed guard start"
+                ));
+                self.settle_compositor(&capture_session)?;
+                let seed_image = self.receive_guarded_generation(
+                    &capture_session,
+                    seed,
+                    pass,
+                    author_marker.map(|(_, marker)| marker),
+                )?;
+                drop(seed_image);
+                trace(format!(
+                    "frame {frame_index}: {background} seed guard complete"
+                ));
                 trace(format!(
                     "frame {frame_index}: {background} transition guard start"
                 ));
@@ -2237,8 +2255,11 @@ mod chromium_backend {
                 height,
                 index: frame_index,
             } = frame;
+            let started = Instant::now();
+            let mut received = 0usize;
             loop {
                 self.check_abort()?;
+                trace(format!("frame {frame_index}: {background} screencast wait expected={expected_guard:?} received={received} elapsed_ms={}", started.elapsed().as_millis()));
                 let png = self.receive_and_ack_screencast_png(session, frame_index)?;
                 let image = decode_viewport_png(&png, background, frame_index)?;
                 let expected_dimensions = (
@@ -2255,9 +2276,12 @@ mod chromium_backend {
                         image.dimensions()
                     )));
                 }
-                if external_guard_matches(&image, width, height, expected_guard)
-                    && author_marker.is_none_or(|marker| author_marker_matches(&image, marker))
-                {
+                received += 1;
+                let guard_matches = external_guard_matches(&image, width, height, expected_guard);
+                let marker_matches =
+                    author_marker.is_none_or(|marker| author_marker_matches(&image, marker));
+                trace(format!("frame {frame_index}: {background} screencast received n={received} png_bytes={} corner={:?} guard={guard_matches} marker={marker_matches} elapsed_ms={}", png.len(), image.get_pixel(width, height).0, started.elapsed().as_millis()));
+                if guard_matches && marker_matches {
                     return Ok(image);
                 }
             }
@@ -2280,11 +2304,17 @@ mod chromium_backend {
                         "Chromium screencast frame has no integer sessionId: {event}"
                     ))
                 })?;
+            trace(format!(
+                "frame {frame_index}: screencast event received; ack {screencast_session_id} start"
+            ));
             self.command(
                 "Page.screencastFrameAck",
                 json!({"sessionId": screencast_session_id}),
                 Some(session),
             )?;
+            trace(format!(
+                "frame {frame_index}: screencast ack {screencast_session_id} complete"
+            ));
             self.ensure_no_blocked_url()?;
             let encoded = required_string(params, "data")?;
             let png = base64::engine::general_purpose::STANDARD
@@ -3826,7 +3856,7 @@ mod chromium_backend {
         }
 
         #[test]
-        fn guarded_candidate_requires_transition_then_desired_generation() {
+        fn guarded_candidate_acks_startup_window_before_transition_and_desired() {
             fn guarded_png(author: [u8; 4], guard: [u8; 3]) -> String {
                 let mut image = image::RgbaImage::from_pixel(
                     2,
@@ -3837,7 +3867,49 @@ mod chromium_backend {
                 base64::engine::general_purpose::STANDARD
                     .encode(encode_viewport_png(image, 0).unwrap())
             }
-
+            fn send(socket: &mut WebSocket<TcpStream>, value: Value) {
+                socket.send(Message::text(value.to_string())).unwrap();
+            }
+            fn exchange(socket: &mut WebSocket<TcpStream>, method: &str, params: Value) {
+                let command = match socket.read().unwrap() {
+                    Message::Text(text) => serde_json::from_str::<Value>(&text).unwrap(),
+                    other => panic!("expected CDP command, got {other:?}"),
+                };
+                assert_eq!(command["method"], method);
+                assert_eq!(command["params"], params);
+                let expected_session = if method.starts_with("Target.") {
+                    None
+                } else {
+                    Some("capture-session")
+                };
+                assert_eq!(
+                    command.get("sessionId").and_then(Value::as_str),
+                    expected_session
+                );
+                let result = match method {
+                    "Target.attachToTarget" => json!({"sessionId":"capture-session"}),
+                    "Runtime.evaluate" => json!({"result":{"type":"boolean","value":true}}),
+                    _ => json!({}),
+                };
+                send(socket, json!({"id":command["id"],"result":result}));
+            }
+            fn advance(socket: &mut WebSocket<TcpStream>) {
+                exchange(
+                    socket,
+                    "Emulation.setVirtualTimePolicy",
+                    json!({"policy":"advance","budget":1,"maxVirtualTimeTaskStarvationCount":10_000}),
+                );
+                send(
+                    socket,
+                    json!({"method":"Emulation.virtualTimeBudgetExpired","params":{},"sessionId":"capture-session"}),
+                );
+            }
+            fn frame(socket: &mut WebSocket<TcpStream>, id: u64, data: &str) {
+                send(
+                    socket,
+                    json!({"method":"Page.screencastFrame","params":{"data":data,"metadata":{},"sessionId":id},"sessionId":"capture-session"}),
+                );
+            }
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let client_stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
             let (server_stream, _) = listener.accept().unwrap();
@@ -3850,187 +3922,74 @@ mod chromium_backend {
             let seed = [0, 0, 90];
             let transition = [0, 0, 165];
             let desired = [0, 0, 0];
-            let wrong = guarded_png([1, 2, 3, 255], [17, 18, 19]);
-            let transition_frame = guarded_png([4, 5, 6, 255], transition);
+            let stale = guarded_png([1, 2, 3, 255], [17, 18, 19]);
+            let seeded = guarded_png([4, 5, 6, 255], seed);
+            let transitioned = guarded_png([4, 5, 6, 255], transition);
             let desired_frame = guarded_png([128, 0, 0, 255], desired);
-            let host_background = |rgb: [u8; 3]| {
-                json!({
-                    "expression": format!(
-                        "(() => {{ const layer = document.getElementById('opentake-host-background'); if (!layer) return false; layer.style.backgroundColor = 'rgb({} {} {})'; return true; }})()",
-                        rgb[0], rgb[1], rgb[2]
-                    ),
-                    "returnByValue": true
-                })
-            };
+            let background =
+                |rgb| json!({"expression":host_background_expression(rgb),"returnByValue":true});
             let server = thread::spawn(move || {
-                let read_json = |socket: &mut WebSocket<TcpStream>| match socket.read().unwrap() {
-                    Message::Text(text) => serde_json::from_str::<Value>(text.as_ref()).unwrap(),
-                    other => panic!("expected CDP command, got {other:?}"),
-                };
-                let send_json = |socket: &mut WebSocket<TcpStream>, value: Value| {
-                    socket.send(Message::text(value.to_string())).unwrap();
-                };
-
-                let attach = read_json(&mut server_socket);
-                assert_eq!(attach["method"], "Target.attachToTarget");
-                send_json(
+                exchange(
                     &mut server_socket,
-                    json!({"id": 1, "result": {"sessionId": "capture-session"}}),
+                    "Target.attachToTarget",
+                    json!({"targetId":"target-id","flatten":true}),
                 );
-                for (id, method, params) in [
-                    (2, "Page.enable", json!({})),
-                    (
-                        3,
-                        "Emulation.setVirtualTimePolicy",
-                        json!({"policy": "pause"}),
-                    ),
-                    (4, "Runtime.evaluate", host_background(seed)),
-                    (
-                        5,
-                        "Page.startScreencast",
-                        json!({
-                            "format": "png",
-                            "maxWidth": 2,
-                            "maxHeight": 2,
-                            "everyNthFrame": 1
-                        }),
-                    ),
-                    (6, "Runtime.evaluate", host_background(transition)),
-                ] {
-                    let command = read_json(&mut server_socket);
-                    assert_eq!(
-                        command,
-                        json!({
-                            "id": id,
-                            "method": method,
-                            "params": params,
-                            "sessionId": "capture-session"
-                        })
-                    );
-                    let result = if method == "Runtime.evaluate" {
-                        json!({"result": {"type": "boolean", "value": true}})
-                    } else {
-                        json!({})
-                    };
-                    send_json(&mut server_socket, json!({"id": id, "result": result}));
-                }
-
-                let transition_fence = read_json(&mut server_socket);
-                assert_eq!(
-                    transition_fence,
-                    json!({
-                        "id": 7,
-                        "method": "Emulation.setVirtualTimePolicy",
-                        "params": {
-                            "policy": "advance",
-                            "budget": 1,
-                            "maxVirtualTimeTaskStarvationCount": 10_000
-                        },
-                        "sessionId": "capture-session"
-                    })
-                );
-                send_json(&mut server_socket, json!({"id": 7, "result": {}}));
-                send_json(
+                exchange(&mut server_socket, "Page.enable", json!({}));
+                exchange(
                     &mut server_socket,
-                    json!({
-                        "method": "Emulation.virtualTimeBudgetExpired",
-                        "params": {},
-                        "sessionId": "capture-session"
-                    }),
+                    "Emulation.setVirtualTimePolicy",
+                    json!({"policy":"pause"}),
                 );
-
-                for (id, data) in [(8, wrong), (9, transition_frame.clone())] {
-                    send_json(
+                exchange(&mut server_socket, "Runtime.evaluate", background(seed));
+                exchange(
+                    &mut server_socket,
+                    "Page.startScreencast",
+                    json!({"format":"png","maxWidth":2,"maxHeight":2,"everyNthFrame":1}),
+                );
+                // Match Chromium's full three-frame startup window. A transition
+                // published before these ACKs would be dropped, not replayed.
+                frame(&mut server_socket, 70, &stale);
+                frame(&mut server_socket, 71, &stale);
+                frame(&mut server_socket, 72, &seeded);
+                advance(&mut server_socket);
+                for id in 70..=72 {
+                    exchange(
                         &mut server_socket,
-                        json!({
-                            "method": "Page.screencastFrame",
-                            "params": {"data": data, "metadata": {}, "sessionId": 70 + id},
-                            "sessionId": "capture-session"
-                        }),
+                        "Page.screencastFrameAck",
+                        json!({"sessionId":id}),
                     );
-                    let ack = read_json(&mut server_socket);
-                    assert_eq!(ack["id"], id);
-                    assert_eq!(ack["method"], "Page.screencastFrameAck");
-                    send_json(&mut server_socket, json!({"id": id, "result": {}}));
                 }
-
-                let desired_command = read_json(&mut server_socket);
-                assert_eq!(
-                    desired_command,
-                    json!({
-                        "id": 10,
-                        "method": "Runtime.evaluate",
-                        "params": host_background(desired),
-                        "sessionId": "capture-session"
-                    })
-                );
-                send_json(
+                exchange(
                     &mut server_socket,
-                    json!({"id": 10, "result": {"result": {"type": "boolean", "value": true}}}),
+                    "Runtime.evaluate",
+                    background(transition),
                 );
-
-                let desired_fence = read_json(&mut server_socket);
-                assert_eq!(
-                    desired_fence,
-                    json!({
-                        "id": 11,
-                        "method": "Emulation.setVirtualTimePolicy",
-                        "params": {
-                            "policy": "advance",
-                            "budget": 1,
-                            "maxVirtualTimeTaskStarvationCount": 10_000
-                        },
-                        "sessionId": "capture-session"
-                    })
-                );
-                send_json(&mut server_socket, json!({"id": 11, "result": {}}));
-                send_json(
-                    &mut server_socket,
-                    json!({
-                        "method": "Emulation.virtualTimeBudgetExpired",
-                        "params": {},
-                        "sessionId": "capture-session"
-                    }),
-                );
-
-                for (id, data) in [(12, transition_frame), (13, desired_frame)] {
-                    send_json(
+                advance(&mut server_socket);
+                for (id, data) in [(73, &seeded), (74, &transitioned)] {
+                    frame(&mut server_socket, id, data);
+                    exchange(
                         &mut server_socket,
-                        json!({
-                            "method": "Page.screencastFrame",
-                            "params": {"data": data, "metadata": {}, "sessionId": 70 + id},
-                            "sessionId": "capture-session"
-                        }),
+                        "Page.screencastFrameAck",
+                        json!({"sessionId":id}),
                     );
-                    let ack = read_json(&mut server_socket);
-                    assert_eq!(ack["id"], id);
-                    assert_eq!(ack["method"], "Page.screencastFrameAck");
-                    send_json(&mut server_socket, json!({"id": id, "result": {}}));
                 }
-
-                for (id, method, params, session) in [
-                    (
-                        14,
-                        "Page.stopScreencast",
-                        json!({}),
-                        Some("capture-session"),
-                    ),
-                    (
-                        15,
-                        "Target.detachFromTarget",
-                        json!({"sessionId": "capture-session"}),
-                        None,
-                    ),
-                ] {
-                    let command = read_json(&mut server_socket);
-                    assert_eq!(command["id"], id);
-                    assert_eq!(command["method"], method);
-                    assert_eq!(command["params"], params);
-                    assert_eq!(command.get("sessionId").and_then(Value::as_str), session);
-                    send_json(&mut server_socket, json!({"id": id, "result": {}}));
+                exchange(&mut server_socket, "Runtime.evaluate", background(desired));
+                advance(&mut server_socket);
+                for (id, data) in [(75, &transitioned), (76, &desired_frame)] {
+                    frame(&mut server_socket, id, data);
+                    exchange(
+                        &mut server_socket,
+                        "Page.screencastFrameAck",
+                        json!({"sessionId":id}),
+                    );
                 }
+                exchange(&mut server_socket, "Page.stopScreencast", json!({}));
+                exchange(
+                    &mut server_socket,
+                    "Target.detachFromTarget",
+                    json!({"sessionId":"capture-session"}),
+                );
             });
-
             let mut cdp = Cdp::new(
                 client_socket,
                 SandboxPolicy::default(),
@@ -4148,7 +4107,7 @@ mod chromium_backend {
                         json!({"id": 1, "result": {"sessionId": "capture-session"}}).to_string(),
                     ))
                     .unwrap();
-                for id in 2..=6 {
+                for id in 2..=5 {
                     let command = read_json(&mut server_socket);
                     if id == 5 {
                         assert_eq!(command["method"], "Page.startScreencast");
@@ -4164,11 +4123,11 @@ mod chromium_backend {
                         ))
                         .unwrap();
                 }
-                let transition_fence = read_json(&mut server_socket);
-                assert_eq!(transition_fence["method"], "Emulation.setVirtualTimePolicy");
-                assert_eq!(transition_fence["params"]["policy"], "advance");
+                let seed_fence = read_json(&mut server_socket);
+                assert_eq!(seed_fence["method"], "Emulation.setVirtualTimePolicy");
+                assert_eq!(seed_fence["params"]["policy"], "advance");
                 server_socket
-                    .send(Message::text(json!({"id": 7, "result": {}}).to_string()))
+                    .send(Message::text(json!({"id": 6, "result": {}}).to_string()))
                     .unwrap();
                 server_socket
                     .send(Message::text(
@@ -4193,13 +4152,13 @@ mod chromium_backend {
                 let ack = read_json(&mut server_socket);
                 assert_eq!(ack["method"], "Page.screencastFrameAck");
                 server_socket
-                    .send(Message::text(json!({"id": 8, "result": {}}).to_string()))
+                    .send(Message::text(json!({"id": 7, "result": {}}).to_string()))
                     .unwrap();
                 let stop = read_json(&mut server_socket);
                 assert_eq!(stop["method"], "Page.stopScreencast");
                 server_socket
                     .send(Message::text(
-                        json!({"id": 9, "error": {"code": -1, "message": "stop-secondary"}})
+                        json!({"id": 8, "error": {"code": -1, "message": "stop-secondary"}})
                             .to_string(),
                     ))
                     .unwrap();
@@ -4207,7 +4166,7 @@ mod chromium_backend {
                 assert_eq!(detach["method"], "Target.detachFromTarget");
                 server_socket
                     .send(Message::text(
-                        json!({"id": 10, "error": {"code": -2, "message": "detach-secondary"}})
+                        json!({"id": 9, "error": {"code": -2, "message": "detach-secondary"}})
                             .to_string(),
                     ))
                     .unwrap();
@@ -4875,6 +4834,54 @@ mod chromium_backend {
                             json!({"id": next_id, "result": {"result": {"type": "boolean", "value": true}}}),
                         );
                         next_id += 1;
+
+                        let seed_fence = read_json(&mut server_socket);
+                        assert_eq!(
+                            seed_fence,
+                            json!({
+                                "id": next_id,
+                                "method": "Emulation.setVirtualTimePolicy",
+                                "params": {"policy":"advance","budget":1,"maxVirtualTimeTaskStarvationCount":10_000},
+                                "sessionId": capture_session
+                            })
+                        );
+                        send_json(&mut server_socket, json!({"id":next_id,"result":{}}));
+                        next_id += 1;
+                        send_json(
+                            &mut server_socket,
+                            json!({
+                                "method":"Emulation.virtualTimeBudgetExpired",
+                                "params":{},"sessionId":capture_session
+                            }),
+                        );
+                        // A seed with a stale author surface must not release
+                        // the startup fence, even when the external guard matches.
+                        for (session_id, seed_marker) in [
+                            (
+                                5,
+                                AuthorMarker {
+                                    rgb: [marker.rgb[0] ^ 0xff, marker.rgb[1], marker.rgb[2]],
+                                    ..marker
+                                },
+                            ),
+                            (6, marker),
+                        ] {
+                            send_json(
+                                &mut server_socket,
+                                json!({
+                                    "method":"Page.screencastFrame",
+                                    "params":{"data":encoded(current,seed,seed_marker),"metadata":{},"sessionId":session_id},
+                                    "sessionId":capture_session
+                                }),
+                            );
+                            let ack = read_json(&mut server_socket);
+                            assert_eq!(
+                                ack,
+                                json!({"id":next_id,"method":"Page.screencastFrameAck","params":{"sessionId":session_id},"sessionId":capture_session})
+                            );
+                            send_json(&mut server_socket, json!({"id":next_id,"result":{}}));
+                            next_id += 1;
+                        }
 
                         let transition_command = read_json(&mut server_socket);
                         assert_eq!(

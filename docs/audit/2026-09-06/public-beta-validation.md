@@ -18,9 +18,9 @@ macOS ARM64；Node 26.7.0、pnpm 10.33.4。默认 `/usr/bin/python3` 缺少 `tom
 |---|---|
 | Rust fmt | 通过 |
 | Rust workspace clippy | 修复 constant chunks/manual contains 后通过，exit 0；第三方 `block 0.1.6` 有 future-incompat notice |
-| Rust workspace tests | 本轮首个完整结果：80组、2885通过、0失败、10个显式ignored；之后的搜索恢复及有界排队修复18项定向测试通过，最终汇总待更新 |
+| Rust workspace tests | 最终整合：80组、2899通过、0失败、10个显式ignored；包含Motion握手、poster发布、导出后台/提前取消和PCM完整轨修复 |
 | Rust minimal clippy | 无默认feature构建检查通过 |
-| Web tests/build | 最终整合后153files/1462tests通过，生产构建通过；保留既有chunk/dynamic-import warnings |
+| Web tests/build | 最终整合后153files/1466tests通过，生产构建通过；保留既有chunk/dynamic-import warnings |
 | 发布/Windows workflow结构 | Beta 6 identity 更新后通过；只修改version/WiX/notes入口及对应现有合同摘要，历史Beta4恢复链不变 |
 | 脚本单测 | Beta6更新后209/209通过 |
 | sidecar provisioner 单测 | 7/7 通过 |
@@ -32,7 +32,7 @@ macOS ARM64；Node 26.7.0、pnpm 10.33.4。默认 `/usr/bin/python3` 缺少 `tom
 | 真实Keychain/MCP | 2项通过：鉴权、Host/Origin、重启/撤销、端口冲突、禁用/退出清理；敏感token未进入日志 |
 | 新安装包GUI | macOS release app构建中，原生GUI待执行 |
 | 宣传视频 | 独立GPT-6交付60s/1080p/30fps/1800帧H.264+AAC，主代理ffprobe、封面/联系表及全片解码通过；当前为注明日期的历史实拍剪辑，不算新包GUI证据 |
-| 远端CI/Release | PR #249 已建立，CI 34041435244 执行中；Web/Motion及三平台安全文件系统已通过；尚未公开发布 |
+| 远端CI/Release | PR #249 已建立；两轮CI发现并定位的PCM问题均已修复、本地原测试转绿；真实模型资格34043674623双平台成功；最终候选远端CI待启动，尚未公开发布 |
 
 ## 缺口与证据边界
 
@@ -57,3 +57,18 @@ CI `34041435244` 的 Linux Rust 格式/clippy成功，workspace在实际 `facade
 - 首轮CI最终为7项成功、Linux Rust与Windows full-product两项失败，二者都在同一AAC facade测试触发相同超限，已有本地修复待新SHA复验。
 - Windows模型固定输入适配完成并独立审查通过：同产品分支的宿主真实双编码器+五条查询14秒/RSS1.89GiB，4项Windows分支单测与72项macOS模块实测通过；正式Windows/MSVC仍待qualification workflow。
 - 新增模型/PCM修复后的workspace clippy与minimal clippy通过。workspace最终重跑在4K Chromium捕获出现180秒超时，后续同组3项因共享锁poison未执行成功；已启动独立Chromium组诊断重跑，未放宽180秒门槛。
+
+## 2026-09-07 收尾进展
+
+- 精确候选 `64dce596d2d724f08339d469e1233601e927bace` 的 [真实模型平台资格](https://github.com/appergb/OpenTake/actions/runs/34043674623) 已成功：macOS与Windows各1项真正执行、0失败、0忽略，五条图文查询结果一致。相关日志和JSON保存本轮output目录。
+- 首包原生GUI贴纸导入/预览/落轨、文本创建并保存OpenTake Beta 6、视频+音频+图片+文本组合导出已走通。输出 `Beta6-GUI-export-720p.mp4` 为1056×720 H.264/30fps/450帧 + AAC48kHz单声道，15秒，1,095,344bytes，完整解码成功。分割实际发生在第299帧；AX slider setValue未触发播放头变化，不把它记为中点定位成功。
+- GUI导出耗时期间界面阻塞，sample92542明确主AppKit/WebKit IPC线程同步执行export_video→run_export_with_control→decode_frame。已改async+spawn_blocking，先claim lease和snapshot，再由worker拥有lease到真正结束；ExportControl共享Arc状态，保留更新安装互斥和取消generation。新增跨thread lease取消测试先RED借用非static，后export73项通过。当前首包尚未包含该修复，需新包验证进度和取消。
+- transcribe_media存在同样的sync-worker错误假设，已沿现有有界推理worker改async调度，活动lease由任务持有；4项既有转写测试通过。文档与最终评审继续同步。
+
+- 提前取消回归确实RED：旧路径返回取消但已有输出文件已被删除；common export preflight修复后74项export测试通过。无range PCM已恢复完整轨语义，追加最多一秒的有界padding；原full-track equality测试未修改，media facade与FFmpeg集成15项通过/1项原有ignored。此前统一裁剪方案不再是当前实现。
+
+## 最终整合本地验收（2026-09-07）
+
+Rust fmt、workspace clippy、minimal clippy均通过；80组workspace测试合计2899 passed/0 failed/10 ignored，全部命令exit0。Web153文件1466测试、TypeScript和生产构建通过。源码最后只读审查关闭，Motion/Poster两片无确定P1/P2。Release与Windows工作流合同通过，408篇Markdown本地链接检查无错误。新包仍须复验poster冷导入及后台导出进度/取消；旧首包的完成导出不能代替这两项。
+
+独立首包QA已通过原生Open选择器重新打开保存工程，15秒、V2文本+V1视频/图片+A1音频四片段全部保留。未将Home最近工程tile双击无变化记为重开成功，也未把AX range setter当成成功seek。

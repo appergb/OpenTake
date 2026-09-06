@@ -30,7 +30,7 @@
 
 The candidate source includes multiple media preview tabs, folder/flat/grouped media views, temporal compositor routing, transparent Motion publishing and ProRes 4444 export. The Text panel adds text clips; the Effect panel applies presets to one selected visual clip while preserving existing effects. Sticker now supports project image/Lottie assets, local import, selection/preview and placement on the timeline. [Sticker validation](docs/audit/2026-09-06/sticker-panel.md) records focused tests; native package GUI acceptance is pending. These are source-level capabilities; native GUI, provider and package validation is recorded separately.
 
-Semantic search model installation is implemented. Fixed-revision assets (about 1.5 GB) passed checksum validation, and the real macOS Rust path passed offline installation, image/text embedding and ranking checks. A model installation is required before use. Windows ort-tract execution with the real graphs and the new package UI still await validation; see the [semantic model audit](docs/audit/2026-09-06/semantic-search-model.md).
+Semantic search model installation is implemented. Fixed-revision assets (about 1.5 GB) passed checksum validation, and the real macOS Rust path passed offline installation, image/text embedding and ranking checks. A model installation is required before use. The real model qualification passed on both macOS and Windows; Windows uses fixed input facts with the locked Tract engine. New package UI acceptance is recorded separately; see the [semantic model audit](docs/audit/2026-09-06/semantic-search-model.md).
 
 ## Table of Contents
 

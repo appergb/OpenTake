@@ -2371,6 +2371,35 @@ export function FolderTile({
   );
 }
 
+/** A failed <img> does not recover when its cached file becomes readable later.
+ * Retry only the asset read, not decoding or timeline work. */
+function MediaCardThumbnail({ src, name, type }: { src: string; name: string; type: MediaItem["type"] }) {
+  const [attempt, setAttempt] = useState(0);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    if (!failed || attempt >= 2) return;
+    const timer = window.setTimeout(() => {
+      setAttempt((previous) => previous + 1);
+      setFailed(false);
+    }, attempt === 0 ? 250 : 1000);
+    return () => window.clearTimeout(timer);
+  }, [attempt, failed]);
+
+  if (failed) return <Icon icon={TYPE_ICON[type]} size={22} strokeWidth={1.5} />;
+  // The native protocol authorizes uri.path(), so a retry query does not change
+  // the file being granted. Changing the URL avoids WebKit retaining a failed load.
+  const retrySrc = attempt === 0 ? src : `${src}${src.includes("?") ? "&" : "?"}opentake-thumbnail-retry=${attempt}`;
+  return (
+    <img
+      src={retrySrc}
+      alt={name}
+      draggable={false}
+      onError={() => setFailed(true)}
+      style={{ width: "100%", height: "100%", objectFit: "cover" }}
+    />
+  );
+}
+
 export function MediaCard({
   item,
   rovingTabIndex = 0,
@@ -2653,11 +2682,11 @@ export function MediaCard({
         {/* `draggable={false}` on the inner media so the card's custom drag
             (MEDIA_DND_TYPE) wins instead of a native image drag. */}
         {thumb ? (
-          <img
+          <MediaCardThumbnail
+            key={`${projectEpoch}:${thumbnailKey}:${thumb}`}
             src={thumb}
-            alt={item.name}
-            draggable={false}
-            style={{ width: "100%", height: "100%", objectFit: "cover" }}
+            name={item.name}
+            type={item.type}
           />
         ) : item.type === "audio" ? (
           <AudioWaveform

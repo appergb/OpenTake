@@ -814,15 +814,86 @@ fn timed_poster_path_for(cache_root: &Path, key: &str, time_secs: f64) -> PathBu
     visual_cache_dir(cache_root).join(format!("{key}.thumb.{millis}.png"))
 }
 
+/// Complete PNGs are immutable at their content-keyed poster path. Invalid or
+/// non-regular targets are retained and reported, never silently replaced.
+fn cached_poster_dimensions(path: &Path) -> Result<Option<(u32, u32)>, String> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("poster cache metadata: {error}")),
+    };
+    if !metadata.is_file()
+        || metadata_is_symlink_or_reparse(&metadata)
+        || !crate::fs_availability::is_materialized_regular_file(path)
+    {
+        return Err(format!(
+            "invalid poster cache (resident regular PNG required): {}",
+            path.display()
+        ));
+    }
+    let (file, _) = crate::safe_asset_protocol::open_retained_regular_file(path)
+        .map_err(|error| format!("poster cache open: {error}"))?;
+    let image =
+        image::ImageReader::with_format(std::io::BufReader::new(file), image::ImageFormat::Png)
+            .decode()
+            .map_err(|error| format!("invalid poster cache PNG: {error}"))?;
+    Ok(Some((image.width(), image.height())))
+}
+
+/// Staging is separate from publication so a prewarm job can acquire its epoch
+/// lease only for publication. tempfile already provides an atomic no-replace
+/// rename on supported macOS/Linux filesystems and no-replace move on Windows.
+struct StagedPoster {
+    file: tempfile::NamedTempFile,
+    target: PathBuf,
+}
+
+impl StagedPoster {
+    fn new(target: &Path, bytes: &[u8]) -> Result<Self, String> {
+        use std::io::Write;
+        image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+            .map_err(|error| format!("invalid staged poster PNG: {error}"))?;
+        let parent = target
+            .parent()
+            .ok_or_else(|| "poster cache target has no parent".to_string())?;
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        let mut file = tempfile::Builder::new()
+            .prefix(".poster-")
+            .suffix(".tmp")
+            .tempfile_in(parent)
+            .map_err(|error| format!("poster cache staging: {error}"))?;
+        file.write_all(bytes)
+            .map_err(|error| format!("poster cache write: {error}"))?;
+        Ok(Self {
+            file,
+            target: target.to_path_buf(),
+        })
+    }
+
+    fn publish(self) -> Result<(), String> {
+        // Reuse a winner without even touching its metadata via a rename/link.
+        if cached_poster_dimensions(&self.target)?.is_some() {
+            return Ok(());
+        }
+        match self.file.persist_noclobber(&self.target) {
+            Ok(_) => Ok(()),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if cached_poster_dimensions(&self.target)?.is_some() {
+                    Ok(())
+                } else {
+                    Err("poster cache publication winner disappeared".to_string())
+                }
+            }
+            Err(error) => Err(format!("poster cache publication: {}", error.error)),
+        }
+    }
+}
+
 fn write_png(path: &Path, frame: &RgbaFrame) -> Result<(), String> {
-    if path.exists() {
+    if cached_poster_dimensions(path)?.is_some() {
         return Ok(());
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let bytes = encode_png(frame)?;
-    std::fs::write(path, bytes).map_err(|e| e.to_string())
+    StagedPoster::new(path, &encode_png(frame)?)?.publish()
 }
 
 fn encode_png(frame: &RgbaFrame) -> Result<Vec<u8>, String> {
@@ -848,9 +919,10 @@ fn cached_thumbnail_path_for_entry(
     }
     let key = cache_key_for(path).ok()?;
     let poster_path = poster_path_for(cache_root, &key);
-    poster_path
-        .is_file()
-        .then(|| poster_path.to_string_lossy().into_owned())
+    cached_poster_dimensions(&poster_path)
+        .ok()
+        .flatten()
+        .map(|_| poster_path.to_string_lossy().into_owned())
 }
 
 fn poster_target_time(time_secs: Option<f64>) -> f64 {
@@ -863,14 +935,11 @@ fn read_cached_poster(
     poster_path: &Path,
     target: f64,
 ) -> Option<Result<(PathBuf, u32, u32, f64), String>> {
-    if !poster_path.exists() {
-        return None;
+    match cached_poster_dimensions(poster_path) {
+        Ok(Some((width, height))) => Some(Ok((poster_path.to_path_buf(), width, height, target))),
+        Ok(None) => None,
+        Err(error) => Some(Err(error)),
     }
-    Some(
-        image::image_dimensions(poster_path)
-            .map(|(width, height)| (poster_path.to_path_buf(), width, height, target))
-            .map_err(|error| format!("thumbnail dimensions: {error}")),
-    )
 }
 
 /// Decode (or read from cache) a single poster frame for `path` at `target`,
@@ -1090,7 +1159,7 @@ fn generate_thumbnail_for_entry(
         }
         ClipType::Image => {
             let poster_path = poster_path_for(engine.cache_root(), &key);
-            if !poster_path.exists() {
+            if cached_poster_dimensions(&poster_path)?.is_none() {
                 let frame = engine.image_thumbnail(path).map_err(|e| e.to_string())?;
                 write_png(&poster_path, &frame)?;
             }
@@ -1182,12 +1251,11 @@ fn cached_thumbnail_for_entry(
         }
         ClipType::Image => {
             let poster_path = poster_path_for(engine.cache_root(), &key);
-            if !poster_path.exists() {
-                return None;
-            }
-            let (tile_width, tile_height) = image::image_dimensions(&poster_path)
-                .map(|(width, height)| (Some(width), Some(height)))
-                .unwrap_or((None, None));
+            let (tile_width, tile_height) = match cached_poster_dimensions(&poster_path) {
+                Ok(Some((width, height))) => (Some(width), Some(height)),
+                Ok(None) => return None,
+                Err(error) => return Some(Err(error)),
+            };
             Some(Ok(ThumbnailDto {
                 media_ref: entry.id.clone(),
                 kind: entry.kind,
@@ -1554,7 +1622,7 @@ pub(crate) struct SavedMediaFinalizationContext<'a> {
 pub(crate) fn finalize_saved_media(
     context: SavedMediaFinalizationContext<'_>,
     output: crate::export::ProjectMediaOutput,
-    guard: &mut crate::export::ExportGuard<'_>,
+    guard: &mut crate::export::ExportGuard,
 ) -> Result<MediaListDto, String> {
     finalize_saved_media_with_hooks(context, output, guard, (|| {}, || {}, || {}, || {}))
 }
@@ -1562,7 +1630,7 @@ pub(crate) fn finalize_saved_media(
 fn finalize_saved_media_with_hooks(
     context: SavedMediaFinalizationContext<'_>,
     output: crate::export::ProjectMediaOutput,
-    guard: &mut crate::export::ExportGuard<'_>,
+    guard: &mut crate::export::ExportGuard,
     hooks: (impl FnOnce(), impl FnOnce(), impl FnOnce(), impl FnOnce()),
 ) -> Result<MediaListDto, String> {
     let SavedMediaFinalizationContext {
@@ -6993,6 +7061,101 @@ mod tests {
     }
 
     #[test]
+    fn poster_publication_hides_staging_until_complete_publish() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.png");
+        touch(&source);
+        let cache = dir.path().join("cache");
+        let target = poster_path_for(&cache, &cache_key_for(&source).unwrap());
+        let entry: MediaManifestEntry = serde_json::from_value(serde_json::json!({
+            "id": "source", "name": "source", "type": "image", "duration": 1.0,
+            "source": { "external": { "absolutePath": source } }
+        }))
+        .unwrap();
+        let for_thread = target.clone();
+        let (staged_tx, staged_rx) = std::sync::mpsc::channel();
+        let (publish_tx, publish_rx) = std::sync::mpsc::channel();
+        let producer = std::thread::spawn(move || {
+            let bytes = encode_png(&RgbaFrame::black(2, 2)).unwrap();
+            let staged = StagedPoster::new(&for_thread, &bytes).unwrap();
+            staged_tx.send(()).unwrap();
+            publish_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            staged.publish().unwrap();
+        });
+        staged_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(!target.exists());
+        assert!(read_cached_poster(&target, 0.0).is_none());
+        assert!(MediaItemDto::from_entry(&entry, None, Some(&cache), false)
+            .thumbnail
+            .is_none());
+        publish_tx.send(()).unwrap();
+        producer.join().unwrap();
+        assert_eq!(cached_poster_dimensions(&target).unwrap(), Some((2, 2)));
+        assert_eq!(
+            MediaItemDto::from_entry(&entry, None, Some(&cache), false).thumbnail,
+            Some(target.to_string_lossy().into_owned())
+        );
+        assert_eq!(fs::read_dir(target.parent().unwrap()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn poster_publication_reuses_a_winner_that_arrives_after_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("winner.thumb.png");
+        let staged =
+            StagedPoster::new(&target, &encode_png(&RgbaFrame::black(4, 4)).unwrap()).unwrap();
+        write_png(&target, &RgbaFrame::black(2, 2)).unwrap();
+        let before = FileIdentity::from_path(&target).unwrap();
+        let before_bytes = fs::read(&target).unwrap();
+        staged.publish().unwrap();
+        assert_eq!(FileIdentity::from_path(&target).unwrap(), before);
+        assert_eq!(fs::read(&target).unwrap(), before_bytes);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn poster_publication_rejects_partial_png_and_cleans_unused_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("partial.thumb.png");
+        let png = encode_png(&RgbaFrame::black(2, 2)).unwrap();
+        assert!(StagedPoster::new(&target, &png[..33]).is_err());
+        assert!(!target.exists());
+        let staged = StagedPoster::new(&target, &png).unwrap();
+        fs::write(&target, &png[..33]).unwrap();
+        assert!(staged.publish().is_err());
+        assert_eq!(fs::read(&target).unwrap(), png[..33]);
+        assert!(read_cached_poster(&target, 0.0).unwrap().is_err());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn poster_publication_refuses_symlink_without_modifying_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("other.png");
+        write_png(&other, &RgbaFrame::black(2, 2)).unwrap();
+        let before = fs::read(&other).unwrap();
+        let target = dir.path().join("symlink.thumb.png");
+        std::os::unix::fs::symlink(&other, &target).unwrap();
+        assert!(write_png(&target, &RgbaFrame::black(4, 4)).is_err());
+        assert!(read_cached_poster(&target, 0.0).unwrap().is_err());
+        assert!(fs::symlink_metadata(&target)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&other).unwrap(), before);
+    }
+
+    #[test]
+    fn poster_publication_refuses_invalid_existing_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("invalid.thumb.png");
+        fs::write(&target, b"not a PNG").unwrap();
+        assert!(write_png(&target, &RgbaFrame::black(2, 2)).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"not a PNG");
+    }
+
+    #[test]
     fn media_item_uses_existing_cached_thumbnail_without_decoding() {
         let tmp = tempfile::tempdir().unwrap();
         let source = tmp.path().join("clip.mp4");
@@ -7001,7 +7164,7 @@ mod tests {
         let key = cache_key_for(&source).unwrap();
         let poster = poster_path_for(&cache_root, &key);
         fs::create_dir_all(poster.parent().unwrap()).unwrap();
-        fs::write(&poster, b"cached").unwrap();
+        write_png(&poster, &RgbaFrame::black(2, 2)).unwrap();
         let entry = MediaManifestEntry {
             id: "a".into(),
             name: "clip".into(),
@@ -7027,6 +7190,9 @@ mod tests {
         assert!(!dto.missing);
         let poster_string = poster.to_string_lossy().into_owned();
         assert_eq!(dto.thumbnail.as_deref(), Some(poster_string.as_str()));
+        fs::write(&poster, b"partial PNG").unwrap();
+        let invalid = MediaItemDto::from_entry(&entry, None, Some(&cache_root), false);
+        assert!(invalid.thumbnail.is_none());
     }
 
     #[test]

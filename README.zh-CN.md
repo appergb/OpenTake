@@ -16,7 +16,7 @@
 
 候选源码已包含多素材预览 tab、文件夹/平铺/分组媒体视图、temporal compositor 路由、透明 Motion 发布和 ProRes 4444 导出。文本面板可以添加文字片段；特效面板为单个选中视觉片段追加预设并保留既有特效。Sticker 已支持项目图片/Lottie 素材、本地导入、选择/预览、拖拽与落轨；[专项测试记录](docs/audit/2026-09-06/sticker-panel.md)已完成，新包原生 GUI 验收待执行。这些是源码接线状态，原生 GUI、provider 与安装包验证另按证据记录。
 
-语义搜索模型安装已实现，约 1.5 GB 的固定 revision 资产已通过校验，macOS 真实 Rust 链路已验证离线安装、图文 embedding 与排名。使用前需安装模型；Windows ort-tract 真实图执行及新包 UI 仍待验收，详见[语义模型专项审计](docs/audit/2026-09-06/semantic-search-model.md)。
+语义搜索模型安装已实现，约 1.5 GB 的固定 revision 资产已通过校验，macOS 真实 Rust 链路已验证离线安装、图文 embedding 与排名。使用前需安装模型；macOS 与 Windows 已通过真实模型平台资格，Windows 使用固定输入的锁定 Tract 引擎；新包 UI 按总记录另行验收，详见[语义模型专项审计](docs/audit/2026-09-06/semantic-search-model.md)。
 
 - [项目介绍](#-项目介绍)
 - [为什么选 OpenTake](#-为什么选-opentake)
@@ -104,7 +104,7 @@ OpenTake 提供兼容 Agent 工具，并按当前媒体、生成能力和 provid
 | 帧合成 | wgpu 自写合成器 — 多轨叠加 + 逐帧属性采样 + 仿射/裁剪/混合 |
 | 音频播放 | cpal |
 | 语音转写 | whisper-rs (word/segment 时间戳) |
-| 语义搜索 | SigLIP2；固定 revision 模型安装与 macOS 真实 Rust 推理已验证 |
+| 语义搜索 | SigLIP2；固定 revision 模型安装与 macOS/Windows 真实推理已验证 |
 
 ### 🌐 BYOK 生成式 AI
 

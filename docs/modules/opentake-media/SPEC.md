@@ -28,7 +28,7 @@
 5. **不可变 / 纯函数优先**:排名(`VisualSearch`)、波形降采样、采样判定、转写过滤等都是无副作用纯函数,可全单测;有状态的只有索引调度器(§7.7)与模型加载器(§5.6)。
 6. **后端推理可插拔**:`Embedder` / `Transcriber` / `OrtWorker` 定义为 trait,默认实现走 ort 或 candle;测试注入 mock(协议化 DI)。
 7. **导出期让路**:任何后台任务(索引/缩略图/波形)在导出活跃时暂停。证据:上游 `ExportService.isExporting.didSet → SearchIndexCoordinator.exportDidBegin/End`(`MODULE-PORT-MAP` L457)、`SearchIndexCoordinator.waitWhileExportActive`(`SearchIndexCoordinator.swift:49`)。
-8. **L2 归一化对齐风险**:上游裸点积 `cblas_sgemv` 是否等价余弦,取决于导出模型是否在图内 L2 归一化(`MODULE-PORT-MAP` L860)。本 crate **必须复用上游同一份权重转 ONNX**,并在 `Embedder::encode` 后做一次**条件 L2 归一化开关**(`Spec.normalized: bool`),默认 false 以匹配上游(模型内已归一化)——除非验证证明需要外部归一化。
+8. **L2 归一化契约**：以真实固定模型输出为准。当前 ONNX Community 图输出未归一化，`Spec.normalized=false`，应用执行 L2 归一化后再按余弦阈值排名；已通过 macOS/Windows 真实模型验证。旧“false 表示模型已归一化”的假设已废止。更换模型/I/O 必须重测并升级缓存版本，见 [语义搜索规范](semantic-search.md)。
 
 ---
 

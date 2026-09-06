@@ -174,9 +174,9 @@ pub const CANCELLED_SENTINEL: &str = "export cancelled";
 /// Claiming a lease and publishing its fresh token happen under one mutex, so a
 /// concurrent cancel can only target the previous operation or the new one; it
 /// can never be erased by a later reset.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ExportControl {
-    operation: Mutex<ExportOperationState>,
+    operation: Arc<Mutex<ExportOperationState>>,
 }
 
 #[derive(Default)]
@@ -191,14 +191,14 @@ struct ActiveExport {
     cancel: MediaCancelToken,
 }
 
-pub(crate) struct ExportGuard<'a> {
-    control: &'a ExportControl,
+pub(crate) struct ExportGuard {
+    control: ExportControl,
     generation: u64,
     operation_id: String,
     cancel: MediaCancelToken,
 }
 
-impl std::fmt::Debug for ExportGuard<'_> {
+impl std::fmt::Debug for ExportGuard {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ExportGuard")
@@ -208,7 +208,7 @@ impl std::fmt::Debug for ExportGuard<'_> {
     }
 }
 
-impl Drop for ExportGuard<'_> {
+impl Drop for ExportGuard {
     fn drop(&mut self) {
         let mut state = self
             .control
@@ -284,7 +284,7 @@ impl ExportControl {
         Ok(())
     }
 
-    pub(crate) fn try_begin(&self, operation_id: &str) -> Result<ExportGuard<'_>, String> {
+    pub(crate) fn try_begin(&self, operation_id: &str) -> Result<ExportGuard, String> {
         self.try_begin_with_hook(operation_id, || {})
     }
 
@@ -292,7 +292,7 @@ impl ExportControl {
         &self,
         operation_id: &str,
         after_publish: impl FnOnce(),
-    ) -> Result<ExportGuard<'_>, String> {
+    ) -> Result<ExportGuard, String> {
         validate_export_operation_id(operation_id)?;
         let mut state = self
             .operation
@@ -312,7 +312,7 @@ impl ExportControl {
         after_publish();
         drop(state);
         Ok(ExportGuard {
-            control: self,
+            control: self.clone(),
             generation,
             operation_id: operation_id.to_string(),
             cancel,
@@ -320,7 +320,7 @@ impl ExportControl {
     }
 }
 
-impl ExportGuard<'_> {
+impl ExportGuard {
     /// Observe cancellation for this exact export generation.
     pub(crate) fn checkpoint(&self) -> Result<(), String> {
         if self.cancel.checkpoint() {
@@ -1392,16 +1392,16 @@ pub(crate) fn write_timeline_audio_wav_for_manifest_with_control(
 /// to opaque black, which is the correct clear color, not an error.
 ///
 /// Emits throttled `"export://progress"` events via `app` and polls `control`
-/// for a mid-encode cancel every frame (see the module doc). This is a sync
-/// (non-`async`) command, so Tauri runs it on a worker thread — `cancel_export`
-/// (and the WebView's event loop delivering `"export://progress"`) keep running
-/// concurrently while this call is in flight.
+/// for a mid-encode cancel every frame (see the module doc). The async command
+/// claims its lease and snapshots the project before handing the blocking work
+/// to `spawn_blocking`, leaving the UI and `cancel_export` responsive. The
+/// worker owns the lease until it actually finishes, even if its caller drops.
 ///
 /// GPU acquisition / decode / encode failures surface to the front-end as
 /// `Err(String)` (the Tauri boundary contract); a mid-export cancel surfaces as
 /// `Err(`[`CANCELLED_SENTINEL`]`)`.
 #[tauri::command]
-pub fn export_video(
+pub async fn export_video(
     app: AppHandle,
     core: State<'_, AppCore>,
     control: State<'_, ExportControl>,
@@ -1409,6 +1409,7 @@ pub fn export_video(
     operation_id: String,
 ) -> Result<ExportSummary, String> {
     let guard = control.try_begin(&operation_id)?;
+    let owned_control = control.inner().clone();
     // Snapshot the session up front; no session lock is held during GPU/encode.
     let snapshot = core.runtime_snapshot();
     let timeline = snapshot.timeline;
@@ -1425,17 +1426,22 @@ pub fn export_video(
             },
         );
     });
-    run_export_with_control(
-        &timeline,
-        &manifest,
-        &project_dir,
-        &req,
-        ExportRunOptions {
-            control: Some(&control),
-            on_progress: Some(on_progress),
-            ..ExportRunOptions::default()
-        },
-    )
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = guard;
+        run_export_with_control(
+            &timeline,
+            &manifest,
+            &project_dir,
+            &req,
+            ExportRunOptions {
+                control: Some(&owned_control),
+                on_progress: Some(on_progress),
+                ..ExportRunOptions::default()
+            },
+        )
+    })
+    .await
+    .map_err(|error| format!("export worker failed: {error}"))?
 }
 
 /// The export orchestration, decoupled from Tauri/`AppCore` so it can be driven
@@ -1623,6 +1629,9 @@ pub(crate) fn run_export_with_control(
     let control = options.control;
     let external_cancel = options.external_cancel.clone();
     validate_export_cancel_sources(control, external_cancel.as_ref())?;
+    // A queued cancellation must win before GPU setup or opening/truncating
+    // an existing output. Later frame/audio checks still cover running work.
+    check_audio_cancel_with_external(control, external_cancel.as_ref())?;
     let on_progress = options.on_progress;
     let defer_completion = options.defer_completion;
     let reserved_output = options.output_file.is_some();
@@ -2457,7 +2466,7 @@ impl ProjectMediaOutput {
 
     pub(crate) fn prepare_commit_cancellable(
         &self,
-        guard: &ExportGuard<'_>,
+        guard: &ExportGuard,
         after_sync: impl FnOnce(),
     ) -> Result<(), String> {
         guard.checkpoint()?;
@@ -2955,6 +2964,52 @@ fn clip_source_window_secs(clip: &Clip, timeline_fps: i32) -> Option<(f64, f64)>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_export_lease_preserves_cancellation_across_worker_handoff() {
+        let control = ExportControl::default();
+        let guard = control.try_begin("worker-handoff").unwrap();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (finish_tx, finish_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            finish_rx.recv().unwrap();
+            guard.checkpoint()
+        });
+        ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(control.try_begin("overlapping-export").is_err());
+        assert!(control.request_cancel("worker-handoff"));
+        finish_tx.send(()).unwrap();
+        assert_eq!(worker.join().unwrap(), Err(CANCELLED_SENTINEL.to_string()));
+        assert!(!control.request_cancel("worker-handoff"));
+        assert!(control.try_begin("next-export").is_ok());
+    }
+
+    #[test]
+    fn pre_cancelled_export_leaves_existing_output_untouched() {
+        let temp = tempfile::tempdir().unwrap();
+        let output = temp.path().join("existing.mp4");
+        fs::write(&output, b"keep existing output").unwrap();
+        let control = ExportControl::default();
+        let _guard = control.try_begin("cancel-before-worker").unwrap();
+        assert!(control.request_cancel("cancel-before-worker"));
+        let result = run_export_with_control(
+            &opentake_domain::Timeline::new(),
+            &opentake_domain::MediaManifest::default(),
+            &None,
+            &ExportRequest {
+                out_path: output.to_string_lossy().into_owned(),
+                codec: ExportCodec::H264,
+                quality: ExportQuality::P720,
+            },
+            ExportRunOptions {
+                control: Some(&control),
+                ..Default::default()
+            },
+        );
+        assert_eq!(result.unwrap_err(), CANCELLED_SENTINEL);
+        assert_eq!(fs::read(&output).unwrap(), b"keep existing output");
+    }
     use std::fs;
     use std::path::Path;
 

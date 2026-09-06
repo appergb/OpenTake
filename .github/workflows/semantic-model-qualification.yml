@@ -3,12 +3,6 @@ name: Semantic model qualification
 on:
   push:
     branches: ['release/**']
-    paths:
-      - '.github/workflows/semantic-model-qualification.yml'
-      - 'crates/opentake-media/src/search/**'
-      - 'crates/opentake-media/Cargo.toml'
-      - 'crates/opentake-media/examples/search_manifest.rs'
-      - 'scripts/prepare_search_model_fixtures.py'
   workflow_dispatch:
     inputs:
       commit_sha:

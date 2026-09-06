@@ -21,3 +21,7 @@
 `aae0ae6..33ee8e2` 中的候选新增包括 ProRes 4444、失败清理、取消传播和输出身份检查。[本次同步报告](../../documentation-sync-2026-09-06.md)记录源码依据，[当前验证](../../audit/2026-09-06/public-beta-validation.md)记录实际运行结果。早期 H.264-only、无进度/取消的描述已被当前实现替代。
 
 关联：[媒体编码](../opentake-media/encode.md) · [RenderPlan](../opentake-render/render-plan.md) · [单帧渲染](render.md)。
+
+## 2026-09-07 调度修复
+
+`export_video` 通过async命令调用专用blocking task。调用时先获取单导出lease和项目snapshot，worker持有共享ExportControl及owned ExportGuard，直到真正结束；取消、进度事件和WebView主循环可以并行响应。GUI首包已暴露原同步命令占住主线程的问题，本次调度改动的原生进度/取消验收见[当前验证记录](../../audit/2026-09-06/public-beta-validation.md)。

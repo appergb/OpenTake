@@ -35,7 +35,7 @@ updated: 2026-09-06
 - [x] M1：核对工作树、变更、实际公开版本、能力清单；委派视频制作。
 - [x] M2：本地 baseline：Rust fmt/clippy/workspace test、Web test/build、脚本合同/许可证与依赖审计；按失败点最小修复。
 - [ ] M3：从能力清单逐项完成核心闭环及安装包 GUI 验收，补齐未完成能力，更新可复现证据；未验证项保留明确状态。
-- [ ] M4：统一入口和开发规范、当前发布说明、README 多语言、模块状态、历史元数据、链接/版本一致性；保留历史事实。
+- [x] M4：统一入口和开发规范、当前发布说明、README 多语言、模块状态、历史元数据、链接/版本一致性；保留历史事实。
 - [ ] M5：候选版本清单、最终 diff 审查、独立必要复核、本地最终构建；完成 PR/远端 exact-SHA CI。
 - [ ] M6：合并已验证候选至 main，创建新的不可变 tag，等待完整 release pipeline；回读发布资产与校验结果。
 - [x] M7：视频 MP4、封面、可复现源工程、素材来源与视觉/解码验收；发布文档链接到实际交付。
@@ -66,3 +66,8 @@ updated: 2026-09-06
 
 - GitHub 候选已建立：`3c68cf7` 为本轮完整快照，`4e08454` 排除本地演示锁文件，已推送 `release/v1.0.0-beta.6` 并创建 [PR #249](https://github.com/appergb/OpenTake/pull/249)。随后合入 main 的纯合并提交以满足 strict 分支新鲜度（无产品内容差异），待下一修复统一推送。未创建 Beta 6 tag 或公开 Release。
 - 独立审查确认 Sticker pending、模型修复入口/真实下载大小、视觉错误结果分组及250ms有界排队的问题关闭，无新增确定缺陷。新增独立 SigLIP2 平台资格 workflow：读取生产清单、下载校验真实资产，在 macOS/Windows 绑定exact SHA执行真实图文模型测试，不改既有CI或17项发布资产合同。
+
+- 2026-09-07：真实模型平台资格run34043674623在macOS/Windows对64dce59各1个真实用例通过。第二轮CI34043676627原AAC facade已过，但无range完整轨用例反对隐式裁剪，按保留完整解码+有界padding预算修正，指定range仍裁剪。原生GUI完成15秒H264/AAC组合导出，另实证同步export命令占主线程；export改async+blocking worker和owned lease，transcribe同原因改有界worker，独立审查的提前取消边界另加preflight防止已有文件被截断删除。
+- 追加原生收尾分工：Carver负责macOS 4K Motion连续两次180s超时（只写motion renderer/tests及专项记录，禁止放宽超时/跳过guard）；Banach定位到同key小poster同步/预热双生产者发布竞态，负责media.rs poster段和prewarm.rs原子不覆盖发布+屏障测试，保留主线media.rs的两处ExportGuard类型配套。主代理保留export/transcribe/search调度、全量集成、GUI和发布；Bacon只读评审。
+
+- 最终整合本地Gate全部成功：Rust80组2899/0/10、Web153files/1466、fmt/workspace+minimal clippy、生产build、两套workflow合同、408MD链接检查。最后只读审查关闭。准备提交冻结候选，启动最终远端CI并重打包验证poster冷导入和导出期间响应/取消。
