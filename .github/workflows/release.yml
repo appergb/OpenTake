@@ -1023,11 +1023,76 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  linux_x64:
+    name: Linux x64 DEB and RPM
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      TARGET_SHA: ${{ needs.validate.outputs.source_sha }}
+      RELEASE_TAG: ${{ needs.validate.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+      CI: true
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.validate.outputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Assert exact checked-out SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD | tr '[:upper:]' '[:lower:]')"
+          expected="$(printf '%s' "$TARGET_SHA" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Install Linux bundle dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev libasound2-dev \
+            libglib2.0-dev libsoup-3.0-dev patchelf pkg-config rpm
+
+      - name: Install Rust and Tauri CLI
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - name: Install frontend dependencies
+        run: pnpm -C web install --frozen-lockfile
+
+      - name: Build DEB and RPM packages
+        run: |
+          pnpm -C web build
+          cargo tauri build --bundles deb,rpm --target x86_64-unknown-linux-gnu
+
+      - name: Verify Linux packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle_root="target/x86_64-unknown-linux-gnu/release/bundle"
+          test "$(find "$bundle_root/deb" -maxdepth 1 -type f -name '*.deb' | wc -l | tr -d ' ')" -eq 1
+          test "$(find "$bundle_root/rpm" -maxdepth 1 -type f -name '*.rpm' | wc -l | tr -d ' ')" -eq 1
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Upload Linux packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: opentake-linux-x64-${{ needs.validate.outputs.source_sha }}
+          path: |
+            target/x86_64-unknown-linux-gnu/release/bundle/deb/*.deb
+            target/x86_64-unknown-linux-gnu/release/bundle/rpm/*.rpm
+          if-no-files-found: error
+          retention-days: 30
+
   publish:
     name: Publish verified GitHub prerelease
     permissions:
       contents: write
-    needs: [validate, quality, macos_arm64, windows_x64]
+    needs: [validate, quality, macos_arm64, windows_x64, linux_x64]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -1100,6 +1165,12 @@ jobs:
           name: opentake-windows-x64-${{ needs.validate.outputs.source_sha }}
           path: ${{ runner.temp }}/opentake-release-${{ github.run_id }}-${{ github.run_attempt }}/input/windows
 
+      - name: Download Linux artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: opentake-linux-x64-${{ needs.validate.outputs.source_sha }}
+          path: ${{ runner.temp }}/opentake-release-${{ github.run_id }}-${{ github.run_attempt }}/input/linux
+
       - name: Stage and verify the exact release payload
         shell: bash
         run: |
@@ -1122,6 +1193,8 @@ jobs:
           mapfile -d '' nsis_attestation_signatures < <(find "$PUBLISH_ROOT/input/windows" -type f -name '*.exe.attestation.json.sig' -print0)
           mapfile -d '' mac_receipts < <(find "$PUBLISH_ROOT/input/macos" -type f -name 'macos-arm64-receipt.json' -print0)
           mapfile -d '' windows_receipts < <(find "$PUBLISH_ROOT/input/windows" -type f -name 'windows-x64-receipt.json' -print0)
+          mapfile -d '' linux_debs < <(find "$PUBLISH_ROOT/input/linux" -type f -name '*.deb' -print0)
+          mapfile -d '' linux_rpms < <(find "$PUBLISH_ROOT/input/linux" -type f -name '*.rpm' -print0)
           test "${#dmgs[@]}" -eq 1
           test "${#mac_updaters[@]}" -eq 1
           test "${#mac_signatures[@]}" -eq 1
@@ -1136,6 +1209,8 @@ jobs:
           test "${#nsis_attestation_signatures[@]}" -eq 1
           test "${#mac_receipts[@]}" -eq 1
           test "${#windows_receipts[@]}" -eq 1
+          test "${#linux_debs[@]}" -eq 1
+          test "${#linux_rpms[@]}" -eq 1
           mkdir -p "$PUBLISH_ROOT/assets"
           cp "${dmgs[0]}" "${mac_updaters[0]}" "${mac_signatures[0]}" "$PUBLISH_ROOT/assets/"
           cp "${mac_attestations[0]}" "${mac_attestation_signatures[0]}" "$PUBLISH_ROOT/assets/"
@@ -1144,6 +1219,7 @@ jobs:
           cp "${nsis_attestations[0]}" "${nsis_attestation_signatures[0]}" "$PUBLISH_ROOT/assets/"
           cp "${mac_receipts[0]}" "$PUBLISH_ROOT/assets/macos-arm64-receipt.json"
           cp "${windows_receipts[0]}" "$PUBLISH_ROOT/assets/windows-x64-receipt.json"
+          cp "${linux_debs[0]}" "${linux_rpms[0]}" "$PUBLISH_ROOT/assets/"
 
           python3 - <<'PY'
           import hashlib
@@ -1191,6 +1267,8 @@ jobs:
               path for path in files
               if path.name.endswith(".exe.attestation.json.sig")
           ]
+          linux_debs = [path for path in files if path.name.endswith(".deb")]
+          linux_rpms = [path for path in files if path.name.endswith(".rpm")]
           receipts = [path for path in files if path.name.endswith("-receipt.json")]
           counts = tuple(
               len(group)
@@ -1207,10 +1285,12 @@ jobs:
                   msi_attestation_signatures,
                   nsis_attestations,
                   nsis_attestation_signatures,
+                  linux_debs,
+                  linux_rpms,
                   receipts,
               )
           )
-          if counts != (1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 2) or len(files) != 15:
+          if counts != (1, 1, 1, 1, 1, 1, 1, 2, 1, 1, 1, 1, 1, 1, 2) or len(files) != 17:
               raise SystemExit(f"unexpected staged release payload counts: {counts}")
           if mac_signatures[0] != Path(f"{mac_updaters[0]}.sig"):
               raise SystemExit("macOS updater signature is not the archive companion")
@@ -1548,12 +1628,12 @@ jobs:
           cd "$PUBLISH_ROOT/assets"
           mapfile -t asset_names < <(find . -maxdepth 1 -type f -printf '%f\n' | LC_ALL=C sort)
           payload_names=("${asset_names[@]}")
-          test "${#payload_names[@]}" -eq 16
+          test "${#payload_names[@]}" -eq 18
           sha256sum "${payload_names[@]}" > SHA256SUMS
-          test "$(wc -l < SHA256SUMS | tr -d ' ')" -eq 16
+          test "$(wc -l < SHA256SUMS | tr -d ' ')" -eq 18
           sha256sum --check SHA256SUMS
           printf '%s\n' "${payload_names[@]}" SHA256SUMS | LC_ALL=C sort > "$PUBLISH_ROOT/expected-assets.txt"
-          test "$(wc -l < "$PUBLISH_ROOT/expected-assets.txt" | tr -d ' ')" -eq 17
+          test "$(wc -l < "$PUBLISH_ROOT/expected-assets.txt" | tr -d ' ')" -eq 19
 
       - name: Prepare release notes with provenance
         shell: bash
