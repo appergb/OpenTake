@@ -134,9 +134,16 @@ struct PendingAudio {
 impl VideoEncoder {
     /// Start an encoder writing to `out`. `w`/`h` must already be even.
     pub fn new(out: &Path, w: u32, h: u32, fps: i32, preset: &ExportPreset) -> Result<Self> {
-        reject_link_output(out)?;
-        let output = open_output_nofollow(out)?;
+        let output = Self::open_output_file(out)?;
         Self::new_with_file(out, output, w, h, fps, preset)
+    }
+
+    /// Open and truncate a regular, non-link output file without following a
+    /// symlink. Callers that need an identity-safe cleanup guard can retain
+    /// this handle and pass a clone into `new_with_file`.
+    pub fn open_output_file(out: &Path) -> Result<File> {
+        reject_link_output(out)?;
+        open_output_nofollow(out)
     }
 
     pub fn new_with_file(

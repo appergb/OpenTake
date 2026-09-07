@@ -1,5 +1,9 @@
 # Stem separation execution boundaries
 
+> 状态：draft · 阶段：partial-implementation · 路由同步：2026-09-06。本文包含设计目标与已有实现；须按源码和日期化证据逐项判断。
+> 当前执行与验收：[公开 Beta 计划](../plans/active/2026-09-06-public-beta.md) · [当日验证](../audit/2026-09-06/public-beta-validation.md)。
+
+
 OpenTake currently exposes two explicit execution choices. Only the local path is executable in this release; the hosted path is intentionally fail-closed.
 
 ## Local execution

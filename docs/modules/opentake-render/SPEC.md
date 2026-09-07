@@ -1,5 +1,8 @@
 # opentake-render 实现就绪规格(Issue #7:wgpu 帧合成器 + RenderPlan)
 
+> 状态：draft · 阶段：partial-implementation · 设计与早期实现来源保留；原文日期、行号和“待做”属于设计时点。2026-09-06 当前实现见本模块 [OVERVIEW.md](OVERVIEW.md)，当前验收见[公开 Beta 记录](../../audit/2026-09-06/public-beta-validation.md)。
+
+
 > 状态:实现就绪(implementation-ready)。本文是 `crates/opentake-render/` 的逐项施工图。
 > 范围:① 纯函数 `Timeline → RenderPlan`(Rust 数据结构 + 算法,逐条对应上游公式);② wgpu render graph;③ 预览/导出共享 RenderPlan;④ 图片/文字/Lottie 物化为纹理;⑤ 与 `opentake-domain` / `opentake-media` 的接口契约;⑥ PoC 验收(与上游 `inspect_timeline` 像素 diff)+ 分步实施清单。
 > 定位:这是**全项目命门**(ARCHITECTURE.md §1、ROADMAP Phase 3)。上游所有像素级合成都委托给 AVFoundation 黑盒(`AVVideoComposition` + layer instructions + ramps),无 Metal/CoreImage/手写 shader;OpenTake 必须自建 wgpu 合成器把这块从零补回。
@@ -19,7 +22,7 @@
 | 文字渲染(预览+导出) | `…/Preview/TextLayerController.swift`(224 行) | `applyStyle` L152、`isGeometryFlipped` L13、`applyOpacityAnimation` discrete L191、`buildForExport` L75、`visibleTextClips` L122、`referenceCanvasHeight=1080` L150 |
 | 文字样式/测量 | `…/Models/TextStyle.swift`、`…/Models/TextLayout.swift` | `attributes` L138、`naturalSize` L9、shadowPadding=12 L6 |
 | 领域模型(已 1:1 移植到 Rust) | `…/Models/Timeline.swift`、`…/Models/Keyframe.swift`、`…/Models/ClipType.swift` | `Transform` L364、`Crop` L501、`affineTransform` 输入语义见下 |
-| 架构/路线 | `/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake/docs/ARCHITECTURE.md` §1/§6 | `…/docs/_analysis/02-苹果框架可移植性.md`、`…/docs/ROADMAP.md` Phase 3 L25-34 |
+| 架构/路线 | `/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake/docs/architecture/ARCHITECTURE.md` §1/§6 | `…/docs/_analysis/02-苹果框架可移植性.md`、`…/docs/architecture/ROADMAP.md` Phase 3 L25-34 |
 
 **已就位的 Rust 依赖(本 crate 不得重写,只能调用):** `crates/opentake-domain/` 已逐行移植并单测覆盖:
 - `Clip::transform_at / size_at / top_left_at / rotation_at`(`clip.rs` L214-246)
@@ -83,7 +86,7 @@ return placed ∘ translate(-cx,-cy) ∘ rotate(rotation*π/180) ∘ translate(c
 
 ### 1.5 多轨混合(对应 instruction.layerInstructions 顺序 L405-449)
 - `layerInstructions` 顺序 = `trackMappings.filter(\.isVideo)` 顺序 = **轨道枚举顺序 + 黑底最后追加**(L194/L206)。AVFoundation 按 layer instruction 数组顺序混合,**后者在上**。
-- 因此 OpenTake 混合顺序:**黑底(最底)→ track[0] → track[1] → … → track[n-1](最顶)**。注意上游黑底 mapping 是最后 append 到 trackMappings 的(L209-215),但它的 opacity 在自身区间是 1、其余轨道盖在它上面——等价于"黑底铺底,视频轨从下标 0 到 n-1 依次叠加"。OpenTake 直接按此顺序 alpha-over 合成(见 §3.6)。
+- 因此 OpenTake 混合顺序:**黑底(最底)→ track[0] → track[1] → … → `track[n-1]`（最顶）**。注意上游黑底 mapping 是最后 append 到 trackMappings 的(L209-215),但它的 opacity 在自身区间是 1、其余轨道盖在它上面——等价于"黑底铺底,视频轨从下标 0 到 n-1 依次叠加"。OpenTake 直接按此顺序 alpha-over 合成(见 §3.6)。
 - `track.hidden` ⇒ 整轨不渲染(L419);`track.muted` ⇒ 音频不出声(audio 路径 L391,本 crate 视频侧只需关心 hidden)。
 
 ### 1.6 色彩空间(对应 vcConfig L456-458 + ImageVideoGenerator L169-173)

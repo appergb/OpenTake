@@ -31,6 +31,10 @@ web                                  React/TS 前端（只读镜像）
 - **[opentake-domain](opentake-domain/INDEX.md)** — Timeline/Track/Clip/Keyframe/Transform/Text/Grade 纯值语义；序列化模型。叶子 crate，禁止 I/O。
   [总览](opentake-domain/OVERVIEW.md)
 
+### 平台基础
+- **[opentake-process-tree](opentake-process-tree/INDEX.md)** — Unix 进程组 / Windows Job Object 生命周期与取消支持。
+  [总览](opentake-process-tree/OVERVIEW.md)
+
 ### 引擎层
 - **[opentake-ops](opentake-ops/INDEX.md)** — Overwrite/Ripple/Snap 纯引擎、`EditCommand` 枚举、`apply()` 事务、撤销/重做栈、各 ops 算法（trim/move/split/ripple/link…）。
   [总览](opentake-ops/OVERVIEW.md)
@@ -38,13 +42,13 @@ web                                  React/TS 前端（只读镜像）
 ### 能力层
 - **[opentake-project](opentake-project/INDEX.md)** — 工程持久化、bundle/archive、布局、FCPXML(XMEML) 导出、生成日志。
   [总览](opentake-project/OVERVIEW.md)
-- **[opentake-render](opentake-render/INDEX.md)** — RenderPlan（纯函数 Timeline→每帧属性）、wgpu 合成器、文本栅格化；预览与导出像素一致。
+- **[opentake-render](opentake-render/INDEX.md)** — RenderPlan（纯函数 Timeline→每帧属性）、wgpu 合成器、文本栅格化；预览/导出共享语义，像素一致性按场景验收。
   [总览](opentake-render/OVERVIEW.md) · [规格 SPEC](opentake-render/SPEC.md)
 - **[opentake-media](opentake-media/INDEX.md)** — FFmpeg 编解码、缩略图/雪碧图、波形、转写(whisper)、语义搜索(SigLIP2+ort)、节拍/静音/自动裁剪分析。
   [总览](opentake-media/OVERVIEW.md) · [规格 SPEC](opentake-media/SPEC.md)
 - **[opentake-motion](opentake-motion/INDEX.md)** — Lottie / web 动态图形渲染、沙箱、缓存、与渲染管线集成。
   [总览](opentake-motion/OVERVIEW.md) · [Motion Graphics 插件设计](opentake-motion/MOTION-GRAPHICS-PLUGIN.md)
-- **[opentake-agent](opentake-agent/INDEX.md)** — MCP/Agent（当前最多 44 个可发布工具：38 基础 + 4 生成 + 2 动效，能力门控后按能力发布；KNOWN wire 名共 54）、工具派发、Context Signal、工作流插件、内置 Agent 聊天（Codex/ChatGPT 登录）。
+- **[opentake-agent](opentake-agent/INDEX.md)** — MCP/Agent（工具按基础集合、生成/Motion 桥与凭据动态发布；完整集合以源码和运行期发现为准）、工具派发、Context Signal、工作流插件、内置 Agent 聊天（Codex/ChatGPT 登录）。
   [总览](opentake-agent/OVERVIEW.md) · [规格 SPEC](opentake-agent/SPEC.md) · [Context Signal](opentake-agent/AGENT-CONTEXT-SIGNAL.md) · [工作流插件](opentake-agent/WORKFLOW-PLUGIN-SYSTEM.md)
 - **[opentake-gen](opentake-gen/INDEX.md)** — 生成式 AI 客户端(fal.ai/Replicate/OpenAI/ElevenLabs)、模型目录、生成参数、BYOK 密钥（无后端）。
   [总览](opentake-gen/OVERVIEW.md) · [规格 SPEC](opentake-gen/SPEC.md)

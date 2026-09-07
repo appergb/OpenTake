@@ -1,5 +1,8 @@
 # opentake-agent 实现就绪规格（Issue #9）
 
+> 状态：draft · 阶段：partial-implementation · 设计与早期实现来源保留；原文日期、行号和“待做”属于设计时点。2026-09-06 当前实现见本模块 [OVERVIEW.md](OVERVIEW.md)，当前验收见[公开 Beta 记录](../../audit/2026-09-06/public-beta-validation.md)。
+
+
 > **Beta 2 安全裁决（2026-08-03）：**本文保留上游固定端口方案作为设计来源与测试合同，
 > 但其“默认启动、未认证 `127.0.0.1:19789`、外部客户端直连”不再是产品运行合同。
 > 当前产品仅由官方 Codex / ChatGPT 每轮创建随机 loopback 端口、256-bit Bearer、工程绑定的
@@ -9,7 +12,7 @@
 > 短 ID 系统 + 统一执行壳 + 面向 LLM 的精确路径错误 + 应用内 chat +
 > **Agent Context Signal 注入** + **Workflow Plugin 系统**。
 >
-> 设计来源（已逐行核读）：上游 `palmier-pro-upstream/Sources/PalmierPro/Agent/`（29 文件），以及 OpenTake `docs/AGENT-CONTEXT-SIGNAL.md`、`docs/WORKFLOW-PLUGIN-SYSTEM.md`、`docs/ARCHITECTURE.md §7/§9`、`docs/MODULE-PORT-MAP.md`「Agent」、`docs/_analysis/04-MCP与Agent工具.md`、`docs/ROADMAP.md` Phase 7/S/W。
+> 设计来源（已逐行核读）：上游 `palmier-pro-upstream/Sources/PalmierPro/Agent/`（29 文件），以及 OpenTake `docs/AGENT-CONTEXT-SIGNAL.md`、`docs/WORKFLOW-PLUGIN-SYSTEM.md`、`docs/architecture/ARCHITECTURE.md §7/§9`、`docs/architecture/MODULE-PORT-MAP.md`「Agent」、`docs/_analysis/04-MCP与Agent工具.md`、`docs/architecture/ROADMAP.md` Phase 7/S/W。
 >
 > 核心架构原则（上游验证，OpenTake 照搬）：**编辑能力只有一处真实定义**（`opentake-core` 的 `EditCommand` 路由 → `opentake-ops`），**MCP server 与应用内 chat 是它的两个对等前端**，不写两套。Agent 层「非常薄」——31 个工具是 `opentake-core` 命令的薄包装；真正的编辑算法在 `opentake-ops`/`opentake-domain`（不在本 crate）。
 >
@@ -34,10 +37,10 @@
 | 后端代理客户端（计费通道，OpenTake 替换） | `…/Agent/Clients/PalmierClient.swift` | `endpoint v1/agent/stream :35`；错误信封 `:80-101` |
 | get_timeline 编码（轨道/clip 结构 + 压缩规则，Context Signal 检测依据） | `…/Agent/Tools/ToolExecutor+Timeline.swift` | `getTimeline :17`；`trackDefaults :60`（`muted/hidden/syncLocked`）；`clipDefaults :62`；`compactTrack :73`；`compactClip :112` |
 | add_clips 行为（覆写、自动建轨、linked audio、全有或全无） | `…/Agent/Tools/ToolExecutor+Clips.swift` | `AddClipsInput :5`；`addClips :13`；`Mixed trackIndex :171-174`；`insertTrack :194/:199`；`clearRegion+placeClip :225-226` |
-| OpenTake 目标 crate 边界 + §7 MCP 设计 | `/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake/docs/ARCHITECTURE.md` | crate 布局 `:64-87`；`EditCommand/EditResult :105-116`；§7 `:148-154`；§9 目录 `:165-177` |
+| OpenTake 目标 crate 边界 + §7 MCP 设计 | `/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake/docs/architecture/ARCHITECTURE.md` | crate 布局 `:64-87`；`EditCommand/EditResult :105-116`；§7 `:148-154`；§9 目录 `:165-177` |
 | Context Signal 全设计 | `/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake/docs/AGENT-CONTEXT-SIGNAL.md` | 发射时机表 `:37-47`；数据结构 `:50-83`；插件叠加 `:88-98`；类型检测 `:104-140`；轨道角色 `:148-173`；规则 `:177-203` |
 | Workflow Plugin 全设计 | `/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake/docs/WORKFLOW-PLUGIN-SYSTEM.md` | 目录 `:18-24`；plugin.json schema `:28-96`；激活 `:100-104`；影响 Agent `:108-118`；与 Core 关系 `:136-141` |
-| Phase 7 / S / W 验证标准 | `/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake/docs/ROADMAP.md` | Phase 7 `:52-59`；Phase S `:99-110`；Phase W `:113-119` |
+| Phase 7 / S / W 验证标准 | `/Users/lvbaiqing/TRUE 开发/PRIMARY-CN/OpenTake/docs/architecture/ROADMAP.md` | Phase 7 `:52-59`；Phase S `:99-110`；Phase W `:113-119` |
 
 ---
 

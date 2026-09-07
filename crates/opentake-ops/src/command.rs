@@ -642,6 +642,20 @@ pub struct RenameEntry {
     pub name: String,
 }
 
+/// One folder creation entry for [`EditCommand::CreateFolders`].
+#[derive(Clone, Debug)]
+pub struct FolderCreateEntry {
+    pub name: String,
+    pub parent_folder_id: Option<String>,
+}
+
+/// One asset-folder assignment for [`EditCommand::MoveToFolders`].
+#[derive(Clone, Debug)]
+pub struct FolderMoveEntry {
+    pub asset_ids: Vec<String>,
+    pub folder_id: Option<String>,
+}
+
 /// A text overlay entry for [`EditCommand::AddTexts`]. The transform is supplied
 /// fully resolved (text measurement is a media/UI concern this leaf doesn't do).
 #[derive(Clone, Debug)]
@@ -1109,11 +1123,15 @@ pub enum EditCommand {
         name: String,
         parent_folder_id: Option<String>,
     },
+    /// Create several media-library folders in one undoable transaction.
+    CreateFolders { entries: Vec<FolderCreateEntry> },
     /// Move media assets into a folder (or to root with `None`).
     MoveToFolder {
         asset_ids: Vec<String>,
         folder_id: Option<String>,
     },
+    /// Apply several asset-folder assignments in one undoable transaction.
+    MoveToFolders { entries: Vec<FolderMoveEntry> },
     /// Rename media assets (single = one-element vec). Library-only; clip
     /// references are unaffected.
     RenameMedia { entries: Vec<RenameEntry> },
@@ -1428,10 +1446,12 @@ pub fn apply(
             name,
             parent_folder_id,
         } => create_folder(state, name, parent_folder_id, ids),
+        EditCommand::CreateFolders { entries } => create_folders(state, entries, ids),
         EditCommand::MoveToFolder {
             asset_ids,
             folder_id,
         } => move_to_folder(state, asset_ids, folder_id),
+        EditCommand::MoveToFolders { entries } => move_to_folders(state, entries),
         EditCommand::RenameMedia { entries } => rename_media(state, entries),
         EditCommand::RenameFolder { entries } => rename_folder(state, entries),
         EditCommand::DeleteMedia { asset_ids } => delete_media(state, asset_ids),
@@ -1675,7 +1695,9 @@ fn edit_nested_sequence(
             | EditCommand::DissolveNestedSequence { .. }
             | EditCommand::PlaceMedia { .. }
             | EditCommand::CreateFolder { .. }
+            | EditCommand::CreateFolders { .. }
             | EditCommand::MoveToFolder { .. }
+            | EditCommand::MoveToFolders { .. }
             | EditCommand::RenameMedia { .. }
             | EditCommand::RenameFolder { .. }
             | EditCommand::DeleteMedia { .. }
@@ -6142,6 +6164,54 @@ fn create_folder(
     )
 }
 
+fn create_folders(
+    state: &mut EditorState,
+    entries: Vec<FolderCreateEntry>,
+    ids: &dyn IdGen,
+) -> Result<EditResult, EditError> {
+    if entries.is_empty() {
+        return Err(EditError::Invalid(
+            "create_folder: entries must not be empty".into(),
+        ));
+    }
+    if entries.iter().any(|entry| entry.name.is_empty()) {
+        return Err(EditError::Invalid("folder name is required".into()));
+    }
+    for entry in &entries {
+        if let Some(parent) = entry.parent_folder_id.as_deref() {
+            if !state
+                .manifest
+                .folders
+                .iter()
+                .any(|folder| folder.id == parent)
+            {
+                return Err(EditError::Invalid(format!(
+                    "parentFolderId not found: {parent}"
+                )));
+            }
+        }
+    }
+    let count = entries.len();
+    transact(
+        state,
+        "New Folders",
+        move |created| format!("Created {count} folder(s): {}", created.join(", ")),
+        |st| {
+            let mut created = Vec::with_capacity(entries.len());
+            for entry in &entries {
+                let id = ops::create_folder(
+                    &mut st.manifest,
+                    entry.name.clone(),
+                    entry.parent_folder_id.clone(),
+                    ids,
+                );
+                created.push(id);
+            }
+            Ok(created)
+        },
+    )
+}
+
 fn move_to_folder(
     state: &mut EditorState,
     asset_ids: Vec<String>,
@@ -6161,6 +6231,70 @@ fn move_to_folder(
                 &asset_ids.iter().cloned().collect(),
                 folder_id.clone(),
             );
+            Ok(Vec::new())
+        },
+    )
+}
+
+fn move_to_folders(
+    state: &mut EditorState,
+    entries: Vec<FolderMoveEntry>,
+) -> Result<EditResult, EditError> {
+    if entries.is_empty() {
+        return Err(EditError::Invalid(
+            "move_to_folder: entries must not be empty".into(),
+        ));
+    }
+    if entries.iter().any(|entry| entry.asset_ids.is_empty()) {
+        return Err(EditError::Invalid(
+            "move_to_folder: assetIds is required".into(),
+        ));
+    }
+    for entry in &entries {
+        for asset_id in &entry.asset_ids {
+            if !state
+                .manifest
+                .entries
+                .iter()
+                .any(|asset| asset.id == *asset_id)
+            {
+                return Err(EditError::Invalid(format!(
+                    "media asset not found: {asset_id}"
+                )));
+            }
+        }
+        if let Some(folder_id) = entry.folder_id.as_deref() {
+            if !state
+                .manifest
+                .folders
+                .iter()
+                .any(|folder| folder.id == folder_id)
+            {
+                return Err(EditError::Invalid(format!(
+                    "folderId not found: {folder_id}"
+                )));
+            }
+        }
+    }
+    let asset_count = entries
+        .iter()
+        .map(|entry| entry.asset_ids.len())
+        .sum::<usize>();
+    let operation_count = entries.len();
+    transact(
+        state,
+        "Move to Folder",
+        move |_| {
+            format!("Moved {asset_count} asset(s) across {operation_count} folder operation(s)")
+        },
+        |st| {
+            for entry in &entries {
+                ops::move_to_folder(
+                    &mut st.manifest,
+                    &entry.asset_ids.iter().cloned().collect(),
+                    entry.folder_id.clone(),
+                );
+            }
             Ok(Vec::new())
         },
     )

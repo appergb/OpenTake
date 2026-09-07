@@ -3,6 +3,8 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 const native = vi.hoisted(() => ({
+  currentMonitor: vi.fn(),
+  primaryMonitor: vi.fn(),
   scaleFactor: vi.fn(),
   innerSize: vi.fn(),
   outerPosition: vi.fn(),
@@ -17,6 +19,8 @@ vi.mock("../lib/api", () => ({
 }));
 
 vi.mock("@tauri-apps/api/window", () => ({
+  currentMonitor: native.currentMonitor,
+  primaryMonitor: native.primaryMonitor,
   getCurrentWindow: () => ({
     scaleFactor: native.scaleFactor,
     innerSize: native.innerSize,
@@ -34,6 +38,32 @@ vi.mock("@tauri-apps/api/dpi", () => ({
     constructor(public x: number, public y: number) {}
   },
 }));
+
+function monitorWorkArea({
+  x,
+  y,
+  width,
+  height,
+  scaleFactor = 1,
+}: {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  scaleFactor?: number;
+}) {
+  return {
+    scaleFactor,
+    workArea: {
+      position: {
+        toLogical: () => ({ x, y }),
+      },
+      size: {
+        toLogical: () => ({ width, height }),
+      },
+    },
+  };
+}
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -55,6 +85,8 @@ async function loadStores() {
 beforeEach(() => {
   localStorage.clear();
   document.documentElement.removeAttribute("data-theme");
+  native.currentMonitor.mockReset().mockResolvedValue(null);
+  native.primaryMonitor.mockReset().mockResolvedValue(null);
   native.scaleFactor.mockReset().mockResolvedValue(1);
   native.innerSize.mockReset().mockResolvedValue({
     toLogical: () => ({ width: 1600, height: 1000 }),
@@ -84,6 +116,21 @@ it("removes legacy and versioned theme preferences without a document theme mark
   expect(localStorage.getItem("opentake.theme.v2")).toBeNull();
   expect(useSettingsStore.getState()).not.toHaveProperty("theme");
   expect(document.documentElement.dataset.theme).toBeUndefined();
+});
+
+it("defaults fresh installs to the compact window layout", async () => {
+  const { useSettingsStore } = await loadStores();
+
+  expect(useSettingsStore.getState().windowSize).toBe("compact");
+  expect(localStorage.getItem("windowSize")).toBeNull();
+});
+
+it("loads an explicit persisted standard layout choice", async () => {
+  localStorage.setItem("windowSize", "standard");
+
+  const { useSettingsStore } = await loadStores();
+
+  expect(useSettingsStore.getState().windowSize).toBe("standard");
 });
 
 it("awaits a native resize before persisting the selected dark compact layout", async () => {
@@ -130,6 +177,7 @@ it("does not move the native window when its size is rejected", async () => {
 });
 
 it("restores native geometry when positioning a resized window fails", async () => {
+  localStorage.setItem("windowSize", "standard");
   native.setPosition
     .mockRejectedValueOnce(new Error("position denied"))
     .mockResolvedValueOnce(undefined);
@@ -146,6 +194,53 @@ it("restores native geometry when positioning a resized window fails", async () 
     expect.objectContaining({ width: 1600, height: 1000 }),
   );
   expect(native.setPosition).toHaveBeenLastCalledWith(expect.objectContaining({ x: 40, y: 60 }));
+  expect(useSettingsStore.getState().windowSize).toBe("standard");
+});
+
+it("clamps to the current window when monitor metadata is unavailable", async () => {
+  native.innerSize.mockResolvedValue({
+    toLogical: () => ({ width: 900, height: 600 }),
+  });
+  native.outerPosition.mockResolvedValue({
+    toLogical: () => ({ x: 120, y: 90 }),
+  });
+  const { useSettingsStore } = await loadStores();
+
+  await useSettingsStore.getState().setWindowSize("standard");
+
+  expect(native.currentMonitor).toHaveBeenCalledOnce();
+  expect(native.primaryMonitor).toHaveBeenCalledOnce();
+  expect(native.setSize).toHaveBeenCalledWith(
+    expect.objectContaining({ width: 900, height: 600 }),
+  );
+  expect(native.setPosition).toHaveBeenCalledWith(
+    expect.objectContaining({ x: 120, y: 90 }),
+  );
+});
+
+it("falls back to the primary monitor work area when the current monitor is unavailable", async () => {
+  native.scaleFactor.mockResolvedValue(2);
+  native.primaryMonitor.mockResolvedValue(
+    monitorWorkArea({ x: 0, y: 24, width: 1331, height: 768, scaleFactor: 2 }),
+  );
+  native.innerSize.mockResolvedValue({
+    toLogical: () => ({ width: 1066, height: 666 }),
+  });
+  native.outerPosition.mockResolvedValue({
+    toLogical: () => ({ x: 120, y: 90 }),
+  });
+  const { useSettingsStore } = await loadStores();
+
+  await useSettingsStore.getState().setWindowSize("standard");
+
+  expect(native.currentMonitor).toHaveBeenCalledOnce();
+  expect(native.primaryMonitor).toHaveBeenCalledOnce();
+  expect(native.setSize).toHaveBeenCalledWith(
+    expect.objectContaining({ width: 1331, height: 768 }),
+  );
+  expect(native.setPosition).toHaveBeenCalledWith(
+    expect.objectContaining({ x: 0, y: 24 }),
+  );
   expect(useSettingsStore.getState().windowSize).toBe("standard");
 });
 
@@ -180,6 +275,7 @@ it("serializes a later layout choice after an earlier native resize", async () =
 });
 
 it("serializes a user layout selection after startup resize", async () => {
+  localStorage.setItem("windowSize", "standard");
   const startupResize = deferred<void>();
   const startupPosition = deferred<void>();
   native.setSize

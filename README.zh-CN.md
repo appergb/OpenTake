@@ -12,6 +12,12 @@
   </p>
 </div>
 
+**源码版本：`1.0.0-beta.6`。** 公开版本与下载以 [GitHub Releases](https://github.com/appergb/OpenTake/releases) 为准。执行与验证见[活动计划](docs/plans/active/2026-09-06-public-beta.md)、[版本说明](docs/releases/1.0.0-beta.6.md)和[文档/源码核对记录](docs/documentation-sync-2026-09-06.md)。
+
+源码包含多素材预览 tab、文件夹/平铺/分组媒体视图、temporal compositor 路由、透明 Motion 发布和 ProRes 4444 导出。文本面板可以添加文字片段；特效面板为单个选中视觉片段追加预设并保留既有特效。贴纸支持项目图片/Lottie 素材、本地导入、选择/预览、拖拽与落轨；定向测试与 macOS 安装包实际操作见[验证记录](docs/audit/2026-09-06/public-beta-validation.md)。平台与 provider 的验证范围按对应证据记录。
+
+语义搜索使用约 1.5 GB 的固定版本模型，经过校验并支持离线安装。macOS 与 Windows 已通过真实图文推理和排名验证，Windows 使用固定输入的锁定 Tract 引擎；macOS 安装包还实际完成了模型下载、索引和中文画面搜索。使用前需安装模型，详见[语义模型专项审计](docs/audit/2026-09-06/semantic-search-model.md)。
+
 - [项目介绍](#-项目介绍)
 - [为什么选 OpenTake](#-为什么选-opentake)
 - [竞品对比优势](#-竞品对比优势)
@@ -29,7 +35,7 @@
 
 ## 📖 项目介绍
 
-**OpenTake** 是一个基于 **Rust + Tauri 2** 构建的**跨平台视频制作引擎**，可在 macOS / Windows / Linux 三大平台上运行，旨在将 AI Agent 与专业视频编辑工作流深度集成。
+**OpenTake** 是一个基于 **Rust + Tauri 2** 构建的**跨平台视频制作引擎**，面向 macOS / Windows / Linux 三大平台，旨在将 AI Agent 与专业视频编辑工作流深度集成。
 
 > 🌟 **核心创新**: 我们不让 Agent 去翻技能文档。OpenTake 会**主动向 Agent 发送编辑指导（Context Signal）**——时间线的每条轨道、每段素材、每个剪辑阶段，软件都能精准告知 Agent「这段该怎么做」。
 
@@ -44,9 +50,9 @@ OpenTake 不是剪映 / DaVinci Resolve / Final Cut Pro 的替代品——它是
 | 痛点 | 传统做法 | OpenTake 的做法 |
 |:--|:--|:--|
 | Agent 不知道素材怎么剪 | Agent 自己去读 Skill 文档 | 软件主动发射 Context Signal，告诉 Agent「这条轨是主画面，素材该用口播手法剪」 |
-| 跨平台需要三套代码 | macOS 用 Swift/AVFoundation，Windows 用 C++/DirectShow | Rust 单一代码库，FFmpeg + wgpu 跨平台编译，三平台体验一致 |
+| 跨平台需要三套代码 | macOS 用 Swift/AVFoundation，Windows 用 C++/DirectShow | Rust 单一代码库，FFmpeg + wgpu 跨平台编译，各平台独立验证 |
 | 我想用自己的 AI Key | 被锁定在厂商的云服务里 | BYOK（自带 Key）直连 fal.ai / Replicate / OpenAI，零后端、零运营成本 |
-| Agent 只能聊不能操作 | CLI Agent 读文本输出 | MCP Server 31 个工具——Agent 直接在时间线上 add_clips / split_clip / set_keyframes |
+| Agent 只能聊不能操作 | CLI Agent 读文本输出 | 按能力发布的 MCP Server——Agent 直接在时间线上 add_clips / split_clip / set_keyframes |
 | 每个视频类型都要重新写提示词 | 每次重复「你要剪一个评测视频...」 | 工作流插件系统：评测/科普/游戏/婚礼每种类型封装好方法论，Agent 开机即用 |
 | 学新软件成本高 | 界面复杂，学习曲线陡 | Agent 替你操作，你只需要告诉它「帮我把这个采访剪成 3 分钟的精华」 |
 
@@ -54,16 +60,7 @@ OpenTake 不是剪映 / DaVinci Resolve / Final Cut Pro 的替代品——它是
 
 ## ⚡ 竞品对比优势
 
-| 维度 | 剪映 / CapCut | DaVinci Resolve | Final Cut Pro | **OpenTake** |
-|:--|:--|:--|:--|:--|
-| **Agent 原生集成** | ❌ | ❌ | ❌ | ✅ MCP 31 工具 + Context Signal |
-| **跨平台** | ✅ macOS / Win | ✅ macOS / Win / Linux | ❌ macOS only | ✅ macOS / Win / Linux |
-| **BYOK AI 生成** | 内置模板付费 | ❌ | ❌ | ✅ 直连 fal.ai / Replicate / OpenAI |
-| **本地语音转写** | ❌ 云端 | ❌ 需插件 | ❌ 需插件 | ✅ whisper-rs 端侧推理 |
-| **本地语义搜索** | ❌ | ❌ | ❌ | ✅ SigLIP2 + Ort 本地索引 |
-| **工作流插件** | ❌ 固定模板 | ❌ | ❌ | ✅ JSON+MD 社区插件系统 |
-| **开源** | ❌ | ❌ | ❌ | ✅ GPL-3.0 |
-| **Agent 可操控所有关键帧属性** | ❌ | ❌ | ❌ | ✅ opacity / position / scale / rotation / crop / volume |
+OpenTake 的项目重点是 Rust 权威时间线、命令式撤销、认证 MCP、Context Signal 和本地/BYOK 媒体工作流。[能力账本](docs/capabilities/CAPABILITY-LEDGER.md)区分实现与验证证据，不代表已经达到其他编辑器的全功能对等。
 
 ---
 
@@ -84,7 +81,7 @@ Agent 操作时间线时，每次工具返回附带 `context_signal`：
 
 ### 🔌 Agent 工具面
 
-OpenTake 提供 45 个兼容 Agent 工具，并按当前媒体、生成能力和 provider 授权动态发布；
+OpenTake 提供兼容 Agent 工具，并按当前媒体、生成能力和 provider 授权动态发布；
 未就绪能力会 fail closed，不会被虚假宣传为可执行：
 
 | 分组 | 代表工具 |
@@ -95,9 +92,7 @@ OpenTake 提供 45 个兼容 Agent 工具，并按当前媒体、生成能力和
 | 素材库组织 | `create_folder`, `move_to_folder`, `rename_media` |
 | 资源 | `models/video`, `models/image` |
 
-官方 Codex / ChatGPT 每轮使用独立的随机回环端口、256-bit Bearer 和当前工程身份，
-轮次结束即销毁。Beta 2 已关闭旧的未认证固定 `127.0.0.1:19789` 入口；Claude、
-Cursor 等外部客户端将在后续带认证、显式配对流程完成后重新开放。
+官方 Codex / ChatGPT 每轮使用绑定当前工程的认证回环端点。Beta 5 已加入外部 MCP 客户端显式配对、凭据撤销和重启保留配置；旧的未认证入口仍关闭。详见 [MCP 实现](docs/modules/opentake-agent/mcp-server.md)。
 
 内置 Agent chat panel，与 MCP 共享工具定义和系统提示词。
 
@@ -109,7 +104,7 @@ Cursor 等外部客户端将在后续带认证、显式配对流程完成后重�
 | 帧合成 | wgpu 自写合成器 — 多轨叠加 + 逐帧属性采样 + 仿射/裁剪/混合 |
 | 音频播放 | cpal |
 | 语音转写 | whisper-rs (word/segment 时间戳) |
-| 语义搜索 | candle / ort + SigLIP2 图文双编码器 |
+| 语义搜索 | SigLIP2；固定 revision 模型安装与 macOS/Windows 真实推理已验证 |
 
 ### 🌐 BYOK 生成式 AI
 
@@ -125,12 +120,12 @@ Cursor 等外部客户端将在后续带认证、显式配对流程完成后重�
 
 ## 🖥️ 支持平台
 
-| 平台 | 状态 | 说明 |
-|:--|:--|:--|
-| **macOS** (Apple Silicon + Intel) | ✅ 主要开发平台 | 原生 ARM64 + x86_64，GPU 加速 via Metal (wgpu) |
-| **Windows** (10/11 x86_64) | ✅ 支持 | Vulkan / DX12 backend (wgpu)，完整 Tauri 2 支持 |
-| **Linux** (x86_64) | ✅ 支持 | Vulkan backend，AppImage / deb 打包 |
-| **Backend / Headless** | ✅ 支持 | 纯 Rust 核心可在无 GUI 环境下运行，用于 CI / 服务端渲染 / Agent 批量处理 |
+| 平台 | 证据边界 |
+|:--|:--|
+| macOS | 主要开发平台；原生与安装包的日期化证据见发布记录。Intel/Apple Silicon 产物分别验证。 |
+| Windows | 构建与安装器目标；候选提交 CI 和真实安装/UI 验证完成后才能称为已验证发行。 |
+| Linux | 构建目标；本文不声明新增 Linux 发行或原生 GUI 验证。 |
+| Headless core | Rust 库和测试可脱离桌面 UI 运行，媒体/GPU/浏览器能力仍有环境依赖。 |
 
 ---
 
@@ -138,6 +133,7 @@ Cursor 等外部客户端将在后续带认证、显式配对流程完成后重�
 
 ```
 crates/
+├── opentake-process-tree # Cross-platform child-process lifecycle
 ├── opentake-domain     # Timeline / Track / Clip / Keyframe — 纯函数式值语义
 ├── opentake-ops        # OverwriteEngine / RippleEngine / SnapEngine — 编辑算法层
 ├── opentake-project    # 项目持久化 / bundle / archive / export
@@ -213,16 +209,16 @@ plugins/
 
 ```bash
 # 在 OpenTake 同级目录 clone 上游
-cd ..  # from OpenTake/
+cd ..  # from OpenTake-generation/
 git clone https://github.com/palmier-io/palmier-pro.git palmier-pro-upstream
-cd OpenTake
+cd OpenTake-generation
 ```
 
 目录结构：
 
 ```
 PRIMARY-CN/
-├── OpenTake/                  # 本项目
+├── OpenTake-generation/       # 本项目
 └── palmier-pro-upstream/      # 上游 Swift 源码 (GPL-3.0)
 ```
 
@@ -263,9 +259,6 @@ cd web && pnpm install && pnpm build
 cd .. && cargo tauri dev
 ```
 
-> **当前状态**：`1.0.0-beta.2` 候选版。本地剪辑、预览、持久化、导出、Agent、
-> Motion Canvas 与可审阅 AI 工作流竖切均已实现。验证范围及平台/provider 限制见
-> [Beta 发布说明](docs/releases/1.0.0-beta.2.md)。
 
 ---
 
@@ -276,6 +269,10 @@ cd .. && cargo tauri dev
 | `0.1.0-dev` | 2026-06 | Phase 0+1: Cargo workspace + Domain models + Edit ops + Tauri scaffold |
 | `1.0.0-beta.1` | 2026-08-01 | 首个可安装 Beta：本地编辑闭环、Agent、Motion 与可审阅 AI 工作流 |
 | `1.0.0-beta.2` | 2026-08-03 | 官方 Codex 登录、原子时间线手势、安全 MCP 与交互加固 |
+| `1.0.0-beta.3` | 2026-08-09 | 空格播放、HEVC 原生预览与发布流水线修复 |
+| `1.0.0-beta.4` | 2026-08-10 | 时间/转场持久化、导出一致性与更新器 |
+| `1.0.0-beta.5` | 2026-08-14 | 外部 MCP 配对、有序 Agent 对话与 Motion Studio |
+| `1.0.0-beta.6` | [版本记录](docs/releases/1.0.0-beta.6.md) | 透明 Motion、ProRes 4444、多预览、媒体视图、文本/特效/贴纸与真实语义搜索 |
 | *(planned)* `1.0.0` | TBD | Phase 10: 全功能发布 — 对标剪映 + Agent 深度集成 |
 
 📖 [完整路线图](docs/architecture/ROADMAP.md)

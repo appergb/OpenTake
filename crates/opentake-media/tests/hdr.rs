@@ -127,7 +127,9 @@ fn packaged_hdr_decode_path_materializes_bt709_rgba_pixels() {
     assert_eq!((frame.width, frame.height), (160, 90));
     let (min, max) = frame
         .rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|pixel| pixel[..3].iter().copied())
         .fold((u8::MAX, u8::MIN), |(min, max), value| {
             (min.min(value), max.max(value))

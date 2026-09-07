@@ -456,7 +456,7 @@ mod tests {
         assert_eq!(frame.rgba.len(), (1024 * 108 * 4) as usize);
         // With fonts available, "Hello" must paint some non-transparent pixels.
         if r.has_fonts() {
-            let painted = frame.rgba.chunks_exact(4).any(|px| px[3] > 0);
+            let painted = frame.rgba.as_chunks::<4>().0.iter().any(|px| px[3] > 0);
             assert!(
                 painted,
                 "expected visible text pixels when fonts are present"
@@ -473,7 +473,7 @@ mod tests {
         };
         let frame = r.rasterize(&req("Hi", &style)).expect("frame");
         // Background is opaque, so every pixel has full alpha regardless of fonts.
-        let opaque = frame.rgba.chunks_exact(4).all(|px| px[3] == 255);
+        let opaque = frame.rgba.as_chunks::<4>().0.iter().all(|px| px[3] == 255);
         assert!(opaque, "opaque background should fill the whole box");
     }
 

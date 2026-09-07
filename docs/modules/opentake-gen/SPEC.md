@@ -1,5 +1,8 @@
 # gen-SPEC — opentake-gen 实现就绪规格（Issue #10）
 
+> 状态：draft · 阶段：partial-implementation · 设计与早期实现来源保留；原文日期、行号和“待做”属于设计时点。2026-09-06 当前实现见本模块 [OVERVIEW.md](OVERVIEW.md)，当前验收见[公开 Beta 记录](../../audit/2026-09-06/public-beta-validation.md)。
+
+
 > 状态：实现就绪（implementation-ready）。本规格基于上游 Swift 真实源码逐字段复刻，每个契约点给出 `文件:行号` 证据。
 > 范围：`crates/opentake-gen`（BYOK 生成客户端 + 静态 catalog + provider adapters）与可选的 `opentake-gen-proxy`（axum 托管模式后端）。
 > 约束遵循 OpenTake `AGENTS.md`：内部错误用 `anyhow::Error`，边界层转 `Err(String)`；所有 serde 模型加 `#[serde(default)]` + `Option<T>` 以读旧数据不破坏；注释最小化。
@@ -57,7 +60,7 @@ bytes = "1"
 opentake-domain = { workspace = true }  # GenerationInput 等共享类型（见 §5）
 ```
 
-> 说明：`opentake-domain` 是零依赖叶子 crate（`crates/opentake-domain/src/lib.rs:1-8`），不允许网络/FS。因此 **`GenerationInput` 放 domain，`GenerationParams`/`GenClient`/adapters 放 opentake-gen**，方向是 gen → domain。详见 §5.1。
+> 说明：`opentake-domain` 是无 I/O 叶子 crate（`crates/opentake-domain/src/lib.rs:1-8`），不允许网络/FS。因此 **`GenerationInput` 放 domain，`GenerationParams`/`GenClient`/adapters 放 opentake-gen**，方向是 gen → domain。详见 §5.1。
 
 ### 1.1 顶层客户端
 
@@ -739,7 +742,7 @@ pub struct UpscaleCaps {
 
 ### 5.1 GenerationInput 落在 opentake-domain（逐字段复刻 `MediaManifest.swift:36-63`）
 
-`GenerationInput` 是**持久化到工程文件**的领域类型（上游存于 `MediaManifestEntry.generationInput` `MediaManifest.swift:26`），故放零依赖 `opentake-domain`，按 `AGENTS.md:62` 全字段 `#[serde(default)]` + `Option<T>`：
+`GenerationInput` 是**持久化到工程文件**的领域类型（上游存于 `MediaManifestEntry.generationInput` `MediaManifest.swift:26`），故放无 I/O 的 `opentake-domain`，按 `AGENTS.md:62` 全字段 `#[serde(default)]` + `Option<T>`：
 
 ```rust
 // crates/opentake-domain/src/generation.rs（新增；domain 当前无此文件）
@@ -888,6 +891,6 @@ pub struct GenerationInput {
 
 - `…/OpenTake/Cargo.toml` — workspace 含 `opentake-gen`/`opentake-domain`/`opentake-agent`（`members`）；`serde`/`serde_json` 在 `[workspace.dependencies]`
 - `…/OpenTake/crates/opentake-gen/{Cargo.toml,src/lib.rs}` — 当前为 Phase 0 空脚手架（`[dependencies]` 为空 / lib 仅 `crate_compiles` 测试）
-- `…/OpenTake/crates/opentake-domain/{Cargo.toml,src/lib.rs}` — 零依赖叶子 crate（仅依赖 serde；声明“Zero IO”）
+- `…/OpenTake/crates/opentake-domain/{Cargo.toml,src/lib.rs}` — 无 I/O 叶子 crate（仅依赖 serde；声明“Zero IO”）
 - `…/OpenTake/crates/opentake-agent/src/lib.rs` — 工具层 + MCP(rmcp) + chat 客户端（peer clients）
 - `…/OpenTake/AGENTS.md` — Rust 风格铁律（`anyhow`→边界 `Err(String)`；domain 零网络/FS；serde `default`+`Option`；≥80% 覆盖）

@@ -2,7 +2,7 @@
 
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MediaItem, SearchIndexStatus, SearchResults } from "../../lib/types";
 import { t } from "../../i18n";
 import { useEditorUiStore } from "../../store/uiStore";
@@ -16,6 +16,7 @@ vi.mock("../../lib/api", async (importOriginal) => {
     ...actual,
     generateThumbnail: vi.fn().mockResolvedValue(null),
     preloadMedia: vi.fn().mockResolvedValue("cached"),
+    searchModelStatus: vi.fn().mockResolvedValue({ installed: false, model: "siglip2", bytes: 0 }),
     searchIndexStatus: vi
       .fn()
       .mockResolvedValue({ modelInstalled: false, indexable: 0, indexed: 0 }),
@@ -65,6 +66,7 @@ afterEach(() => {
   vi.mocked(api.searchIndexStatus)
     .mockReset()
     .mockResolvedValue({ modelInstalled: false, indexable: 0, indexed: 0 });
+  vi.mocked(api.searchModelStatus).mockReset().mockResolvedValue({ installed: false, model: "siglip2", bytes: 0 });
   useMediaStore.setState({ items: [], folders: [], importing: false, error: null });
   useProjectStore.setState({ projectEpoch: 0, projectPath: null });
   useEditorUiStore.setState({
@@ -723,5 +725,239 @@ describe("MediaSearch result context menu", () => {
 
     expect(container.querySelector('[role="menu"]')).not.toBeNull();
     await act(async () => root.unmount());
+  });
+});
+
+
+describe("MediaSearch model recovery", () => {
+  let root: ReturnType<typeof createRoot>;
+  let container: HTMLDivElement;
+  const repairError = "SEARCH_MODEL_REPAIR_REQUIRED: text encoder checksum mismatch";
+  const installed = { modelInstalled: true, indexable: 1, indexed: 1 };
+  const model = { installed: true, model: "siglip2", bytes: 1535824768 };
+  const brokenResults = () => ({
+    moments: [],
+    spoken: [{ mediaId: searchItem.id, startSec: 0, endSec: 1, text: "retained transcript", score: 1 }],
+    files: [{ mediaId: searchItem.id, score: 1 }],
+    visualError: repairError,
+  });
+  async function render(query = "current query") {
+    await act(async () => root.render(React.createElement(MediaSearchResults, {
+      query, nameMatches: [searchItem], hasIndexableAssets: true,
+    })));
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+  }
+  function action(key: string) {
+    const button = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((element) => element.textContent?.includes(t(key)));
+    expect(button, key).toBeDefined();
+    return button!;
+  }
+  async function click(key: string) { await act(async () => action(key).click()); }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.mocked(api.searchModelStatus).mockReset().mockResolvedValue(model);
+    vi.mocked(api.searchIndexStatus).mockReset().mockResolvedValue(installed);
+    vi.mocked(api.searchQuery).mockReset().mockResolvedValue(emptyResults());
+    vi.mocked(api.searchIndexStart).mockReset().mockResolvedValue(installed);
+    vi.mocked(api.downloadSearchModel).mockReset().mockResolvedValue(model);
+    useProjectStore.setState({ projectEpoch: 100, projectPath: "/recovery.opentake" });
+    useMediaStore.setState({ items: [searchItem] });
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+  });
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    container.remove();
+  });
+
+  it("uses the actual 1535824768-byte manifest total in the initial download hint", async () => {
+    vi.mocked(api.searchIndexStatus).mockResolvedValue({ ...installed, modelInstalled: false });
+    await render();
+    expect(api.searchModelStatus).toHaveBeenCalled();
+    expect(action("search.smartSearch").title).toContain("1.54 GB");
+    expect(action("search.smartSearch").title).not.toContain("380 MB");
+  });
+
+  it.each(["zero", "failure"])("reports an unknown download size for %s instead of a placeholder", async (size) => {
+    vi.mocked(api.searchIndexStatus).mockResolvedValue({ ...installed, modelInstalled: false });
+    if (size === "zero") vi.mocked(api.searchModelStatus).mockResolvedValue({ ...model, bytes: 0 });
+    else vi.mocked(api.searchModelStatus).mockRejectedValue(new Error("status unavailable"));
+    await render();
+    expect(action("search.smartSearch").title).toBe(t("search.smartSearchUnknownSizeHint"));
+    expect(action("search.smartSearch").title).not.toMatch(/\d+.*(?:MB|GB)/);
+  });
+
+  it.each(["", "model error: "])("routes a corrupt index failure wrapped with %j to model repair and redownload", async (wrapper) => {
+    vi.mocked(api.searchIndexStatus).mockResolvedValue({ ...installed, indexed: 0 });
+    vi.mocked(api.searchIndexStart).mockRejectedValueOnce(new Error(`${wrapper}${repairError}`));
+    await render();
+    await click("search.index");
+    expect(container.textContent).toContain(t("search.repairModelHint"));
+    await click("search.repairModel");
+    expect(api.downloadSearchModel).toHaveBeenCalledTimes(1);
+    expect(api.searchIndexStart).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an ordinary index failure on the index retry path with an accurate hint", async () => {
+    vi.mocked(api.searchIndexStatus).mockResolvedValue({ ...installed, indexed: 0 });
+    vi.mocked(api.searchIndexStart).mockRejectedValueOnce(new Error("decoder unavailable"));
+    await render();
+    await click("search.index");
+    expect(action("search.retry").title).toBe(t("search.indexRetryHint"));
+    expect(container.textContent).toContain("decoder unavailable");
+    await click("search.retry");
+    expect(api.searchIndexStart).toHaveBeenCalledTimes(2);
+    expect(api.downloadSearchModel).not.toHaveBeenCalled();
+  });
+
+  it("offers repair for a fully indexed query without hiding Files or Spoken, then reruns the latest query", async () => {
+    const download = deferred<typeof model>();
+    vi.mocked(api.searchQuery).mockResolvedValue(brokenResults());
+    vi.mocked(api.downloadSearchModel).mockReturnValue(download.promise);
+    try {
+      await render();
+      expect(container.textContent).toContain(t("search.group.files"));
+      expect(container.textContent).toContain("retained transcript");
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain(t("search.repairModelHint"));
+      const repair = action("search.repairModel");
+      await act(async () => { repair.click(); repair.click(); });
+      expect(api.downloadSearchModel).toHaveBeenCalledTimes(1);
+      await render("latest query");
+      const count = vi.mocked(api.searchQuery).mock.calls.length;
+      vi.mocked(api.searchQuery).mockResolvedValue(emptyResults());
+      await act(async () => download.resolve(model));
+      await act(async () => vi.advanceTimersByTimeAsync(250));
+      expect(vi.mocked(api.searchIndexStatus).mock.calls.length).toBeGreaterThan(1);
+      expect(api.searchQuery).toHaveBeenCalledTimes(count + 1);
+      expect(api.searchQuery).toHaveBeenLastCalledWith("latest query");
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+      expect(container.textContent).not.toContain(t("search.repairModel"));
+      expect(container.textContent).toContain(searchItem.name);
+    } finally {
+      await act(async () => download.resolve(model));
+    }
+  });
+
+  it("reruns the query after successful indexing and clears an earlier visual failure", async () => {
+    vi.mocked(api.searchIndexStatus).mockResolvedValue({ ...installed, indexed: 0 });
+    vi.mocked(api.searchQuery).mockResolvedValue({ ...emptyResults(), visualError: "inference failed" });
+    await render();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("inference failed");
+    expect(container.textContent).not.toContain(t("search.repairModel"));
+    vi.mocked(api.searchIndexStatus).mockResolvedValue(installed);
+    vi.mocked(api.searchQuery).mockResolvedValue(emptyResults());
+    await click("search.index");
+    await act(async () => vi.advanceTimersByTimeAsync(250));
+    expect(api.searchQuery).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("does not requery or apply an old repair completion after the project changes", async () => {
+    const download = deferred<typeof model>();
+    vi.mocked(api.downloadSearchModel).mockReturnValue(download.promise);
+    vi.mocked(api.searchQuery).mockResolvedValue(brokenResults());
+    try {
+      await render();
+      await click("search.repairModel");
+      vi.mocked(api.searchQuery).mockResolvedValue(emptyResults());
+      await act(async () => useProjectStore.setState({ projectEpoch: 101, projectPath: "/next.opentake" }));
+      await act(async () => vi.advanceTimersByTimeAsync(250));
+      const count = vi.mocked(api.searchQuery).mock.calls.length;
+      await act(async () => download.resolve(model));
+      await act(async () => vi.advanceTimersByTimeAsync(250));
+      expect(api.searchQuery).toHaveBeenCalledTimes(count);
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+      expect(api.searchIndexStart).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => download.resolve(model));
+    }
+  });
+
+  it("keeps repair download failures visible and permits one download retry", async () => {
+    vi.mocked(api.searchQuery).mockResolvedValue(brokenResults());
+    vi.mocked(api.downloadSearchModel).mockRejectedValueOnce(new Error("network disconnected"));
+    await render();
+    await click("search.repairModel");
+    expect(container.textContent).toContain("network disconnected");
+    await click("search.retry");
+    expect(api.downloadSearchModel).toHaveBeenCalledTimes(2);
+    expect(api.searchIndexStart).not.toHaveBeenCalled();
+  });
+
+  it("shares the pending repair across unmount/remount, then refreshes and requeries once", async () => {
+    const download = deferred<typeof model>();
+    vi.mocked(api.searchQuery).mockResolvedValue(brokenResults());
+    vi.mocked(api.downloadSearchModel).mockReturnValue(download.promise);
+    try {
+      await render();
+      await click("search.repairModel");
+      await act(async () => root.unmount());
+      root = createRoot(container);
+      await render();
+      expect(container.textContent).toContain(t("search.downloading", { percent: 0 }));
+      expect(container.querySelector("button")).toBeNull();
+      expect(api.downloadSearchModel).toHaveBeenCalledTimes(1);
+      const count = vi.mocked(api.searchQuery).mock.calls.length;
+      vi.mocked(api.searchQuery).mockResolvedValue(emptyResults());
+      await act(async () => download.resolve(model));
+      await act(async () => vi.advanceTimersByTimeAsync(250));
+      expect(api.searchQuery).toHaveBeenCalledTimes(count + 1);
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+    } finally {
+      await act(async () => download.resolve(model));
+    }
+  });
+
+  it("does not refresh status or issue a query after the repair view unmounts", async () => {
+    const download = deferred<typeof model>();
+    vi.mocked(api.searchQuery).mockResolvedValue(brokenResults());
+    vi.mocked(api.downloadSearchModel).mockReturnValue(download.promise);
+    try {
+      await render();
+      await click("search.repairModel");
+      await act(async () => root.render(null));
+      const queries = vi.mocked(api.searchQuery).mock.calls.length;
+      const statuses = vi.mocked(api.searchIndexStatus).mock.calls.length;
+      await act(async () => download.resolve(model));
+      await act(async () => vi.advanceTimersByTimeAsync(250));
+      expect(api.searchQuery).toHaveBeenCalledTimes(queries);
+      expect(api.searchIndexStatus).toHaveBeenCalledTimes(statuses);
+      expect(container.textContent).toBe("");
+    } finally {
+      await act(async () => download.resolve(model));
+    }
+  });
+
+  it("ignores a corrupt query response that arrives after the repaired query succeeds", async () => {
+    const download = deferred<typeof model>();
+    const oldQuery = deferred<SearchResults>();
+    vi.mocked(api.searchQuery).mockResolvedValueOnce(brokenResults()).mockReturnValueOnce(oldQuery.promise).mockResolvedValue(emptyResults());
+    vi.mocked(api.downloadSearchModel).mockReturnValue(download.promise);
+    try {
+      await render();
+      await click("search.repairModel");
+      await render("query during repair");
+      await act(async () => download.resolve(model));
+      await act(async () => vi.advanceTimersByTimeAsync(250));
+      expect(api.searchQuery).toHaveBeenCalledTimes(3);
+      await act(async () => oldQuery.resolve(brokenResults()));
+      expect(container.querySelector('[role="alert"]')).toBeNull();
+      expect(container.textContent).not.toContain(t("search.repairModel"));
+    } finally {
+      await act(async () => { download.resolve(model); oldQuery.resolve(emptyResults()); });
+    }
+  });
+
+  it("ignores a model-size response from the previous project", async () => {
+    const oldSize = deferred<typeof model>();
+    vi.mocked(api.searchIndexStatus).mockResolvedValue({ ...installed, modelInstalled: false });
+    vi.mocked(api.searchModelStatus).mockReturnValueOnce(oldSize.promise).mockResolvedValue({ ...model, bytes: 0 });
+    await render();
+    await act(async () => useProjectStore.setState({ projectEpoch: 102, projectPath: "/size-next.opentake" }));
+    await act(async () => oldSize.resolve(model));
+    expect(action("search.smartSearch").title).toBe(t("search.smartSearchUnknownSizeHint"));
   });
 });

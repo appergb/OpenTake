@@ -10,7 +10,7 @@
   </p>
 
   <p>
-    <a href="#-installation"><img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-6e7385?logo=rust" alt="Platforms" /></a>
+    <a href="#-platforms"><img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-6e7385?logo=rust" alt="Platforms" /></a>
     <a href="https://github.com/appergb/OpenTake/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-blue.svg" alt="License" /></a>
     <a href="https://github.com/appergb/OpenTake/stargazers"><img src="https://img.shields.io/github/stars/appergb/OpenTake?style=flat&color=f5c542" alt="Stars" /></a>
     <a href="https://discord.gg/opentake"><img src="https://img.shields.io/badge/Discord-EN-5865F2?logo=discord&logoColor=white" alt="Discord EN" /></a>
@@ -25,6 +25,12 @@
     </sub>
   </p>
 </div>
+
+**Source version: `1.0.0-beta.6`.** Published versions and downloads are maintained in [GitHub Releases](https://github.com/appergb/OpenTake/releases). See the [execution plan](docs/plans/active/2026-09-06-public-beta.md), [version notes](docs/releases/1.0.0-beta.6.md) and [documentation/source review](docs/documentation-sync-2026-09-06.md).
+
+The source includes multiple media preview tabs, folder/flat/grouped media views, temporal compositor routing, transparent Motion publishing and ProRes 4444 export. The Text panel adds text clips; the Effect panel applies presets to one selected visual clip while preserving existing effects. Sticker supports project image/Lottie assets, local import, selection/preview and placement on the timeline. Focused tests and macOS package GUI checks are recorded in the [validation report](docs/audit/2026-09-06/public-beta-validation.md); provider and platform coverage remains tied to the corresponding evidence.
+
+Semantic search uses fixed-revision assets (about 1.5 GB) with checksum validation and offline installation. Real image/text embedding and ranking passed on macOS and Windows; Windows uses fixed input facts with the locked Tract engine. The macOS package also passed actual model download, indexing and Chinese visual queries. A model installation is required before use; see the [semantic model audit](docs/audit/2026-09-06/semantic-search-model.md).
 
 ## Table of Contents
 
@@ -45,7 +51,7 @@
 
 ## 📖 About
 
-**OpenTake** is a **cross-platform video production engine** built on **Rust + Tauri 2**, running on macOS / Windows / Linux, designed to deeply integrate AI Agents into professional video editing workflows.
+**OpenTake** is a **cross-platform video production engine** built on **Rust + Tauri 2**, targeting macOS / Windows / Linux, designed to deeply integrate AI Agents into professional video editing workflows.
 
 > 🌟 **Core Innovation**: Instead of making the Agent parse lengthy skill documents, OpenTake **actively pushes editing guidance (Context Signal)** to the Agent — telling it exactly what each track does, how each clip should be cut, and what rules apply at every stage.
 
@@ -60,9 +66,9 @@ OpenTake is not a replacement for CapCut / DaVinci Resolve / Final Cut Pro — i
 | Pain Point | Traditional Approach | OpenTake Approach |
 |:--|:--|:--|
 | Agent doesn't know how to edit | Agent reads skill docs on its own | Software pushes Context Signal — "this track is A-roll, cut with talking-head rhythm" |
-| Cross-platform needs 3 codebases | macOS: Swift/AVFoundation, Windows: C++/DirectShow | Single Rust codebase, FFmpeg + wgpu, identical experience on all 3 platforms |
+| Cross-platform needs 3 codebases | macOS: Swift/AVFoundation, Windows: C++/DirectShow | Single Rust codebase, FFmpeg + wgpu, platform-specific validation |
 | I want to use AI directly | Locked into vendor cloud services | Official Codex / ChatGPT sign-in for Agent, plus BYOK for fal.ai / Replicate / OpenAI |
-| Agent can chat but can't act | CLI agent reads text output | MCP Server with 31 tools — Agent directly runs add_clips / split_clip / set_keyframes |
+| Agent can chat but can't act | CLI agent reads text output | Capability-filtered MCP Server — Agent directly runs add_clips / split_clip / set_keyframes |
 | Rewriting prompts for every video type | "You are editing a product review..." every time | Workflow Plugin System: review/tutorial/gaming/wedding, each pre-packaged with methodology |
 | Steep learning curve for new tools | Complex UI, long onboarding | Agent operates for you — just say "edit this interview into a 3-minute highlight" |
 
@@ -70,16 +76,7 @@ OpenTake is not a replacement for CapCut / DaVinci Resolve / Final Cut Pro — i
 
 ## ⚡ Competitive Edge
 
-| Dimension | CapCut | DaVinci Resolve | Final Cut Pro | **OpenTake** |
-|:--|:--|:--|:--|:--|
-| **Agent-Native Integration** | ❌ | ❌ | ❌ | ✅ MCP 31 tools + Context Signal |
-| **Cross-Platform** | ✅ macOS / Win | ✅ macOS / Win / Linux | ❌ macOS only | ✅ macOS / Win / Linux |
-| **BYOK AI Generation** | Paid templates | ❌ | ❌ | ✅ Direct fal.ai / Replicate / OpenAI |
-| **Local Transcription** | ❌ Cloud-only | ❌ Plugins needed | ❌ Plugins needed | ✅ whisper-rs on-device |
-| **Local Semantic Search** | ❌ | ❌ | ❌ | ✅ SigLIP2 + Ort on-device |
-| **Workflow Plugins** | ❌ Fixed templates | ❌ | ❌ | ✅ JSON+MD community plugins |
-| **Open Source** | ❌ | ❌ | ❌ | ✅ GPL-3.0 |
-| **Agent-Controllable Keyframes** | ❌ | ❌ | ❌ | ✅ All 6 kf tracks via MCP |
+OpenTake combines a Rust-owned timeline, command-based undo, authenticated MCP, Context Signal and local/BYOK media workflows. The [capability ledger](docs/capabilities/CAPABILITY-LEDGER.md) tracks implementation and evidence; it does not imply feature parity with other editors.
 
 ---
 
@@ -100,7 +97,7 @@ Knowledge source: [ClipSkills](https://github.com/appergb/ClipSkills) — 12-vol
 
 ### 🔌 Agent Tool Surface
 
-OpenTake exposes 44 compatible Agent tools, filtered at runtime so unavailable media,
+OpenTake exposes compatible Agent tools, filtered at runtime so unavailable media,
 generation, or provider capabilities fail closed instead of being advertised:
 
 | Group | Key Tools |
@@ -111,10 +108,7 @@ generation, or provider capabilities fail closed instead of being advertised:
 | Library | `create_folder`, `move_to_folder`, `rename_media` |
 | Resources | `models/video`, `models/image` |
 
-Official Codex / ChatGPT turns use a fresh loopback endpoint with a random port,
-256-bit Bearer token, and current-project identity for that turn only. The legacy
-fixed unauthenticated `127.0.0.1:19789` endpoint is disabled in Beta 2; external
-Claude/Cursor pairing will return only with an authenticated opt-in flow.
+Official Codex / ChatGPT turns use an authenticated per-turn loopback endpoint bound to the current project. Beta 5 also introduced explicit pairing for external MCP clients, with credentials, revocation and persistent client configuration. The old unauthenticated endpoint remains disabled; see [MCP behavior](docs/modules/opentake-agent/mcp-server.md).
 
 Built-in Agent chat panel shares tool definitions and system prompt with MCP. It can use direct
 OpenAI/Anthropic BYOK or the user-installed official Codex CLI's ChatGPT sign-in; OpenTake never
@@ -127,8 +121,8 @@ reads or stores the Codex credential.
 | Codec | FFmpeg (`ffmpeg-next`) — battle-tested Rust bindings |
 | Compositor | wgpu custom compositor — multi-track layering + per-frame property sampling + affine/crop/blend |
 | Audio Playback | cpal |
-| Transcription | whisper-rs (word/segment timestamps) |
-| Semantic Search | candle / ort + SigLIP2 dual-encoder |
+| Transcription | whisper-rs (requires installed model) |
+| Semantic Search | SigLIP2; fixed-revision model installation and real macOS Rust inference validated |
 
 Playback routing is capability-based. Ordinary media uses WebKit playback;
 timelines that require supported compositing use the Rust compositor; and
@@ -154,14 +148,12 @@ Community-authored JSON + Markdown plugins per video genre — review / tutorial
 
 ## 🖥️ Platforms
 
-| Platform | Status | Notes |
-|:--|:--|:--|
-| **macOS** (Apple Silicon + Intel) | ✅ Primary dev platform | Native ARM64 + x86_64; GPU via Metal (wgpu) |
-| **Windows** (10/11 x86_64) | ✅ Supported | Vulkan / DX12 backend (wgpu); full Tauri 2 support |
-| **Linux** (x86_64) | ✅ Supported | Vulkan backend; AppImage / deb packaging |
-| **Backend / Headless** | ✅ Supported | Pure Rust core runs without GUI for CI / server rendering / Agent batch processing |
-
-<sub>📋 macOS ≥12.0 (Monterey), Windows ≥10 (1809+), Linux glibc ≥2.31</sub>
+| Platform | Evidence boundary |
+|:--|:--|
+| macOS | Primary development platform; dated native/package evidence is linked from release notes. Intel and Apple Silicon artifacts require their own validation. |
+| Windows | Build/installer target; candidate CI and native installer/UI evidence are required before claiming a verified distribution. |
+| Linux | Build target; no new Linux distribution or native GUI verification is claimed here. |
+| Headless core | Rust library APIs and tests can run without the desktop UI; media/GPU/browser capabilities still have runtime requirements. |
 
 ---
 
@@ -169,19 +161,20 @@ Community-authored JSON + Markdown plugins per video genre — review / tutorial
 
 ```
 crates/
+├── opentake-process-tree # Cross-platform child-process lifecycle
 ├── opentake-domain     # Timeline / Track / Clip / Keyframe — pure value semantics
 ├── opentake-ops        # OverwriteEngine / RippleEngine / SnapEngine — edit algorithm layer
 ├── opentake-project    # Project persistence / bundle / archive / export
 ├── opentake-media      # FFmpeg codec / thumbnails / waveform / transcription / semantic search
 ├── opentake-render     # wgpu compositor + text rasterizer
-├── opentake-motion     # Native motion fallback: RGBA frame cache / alpha source scaffold
+├── opentake-motion     # Motion rendering, RGBA cache and transparent publishing
 ├── opentake-agent      # MCP Server + Agent chat + context signal system
 ├── opentake-gen        # Generative AI clients (fal.ai / Replicate / OpenAI)
 ├── opentake-core       # Session management / DI / event bus
 └── src-tauri           # Tauri 2 desktop shell
 ```
 
-Planned external plugin:
+Motion Canvas plugin (implemented constrained runner):
 
 ```
 plugins/
@@ -251,14 +244,14 @@ When porting editing logic, compare against the original Palmier Pro Swift sourc
 # Clone upstream alongside OpenTake (sibling directory)
 cd ..
 git clone https://github.com/palmier-io/palmier-pro.git palmier-pro-upstream
-cd OpenTake
+cd OpenTake-generation
 ```
 
 Expected layout:
 
 ```
 PRIMARY-CN/
-├── OpenTake/                  # This repo
+├── OpenTake-generation/       # This repo
 └── palmier-pro-upstream/      # Upstream Swift source (GPL-3.0)
 ```
 
@@ -303,11 +296,6 @@ cd ..
 cargo tauri dev
 ```
 
-> **Current Status**: `1.0.0-beta.5` candidate. The local editing, preview,
-> persistence, export, authenticated external MCP, ordered Agent conversation,
-> Motion Studio, and reviewed AI workflow verticals are implemented. See the
-> [Beta release notes](docs/releases/1.0.0-beta.5.md)
-> for validation scope and platform/provider limits.
 
 The sibling directory `palmier-pro-upstream/` contains upstream Swift sources for reference during porting.
 
@@ -323,6 +311,7 @@ The sibling directory `palmier-pro-upstream/` contains upstream Swift sources fo
 | `1.0.0-beta.3` | 2026-08-09 | Playback Beta: app-wide Space transport, native HEVC source preview and release-pipeline hardening |
 | `1.0.0-beta.4` | 2026-08-10 | Release candidate: timing and transition persistence, export consistency, signed updater and Windows tract security upgrade |
 | `1.0.0-beta.5` | 2026-08-14 | Agent workflow Beta: persistent authenticated MCP, ordered inline tools, Motion Studio, project previews and interface polish |
+| `1.0.0-beta.6` | [Version record](docs/releases/1.0.0-beta.6.md) | Transparent Motion, ProRes 4444, preview tabs, media views, text/effects/stickers and verified semantic search |
 | *(planned)* `1.0.0` | TBD | Phase 10: Full release — CapCut parity + deep Agent integration |
 
 📖 [Full Roadmap](docs/architecture/ROADMAP.md)

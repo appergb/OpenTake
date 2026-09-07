@@ -68,6 +68,7 @@ fn studio_document_publish_is_visible_atomic_editable_and_reopenable() {
                 fps: 10,
                 start_frame: 2,
                 duration_frames: 6,
+                transparent: true,
                 track_index: None,
             },
             &opentake_media::MediaCancelToken::new(),
@@ -119,7 +120,9 @@ fn studio_document_publish_is_visible_atomic_editable_and_reopenable() {
     );
     assert!(
         middle
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|pixel| [pixel[0], pixel[1], pixel[2]])
             .collect::<std::collections::HashSet<_>>()
             .len()
@@ -143,6 +146,7 @@ fn studio_document_publish_is_visible_atomic_editable_and_reopenable() {
         .unwrap();
     assert_eq!(edited.clip_id, added.clip_id);
     assert_ne!(edited.asset_id, added.asset_id);
+    assert_eq!(edited.output.output_file, "output.mov");
     assert_eq!(
         core.media().entries.len(),
         2,
@@ -204,6 +208,7 @@ fn studio_document_publish_is_visible_atomic_editable_and_reopenable() {
                 fps: 10,
                 start_frame: 0,
                 duration_frames: 2,
+                transparent: false,
                 track_index: None,
             },
             &cancelled,
@@ -223,6 +228,7 @@ fn studio_document_publish_is_visible_atomic_editable_and_reopenable() {
                 fps: 10,
                 start_frame: 0,
                 duration_frames: 2,
+                transparent: false,
                 track_index: None,
             },
             &opentake_media::MediaCancelToken::new(),

@@ -1,5 +1,8 @@
 # web — 模块目录
 
+> 状态：draft · 阶段：implementation-backed · 源码同步：2026-09-06。
+> 当前模块状态见 [OVERVIEW.md](OVERVIEW.md)，候选验收见[当日审计](../../audit/2026-09-06/public-beta-validation.md)。规格文档保留设计语义，不作为全功能完成证明。
+
 > 上级：[模块文档树](../INDEX.md) · [docs 总目录](../../INDEX.md)
 >
 > `web/` = OpenTake 的 **React/TypeScript + Vite + Zustand** 前端（包管理器 pnpm，测试 vitest）。它是架构最上层的**纯消费者**：只持后端 `Timeline` 只读镜像 + 版本号，**不做撤销、不持领域逻辑**；编辑经 `edit_apply` 发往 Rust，由 `timeline_changed` 事件回流刷新。像素↔帧换算放前端，帧↔秒换算放 Rust。非 Tauri 下 `isTauri=false`，命令落内存 fallback。
@@ -10,13 +13,15 @@
 
 - **[OVERVIEW.md](OVERVIEW.md)** — 一句话定位与架构位置、职责边界（做/不做）、关键概念与数据流（手势→editActions→`editApply`→`edit_apply`→`timeline_changed`→`get_timeline`；camelCase 契约；单表面单时钟预览；非 Tauri 降级）、完成状态、代码风格。
 
+当前新增：[Sticker 专项验证](../../audit/2026-09-06/sticker-panel.md)（图片/Lottie 既有媒体路径已接线，新包 GUI 待验收）。
+
 ## 子系统文档
 
 - **[state-stores.md](state-stores.md)** — `store/`：Zustand 各 store + actions + 镜像同步。`projectStore`（只读镜像 + 版本 + canUndo/canRedo，**无撤销栈**）、`uiStore`/`settingsStore`/`clipboardStore`/`recentStore`（纯 UI 态）、`mediaStore`/`libraryStore`（后端镜像）、`editActions`（手势→`EditRequest`，删除健壮化、媒体落轨串行化、复制/剪切/粘贴）、`mediaActions`/`projectActions`（对话框驱动）、`sync.ts`（镜像更新唯一入口 + `forceRefresh`）。
 - **[ipc-api.md](ipc-api.md)** — `lib/` 对接面：`api.ts`（IPC + `isTauri`，`editApply`/`getTimeline`/`getWaveform` try/catch/`compositeFrame`/`secret_*` 事件）、`types.ts`（领域镜像 + `EditRequest` 全变体 + **camelCase 对齐铁律**）、`asset.ts`（`convertFileSrc` 资产协议）、`libraryApi.ts`（全局库通道）、`dialog.ts`（对话框懒加载）、`fallback.ts`（浏览器内存 demo 子集）。
 - **[timeline-ui.md](timeline-ui.md)** — `components/timeline/` + `lib/geometry.ts`/`snap.ts`/`ruler.ts`/`zones.ts`/`clip.ts`：像素↔帧（前端、截断）、Canvas 绘制（`timelineCanvas`/`clipRenderer`/`rulerCanvas`）、吸附/多探针、命中测试、刮擦/缩放/平移/移动/修剪/切割与触控板手势、轨道头、右键菜单、媒体交换。
 - **[preview-ui.md](preview-ui.md)** — `components/preview/`：单表面 + 单时钟模型，`previewEngine`（rAF 三态 PLAY/SCRUB/PAUSE）、`timelinePlayback`（纯逻辑）、`TimelinePlaybackLayer`（被动 DOM 注册）、`previewLayerStyles`（样式采样）、`Preview`（单素材/合成两模式 + 运输控制）。
-- **[panels-ui.md](panels-ui.md)** — `components/` 其余：inspector（检查器 + 关键帧面板 + 可拖拽数值 + 文本）、media（媒体面板 + 全局库页 + 星标）、toolbar、home（启动器）、settings（含 BYOK keychain）、agent（占位）、shell（五面板布局 + 分割条 + 标题栏）、ui（lucide `Icon` / `HoverButton` / `Dropdown` / `PanelShell`）。
+- **[panels-ui.md](panels-ui.md)** — `components/` 其余：inspector（检查器 + 关键帧面板 + 可拖拽数值 + 文本）、media（媒体面板 + 全局库页 + 星标）、toolbar、home（启动器）、settings（含 BYOK keychain）、agent（有序对话与工具结果）、shell（五面板布局 + 分割条 + 标题栏）、ui（lucide `Icon` / `HoverButton` / `Dropdown` / `PanelShell`）。
 - **[hooks-i18n-theme.md](hooks-i18n-theme.md)** — `hooks/`（`useAutosave` 防抖保存、`useKeyboardShortcuts` 快捷键）+ `i18n/`（zh-CN 默认 / en）+ `lib/theme.ts`（`AppTheme` 数值常量单一源）+ `styles/`（`tokens.css` CSS 变量、`global.css` 全局基础）。
 
 ## 规格
@@ -84,7 +89,7 @@ web/src/
 │   ├── toolbar/            顶部工具栏
 │   ├── home/               启动器
 │   ├── settings/           设置（含 BYOK）
-│   ├── agent/              Agent 面板（占位）
+│   ├── agent/              Agent 面板（有序对话与工具结果）
 │   ├── shell/              五面板布局 + 分割条 + 标题栏 + 视图菜单
 │   └── ui/                 通用原始件（lucide Icon / HoverButton / Dropdown / PanelShell）
 ├── hooks/                  useAutosave / useKeyboardShortcuts

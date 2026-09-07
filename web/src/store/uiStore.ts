@@ -169,6 +169,120 @@ function settledFrame(frame: number): number {
   return Math.max(0, Math.round(frame));
 }
 
+const PREVIEW_TIMELINE_TAB_ID = "timeline";
+
+export function previewMediaTabId(mediaId: string): string {
+  return `media_${mediaId}`;
+}
+
+export function previewTabMediaId(tabId: string): string | null {
+  return tabId.startsWith("media_") && tabId.length > "media_".length
+    ? tabId.slice("media_".length)
+    : null;
+}
+
+function dedupePreviewTabIds(previewTabIds: string[]): string[] {
+  return [...new Set(previewTabIds.filter((id) => id !== ""))];
+}
+
+function previewHistoryWithActivation(previewTabHistory: string[], mediaId: string): string[] {
+  return [...previewTabHistory.filter((id) => id !== mediaId), mediaId];
+}
+
+interface EffectivePreviewState {
+  previewTabIds: string[];
+  previewTabHistory: string[];
+  previewActiveTabId: string;
+}
+
+export function resolveEffectivePreviewState(
+  state: Pick<
+    UiState,
+    | "previewTabHistory"
+    | "previewTabIds"
+    | "previewActiveTabId"
+    | "previewMediaId"
+  >,
+): EffectivePreviewState {
+  const previewTabIds = dedupePreviewTabIds(state.previewTabIds);
+  const previewMediaId = state.previewMediaId;
+  const activeMediaId = previewTabMediaId(state.previewActiveTabId);
+  const activeTabValid =
+    state.previewActiveTabId === PREVIEW_TIMELINE_TAB_ID
+      ? previewMediaId === null
+      : activeMediaId !== null && previewTabIds.includes(activeMediaId);
+  const effectivePreviewTabIds =
+    previewMediaId &&
+    !previewTabIds.includes(previewMediaId) &&
+    (previewTabIds.length === 0 || !activeTabValid)
+      ? [...previewTabIds, previewMediaId]
+      : previewTabIds;
+  const previewTabHistory = state.previewTabHistory.filter((id) =>
+    effectivePreviewTabIds.includes(id),
+  );
+  const effectivePreviewTabHistory =
+    previewMediaId &&
+    effectivePreviewTabIds.includes(previewMediaId) &&
+    !previewTabHistory.includes(previewMediaId)
+      ? [...previewTabHistory, previewMediaId]
+      : previewTabHistory;
+  const effectivePreviewActiveTabId =
+    state.previewActiveTabId !== PREVIEW_TIMELINE_TAB_ID &&
+    activeMediaId !== null &&
+    effectivePreviewTabIds.includes(activeMediaId)
+      ? state.previewActiveTabId
+      : previewMediaId && effectivePreviewTabIds.includes(previewMediaId)
+        ? previewMediaTabId(previewMediaId)
+        : PREVIEW_TIMELINE_TAB_ID;
+
+  return {
+    previewTabIds: effectivePreviewTabIds,
+    previewTabHistory: effectivePreviewTabHistory,
+    previewActiveTabId: effectivePreviewActiveTabId,
+  };
+}
+
+function previewSelectionState(
+  state: Pick<
+    UiState,
+    | "previewTabHistory"
+    | "previewTabIds"
+    | "previewActiveTabId"
+    | "previewMediaId"
+  >,
+  previewTabIds: string[],
+  tabId: string,
+  options?: { updateHistory?: boolean },
+) {
+  const normalizedPreviewTabIds = dedupePreviewTabIds(previewTabIds);
+  const normalizedPreviewTabHistory = state.previewTabHistory.filter((id) =>
+    normalizedPreviewTabIds.includes(id),
+  );
+  if (tabId === PREVIEW_TIMELINE_TAB_ID) {
+    return {
+      previewTabIds: normalizedPreviewTabIds,
+      previewActiveTabId: PREVIEW_TIMELINE_TAB_ID,
+      previewMediaId: null,
+      previewTabHistory: normalizedPreviewTabHistory,
+      selectedMediaAssetIds: new Set<string>(),
+    };
+  }
+  const mediaId = previewTabMediaId(tabId);
+  if (!mediaId || !normalizedPreviewTabIds.includes(mediaId)) return null;
+  return {
+    previewTabIds: normalizedPreviewTabIds,
+    previewActiveTabId: tabId,
+    previewMediaId: mediaId,
+    previewTabHistory:
+      options?.updateHistory === false
+        ? normalizedPreviewTabHistory
+        : previewHistoryWithActivation(normalizedPreviewTabHistory, mediaId),
+    selectedClipIds: new Set<string>(),
+    selectedFolderIds: new Set<string>(),
+    selectedMediaAssetIds: new Set([mediaId]),
+  };
+}
+
 interface UiState {
   // Top-level navigation
   view: AppView;
@@ -240,9 +354,17 @@ interface UiState {
    *  timeline W/H. */
   previewQualityShortEdge: number | null;
   setPreviewQualityShortEdge: (shortEdge: number | null) => void;
+  /** Open media preview tabs in insertion order; the timeline tab is implicit. */
+  previewTabIds: string[];
+  /** Most-recently activated media preview tabs; timeline is implicit. */
+  previewTabHistory: string[];
   /** Media asset previewed in the canvas (clicked in the media panel). `null`
    *  shows the timeline composite. Mirrors upstream `openPreviewTab(mediaAsset)`. */
   previewMediaId: string | null;
+  openPreviewTab: (mediaId: string) => void;
+  selectPreviewTab: (tabId: string) => void;
+  closePreviewTab: (tabId: string) => void;
+  closeAllPreviewTabs: () => void;
   setPreviewMedia: (id: string | null) => void;
   /** Active on-canvas subject rectangle for the Inspector motion tracker. */
   motionTrackingSelection: MotionTrackingSelection | null;
@@ -438,6 +560,8 @@ export const createEditorUiStore = () => create<UiState>((set, get) => ({
   canvasZoom: 1,
   canvasOffset: { width: 0, height: 0 },
   previewQualityShortEdge: null,
+  previewTabIds: [],
+  previewTabHistory: [],
   previewMediaId: null,
   motionTrackingSelection: null,
   setMotionTrackingSelection: (motionTrackingSelection) => set({ motionTrackingSelection }),
@@ -460,7 +584,7 @@ export const createEditorUiStore = () => create<UiState>((set, get) => ({
   mediaTab: "material",
   mediaSubTab: "import",
   inspectorTab: "video",
-  previewActiveTabId: "timeline",
+  previewActiveTabId: PREVIEW_TIMELINE_TAB_ID,
 
   cropEditingActive: false,
   setCropEditingActive: (cropEditingActive) => set({ cropEditingActive }),
@@ -536,7 +660,80 @@ export const createEditorUiStore = () => create<UiState>((set, get) => ({
     }),
   selectMediaAssets: (selectedMediaAssetIds) => set({ selectedMediaAssetIds }),
   clearMediaSelection: () => set({ selectedMediaAssetIds: new Set() }),
-  setPreviewMedia: (previewMediaId) => set({ previewMediaId }),
+  openPreviewTab: (mediaId) =>
+    set((state) => {
+      if (!mediaId) return {};
+      const effectivePreviewState = resolveEffectivePreviewState(state);
+      const previewTabIds = effectivePreviewState.previewTabIds.includes(mediaId)
+        ? effectivePreviewState.previewTabIds
+        : [...effectivePreviewState.previewTabIds, mediaId];
+      return (
+        previewSelectionState(state, previewTabIds, previewMediaTabId(mediaId)) ?? {}
+      );
+    }),
+  selectPreviewTab: (tabId) =>
+    set((state) => {
+      const effectivePreviewState = resolveEffectivePreviewState(state);
+      return (
+        previewSelectionState(state, effectivePreviewState.previewTabIds, tabId) ?? {}
+      );
+    }),
+  closePreviewTab: (tabId) =>
+    set((state) => {
+      if (tabId === PREVIEW_TIMELINE_TAB_ID) return {};
+      const mediaId = previewTabMediaId(tabId);
+      if (!mediaId) return {};
+      const effectivePreviewState = resolveEffectivePreviewState(state);
+      const closingIndex = effectivePreviewState.previewTabIds.indexOf(mediaId);
+      if (closingIndex < 0) return {};
+      const previewTabIds = effectivePreviewState.previewTabIds.filter((id) => id !== mediaId);
+      if (effectivePreviewState.previewActiveTabId !== tabId) {
+        return {
+          ...(previewSelectionState(
+            state,
+            previewTabIds,
+            effectivePreviewState.previewActiveTabId,
+            { updateHistory: false },
+          ) ?? {}),
+          previewTabHistory: effectivePreviewState.previewTabHistory.filter((id) => id !== mediaId),
+        };
+      }
+      const previewTabHistory = effectivePreviewState.previewTabHistory.filter((id) => id !== mediaId);
+      const fallbackMediaId =
+        previewTabHistory[previewTabHistory.length - 1] ??
+        (closingIndex > 0 ? effectivePreviewState.previewTabIds[closingIndex - 1] ?? null : null);
+      return (
+        previewSelectionState(
+          { ...state, previewTabHistory },
+          previewTabIds,
+          fallbackMediaId ? previewMediaTabId(fallbackMediaId) : PREVIEW_TIMELINE_TAB_ID,
+          { updateHistory: false },
+        ) ?? {}
+      );
+    }),
+  closeAllPreviewTabs: () =>
+    set((state) => previewSelectionState(state, [], PREVIEW_TIMELINE_TAB_ID) ?? {}),
+  setPreviewMedia: (previewMediaId) => {
+    if (previewMediaId === null) {
+    set((state) =>
+        previewSelectionState(
+          state,
+          resolveEffectivePreviewState(state).previewTabIds,
+          PREVIEW_TIMELINE_TAB_ID,
+        ) ?? {},
+      );
+      return;
+    }
+    set((state) => {
+      const effectivePreviewState = resolveEffectivePreviewState(state);
+      const previewTabIds = effectivePreviewState.previewTabIds.includes(previewMediaId)
+        ? effectivePreviewState.previewTabIds
+        : [...effectivePreviewState.previewTabIds, previewMediaId];
+      return (
+        previewSelectionState(state, previewTabIds, previewMediaTabId(previewMediaId)) ?? {}
+      );
+    });
+  },
 
   // Marking a range is its own selection mode: upstream's ruler range gesture
   // (`beginTimelineRangeSelection`) clears clip + gap selection when it starts.
@@ -710,6 +907,9 @@ export const createEditorUiStore = () => create<UiState>((set, get) => ({
       trackDisplayHeights: {},
       canvasZoom: 1,
       canvasOffset: { width: 0, height: 0 },
+      previewTabIds: [],
+      previewTabHistory: [],
+      previewActiveTabId: PREVIEW_TIMELINE_TAB_ID,
       previewMediaId: null,
       motionTrackingSelection: null,
       focusedPanel: "timeline",

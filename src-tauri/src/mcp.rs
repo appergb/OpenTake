@@ -984,6 +984,7 @@ impl TauriMotionDocumentOperation {
                     start_frame: request.start_frame.expect("validated at Agent boundary"),
                     duration_frames: request.duration_frames,
                     track_index: request.track_index,
+                    transparent: request.transparent,
                 },
                 cancel,
             )
@@ -1533,20 +1534,38 @@ impl MediaBridge for TauriMediaBridge {
             } else {
                 SearchIndexState::Ready
             };
-            let moments: Vec<SearchVisualHit> =
-                crate::search::visual_hits_by_id(&self.engine, &visual_paths, query, fps, limit)
-                    .into_iter()
-                    .map(|h| SearchVisualHit {
-                        media_ref: h.media_id,
-                        start_seconds: h.start_sec,
-                        end_seconds: h.end_sec,
-                        score: h.score,
-                        is_image: h.is_image,
-                    })
-                    .collect();
+            let (visual_hits, visual_failed) = match crate::search::visual_hits_by_id(
+                &self.engine,
+                &visual_paths,
+                query,
+                fps,
+                limit,
+            ) {
+                Ok(hits) => (hits, false),
+                Err(_) => (Vec::new(), true),
+            };
+            let status = if visual_failed {
+                SearchIndexState::Failed
+            } else {
+                status
+            };
+            let moments: Vec<SearchVisualHit> = visual_hits
+                .into_iter()
+                .map(|h| SearchVisualHit {
+                    media_ref: h.media_id,
+                    start_seconds: h.start_sec,
+                    end_seconds: h.end_sec,
+                    score: h.score,
+                    is_image: h.is_image,
+                })
+                .collect();
             // `indexedAssets` is only meaningful when the model is loaded
             // (upstream sets it only when an embedder spec exists).
-            let indexed_opt = if installed { Some(indexed) } else { None };
+            let indexed_opt = if installed && !visual_failed {
+                Some(indexed)
+            } else {
+                None
+            };
             (status, indexable, indexed_opt, moments)
         };
 
@@ -1761,7 +1780,12 @@ impl TauriMediaBridge {
                 "source.url staging identity changed before probe",
             ));
         }
-        let probed = probe(staged.file(), &extension, expected_kind)?;
+        let probed = if expected_kind == "lottie" {
+            crate::media::probe_lottie_file(staged.path(), staged.file())
+                .map_err(|error| BridgeError::new(format!("Invalid Lottie document: {error}")))?
+        } else {
+            probe(staged.file(), &extension, expected_kind)?
+        };
         cancelled_checkpoint(cancel)?;
         if !project_media
             .matches_leaf(&staged)
@@ -1922,12 +1946,15 @@ impl TauriMediaBridge {
             .unwrap_or_default();
         if importable_clip_type(&file_url).is_none() {
             return Err(BridgeError::new(format!(
-                "Unsupported file extension '.{ext}'. Supported: mov/mp4/m4v, mp3/wav/aac/m4a, png/jpg/jpeg/tiff/heic."
+                "Unsupported file extension '.{ext}'. Supported: mov/mp4/m4v, mp3/wav/aac/m4a, png/jpg/jpeg/tiff/heic, json/lottie."
             )));
         }
         let source = RetainedExternalSource::open(&file_url)?;
         cancelled_checkpoint(cancel)?;
-        let probe =
+        let probe = if crate::media::is_lottie_path(&file_url) {
+            crate::media::probe_lottie_file(&file_url, source.file())
+                .map_err(|error| BridgeError::new(format!("Invalid Lottie document: {error}")))?
+        } else {
             match self
                 .engine
                 .probe_file_cancellable(source.file(), cancel, MCP_MEDIA_PROBE_TIMEOUT)
@@ -1944,7 +1971,8 @@ impl TauriMediaBridge {
                     return Err(BridgeError::new("source.path import was cancelled"));
                 }
                 Err(_) => ProbedMedia::default(),
-            };
+            }
+        };
         cancelled_checkpoint(cancel)?;
         let display_name = name
             .map(str::to_owned)
@@ -2119,7 +2147,10 @@ impl TauriMediaBridge {
                 "source.bytes staging identity changed before probe",
             ));
         }
-        let probe =
+        let probe = if crate::media::is_lottie_path(staged.path()) {
+            crate::media::probe_lottie_file(staged.path(), staged.file())
+                .map_err(|error| BridgeError::new(format!("Invalid Lottie document: {error}")))?
+        } else {
             match self
                 .engine
                 .probe_file_cancellable(staged.file(), cancel, MCP_MEDIA_PROBE_TIMEOUT)
@@ -2136,7 +2167,8 @@ impl TauriMediaBridge {
                     return Err(BridgeError::new("source.bytes import was cancelled"));
                 }
                 Err(_) => ProbedMedia::default(),
-            };
+            }
+        };
         cancelled_checkpoint(cancel)?;
         if !project_media
             .matches_leaf(&staged)
@@ -2250,6 +2282,8 @@ fn allowed_url_extension(extension: &str) -> Option<(&'static str, &'static str)
         "jpg" | "jpeg" => Some(("jpg", "image")),
         "tiff" => Some(("tiff", "image")),
         "heic" => Some(("heic", "image")),
+        "json" => Some(("json", "lottie")),
+        "lottie" => Some(("lottie", "lottie")),
         _ => None,
     }
 }
@@ -2310,7 +2344,7 @@ fn resolve_url_media_type(
             .map(|value| {
                 allowed_url_extension(value).ok_or_else(|| {
                     BridgeError::new(format!(
-                        "Unsupported source.url extension '.{value}'. Supported: mov/mp4/m4v, mp3/wav/aac/m4a, png/jpg/jpeg/tiff/heic."
+                        "Unsupported source.url extension '.{value}'. Supported: mov/mp4/m4v, mp3/wav/aac/m4a, png/jpg/jpeg/tiff/heic, json/lottie."
                     ))
                 })
             })
@@ -2919,7 +2953,7 @@ fn encode_jpeg(frame: &DecodedFrame) -> Option<Vec<u8>> {
 /// to feed the alpha-less JPEG encoder.
 fn rgba_to_rgb(rgba: &[u8]) -> Vec<u8> {
     let mut rgb = Vec::with_capacity(rgba.len() / 4 * 3);
-    for px in rgba.chunks_exact(4) {
+    for px in rgba.as_chunks::<4>().0.iter() {
         rgb.extend_from_slice(&px[..3]);
     }
     rgb
@@ -5212,6 +5246,33 @@ mod tests {
         assert_eq!(manifest.entries.len(), 1);
         assert_eq!(manifest.entries[0].name, "My Clip");
         assert_eq!(manifest.entries[0].kind, ClipType::Video);
+    }
+
+    #[test]
+    fn import_from_path_lottie_registers_valid_animation_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lottie = tmp.path().join("Title.json");
+        std::fs::write(
+            &lottie,
+            br#"{"v":"5.5.2","fr":2,"ip":0,"op":2,"w":16,"h":16,"ddd":0,"assets":[],"layers":[]}"#,
+        )
+        .unwrap();
+        let core = AppCore::new();
+        core.save_project(Some(tmp.path().join("LottiePath.opentake")))
+            .unwrap();
+        let bridge =
+            TauriMediaBridge::new(core, tmp.path().join("cache"), tmp.path().join("models"));
+
+        let out = bridge
+            .import_from_path(&lottie.to_string_lossy(), None, None)
+            .expect("Lottie path import");
+
+        assert_eq!(out.asset_count, 1);
+        let manifest = bridge.core.media();
+        assert_eq!(manifest.entries.len(), 1);
+        assert_eq!(manifest.entries[0].kind, ClipType::Lottie);
+        assert_eq!(manifest.entries[0].source_width, Some(16));
+        assert_eq!(manifest.entries[0].source_height, Some(16));
     }
 
     #[test]

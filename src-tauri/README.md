@@ -1,5 +1,9 @@
 # src-tauri — Tauri 2 desktop shell
 
+> Status: draft · Stage: implementation-backed · Updated: 2026-09-06.
+> This page describes the shell boundary and early command examples. Use the [current module index](../docs/modules/src-tauri/INDEX.md), [export contract](../docs/modules/src-tauri/export.md), and [candidate validation](../docs/audit/2026-09-06/public-beta-validation.md) for the full current surface. Command registration lives in `src/lib.rs`; the table below is not an exhaustive catalog.
+
+
 The Tauri 2 desktop shell for OpenTake. It is a workspace member
 (`members = [..., "src-tauri"]` in `../Cargo.toml`) and holds the authoritative
 [`opentake_core::AppCore`] as managed state, exposing a thin `#[tauri::command]`

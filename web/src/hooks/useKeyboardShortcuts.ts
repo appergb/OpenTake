@@ -497,9 +497,9 @@ export function useKeyboardShortcuts() {
         ui.focusPanel("media");
         if (next.dataset.mediaFolderId) {
           ui.selectMediaAssets(new Set());
+          ui.setPreviewMedia(null);
           useEditorUiStore.setState({
             selectedFolderIds: new Set([next.dataset.mediaFolderId]),
-            previewMediaId: null,
           });
         } else if (next.dataset.mediaAssetId) {
           ui.selectMediaAssets(new Set([next.dataset.mediaAssetId]));

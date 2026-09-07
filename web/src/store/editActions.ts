@@ -732,30 +732,29 @@ export async function redo() {
   if (!isTauri) await forceRefresh();
 }
 
-/** Split at the current playhead (Toolbar / ⌘K). Splits the SELECTED clips the
- *  playhead intersects; if nothing is selected, splits every clip under the
- *  playhead (so split works without first selecting — matches editor norms).
- *  A clip the playhead doesn't intersect is a no-op in the core. */
+/** Split at the current playhead (Toolbar / ⌘K). Upstream only acts on the
+ *  selected clips; with no selection this is an intentional no-op. A selected
+ *  clip the playhead doesn't intersect is a no-op in the core. */
 export async function splitAtPlayhead() {
   const ui = useEditorUiStore.getState();
   const frame = Math.round(ui.activeFrame);
+  if (ui.selectedClipIds.size === 0) return;
   const ids = clipsUnderPlayhead().map((clip) => clip.id);
   await splitClips(ids, frame);
 }
 
-/** Clips the playhead is strictly inside, restricted to the selection when one
- *  exists (else all clips under the playhead) — the target set for trim-to-
- *  playhead, matching `splitAtPlayhead`'s "act on what's under the playhead". */
+/** Selected clips the playhead is strictly inside. Upstream playhead-relative
+ *  edits are selection-driven; an empty selection intentionally yields none. */
 function clipsUnderPlayhead(): Clip[] {
   const ui = useEditorUiStore.getState();
   const frame = Math.round(ui.activeFrame);
   const selected = new Set(ui.selectedClipIds);
-  const restrict = selected.size > 0;
+  if (selected.size === 0) return [];
   const out: Clip[] = [];
   for (const track of currentTimeline().tracks) {
     for (const c of track.clips) {
       if (frame <= c.startFrame || frame >= c.startFrame + c.durationFrames) continue;
-      if (restrict && !selected.has(c.id)) continue;
+      if (!selected.has(c.id)) continue;
       out.push(c);
     }
   }

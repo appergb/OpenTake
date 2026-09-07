@@ -50,6 +50,7 @@ function inspectClip(
   const enabledEffects = effects.filter((effect) => effect.enabled);
   const isLottie = clip.mediaType === "lottie" || clip.sourceClipType === "lottie";
   const needsRust =
+    isLottie ||
     clip.mediaType === "text" ||
     clip.sourceClipType === "text" ||
     clip.colorGrade !== undefined ||
@@ -58,7 +59,6 @@ function inspectClip(
     masks.length > 0 ||
     enabledEffects.length > 0;
 
-  if (isLottie) reasons.push({ code: "lottie", clipId: clip.id });
   for (const effect of effects) {
     if (!isAdvertisedEffectName(effect.name)) {
       reasons.push({ code: "unknown-effect", clipId: clip.id, effect: effect.name });
@@ -99,32 +99,27 @@ export function resolveTimelinePlaybackRoute(
     (item) => item.reversed || item.speedChanged,
   );
 
-  if (needsRust) {
-    for (const item of capabilities) {
-      if (item.reversed) {
-        reasons.push({ code: "composited-reverse", clipId: item.clip.id });
-      }
-      if (item.speedChanged) {
-        reasons.push({
-          code: "composited-speed",
-          clipId: item.clip.id,
-          speed: item.clip.speed,
-        });
-      }
-    }
-  }
-
   if (reasons.length > 0) return { kind: "unsupported", reasons };
   if (!needsRust) {
+    if (requiresNativeVideoStack && hasTemporalRemapping && hasVideo) {
+      if (!runtime.rustAvailable) {
+        return { kind: "unsupported", reasons: [{ code: "rust-unavailable" }] };
+      }
+      if (!runtime.rustEnabled) {
+        return { kind: "unsupported", reasons: [{ code: "rust-disabled" }] };
+      }
+      return { kind: "rust", reasons: [] };
+    }
+
     // A single ordinary video track stays on the low-overhead WebKit route.
     // Multiple video tracks need the native compositor for deterministic
-    // decode/layer parity; an explicit WebKit decode error also retries the
-    // exact revision through FFmpeg. Temporal remapping stays on WebKit until
-    // native reverse/speed parity exists.
+    // decode/layer parity, even with temporal remapping. An explicit WebKit
+    // decode error retries the exact revision through FFmpeg, but ordinary
+    // single-video reverse/speed playback stays on WebKit.
     if (
+      (requiresNativeVideoStack || !hasTemporalRemapping) &&
       (requiresNativeVideoStack || runtime.forceRust === true) &&
       hasVideo &&
-      !hasTemporalRemapping &&
       runtime.rustAvailable &&
       runtime.rustEnabled
     ) {

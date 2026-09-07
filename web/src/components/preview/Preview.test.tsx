@@ -13,6 +13,9 @@ const store = vi.hoisted(() => ({
     currentFrame: 42,
     isPlaying: false,
     isScrubbing: false,
+    previewTabIds: [] as string[],
+    previewTabHistory: [] as string[],
+    previewActiveTabId: "timeline",
     previewMediaId: null as string | null,
     selectedClipIds: new Set<string>(),
     canvasZoom: 1,
@@ -60,6 +63,52 @@ vi.mock("../../store/uiStore", () => ({
   useEditorUiStore: Object.assign((selector: (state: typeof store.ui) => unknown) => selector(store.ui), {
     getState: () => store.ui,
   }),
+  resolveEffectivePreviewState: (state: {
+    previewTabIds?: string[];
+    previewTabHistory?: string[];
+    previewActiveTabId?: string;
+    previewMediaId?: string | null;
+  }) => {
+    const previewTabIds = [...new Set((state.previewTabIds ?? []).filter(Boolean))];
+    const previewMediaId = state.previewMediaId ?? null;
+    const previewActiveTabId = state.previewActiveTabId ?? "timeline";
+    const activeMediaId =
+      previewActiveTabId.startsWith("media_") && previewActiveTabId.length > "media_".length
+        ? previewActiveTabId.slice("media_".length)
+        : null;
+    const activeTabValid =
+      previewActiveTabId === "timeline"
+        ? previewMediaId === null
+        : activeMediaId !== null && previewTabIds.includes(activeMediaId);
+    const effectivePreviewTabIds =
+      previewMediaId &&
+      !previewTabIds.includes(previewMediaId) &&
+      (previewTabIds.length === 0 || !activeTabValid)
+        ? [...previewTabIds, previewMediaId]
+        : previewTabIds;
+    const previewTabHistory = (state.previewTabHistory ?? []).filter((id) =>
+      effectivePreviewTabIds.includes(id),
+    );
+    const effectivePreviewTabHistory =
+      previewMediaId &&
+      effectivePreviewTabIds.includes(previewMediaId) &&
+      !previewTabHistory.includes(previewMediaId)
+        ? [...previewTabHistory, previewMediaId]
+        : previewTabHistory;
+    const effectivePreviewActiveTabId =
+      previewActiveTabId !== "timeline" &&
+      activeMediaId !== null &&
+      effectivePreviewTabIds.includes(activeMediaId)
+        ? previewActiveTabId
+        : previewMediaId && effectivePreviewTabIds.includes(previewMediaId)
+          ? `media_${previewMediaId}`
+          : "timeline";
+    return {
+      previewTabIds: effectivePreviewTabIds,
+      previewTabHistory: effectivePreviewTabHistory,
+      previewActiveTabId: effectivePreviewActiveTabId,
+    };
+  },
 }));
 
 vi.mock("../../store/mediaStore", () => ({
@@ -135,6 +184,24 @@ function track(over: Partial<Track> & { id: string; type: ClipType; clips: Clip[
 
 function timeline(tracks: Track[]): Timeline {
   return { fps: 30, width: 1920, height: 1080, settingsConfigured: true, tracks };
+}
+
+function temporalCompositorTimeline(): Timeline {
+  return timeline([
+    track({
+      id: "text-1",
+      type: "text",
+      clips: [
+        clip({
+          id: "text-remap",
+          mediaRef: "base",
+          mediaType: "text",
+          reversed: true,
+          speed: 1.5,
+        }),
+      ],
+    }),
+  ]);
 }
 
 describe("Preview timeline rendering", () => {
@@ -283,35 +350,58 @@ describe("Preview timeline rendering", () => {
     expect(html.match(/data-rust-frame-slot=/g)).toHaveLength(2);
   });
 
-  it("renders a user visible unsupported surface instead of incomplete DOM media", () => {
+  it("renders Lottie timelines through the native compositor", () => {
     store.timeline = timeline([
       track({
         id: "v1",
-        type: "text",
-        clips: [clip({ id: "text-clip", mediaRef: "base", mediaType: "text", reversed: true })],
+        type: "lottie",
+        clips: [clip({ id: "lottie-clip", mediaRef: "base", mediaType: "lottie" })],
       }),
     ]);
+
+    const html = renderToStaticMarkup(<Preview />);
+
+    expect(html).not.toContain('data-testid="unsupported-playback-surface"');
+    expect(html).toContain('data-playback-surface="native"');
+    expect(html).not.toContain("<video");
+  });
+
+  it("uses the native surface for a temporal compositor timeline when Rust is available", () => {
+    store.timeline = temporalCompositorTimeline();
+
+    const html = renderToStaticMarkup(<Preview />);
+
+    expect(html).not.toContain('data-testid="unsupported-playback-surface"');
+    expect(html).toContain('data-playback-surface="native"');
+    expect(html).not.toMatch(/aria-label="播放\/暂停 \(空格\)"[^>]*disabled/);
+    expect(html).not.toMatch(/aria-label="截取当前帧到素材库"[^>]*disabled/);
+  });
+
+  it("keeps the typed unsupported surface for a temporal compositor timeline when Rust is unavailable", () => {
+    store.playbackCapability = { checked: true, available: false, endpoint: null };
+    store.timeline = temporalCompositorTimeline();
 
     const html = renderToStaticMarkup(<Preview />);
 
     expect(html).toContain('data-testid="unsupported-playback-surface"');
-    expect(html).toContain("当前时间线无法完整预览");
-    expect(html).not.toContain("<video");
+    expect(html).not.toContain('data-playback-surface="native"');
+    expect(html).toMatch(/aria-label="播放\/暂停 \(空格\)"[^>]*disabled/);
+    expect(html).toMatch(/aria-label="截取当前帧到素材库"[^>]*disabled/);
   });
 
-  it("disables play and capture for unsupported playback", () => {
+  it("keeps play and capture enabled for native Lottie playback", () => {
     store.timeline = timeline([
       track({
         id: "v1",
-        type: "text",
-        clips: [clip({ id: "text-clip", mediaRef: "base", mediaType: "text", reversed: true })],
+        type: "lottie",
+        clips: [clip({ id: "lottie-clip", mediaRef: "base", mediaType: "lottie" })],
       }),
     ]);
 
     const html = renderToStaticMarkup(<Preview />);
 
-    expect(html).toMatch(/aria-label="播放\/暂停 \(空格\)"[^>]*disabled/);
-    expect(html).toMatch(/aria-label="截取当前帧到素材库"[^>]*disabled/);
+    expect(html).not.toMatch(/aria-label="播放\/暂停 \(空格\)"[^>]*disabled/);
+    expect(html).not.toMatch(/aria-label="截取当前帧到素材库"[^>]*disabled/);
   });
 
   it("keeps play available so a compositor-only timeline can retry native startup", () => {

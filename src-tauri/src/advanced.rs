@@ -3283,7 +3283,7 @@ fn decode_color_sample(
 fn mean_linear_rgb(frame: &RgbaFrame) -> Result<Rgb, AdvancedWorkflowError> {
     let mut sum = [0.0_f64; 3];
     let mut weight = 0.0_f64;
-    for pixel in frame.rgba.chunks_exact(4) {
+    for pixel in frame.rgba.as_chunks::<4>().0.iter() {
         let alpha = f64::from(pixel[3]) / 255.0;
         if alpha <= 0.01 {
             continue;
@@ -3832,13 +3832,19 @@ fn encode_matte_frame(
             .infer(&frame, cancel)
             .map_err(media_workflow_error)?;
         let mut rgba = Vec::with_capacity(matte.alpha.len() * 4);
-        for (rgb, alpha) in matte.foreground_rgb.chunks_exact(3).zip(matte.alpha) {
+        for (rgb, alpha) in matte
+            .foreground_rgb
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .zip(matte.alpha)
+        {
             rgba.extend_from_slice(rgb);
             rgba.push(alpha);
         }
         frame = RgbaFrame::new(frame.width, frame.height, rgba);
     } else {
-        for pixel in frame.rgba.chunks_exact_mut(4) {
+        for pixel in frame.rgba.as_chunks_mut::<4>().0.iter_mut() {
             pixel[3] = 255;
         }
     }

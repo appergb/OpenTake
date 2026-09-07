@@ -1,21 +1,18 @@
 # Playback engine architecture
 
-> Current reviewed state: 2026-08-10. The original 2026-07-04 default-off
-> MJPEG design is historical; this document records the Wave 1A implementation.
+> Status: draft · Stage: implementation-backed · Source review: 2026-09-06.
+> Earlier dated QA remains historical. Current candidate evidence is in the [public Beta validation record](../audit/2026-09-06/public-beta-validation.md).
 
 ## Capability route is the sole authority
 
 `resolveTimelinePlaybackRoute` selects exactly one route before runtime
 preference or fallback is considered:
 
-- `webkit`: one ordinary visible video track plus image/audio, including
-  temporal-only reverse or speed changes that do not require compositing.
-- `rust`: content requiring the implemented compositor path: text, color grade,
-  chroma key, up to four linear/circle masks, or multiple visible video tracks.
-  A WebKit video decode failure may also retry the exact project revision here.
-- `unsupported`: Lottie, enabled generic effects, polygon masks, more than four
-  masks, or any timeline that combines compositing with reverse or a non-unit
-  speed. Rust unavailable/disabled is also unsupported for Rust-only content.
+- `webkit`: ordinary video playback, including single-track reverse/speed changes where no compositor-only property requires Rust.
+- `rust`: text, Lottie, color grade, chroma key, stabilization, supported masks/effects and native video stacks when the runtime supports them. Composited temporal remapping is implemented; it is no longer rejected merely because speed differs from one or the clip is reversed.
+- `unsupported`: unknown effect names, more than four masks, or a required Rust path that is unavailable/disabled. A multi-video temporal stack requires Rust and fails closed if unavailable.
+
+The exact branching, including ordinary multi-video runtime fallback behavior, is defined by [playbackRoute.ts](../../web/src/components/preview/playbackRoute.ts). Missing media/source failures are also handled by the native session, rather than silently omitting authored layers.
 
 Unsupported capability is fail closed. It receives a localized explanation and
 disabled Play/Capture/Space controls; it is not silently rendered by an engine

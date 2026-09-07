@@ -78,6 +78,18 @@ type DropTarget =
 type DragState =
   | { kind: "scrub" }
   | {
+      kind: "rangeMark";
+      anchorFrame: number;
+      currentFrame: number;
+      previousRange: TimelineRange | null;
+    }
+  | {
+      kind: "rangeEdge";
+      edge: TimelineRangeEdge;
+      range: TimelineRange;
+      currentFrame: number;
+    }
+  | {
       kind: "move";
       hit: ClipHit;
       grabFrame: number;
@@ -90,7 +102,13 @@ type DragState =
       /** Where the drag will land (existing track or a new track below). */
       dropTarget: DropTarget;
     }
-  | { kind: "trimLeft" | "trimRight"; hit: ClipHit; startTrim: number; deltaFrames: number }
+  | {
+      kind: "trimLeft" | "trimRight";
+      hit: ClipHit;
+      startTrim: number;
+      deltaFrames: number;
+      propagateToLinked: boolean;
+    }
   | { kind: "marquee"; startDocX: number; startDocY: number; curDocX: number; curDocY: number }
   | {
       kind: "audioVolumeKf";
@@ -113,6 +131,7 @@ export interface TimelineCursorState {
   toolMode: "pointer" | "razor";
   inRuler?: boolean;
   shiftKey?: boolean;
+  rangeEdge?: TimelineRangeEdge;
   hitRegion?: ClipHit["region"];
   dragKind?: Exclude<DragState, null>["kind"];
   disabled?: boolean;
@@ -122,8 +141,11 @@ export interface TimelineCursorState {
 export function timelineInteractionCursor(state: TimelineCursorState): string {
   if (state.disabled) return "not-allowed";
   if (state.dragKind === "move" || state.dragKind === "scrub") return "grabbing";
+  if (state.dragKind === "rangeMark") return "crosshair";
+  if (state.dragKind === "rangeEdge") return "ew-resize";
   if (state.dragKind === "trimLeft" || state.dragKind === "trimRight") return "ew-resize";
   if (state.dragKind === "marquee") return "crosshair";
+  if (state.rangeEdge) return "ew-resize";
   if (state.inRuler) return state.shiftKey ? "crosshair" : "pointer";
   if (state.toolMode === "razor") return "crosshair";
   if (state.hitRegion === "trimLeft" || state.hitRegion === "trimRight") return "ew-resize";
@@ -152,6 +174,41 @@ export function rangeAtContextFrame(
 }
 
 type VolumeKeyframeInterpolation = Extract<Interpolation, "linear" | "smooth" | "hold">;
+
+export type TimelineRangeEdge = "start" | "end";
+
+/** Return the nearest marked-range edge when the pointer is within the same
+ *  small pixel tolerance used by the timeline handles. Invalid or zero-length
+ *  ranges have no draggable edges. */
+export function rangeEdgeAtPointer(
+  range: TimelineRange | null,
+  docX: number,
+  pixelsPerFrame: number,
+  thresholdPixels = 8,
+): TimelineRangeEdge | null {
+  const normalized = validRange(range);
+  if (!normalized || !Number.isFinite(docX) || pixelsPerFrame <= 0) return null;
+  const startX = normalized.startFrame * pixelsPerFrame;
+  const endX = normalized.endFrame * pixelsPerFrame;
+  const startDistance = Math.abs(docX - startX);
+  const endDistance = Math.abs(docX - endX);
+  if (Math.min(startDistance, endDistance) > thresholdPixels) return null;
+  return startDistance <= endDistance ? "start" : "end";
+}
+
+/** Move one marked-range endpoint while preserving the other endpoint. Keep
+ *  inverted ranges during a drag; validRange() normalizes them for rendering
+ *  and consumers, matching upstream's in-progress selection state. */
+export function moveRangeEndpoint(
+  range: TimelineRange,
+  edge: TimelineRangeEdge,
+  frame: number,
+): TimelineRange {
+  const clamped = Math.max(0, Math.round(frame));
+  return edge === "start"
+    ? { startFrame: clamped, endFrame: range.endFrame }
+    : { startFrame: range.startFrame, endFrame: clamped };
+}
 
 type VolumeKeyframeMenuItem = {
   label: string;
@@ -384,6 +441,15 @@ export function clipSelectionForInteraction(
   if (modifiers.altKey && !already) return new Set([clipId]);
   if (!already) return group;
   return selectedClipIds;
+}
+
+/** Resolve the clips whose trim edge follows one timeline trim gesture. */
+export function trimParticipantIds(
+  timeline: Timeline,
+  clipId: string,
+  propagateToLinked: boolean,
+): Set<string> {
+  return propagateToLinked ? expandLinkGroup(timeline, new Set([clipId])) : new Set([clipId]);
 }
 
 /**
@@ -678,6 +744,9 @@ export function TimelineContainer() {
   const selectClips = useEditorUiStore((s) => s.selectClips);
   const clearSelection = useEditorUiStore((s) => s.clearSelection);
   const selectedTimelineRange = useEditorUiStore((s) => s.selectedTimelineRange);
+  const markRangeStart = useEditorUiStore((s) => s.markRangeStart);
+  const markRangeEnd = useEditorUiStore((s) => s.markRangeEnd);
+  const clearTimelineRange = useEditorUiStore((s) => s.clearTimelineRange);
   const selectedGap = useEditorUiStore((s) => s.selectedGap);
   const selectGap = useEditorUiStore((s) => s.selectGap);
   const pushToast = useEditorUiStore((s) => s.pushToast);
@@ -943,6 +1012,8 @@ export function TimelineContainer() {
         clipId: d.hit.clip.id,
         edge: d.kind === "trimLeft" ? "left" : "right",
         deltaFrames: d.deltaFrames,
+        propagateToLinked: d.propagateToLinked,
+        linkGroupId: d.hit.clip.linkGroupId,
       };
     } else if (d?.kind === "audioVolumeKf") {
       drag = {
@@ -1390,6 +1461,22 @@ export function TimelineContainer() {
     [setCurrentFrame, timeline, zoomScale],
   );
 
+  const updateRulerRangeFrame = useCallback(
+    (docX: number) => {
+      const raw = frameAt(docX, zoomScale);
+      const targets = collectTargets(timeline, EMPTY_EXCLUDE, activeFrame, true);
+      const snap = findSnapDelta([raw], targets, zoomScale, scrubSnapRef.current, [0]);
+      scrubSnapRef.current = snap
+        ? { frame: snap.snappedFrame, probeOffset: snap.probeOffset }
+        : null;
+      const frame = Math.max(0, Math.round(snap ? raw + snap.delta : raw));
+      setSnapFrame(snap ? snap.snappedFrame : null);
+      maybeSnapFeedback(snap ? snap.snappedFrame : null);
+      return frame;
+    },
+    [activeFrame, timeline, zoomScale],
+  );
+
   // --- Pointer down: the decision tree (SPEC §5.8) ---
   const onPointerDown = useCallback(
     (e: React.PointerEvent) => {
@@ -1397,11 +1484,36 @@ export function TimelineContainer() {
       const { docX, docY, inRuler } = toDoc(e);
       (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
 
-      // Ruler -> scrub playhead.
+      // Ruler -> Shift-drag marks a range; dragging an existing edge adjusts
+      // only that endpoint. Plain ruler drags continue to scrub the playhead.
       if (inRuler) {
+        scrubSnapRef.current = null;
+        const edge = rangeEdgeAtPointer(selectedTimelineRange, docX, zoomScale);
+        const existingRange = validRange(selectedTimelineRange);
+        if (edge && existingRange) {
+          const currentFrame = edge === "start" ? existingRange.startFrame : existingRange.endFrame;
+          dragRef.current = { kind: "rangeEdge", edge, range: existingRange, currentFrame };
+          setCanvasCursor("ew-resize");
+          setScrubbing(false);
+          return;
+        }
+        if (e.shiftKey) {
+          const anchorFrame = Math.max(0, frameAt(docX, zoomScale));
+          const previousRange = selectedTimelineRange;
+          clearTimelineRange();
+          markRangeStart(anchorFrame);
+          dragRef.current = {
+            kind: "rangeMark",
+            anchorFrame,
+            currentFrame: anchorFrame,
+            previousRange,
+          };
+          setCanvasCursor("crosshair");
+          setScrubbing(false);
+          return;
+        }
         dragRef.current = { kind: "scrub" };
         setCanvasCursor("grabbing");
-        scrubSnapRef.current = null;
         setScrubbing(true);
         updateRulerScrubFrame(docX);
         return;
@@ -1502,19 +1614,21 @@ export function TimelineContainer() {
             grabFrame: frameAt(docX, zoomScale),
             currentFrames: fadeHit.currentFrames,
           };
-        } else if (hit.region === "trimLeft" && !e.altKey) {
+        } else if (hit.region === "trimLeft") {
           dragRef.current = {
             kind: "trimLeft",
             hit,
             startTrim: hit.clip.trimStartFrame,
             deltaFrames: 0,
+            propagateToLinked: !e.altKey,
           };
-        } else if (hit.region === "trimRight" && !e.altKey) {
+        } else if (hit.region === "trimRight") {
           dragRef.current = {
             kind: "trimRight",
             hit,
             startTrim: hit.clip.trimEndFrame,
             deltaFrames: 0,
+            propagateToLinked: !e.altKey,
           };
         } else {
           const grabFrame = frameAt(docX, zoomScale);
@@ -1564,6 +1678,10 @@ export function TimelineContainer() {
       setCurrentFrame,
       setScrubbing,
       updateRulerScrubFrame,
+      updateRulerRangeFrame,
+      selectedTimelineRange,
+      markRangeStart,
+      clearTimelineRange,
       docWidth,
       docHeight,
       compatibilityReadOnly,
@@ -1588,11 +1706,15 @@ export function TimelineContainer() {
               docWidth,
               docHeight,
             );
+        const rangeEdge = inRuler
+          ? rangeEdgeAtPointer(selectedTimelineRange, docX, zoomScale)
+          : null;
         setCanvasCursor(
           timelineInteractionCursor({
             toolMode,
             inRuler,
             shiftKey: e.shiftKey,
+            rangeEdge: rangeEdge ?? undefined,
             hitRegion: hit?.region,
             disabled: compatibilityReadOnly && Boolean(hit),
           }),
@@ -1605,6 +1727,28 @@ export function TimelineContainer() {
         // Interactive moves update only the playhead. The settled Rust
         // composite remains disabled until pointer-up publishes one exact seek.
         updateRulerScrubFrame(docX);
+        return;
+      }
+
+      if (d.kind === "rangeMark") {
+        const currentFrame = updateRulerRangeFrame(docX);
+        dragRef.current = { ...d, currentFrame };
+        markRangeEnd(currentFrame);
+        forceTick((n) => n + 1);
+        return;
+      }
+
+      if (d.kind === "rangeEdge") {
+        const currentFrame = updateRulerRangeFrame(docX);
+        dragRef.current = { ...d, currentFrame };
+        const nextRange = moveRangeEndpoint(d.range, d.edge, currentFrame);
+        if (!validRange(nextRange)) clearTimelineRange();
+        else {
+          clearTimelineRange();
+          markRangeStart(nextRange.startFrame);
+          markRangeEnd(nextRange.endFrame);
+        }
+        forceTick((n) => n + 1);
         return;
       }
 
@@ -1754,6 +1898,11 @@ export function TimelineContainer() {
       setCurrentFrame,
       selectClips,
       updateRulerScrubFrame,
+      updateRulerRangeFrame,
+      markRangeStart,
+      markRangeEnd,
+      clearTimelineRange,
+      selectedTimelineRange,
       docWidth,
       docHeight,
       toolMode,
@@ -1767,15 +1916,30 @@ export function TimelineContainer() {
   // item triggers insertTrack→refresh→addClips→refresh mid-gesture). Without these
   // the gesture never reaches pointerup, so dragRef and the pointer capture stay
   // stuck and the whole timeline becomes undraggable (#126).
+  const restoreMarkedRange = useCallback(
+    (range: TimelineRange | null) => {
+      clearTimelineRange();
+      if (!range) return;
+      markRangeStart(range.startFrame);
+      markRangeEnd(range.endFrame);
+    },
+    [clearTimelineRange, markRangeEnd, markRangeStart],
+  );
+
   const endDrag = useCallback((e: React.PointerEvent) => {
+    const drag = dragRef.current;
+    if (drag?.kind === "rangeMark") restoreMarkedRange(drag.previousRange);
+    else if (drag?.kind === "rangeEdge") restoreMarkedRange(drag.range);
     dragRef.current = null;
+    snapStateRef.current = null;
+    scrubSnapRef.current = null;
     setSnapFrame(null);
     maybeSnapFeedback(null); // re-arm snap feedback for the next gesture
     setScrubbing(false);
     setCanvasCursor("default");
     const el = e.currentTarget as HTMLElement;
     if (el.hasPointerCapture?.(e.pointerId)) el.releasePointerCapture(e.pointerId);
-  }, []);
+  }, [restoreMarkedRange]);
 
   const onPointerUp = useCallback(
     (e: React.PointerEvent) => {
@@ -1791,6 +1955,33 @@ export function TimelineContainer() {
       if (d.kind === "scrub") {
         const { docX } = toDoc(e);
         updateRulerScrubFrame(docX);
+        scrubSnapRef.current = null;
+        return;
+      }
+
+      if (d.kind === "rangeMark") {
+        const currentFrame = updateRulerRangeFrame(toDoc(e).docX);
+        const nextRange = { startFrame: d.anchorFrame, endFrame: currentFrame };
+        if (!validRange(nextRange)) clearTimelineRange();
+        else markRangeEnd(currentFrame);
+        scrubSnapRef.current = null;
+        setSnapFrame(null);
+        maybeSnapFeedback(null);
+        return;
+      }
+
+      if (d.kind === "rangeEdge") {
+        const currentFrame = updateRulerRangeFrame(toDoc(e).docX);
+        const nextRange = moveRangeEndpoint(d.range, d.edge, currentFrame);
+        if (!validRange(nextRange)) clearTimelineRange();
+        else {
+          clearTimelineRange();
+          markRangeStart(nextRange.startFrame);
+          markRangeEnd(nextRange.endFrame);
+        }
+        scrubSnapRef.current = null;
+        setSnapFrame(null);
+        maybeSnapFeedback(null);
         return;
       }
 
@@ -1928,7 +2119,7 @@ export function TimelineContainer() {
         // Linked partners trim together (upstream commitTrim): apply the SAME
         // timeline-frame edge delta to every clip in the link group, each
         // converted to its own SOURCE-frame trim via round(delta*speed).
-        const groupIds = expandLinkGroup(timeline, new Set([d.hit.clip.id]));
+        const groupIds = trimParticipantIds(timeline, d.hit.clip.id, d.propagateToLinked);
         const edits = [...groupIds]
           .map((id) => {
             const loc = findClipLoc(timeline, id);
@@ -1941,7 +2132,18 @@ export function TimelineContainer() {
         void edit.trimClips(edits);
       }
     },
-    [timeline, setScrubbing, toDoc, updateRulerScrubFrame, pushToast, t],
+    [
+      timeline,
+      setScrubbing,
+      toDoc,
+      updateRulerScrubFrame,
+      updateRulerRangeFrame,
+      markRangeStart,
+      markRangeEnd,
+      clearTimelineRange,
+      pushToast,
+      t,
+    ],
   );
 
   // Ghost preview offsets for the active drag (read from dragRef during render).

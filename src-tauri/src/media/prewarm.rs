@@ -329,7 +329,10 @@ impl PrewarmScheduler {
         if !matches!(media_kind, ClipType::Video | ClipType::Image) || !source.is_file() {
             return PrewarmResult::Cached;
         }
-        let cached = image::image_dimensions(&target).is_ok();
+        let cached = super::cached_poster_dimensions(&target)
+            .ok()
+            .flatten()
+            .is_some();
         self.schedule(
             epoch,
             PrewarmKind::GridPoster,
@@ -453,6 +456,23 @@ impl JobContext {
     /// epoch/token still owns the scheduler. Holding the state lock across the
     /// rename makes transition cancellation and cache publication ordered.
     pub fn commit_staged_bytes(&self, target: &Path, bytes: &[u8]) -> Result<bool, String> {
+        if self.reservation.kind == PrewarmKind::GridPoster {
+            let staged = super::StagedPoster::new(target, bytes)?;
+            let Some(inner) = self.inner.upgrade() else {
+                return Ok(false);
+            };
+            let state = inner.state.lock().unwrap_or_else(|p| p.into_inner());
+            let current = !state.transitioning
+                && state.active_epoch == self.epoch
+                && state.cancel.same_instance(&self.token)
+                && !self.token.is_cancelled();
+            if !current {
+                return Ok(false);
+            }
+            let published = staged.publish();
+            drop(state);
+            return published.map(|()| true);
+        }
         let parent = target
             .parent()
             .ok_or_else(|| format!("prewarm cache target has no parent: {}", target.display()))?;
@@ -568,6 +588,106 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn grid_poster_second_producer_preserves_published_identity() {
+        let scheduler = PrewarmScheduler::new(10);
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("race.thumb.png");
+        let queued_target = target.clone();
+        let second = crate::media::encode_png(&opentake_media::RgbaFrame::black(4, 4)).unwrap();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        assert_eq!(
+            scheduler.schedule(10, PrewarmKind::GridPoster, "race", false, move |context| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                done_tx
+                    .send(context.commit_staged_bytes(&queued_target, &second))
+                    .unwrap();
+            }),
+            PrewarmResult::Queued
+        );
+        entered_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(!target.exists());
+        crate::media::write_png(&target, &opentake_media::RgbaFrame::black(2, 2)).unwrap();
+        let first_identity = same_file::Handle::from_path(&target).unwrap();
+        let first_bytes = std::fs::read(&target).unwrap();
+        #[cfg(unix)]
+        let first_metadata = std::fs::metadata(&target).unwrap();
+        release_tx.send(()).unwrap();
+        assert!(done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap()
+            .unwrap());
+        assert_eq!(
+            same_file::Handle::from_path(&target).unwrap(),
+            first_identity
+        );
+        assert_eq!(std::fs::read(&target).unwrap(), first_bytes);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let after = std::fs::metadata(&target).unwrap();
+            assert_eq!(
+                (after.ino(), after.ctime(), after.ctime_nsec()),
+                (
+                    first_metadata.ino(),
+                    first_metadata.ctime(),
+                    first_metadata.ctime_nsec()
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn grid_poster_preserves_invalid_target_while_sprite_can_replace_its_own_artifact() {
+        let scheduler = PrewarmScheduler::new(10);
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("invalid.thumb.png");
+        std::fs::write(&target, b"invalid cache").unwrap();
+        let for_job = target.clone();
+        let bytes = crate::media::encode_png(&opentake_media::RgbaFrame::black(2, 2)).unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        scheduler.schedule(
+            10,
+            PrewarmKind::GridPoster,
+            "invalid",
+            false,
+            move |context| {
+                done_tx
+                    .send(context.commit_staged_bytes(&for_job, &bytes))
+                    .unwrap();
+            },
+        );
+        assert!(done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap()
+            .is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"invalid cache");
+
+        let sprite = dir.path().join("sprite.jpg");
+        std::fs::write(&sprite, b"partial").unwrap();
+        let for_job = sprite.clone();
+        let (done_tx, done_rx) = mpsc::channel();
+        scheduler.schedule(
+            10,
+            PrewarmKind::TimelineSprite,
+            "sprite",
+            false,
+            move |context| {
+                done_tx
+                    .send(context.commit_staged_bytes(&for_job, b"complete"))
+                    .unwrap();
+            },
+        );
+        assert!(done_rx
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap()
+            .unwrap());
+        assert_eq!(std::fs::read(&sprite).unwrap(), b"complete");
+    }
 
     fn wait_until(timeout: Duration, mut predicate: impl FnMut() -> bool) {
         let deadline = Instant::now() + timeout;

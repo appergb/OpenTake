@@ -1,5 +1,8 @@
 # opentake-core — 模块目录
 
+> 状态：draft · 阶段：implementation-backed · 源码同步：2026-09-06。
+> 当前模块状态见 [OVERVIEW.md](OVERVIEW.md)，候选验收见[当日审计](../../audit/2026-09-06/public-beta-validation.md)。规格文档保留设计语义，不作为全功能完成证明。
+
 > 上级：[模块文档树](../INDEX.md) · [docs 总目录](../../INDEX.md)
 >
 > `opentake-core` = **装配层（命令路由层）**：把 `opentake-{domain,ops,project}` + 注入式能力句柄装配成一个权威可观测的会话 `EditorSession`，对 UI / Agent / MCP 三客户端暴露唯一编辑入口 `AppCore::apply`，经版本号 + 事件广播驱动前端只读镜像。依赖只向下：依赖 `domain` / `ops` / `project`，被 `src-tauri` 调用（`opentake-agent` 也作为客户端持其句柄）。

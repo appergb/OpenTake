@@ -1,118 +1,27 @@
-<!-- OPENSPEC:START -->
-# OpenTake — AI Agent 协作指南
+# OpenTake — 项目入口
 
-OpenTake 是 Palmier Pro 的跨平台社区分支：Rust core（Tauri 2 + React）桌面端，媒体引擎 FFmpeg + wgpu，GPL-3.0 开源。
+> 状态：canonical · 阶段：implementation-backed · 同步日期：2026-09-07
 
-## 项目结构
+OpenTake 是 Palmier Pro 的 GPL-3.0-or-later 社区项目，以 Rust + Tauri 2 + React/TypeScript 构建视频编辑器和 Agent 工作流。编辑逻辑对照只读上游移植。
 
-```
-PRIMARY-CN/
-├── palmier-pro-upstream/   # 上游只读参考（Swift macOS 视频编辑器，GPL-3.0）
-│   └── Sources/PalmierPro/ # 209 .swift，~43K 行，编辑逻辑的真理来源
-└── OpenTake/               # 本项目
-    ├── docs/               # 文档树（入口 docs/INDEX.md）
-    │   ├── modules/        # ★ 按 crate/前端的模块文档（总览+目录+子系统）
-    │   ├── architecture/   # 跨切面：架构/路线图/移植图/gap/bug/编辑自动化 DOS
-    │   └── upstream-analysis/  # 上游拆解报告
-    ├── crates/             # Rust workspace（9 个 crate，依赖只能向下）
-    ├── src-tauri/          # Tauri 2 桌面壳
-    └── web/                # React + TypeScript 前端
-```
+- **活动工作树**：`OpenTake-generation/`；同级 `OpenTake/` 仅作旧代码对照，`palmier-pro-upstream/` 只读。每个独立 Git 仓库仅保留根目录这一份 `AGENTS.md` 自动入口。
+- **源码基线**：本轮同步起点为 `release/v1.0.0-beta.5` / `33ee8e2`，版本清单已进入 `1.0.0-beta.6`。公开发行状态以 [GitHub Releases](https://github.com/appergb/OpenTake/releases) 为唯一事实来源；进入任务先读取实际分支、HEAD、工作区与发行状态。
+- **远端**：`origin` = `https://github.com/appergb/OpenTake.git`。
+- **技术栈**：10 个库 crate + `src-tauri`（11 个 Cargo 成员），React 18 / TypeScript / Vite / Zustand；FFmpeg、wgpu、cpal；Agent 使用 rmcp 与本地/BYOK 能力。
+- **用户意图**：同步全项目文档并完成可验证的 Beta 候选。源码接线、原生 GUI 验证和实际发布分开记录；不把候选写成已发布或全功能完成。
+- **风险**：保留用户未提交改动；平台、provider、安装包验收按真实环境与候选提交记录。新包贴纸、搜索和导出已实测；剩余发布检查见当前验收记录，不把局部通过写成已公开发布。
 
-## 从何处开始
+## 当前活动计划与路由
 
-| 你要做什么 | 先看这个 |
+| 内容 | 唯一来源 / 入口 |
 |---|---|
-| 了解项目全局 | [README.md](README.md) |
-| 理解目标架构 | [docs/architecture/ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md) |
-| 知道当前阶段 + 下一步做什么 | [docs/architecture/ROADMAP.md](docs/architecture/ROADMAP.md) |
-| 理解 Agent 如何与软件协作 | [docs/modules/opentake-agent/AGENT-CONTEXT-SIGNAL.md](docs/modules/opentake-agent/AGENT-CONTEXT-SIGNAL.md) |
-| 移植某个上游模块 | [docs/architecture/MODULE-PORT-MAP.md](docs/architecture/MODULE-PORT-MAP.md) |
-| 了解为何选了 Rust / Tauri / GPL-3.0 | [DECISIONS.md](DECISIONS.md) |
-| 查找某个上游模块的源码 | `palmier-pro-upstream/Sources/PalmierPro/` |
+| 当前执行与发布门槛 | [公开 Beta 活动计划](docs/plans/active/2026-09-06-public-beta.md) |
+| Beta 6 版本说明与发布流程 | [版本发布文档](docs/releases/1.0.0-beta.6.md) |
+| 文档总目录 | [docs/INDEX.md](docs/INDEX.md) |
+| 开发规范、构建与验证 | [docs/project/conventions.md](docs/project/conventions.md) |
+| 意图与工作区约束 | [docs/project/intent.md](docs/project/intent.md) |
+| 模块源码路由 | [docs/modules/INDEX.md](docs/modules/INDEX.md) |
+| 能力与证据 | [能力账本](docs/capabilities/CAPABILITY-LEDGER.md) |
+| 文档同步范围与遗留 | [本次同步报告](docs/documentation-sync-2026-09-06.md) |
 
-## 核心设计原则（来自上游拆解）
-
-1. **单一可观测状态容器**：Rust 持有权威 `Timeline`，前端只持只读镜像 + 版本号。
-2. **纯函数编辑算法**：OverwriteEngine / RippleEngine / SnapEngine 全部纯函数，无副作用，可全单测。
-3. **命令层 = 唯一编辑入口**：所有 UI 手势、Agent、MCP 工具归一到一个 `EditCommand` 枚举。
-4. **撤销栈在 Rust**：整树快照（`Timeline` derive `Clone`），前端不做撤销。
-5. **预览与导出共享 RenderPlan**：纯函数 `Timeline → 每帧属性`，保证预览与导出像素一致。
-
-## 技术栈（已定）
-
-| 关注点 | 选型 |
-|---|---|
-| 核心语言 | Rust（workspace，多 crate） |
-| 桌面壳 | Tauri 2 |
-| 前端 | React + TypeScript + Vite |
-| 状态管理 | Zustand（前端只读镜像） |
-| 编解码 | ffmpeg-next（libav*） |
-| 帧合成 | wgpu（自写合成器） |
-| 音频播放 | cpal |
-| MCP server | rmcp（streamable-http-server） |
-
-## 移植法则
-
-编辑算法从 Swift → Rust 时的转换铁律：
-
-- **一切以整数帧为单位**，`secondsToFrame` 用截断（`Int(s * fps)`），非四舍五入。
-- **关键帧存储用 clip 相对帧偏移**，公开 API 用绝对时间线帧。
-- **`round()` 方向与上游一致**：Swift `.rounded()` = Rust `f64::round()`（.5 向偶取整），MODULE-PORT-MAP 中有标注差异处。
-- **smoothstep(t) = t*t*(3-2t)**，不要换公式。
-- **所有 serde 模型加 `#[serde(default)]` + `Option<T>`**，保证读旧工程不破坏。
-
-## Rust 代码风格
-
-- 用 `Result<T, anyhow::Error>` 做内部错误，边界层转 Tauri 的 `Err(String)`。
-- `crates/opentake-domain/` 零依赖叶子 crate，不允许 `std::fs` 或网络调用。
-- 单测用 `#[cfg(test)]`，每个命令一个 test module，覆盖率 ≥80%。
-- 保持注释最小，只在 why 不显然时写一条短行。
-
-## React / TypeScript 代码风格
-
-- 组件不持有领域逻辑，只渲染 Tauri 命令返回的快照。
-- Timeline 的像素↔帧换算放前端，帧↔秒换算放 Rust。
-- 所有数值常量走 `AppTheme`，不硬编码。
-- 悬停态用 CSS `:hover` + 圆角背景，图标用 lucide-react。
-
-## 构建（全部在 `OpenTake/` 内运行）
-
-```bash
-# Rust core
-cargo build
-cargo test
-cargo clippy
-
-# 前端
-cd web && pnpm install && pnpm build
-
-# 启动 Tauri 开发模式
-cargo tauri dev
-```
-
-当前状态与发布门槛以 `docs/releases/1.0.0-beta.2.md` 为准，验证证据记录在
-`docs/audit/2026-08-02/beta-functional-verification.md`。`CLAUDE.md`、
-`docs/architecture/HANDOFF-2026-07.md` 与 `PORT-1TO1-GAP.md` 均为历史快照或设计来源。
-
-## 上游参考
-
-上游克隆 `palmier-pro-upstream/` 只读。查找编辑逻辑时直接在该目录 grep。禁止修改上游文件。
-
-常用查找路径：
-- 领域模型：`palmier-pro-upstream/Sources/PalmierPro/Models/`
-- 编辑算法：`palmier-pro-upstream/Sources/PalmierPro/Editor/`
-- Agent/MCP 工具：`palmier-pro-upstream/Sources/PalmierPro/Agent/`
-<!-- OPENSPEC:END -->
-
-## Agent Context Signal — 软件主动发信号
-
-OpenTake 的核心创新之一是 **软件主动向 Agent 发送剪辑指引**，而不是让 Agent 自己去读技能文件。
-
-当 Agent 通过 MCP 操作时间线和轨道时，软件会在每次工具返回中附带 `context_signal`：
-- 视频类型判定（口播 / Vlog / 混剪 / 采访 / 短剧 / 长视频）
-- 每个轨道的角色和用途（主画面 / B-roll / 旁白 / BGM / SFX / 文字）
-- 当前剪辑阶段和下一步建议
-- 该视频类型适用的剪辑规则
-
-这些指引内化自 ClipSkills 技能套件（[appergb/ClipSkills](https://github.com/appergb/ClipSkills)，MIT 许可）。详见 [docs/modules/opentake-agent/AGENT-CONTEXT-SIGNAL.md](docs/modules/opentake-agent/AGENT-CONTEXT-SIGNAL.md) 和 [docs/modules/opentake-agent/WORKFLOW-PLUGIN-SYSTEM.md](docs/modules/opentake-agent/WORKFLOW-PLUGIN-SYSTEM.md)。
+`CLAUDE.md` 是历史快照，不是当前交接或额外自动入口。按路由读取所需文档，禁止递归加载整棵文档树。

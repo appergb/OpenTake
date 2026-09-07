@@ -1,16 +1,24 @@
 //! Fail-closed live HTTP transport integration for native playback.
 #![cfg(feature = "playback-engine")]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-use opentake_render::DecodedFrame;
+use opentake_domain::{
+    Clip, ClipType, MediaManifest, MediaManifestEntry, MediaSource, Timeline, Track,
+};
+use opentake_media::{decode_frame_at, FrameRequest, RgbaFrame};
+use opentake_render::{build_render_plan, source_frame_index, DecodedFrame, RenderSize};
 use opentake_tauri_lib::playback::session::PlaybackIdentity;
 use opentake_tauri_lib::playback::transport::PublicationGate;
-use opentake_tauri_lib::playback::{FrameSink, PreviewServer};
+use opentake_tauri_lib::playback::{
+    project_media, project_text, FrameSink, ManifestMetrics, PreviewServer, RenderLoop,
+};
 
 const BOUNDARY: &[u8] = b"\r\n--opentake_mjpeg_boundary\r\n";
 
@@ -31,6 +39,110 @@ fn port_of(endpoint: &str) -> u16 {
 fn start_server() -> Arc<PreviewServer> {
     tauri::async_runtime::block_on(PreviewServer::start())
         .expect("preview server must bind its loopback port")
+}
+
+fn make_distinct_cfr_video(path: &Path, w: u32, h: u32, fps: u32, frames: u32) {
+    let output = Command::new("ffmpeg")
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("testsrc2=size={w}x{h}:rate={fps}"),
+            "-frames:v",
+            &frames.to_string(),
+            "-c:v",
+            "libx264",
+            "-g",
+            &frames.to_string(),
+            "-keyint_min",
+            &frames.to_string(),
+            "-sc_threshold",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-fps_mode",
+            "cfr",
+            "-y",
+        ])
+        .arg(path)
+        .output()
+        .expect("required ffmpeg must start for transport parity fixture");
+    assert!(
+        output.status.success(),
+        "generate transport parity fixture: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn external_entry(id: &str, path: &Path, w: i32, h: i32, fps: f64) -> MediaManifestEntry {
+    MediaManifestEntry {
+        id: id.into(),
+        name: format!("{id}.mp4"),
+        kind: ClipType::Video,
+        source: MediaSource::External {
+            absolute_path: path.to_string_lossy().into_owned(),
+        },
+        duration: 1.0,
+        generation_input: None,
+        source_width: Some(w),
+        source_height: Some(h),
+        source_fps: Some(fps),
+        has_audio: Some(false),
+        color: None,
+        proxy: None,
+        folder_id: None,
+        cached_remote_url: None,
+        cached_remote_url_expires_at: None,
+    }
+}
+
+fn build_plan(
+    timeline: &Timeline,
+    manifest: &MediaManifest,
+    render_size: RenderSize,
+) -> opentake_render::RenderPlan {
+    let (sizes, media) = project_media(manifest, &None);
+    let straight_alpha = media
+        .iter()
+        .filter(|(_, info)| info.straight_alpha)
+        .map(|(id, _)| id.clone())
+        .collect::<HashSet<_>>();
+    let metrics = ManifestMetrics {
+        sizes,
+        straight_alpha,
+    };
+    build_render_plan(timeline, render_size, &metrics)
+}
+
+fn require_render_loop(
+    timeline: Timeline,
+    manifest: &MediaManifest,
+    render_size: RenderSize,
+) -> RenderLoop {
+    let (sizes, media) = project_media(manifest, &None);
+    let text = project_text(&timeline);
+    RenderLoop::new(timeline, media, text, sizes, render_size)
+        .unwrap_or_else(|error| panic!("render loop init failed: {error}"))
+}
+
+fn decode_exact_source_frame(
+    path: &Path,
+    source_frame: i64,
+    fps: u32,
+    width: u32,
+    height: u32,
+) -> RgbaFrame {
+    let request = FrameRequest {
+        time_secs: source_frame as f64 / fps as f64,
+        max_size: (width, height),
+        tolerance_secs: 0.0,
+        apply_rotation: true,
+    };
+    let (_, frame) = decode_frame_at(path, &request)
+        .unwrap_or_else(|error| panic!("decode exact source frame {source_frame}: {error}"));
+    frame
 }
 
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -290,4 +402,182 @@ fn stream_route_rejects_cross_origin() {
         "Origin: http://localhost.evil.example\r\n",
     );
     assert_eq!(head.status, 403);
+}
+
+#[test]
+fn frame_route_first_publication_matches_fractional_speed_plan() {
+    let dir = tempfile::tempdir().expect("fixture tempdir");
+    let src = dir.path().join("speed-15-cfr.mp4");
+    let (w, h, fps, frames) = (160u32, 90u32, 12u32, 12u32);
+    make_distinct_cfr_video(&src, w, h, fps, frames);
+
+    let mut timeline = Timeline::new();
+    timeline.fps = fps as i32;
+    let mut track = Track::new("t1", ClipType::Video);
+    let mut clip = Clip::new("clip-1", "asset-1", 0, 6);
+    clip.trim_start_frame = 2;
+    clip.speed = 1.5;
+    track.clips.push(clip);
+    timeline.tracks.push(track);
+
+    let mut manifest = MediaManifest::new();
+    manifest.entries.push(external_entry(
+        "asset-1", &src, w as i32, h as i32, fps as f64,
+    ));
+
+    let render_size = RenderSize::new(w, h);
+    let plan = build_plan(&timeline, &manifest, render_size);
+    let clip_plan = &plan.clip_plans[0];
+    let mut render_loop = require_render_loop(timeline, &manifest, render_size);
+
+    let server = start_server();
+    let port = port_of(&server.endpoint());
+    let identity = PlaybackIdentity::new(19, 27, "session-speed-15").unwrap();
+    let sink = server.sink(identity.clone(), PublicationGate::open());
+    let publication = sink.publication();
+    let targets = [0, 3, 5];
+    let last_frame = *targets.last().expect("terminal target");
+    let mut emitted = Vec::new();
+    let mut mapped_sources = Vec::new();
+
+    for target in targets {
+        let source_frame = source_frame_index(clip_plan, target);
+        mapped_sources.push(source_frame);
+        let expected = decode_exact_source_frame(&src, source_frame, fps, w, h);
+        let frame = render_loop
+            .render_frame(target)
+            .expect("render target frame");
+        assert_eq!((frame.width, frame.height), (w, h));
+        assert_eq!(
+            frame.rgba, expected.rgba,
+            "first render for timeline frame {target} must match plan source frame {source_frame}"
+        );
+        sink.push_frame(&frame);
+        let event = publication
+            .commit(target, last_frame)
+            .expect("commit staged playback frame");
+        let payload = serde_json::to_value(&event).expect("serialize playback publication");
+        let sequence = payload["sequence"]
+            .as_u64()
+            .expect("publication sequence is numeric");
+        let (head, jpeg) = finite_get(port, &frame_path(&identity, target, sequence), "");
+        assert_eq!(head.status, 200, "published frame {target} should resolve");
+        let image = image::load_from_memory(&jpeg).expect("decode published playback JPEG");
+        assert_eq!((image.width(), image.height()), (w, h));
+        emitted.push(payload);
+    }
+
+    assert_eq!(mapped_sources, vec![2, 7, 10]);
+    assert_eq!(
+        emitted
+            .iter()
+            .map(|payload| payload["frame"].as_i64().expect("frame integer"))
+            .collect::<Vec<_>>(),
+        vec![0, 3, 5]
+    );
+    assert_eq!(
+        emitted
+            .iter()
+            .map(|payload| payload["sequence"].as_u64().expect("sequence integer"))
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert_eq!(
+        emitted
+            .iter()
+            .map(|payload| payload["terminal"].as_bool().expect("terminal bool"))
+            .collect::<Vec<_>>(),
+        vec![false, false, true]
+    );
+}
+
+#[test]
+fn frame_route_first_publication_matches_reversed_plan() {
+    let dir = tempfile::tempdir().expect("fixture tempdir");
+    let src = dir.path().join("reversed-cfr.mp4");
+    let (w, h, fps, frames) = (160u32, 90u32, 12u32, 12u32);
+    make_distinct_cfr_video(&src, w, h, fps, frames);
+
+    let mut timeline = Timeline::new();
+    timeline.fps = fps as i32;
+    let mut track = Track::new("t1", ClipType::Video);
+    let mut clip = Clip::new("clip-1", "asset-1", 0, 6);
+    clip.trim_start_frame = 2;
+    clip.reversed = true;
+    track.clips.push(clip);
+    timeline.tracks.push(track);
+
+    let mut manifest = MediaManifest::new();
+    manifest.entries.push(external_entry(
+        "asset-1", &src, w as i32, h as i32, fps as f64,
+    ));
+
+    let render_size = RenderSize::new(w, h);
+    let plan = build_plan(&timeline, &manifest, render_size);
+    let clip_plan = &plan.clip_plans[0];
+    let mut render_loop = require_render_loop(timeline, &manifest, render_size);
+
+    let server = start_server();
+    let port = port_of(&server.endpoint());
+    let identity = PlaybackIdentity::new(19, 28, "session-reversed").unwrap();
+    let sink = server.sink(identity.clone(), PublicationGate::open());
+    let publication = sink.publication();
+    let targets = [0, 5];
+    let last_frame = *targets.last().expect("terminal target");
+    let mut emitted = Vec::new();
+    let mut mapped_sources = Vec::new();
+
+    for target in targets {
+        let source_frame = source_frame_index(clip_plan, target);
+        mapped_sources.push(source_frame);
+        let expected = decode_exact_source_frame(&src, source_frame, fps, w, h);
+        let frame = render_loop
+            .render_frame(target)
+            .expect("render target frame");
+        assert_eq!((frame.width, frame.height), (w, h));
+        assert_eq!(
+            frame.rgba, expected.rgba,
+            "first reversed render for timeline frame {target} must match plan source frame {source_frame}"
+        );
+        sink.push_frame(&frame);
+        let event = publication
+            .commit(target, last_frame)
+            .expect("commit staged reversed playback frame");
+        let payload =
+            serde_json::to_value(&event).expect("serialize reversed playback publication");
+        let sequence = payload["sequence"]
+            .as_u64()
+            .expect("publication sequence is numeric");
+        let (head, jpeg) = finite_get(port, &frame_path(&identity, target, sequence), "");
+        assert_eq!(
+            head.status, 200,
+            "published reversed frame {target} should resolve"
+        );
+        let image = image::load_from_memory(&jpeg).expect("decode reversed playback JPEG");
+        assert_eq!((image.width(), image.height()), (w, h));
+        emitted.push(payload);
+    }
+
+    assert_eq!(mapped_sources, vec![7, 2]);
+    assert_eq!(
+        emitted
+            .iter()
+            .map(|payload| payload["frame"].as_i64().expect("frame integer"))
+            .collect::<Vec<_>>(),
+        vec![0, 5]
+    );
+    assert_eq!(
+        emitted
+            .iter()
+            .map(|payload| payload["sequence"].as_u64().expect("sequence integer"))
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(
+        emitted
+            .iter()
+            .map(|payload| payload["terminal"].as_bool().expect("terminal bool"))
+            .collect::<Vec<_>>(),
+        vec![false, true]
+    );
 }

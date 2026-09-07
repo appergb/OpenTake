@@ -206,7 +206,7 @@ mod tests {
 
     fn thumb(t: f64, w: u32, h: u32, fill: u8) -> VideoThumb {
         let mut rgba = vec![0u8; (w * h * 4) as usize];
-        for px in rgba.chunks_exact_mut(4) {
+        for px in rgba.as_chunks_mut::<4>().0.iter_mut() {
             px[0] = fill;
             px[1] = fill;
             px[2] = fill;
@@ -346,7 +346,7 @@ mod tests {
     fn avg(f: &RgbaFrame) -> f64 {
         let mut sum = 0.0f64;
         let mut n = 0.0f64;
-        for px in f.rgba.chunks_exact(4) {
+        for px in f.rgba.as_chunks::<4>().0.iter() {
             sum += (px[0] as f64 + px[1] as f64 + px[2] as f64) / 3.0;
             n += 1.0;
         }

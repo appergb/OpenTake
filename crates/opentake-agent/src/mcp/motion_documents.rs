@@ -113,6 +113,10 @@ pub struct MotionDocumentPublishRequest {
     pub duration_frames: i32,
     pub start_frame: Option<i32>,
     pub track_index: Option<usize>,
+    /// Transparent output is supported for a new published clip. Existing
+    /// Motion clip replacement remains opaque until alpha-preserving edit is
+    /// implemented end to end.
+    pub transparent: bool,
     pub clip_id: Option<String>,
 }
 
@@ -303,6 +307,8 @@ struct PublishArgs {
     duration_frames: i32,
     start_frame: Option<i32>,
     track_index: Option<usize>,
+    #[serde(default)]
+    transparent: bool,
     clip_id: Option<String>,
 }
 impl ToolArgs for PublishArgs {
@@ -315,6 +321,7 @@ impl ToolArgs for PublishArgs {
         "durationFrames",
         "startFrame",
         "trackIndex",
+        "transparent",
         "clipId",
     ];
 }
@@ -440,6 +447,11 @@ pub(crate) fn decode_request(
                     "trackIndex must be omitted when clipId is provided",
                 ));
             }
+            if args.clip_id.is_some() && args.transparent {
+                return Err(ToolError::new(
+                    "transparent is supported only when publishing a new Motion clip",
+                ));
+            }
             Ok(MotionDocumentRequest::Publish(
                 MotionDocumentPublishRequest {
                     document_id: args.document_id,
@@ -450,6 +462,7 @@ pub(crate) fn decode_request(
                     duration_frames: args.duration_frames,
                     start_frame: args.start_frame,
                     track_index: args.track_index,
+                    transparent: args.transparent,
                     clip_id: args.clip_id,
                 },
             ))
@@ -764,6 +777,33 @@ mod tests {
             }),
         );
         assert!(publish.is_err());
+
+        let transparent = decode_request(
+            ToolName::PublishMotionDocument,
+            &serde_json::json!({
+                "documentId": ID, "revisionHash": HASH,
+                "width": 1920, "height": 1080, "fps": 60,
+                "durationFrames": 120, "startFrame": 0, "transparent": true
+            }),
+        )
+        .expect("transparent Motion document add is part of the publish contract");
+        let MotionDocumentRequest::Publish(transparent) = transparent else {
+            panic!("expected publish request");
+        };
+        assert!(transparent.transparent);
+
+        let transparent_edit = decode_request(
+            ToolName::PublishMotionDocument,
+            &serde_json::json!({
+                "documentId": ID, "revisionHash": HASH,
+                "width": 1920, "height": 1080, "fps": 60,
+                "durationFrames": 120, "clipId": "clip", "transparent": true
+            }),
+        );
+        assert!(transparent_edit
+            .expect_err("alpha edit is not implemented yet")
+            .to_string()
+            .contains("new Motion clip"));
     }
 
     #[test]

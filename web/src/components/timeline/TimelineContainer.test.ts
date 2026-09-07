@@ -210,6 +210,45 @@ describe("volumeKeyframeMenuItems", () => {
 });
 
 describe("timeline edit frame boundaries", () => {
+  it("hits only the nearest valid range edge within the pointer tolerance", () => {
+    const hit = timelineContainer.rangeEdgeAtPointer as
+      | ((range: { startFrame: number; endFrame: number } | null, docX: number, pixelsPerFrame: number, thresholdPixels?: number) => "start" | "end" | null)
+      | undefined;
+
+    expect(typeof hit).toBe("function");
+    expect(hit?.({ startFrame: 10, endFrame: 20 }, 40, 4)).toBe("start");
+    expect(hit?.({ startFrame: 10, endFrame: 20 }, 80, 4)).toBe("end");
+    expect(hit?.({ startFrame: 20, endFrame: 10 }, 40, 4)).toBe("start");
+    expect(hit?.({ startFrame: 10, endFrame: 20 }, 48, 4)).toBe("start");
+    expect(hit?.({ startFrame: 10, endFrame: 20 }, 60, 4)).toBeNull();
+    expect(hit?.({ startFrame: 20, endFrame: 20 }, 80, 4)).toBeNull();
+    expect(hit?.(null, 40, 4)).toBeNull();
+  });
+
+  it("moves a range endpoint without losing the opposite endpoint", () => {
+    const move = timelineContainer.moveRangeEndpoint as
+      | ((range: { startFrame: number; endFrame: number }, edge: "start" | "end", frame: number) => { startFrame: number; endFrame: number })
+      | undefined;
+
+    expect(typeof move).toBe("function");
+    expect(move?.({ startFrame: 10, endFrame: 20 }, "start", 5)).toEqual({
+      startFrame: 5,
+      endFrame: 20,
+    });
+    expect(move?.({ startFrame: 10, endFrame: 20 }, "end", 30)).toEqual({
+      startFrame: 10,
+      endFrame: 30,
+    });
+    expect(move?.({ startFrame: 10, endFrame: 20 }, "start", 30)).toEqual({
+      startFrame: 30,
+      endFrame: 20,
+    });
+    expect(move?.({ startFrame: 10, endFrame: 20 }, "end", -4)).toEqual({
+      startFrame: 10,
+      endFrame: 0,
+    });
+  });
+
   it("consumes and reports rejected atomic new-track drops", () => {
     expect(timelineContainerSource).toMatch(
       /moveOrDuplicateClipsToNewTrack\([\s\S]*?\)\.catch\([\s\S]*?timeline\.moveFailed/,
@@ -388,6 +427,23 @@ describe("accessibleClipRects", () => {
       ),
     ).toEqual(["video"]);
     expect(timelineContainerSource).not.toContain("selectClips(new Set([rect.clipId]))");
+  });
+
+  it("propagates trim participants by default and isolates the lead with Option", () => {
+    const tl = timeline([
+      track("v1", [clip({ id: "video", mediaType: "video", linkGroupId: "pair" })]),
+      track("a1", [clip({ id: "audio", mediaType: "audio", linkGroupId: "pair" })], "audio"),
+    ]);
+
+    expect(
+      Array.from(timelineContainer.trimParticipantIds?.(tl, "video", true) ?? []).sort(),
+    ).toEqual(["audio", "video"]);
+    expect(
+      Array.from(timelineContainer.trimParticipantIds?.(tl, "video", false) ?? []),
+    ).toEqual(["video"]);
+    expect(timelineContainerSource).toContain("propagateToLinked: !e.altKey");
+    expect(timelineContainerSource).not.toContain('hit.region === "trimLeft" && !e.altKey');
+    expect(timelineContainerSource).not.toContain('hit.region === "trimRight" && !e.altKey');
   });
 
   it("exposes button selection through the pressed state", () => {

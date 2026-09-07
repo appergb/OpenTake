@@ -25,18 +25,6 @@ import { openDialog } from "../lib/dialog";
 import { t } from "../i18n";
 import type { MediaList } from "../lib/types";
 
-/** Extensions the Rust importer accepts (mirrors the `session.rs` white-lists).
- *  These populate the native file-picker filter so the dialog surfaces the same
- *  formats the backend can decode; keep in sync with
- *  `crates/opentake-core/src/session.rs`. */
-const VIDEO_EXTS = [
-  "mov", "mp4", "m4v", "mkv", "webm", "avi", "mts", "m2ts", "mpg", "mpeg", "3gp", "wmv", "flv", "ts",
-];
-const AUDIO_EXTS = [
-  "mp3", "wav", "aac", "m4a", "flac", "ogg", "opus", "aiff", "aif", "wma", "caf",
-];
-const IMAGE_EXTS = ["png", "jpg", "jpeg", "tiff", "heic", "webp", "bmp", "gif", "avif"];
-
 function getErrorMessage(error: unknown): string {
   if (typeof error === "string") return error;
   if (error instanceof Error) return error.message;
@@ -125,9 +113,6 @@ export async function relinkMediaViaDialog(mediaRef: string): Promise<void> {
       directory: false,
       multiple: false,
       defaultPath: useSettingsStore.getState().defaultImportFolder ?? undefined,
-      filters: [
-        { name: "Media", extensions: [...VIDEO_EXTS, ...AUDIO_EXTS, ...IMAGE_EXTS] },
-      ],
     });
     if (typeof selected !== "string") return; // cancelled
     if (!isCurrentProject(project)) return;
@@ -153,9 +138,6 @@ export async function importFilesViaDialog(): Promise<void> {
       directory: false,
       multiple: true,
       defaultPath: useSettingsStore.getState().defaultImportFolder ?? undefined,
-      filters: [
-        { name: "Media", extensions: [...VIDEO_EXTS, ...AUDIO_EXTS, ...IMAGE_EXTS] },
-      ],
     });
     const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
     if (paths.length === 0) return; // cancelled

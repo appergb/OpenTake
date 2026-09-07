@@ -288,7 +288,7 @@ mod tests {
         // Pure red (255,0,0) → luma 0.299*255 ≈ 76.245.
         let f = RgbaFrame::new(8, 8, {
             let mut v = vec![0u8; 8 * 8 * 4];
-            for px in v.chunks_exact_mut(4) {
+            for px in v.as_chunks_mut::<4>().0.iter_mut() {
                 px[0] = 255;
                 px[3] = 255;
             }

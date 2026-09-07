@@ -1,0 +1,6 @@
+node_modules/
+.DS_Store
+review/
+OpenTake Official Demo.opentake/
+deliverables/*-source.tar.gz
+*.opentake-lock

@@ -1,5 +1,8 @@
 # Agent 移植规格
 
+> 状态：historical · 阶段：goal-only。上游 Agent 模块映射来源；由 agent.md 改名，正文与原始时点保留。不是自动指令入口，当前实现见[Agent 模块总览](../modules/opentake-agent/OVERVIEW.md)。
+
+
 **职责**:
 - 对话编排：维护多会话(ChatSession)、消息历史、流式 SSE 解析、工具调用循环(runLoop)、孤儿 tool_use 修复、提示缓存边界设置
 - LLM 客户端抽象(AgentClient)：AnthropicClient 直连 api.anthropic.com；PalmierClient 经 Clerk JWT 鉴权访问自有 Convex 后端 /v1/agent/stream(计费/积分路径)

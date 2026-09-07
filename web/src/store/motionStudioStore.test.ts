@@ -696,6 +696,7 @@ describe("Motion Studio store", () => {
       width: 1920,
       height: 1080,
       fps: 30,
+      transparent: false,
       trackIndex: undefined,
     });
     expect(store.getState()).toMatchObject({
@@ -707,6 +708,27 @@ describe("Motion Studio store", () => {
 
     await store.getState().cancelPublish();
     expect(motionBackend.cancelPublish).toHaveBeenCalledOnce();
+  });
+
+  it("forwards the transparent output choice only when publishing", async () => {
+    const motionBackend = backend();
+    const store = createMotionStudioStore(motionBackend);
+    await store.getState().load();
+    await vi.waitFor(() => expect(store.getState().previewPhase).toBe("ready"));
+
+    store.getState().setTransparent(true);
+    expect(store.getState().transparent).toBe(true);
+    expect(motionBackend.preview).toHaveBeenCalledWith(expect.objectContaining({
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      durationFrames: 90,
+    }));
+    await store.getState().publish();
+
+    expect(motionBackend.publish).toHaveBeenCalledWith(expect.objectContaining({
+      transparent: true,
+    }));
   });
 
   it("installs a project-bound Agent revision after an active publish finishes", async () => {

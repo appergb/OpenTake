@@ -91,7 +91,14 @@ export type DragPaint =
        *  drop. Absent unless the drop would be a single-clip swap. */
       swap?: { clipId: string; toTrackIndex: number; toFrame: number };
     }
-  | { kind: "trim"; clipId: string; edge: "left" | "right"; deltaFrames: number }
+  | {
+      kind: "trim";
+      clipId: string;
+      edge: "left" | "right";
+      deltaFrames: number;
+      propagateToLinked: boolean;
+      linkGroupId?: string;
+    }
   | { kind: "volumeKf"; clipId: string; fromFrame: number; ghostFrame: number }
   | { kind: "fadeKnee"; clipId: string; edge: "left" | "right"; currentFrames: number };
 
@@ -216,7 +223,13 @@ export function paintTimeline(ctx: CanvasRenderingContext2D, s: PaintState) {
           trackHeights,
         );
         ghost = true;
-      } else if (drag?.kind === "trim" && drag.clipId === clip.id) {
+      } else if (
+        drag?.kind === "trim" &&
+        (drag.clipId === clip.id ||
+          (drag.propagateToLinked &&
+            drag.linkGroupId !== undefined &&
+            drag.linkGroupId === clip.linkGroupId))
+      ) {
         const dx = drag.deltaFrames * pixelsPerFrame;
         rect =
           drag.edge === "left"

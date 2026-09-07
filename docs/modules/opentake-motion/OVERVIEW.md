@@ -1,5 +1,10 @@
 # opentake-motion — 模块总览
 
+> 状态：draft · 阶段：implementation-backed · 源码同步：2026-09-06。
+> 本次定向来源：`crates/opentake-motion/src/`、`src-tauri/src/motion.rs`。
+> 受限 HTML/CSS Motion Studio 与固定 Motion Canvas runner 已接入。透明发布与编辑保留 alpha 已有源码；ProRes 4444 编码/输出由 media/Tauri 层承担。任意 TSX 工程宿主仍不在当前开放范围。
+> 当前验收见[公开 Beta 审计](../../audit/2026-09-06/public-beta-validation.md)；下文历史里程碑和测试记录保留其原时点边界。
+
 > 上级：[模块目录 INDEX.md](INDEX.md) · [模块文档树](../INDEX.md) · [docs 总目录](../../INDEX.md)
 >
 > **Beta v1 已接入桌面时间线。** `plugins/motion-canvas-studio/` 提供锁定的 Motion Canvas 3.17.2 `title-card` runner；本 crate 提供离线 Chromium 帧宿主、缓存与 HTML/CSS fallback。Tauri/Core/Agent/Motion Panel 共用同一原子 Render → Import → Place/Replace 流程。完整设计与验收见 [Motion Graphics 插件设计](MOTION-GRAPHICS-PLUGIN.md)。
@@ -46,7 +51,7 @@ opentake-core / src-tauri / opentake-agent   已接 v1 调用方（渲染、验�
 - **Motion Canvas 模板是 v1 主模板路径**。本 crate 的 Chromium 宿主负责逐帧执行其官方 renderer；HTML/CSS/JS 仍是兼容 fallback。二者产 `mp4` 后复用普通视频导入/预览/导出链路。
 - **默认 build 不启动浏览器**。真实 CDP 后端必须显式启用 `chromium` feature；默认路径仍 fail-closed 返回 `RendererUnavailable`。
 - **不持 UI 状态 / 不直接做时间线落轨**。导入 + 落轨的单事务（Render → Import Media → Place Clip）仍属 `src-tauri`/`opentake-core`，本 crate 负责安全、确定性的帧生产。
-- **不定义 `ClipType::Motion`**。透明动效与新 clip 类型 / frame sequence source 是后续目标。
+- **不定义独立 `ClipType::Motion`**。透明发布已使用媒体导入/编码路径；直接 frame sequence source 仍是独立后续目标。
 - **不做帧↔秒折算的真理**。本 crate 内部 `t = frame / fps` 仅用于渲染时间网格；时间线帧↔秒的真理在 domain / 调用层（移植铁律，见 §6）。
 
 ---
@@ -128,13 +133,13 @@ MotionSource (Code 内联文档 | Template id + params)
 - 集成桥：`MotionClipSource` 实现 `SourceMetrics` + `FrameProvider`，解码器注入、过末端钳位、缺帧返回 `None`。
 
 **Beta v1 已实现（集成验收）：**
-- `plugins/motion-canvas-studio/`：Motion Canvas 3.17.2 lockfile、MIT LICENSE/notice、typed job、`title-card.tsx`、确定性离线 runner 与可复现 bundle；npm audit 0，锁定依赖许可证门禁通过。
+- `plugins/motion-canvas-studio/`：Motion Canvas 3.17.2 lockfile、MIT LICENSE/notice、typed job、`title-card.tsx`、确定性离线 runner 与可复现 bundle；当时的 npm audit 与许可证门禁记录保留；当前依赖审计见当日候选记录。
 - Tauri/Core：受控临时目录、离线 Chromium、进度/取消、FFmpeg `output.mp4`、`motion-result.json` 精确校验、项目 media capability 发布、单事务注册/落轨或替换、一步撤销与保存重开。
 - 产品入口：独立 Motion Panel 与动态发布的 Agent add/edit 工具共享生产桥；普通视频 preview/export 无需识别 Motion Canvas。
 - 自动化：两次固定模板渲染像素/哈希一致；失败、取消、遍历、符号链接、畸形/篡改元数据无 manifest/timeline 变更；`composite_frame` 与 `export_video` 均验证包含生成片段。
 
 **计划中 / 待做（明确未实现）：**
-- `MotionClipSource` 直接接入 `TextureSource::FrameSequence`、PNG sequence、透明 alpha overlay/ProRes4444——属 v2。
+- `MotionClipSource` 直接接入通用 frame sequence/PNG sequence 仍待规划；透明 alpha 发布与 ProRes 4444 已有候选源码，不再列作未实现。
 - 用户提供的任意 TS/TSX 编译和通用模板工程宿主——Beta 仅开放固定 `title-card`；其他输入显式拒绝或走受限 HTML fallback。
 - 独立结构化 `motion_metadata`/长期保留 job 文件；Beta 使用 `generation_input` 保存可编辑来源，并在命令结果返回经验证的 output metadata。
 
@@ -142,7 +147,7 @@ MotionSource (Code 内联文档 | Template id + params)
 
 ## 6. 移植铁律（本模块必须遵守）
 
-来自 [AGENTS.md](../../../AGENTS.md) 移植铁律、[MOTION-GRAPHICS-PLUGIN.md](MOTION-GRAPHICS-PLUGIN.md) 与代码现况：
+来自[开发规范](../../project/conventions.md)的移植规则、[MOTION-GRAPHICS-PLUGIN.md](MOTION-GRAPHICS-PLUGIN.md) 与代码现况：
 
 1. **一切以整数帧为单位**：渲染时间网格 `t = i / fps`（`i ∈ 0..duration_frames`）；`RenderedClip` / 缓存 / source 全以帧索引寻址。时间线帧↔秒的真理留在 domain / 调用层（`secondsToFrame` 用截断 `Int(s*fps)`，不四舍五入）。
 2. **确定性可复现（预览 == 导出）**：渲染器必须对同一 `MotionRenderRequest` 产出**字节一致**的帧。这是内容寻址缓存与"预览/导出像素一致"的硬前提；任何引入非确定性（墙钟、随机、未冻结的页面时钟）的实现都违规。

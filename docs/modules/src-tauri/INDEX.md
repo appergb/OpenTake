@@ -1,5 +1,8 @@
 # src-tauri — 模块目录
 
+> 状态：draft · 阶段：implementation-backed · 源码同步：2026-09-06。
+> 当前模块状态见 [OVERVIEW.md](OVERVIEW.md)，候选验收见[当日审计](../../audit/2026-09-06/public-beta-validation.md)。规格文档保留设计语义，不作为全功能完成证明。
+
 > 上级：[模块文档树](../INDEX.md) · [docs 总目录](../../INDEX.md)
 >
 > **Tauri 2 桌面壳 + 命令边界层**：装配所有 crate 成原生进程，持有权威 `AppCore`，对前端暴露薄 `#[tauri::command]` 接口，并把 core 事件桥回 WebView。它是 workspace member，但不在 `crates/` 下。

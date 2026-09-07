@@ -162,7 +162,7 @@ fn run_engine_from(
 fn nonblack_ratio(f: &DecodedFrame) -> f64 {
     let total = (f.width * f.height) as f64;
     let mut nonblack = 0u64;
-    for px in f.rgba.chunks_exact(4) {
+    for px in f.rgba.as_chunks::<4>().0.iter() {
         if px[0] > 16 || px[1] > 16 || px[2] > 16 {
             nonblack += 1;
         }
@@ -174,7 +174,9 @@ fn neon_green_ratio(f: &DecodedFrame) -> f64 {
     let total = (f.width * f.height) as f64;
     let neon_green = f
         .rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .filter(|pixel| pixel[0] < 32 && pixel[1] > 224 && pixel[2] < 32)
         .count();
     neon_green as f64 / total
@@ -494,7 +496,7 @@ fn probe_color_grade_visible_in_playback() {
     // The color-bar source is highly saturated; grade saturation=0 should
     // leave every pixel with R≈G≈B.
     let mut max_dev = 0i32;
-    for px in last.rgba.chunks_exact(4) {
+    for px in last.rgba.as_chunks::<4>().0.iter() {
         let (r, g, b) = (px[0] as i32, px[1] as i32, px[2] as i32);
         let dev = (r - g).abs().max((g - b).abs()).max((r - b).abs());
         max_dev = max_dev.max(dev);

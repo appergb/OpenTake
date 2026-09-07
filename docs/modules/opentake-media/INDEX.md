@@ -1,5 +1,8 @@
 # opentake-media — 模块目录
 
+> 状态：draft · 阶段：implementation-backed · 源码同步：2026-09-06。
+> 当前模块状态见 [OVERVIEW.md](OVERVIEW.md)，候选验收见[当日审计](../../audit/2026-09-06/public-beta-validation.md)。规格文档保留设计语义，不作为全功能完成证明。
+
 > 上级：[模块文档树](../INDEX.md) · [docs 总目录](../../INDEX.md)
 >
 > `opentake-media` = 媒体读取与离线分析层：ffmpeg sidecar 探测/解码/编码、缩略图/雪碧图、波形、转写(whisper)、SigLIP2 语义搜索、节拍/静音/自动裁剪分析、全局素材库。依赖只向下：仅依赖 `opentake-domain`，被 `opentake-core` / `src-tauri` / `opentake-agent` / `opentake-render` 调用。运行期需 **FFmpeg ≥ 6.0 在 PATH**。

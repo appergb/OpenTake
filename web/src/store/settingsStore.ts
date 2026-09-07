@@ -60,8 +60,8 @@ function loadProvider(): ByokProvider {
     : "anthropic";
 }
 function loadWindowSize(): WindowSizeOpt {
-  if (typeof localStorage === "undefined") return "standard";
-  return localStorage.getItem(LS.windowSize) === "compact" ? "compact" : "standard";
+  if (typeof localStorage === "undefined") return "compact";
+  return localStorage.getItem(LS.windowSize) === "standard" ? "standard" : "compact";
 }
 function loadProxyPlaybackEnabled(): boolean {
   if (typeof localStorage === "undefined") return false;
@@ -86,6 +86,10 @@ interface SettingsState {
 
 let windowSizeRequest = 0;
 let windowSizeQueue = Promise.resolve();
+const WINDOW_SIZE_PRESETS: Record<WindowSizeOpt, { width: number; height: number }> = {
+  standard: { width: 1600, height: 1000 },
+  compact: { width: 1066, height: 666 },
+};
 
 function enqueueWindowResize(size: WindowSizeOpt): Promise<void> {
   const operation = windowSizeQueue.then(() => applyWindowSize(size));
@@ -136,25 +140,36 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
 /** Apply the window size (width: 1600x1000 or 1066x666 centered) dynamically in Tauri. */
 export async function applyWindowSize(size: WindowSizeOpt): Promise<void> {
   if (!isTauri) return;
-  const { getCurrentWindow } = await import("@tauri-apps/api/window");
+  const { currentMonitor, getCurrentWindow, primaryMonitor } = await import("@tauri-apps/api/window");
   const { LogicalSize, LogicalPosition } = await import("@tauri-apps/api/dpi");
   const win = getCurrentWindow();
   const factor = await win.scaleFactor();
-
-  const targetWidth = size === "compact" ? 1066 : 1600;
-  const targetHeight = size === "compact" ? 666 : 1000;
+  const preset = WINDOW_SIZE_PRESETS[size];
 
   const physicalSize = await win.innerSize();
   const logicalSize = physicalSize.toLogical(factor);
 
   const physicalPos = await win.outerPosition();
   const logicalPos = physicalPos.toLogical(factor);
-
-  const dw = logicalSize.width - targetWidth;
-  const dh = logicalSize.height - targetHeight;
-
-  const newX = logicalPos.x + dw / 2;
-  const newY = logicalPos.y + dh / 2;
+  const monitor = (await currentMonitor()) ?? (await primaryMonitor());
+  const workArea = monitor
+    ? {
+        position: monitor.workArea.position.toLogical(monitor.scaleFactor),
+        size: monitor.workArea.size.toLogical(monitor.scaleFactor),
+      }
+    : null;
+  const targetWidth = workArea
+    ? Math.min(preset.width, workArea.size.width)
+    : Math.min(preset.width, logicalSize.width);
+  const targetHeight = workArea
+    ? Math.min(preset.height, workArea.size.height)
+    : Math.min(preset.height, logicalSize.height);
+  const newX = workArea
+    ? workArea.position.x + (workArea.size.width - targetWidth) / 2
+    : logicalPos.x + (logicalSize.width - targetWidth) / 2;
+  const newY = workArea
+    ? workArea.position.y + (workArea.size.height - targetHeight) / 2
+    : logicalPos.y + (logicalSize.height - targetHeight) / 2;
 
   await win.setSize(new LogicalSize(targetWidth, targetHeight));
   try {

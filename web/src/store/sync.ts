@@ -5,6 +5,7 @@
  */
 
 import * as api from "../lib/api";
+import { totalFrames } from "../lib/geometry";
 import { useProjectStore } from "./projectStore";
 import { useEditorUiStore } from "./uiStore";
 import { stopNativePlaybackForProjectBoundary } from "../components/preview/nativePlaybackSession";
@@ -58,6 +59,27 @@ function reportSyncFailure(label: string, error: unknown): void {
   useEditorUiStore
     .getState()
     .pushToast(`${label}: ${errorMessage(error)}`);
+}
+
+/** Keep the UI playhead inside the authoritative timeline after an edit or
+ * undo/redo changes its duration. The scrubber intentionally permits the
+ * duration boundary (not only the last drawable frame), so a parked end frame
+ * remains representable while stale positions are never sent to preview. */
+function reconcilePlayheadToTimeline(): void {
+  const ui = useEditorUiStore.getState();
+  const project = useProjectStore.getState();
+  const timeline =
+    project.timeline.nestedSequences?.find(
+      (sequence) => sequence.id === ui.activeNestedSequenceId,
+    )?.timeline ?? project.timeline;
+  const maxFrame = Math.max(0, totalFrames(timeline));
+  const frame = Math.max(
+    0,
+    Math.min(maxFrame, Math.round(Number.isFinite(ui.currentFrame) ? ui.currentFrame : 0)),
+  );
+  if (ui.currentFrame !== frame || ui.activeFrame !== frame) {
+    ui.setCurrentFrame(frame);
+  }
 }
 
 async function convergeEventRefresh(
@@ -164,6 +186,7 @@ async function runMirrorRefresh(
     return "superseded";
   }
   beforeCommit.replaceProjectSnapshot(snap);
+  reconcilePlayheadToTimeline();
   const committed = useProjectStore.getState();
   const committedRevision = committed.snapshotMutationRevision;
   const projectChanged =

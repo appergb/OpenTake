@@ -1,5 +1,9 @@
 # OpenTake — 已知 Bug 与问题
 
+> 状态：historical · 阶段：partial-implementation。原日期、问题与对照结论保留；不作为当前缺口清单。
+> 当前执行与验收：[公开 Beta 计划](../plans/active/2026-09-06-public-beta.md) · [当日验证](../audit/2026-09-06/public-beta-validation.md)。
+
+
 > 本文记录扫描确认的所有真实 Bug 和有问题部分。不包括规划中已承认的"未实现功能"（那些在 [PORT-1TO1-GAP.md](PORT-1TO1-GAP.md) 和 [ROADMAP.md](ROADMAP.md) 中）。
 > 最后更新：2026-06-26
 

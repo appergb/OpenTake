@@ -81,7 +81,7 @@ test-faults = []
 # tract backend so the installed product does not depend on Server-only
 # DirectX/ONNX Runtime entry points. Other platforms keep the pinned native
 # ONNX Runtime backend. Both remain off in the default, fully-offline build.
-ort-backend = ["dep:ort", "dep:ort-tract"]
+ort-backend = ["dep:ort", "dep:ort-tract", "dep:tract-onnx"]
 # Real on-device transcription via whisper.cpp (compiles native C++ on enable).
 whisper-backend = ["dep:whisper-rs"]
 # Model weight download/verify/unzip (reqwest + zip + sha1). Off by default so
@@ -103,6 +103,12 @@ optional = true
 
 [target.'cfg(windows)'.dependencies.ort-tract]
 version = "=0.2.0"
+optional = true
+
+# Fixed-shape search encoders need input-fact binding, which ort-tract's ORT
+# compatibility API does not expose. Reuse the exact engine already in Cargo.lock.
+[target.'cfg(windows)'.dependencies.tract-onnx]
+version = "=0.22.3"
 optional = true
 
 [dependencies.whisper-rs]

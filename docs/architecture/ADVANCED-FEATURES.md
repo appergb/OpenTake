@@ -1,5 +1,9 @@
 # OpenTake 进阶能力设计(对标剪映模块 1–5 的差距深化)
 
+> 状态：draft · 阶段：partial-implementation · 路由同步：2026-09-06。本文包含设计目标与已有实现；须按源码和日期化证据逐项判断。
+> 当前执行与验收：[公开 Beta 计划](../plans/active/2026-09-06-public-beta.md) · [当日验证](../audit/2026-09-06/public-beta-validation.md)。
+
+
 > **2026-08-01 Beta 对账附录（覆盖下表“现状”列）**：本文的 `missing` / `partial`
 > 是实现前的历史快照，继续保留作为设计来源，不再表示当前代码状态。首个 Beta 已闭环：
 > 通用特效、交叉溶解、线性光调色、Lift/Gamma/Gain、HSL、3D LUT、绿幕、圆形/线性/

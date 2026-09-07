@@ -75,6 +75,7 @@ futures-util = "0.3"
 quick-xml = "=0.41.0"
 crossbeam-channel = "0.5"
 velato = { workspace = true }
+zip = { version = "4", default-features = false, features = ["deflate"] }
 sentry = { workspace = true }
 http-range = "0.1.5"
 glob = "0.3"

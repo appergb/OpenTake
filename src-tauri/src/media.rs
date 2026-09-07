@@ -40,6 +40,7 @@ use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use opentake_core::{
     importable_clip_type, AppCore, CommittedMediaImport, CoreError, DeferredCoreEvents,
     DerivedStemProvenance, PreparedMediaFolderRef, PreparedMediaImportOp, ProbedMedia,
+    SUPPORTED_LOTTIE_EXTENSIONS,
 };
 use opentake_domain::{
     AudioDenoise, Clip, ClipType, DenoiseMode, GenerationInput, GenerationJobStatus,
@@ -813,15 +814,86 @@ fn timed_poster_path_for(cache_root: &Path, key: &str, time_secs: f64) -> PathBu
     visual_cache_dir(cache_root).join(format!("{key}.thumb.{millis}.png"))
 }
 
+/// Complete PNGs are immutable at their content-keyed poster path. Invalid or
+/// non-regular targets are retained and reported, never silently replaced.
+fn cached_poster_dimensions(path: &Path) -> Result<Option<(u32, u32)>, String> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("poster cache metadata: {error}")),
+    };
+    if !metadata.is_file()
+        || metadata_is_symlink_or_reparse(&metadata)
+        || !crate::fs_availability::is_materialized_regular_file(path)
+    {
+        return Err(format!(
+            "invalid poster cache (resident regular PNG required): {}",
+            path.display()
+        ));
+    }
+    let (file, _) = crate::safe_asset_protocol::open_retained_regular_file(path)
+        .map_err(|error| format!("poster cache open: {error}"))?;
+    let image =
+        image::ImageReader::with_format(std::io::BufReader::new(file), image::ImageFormat::Png)
+            .decode()
+            .map_err(|error| format!("invalid poster cache PNG: {error}"))?;
+    Ok(Some((image.width(), image.height())))
+}
+
+/// Staging is separate from publication so a prewarm job can acquire its epoch
+/// lease only for publication. tempfile already provides an atomic no-replace
+/// rename on supported macOS/Linux filesystems and no-replace move on Windows.
+struct StagedPoster {
+    file: tempfile::NamedTempFile,
+    target: PathBuf,
+}
+
+impl StagedPoster {
+    fn new(target: &Path, bytes: &[u8]) -> Result<Self, String> {
+        use std::io::Write;
+        image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+            .map_err(|error| format!("invalid staged poster PNG: {error}"))?;
+        let parent = target
+            .parent()
+            .ok_or_else(|| "poster cache target has no parent".to_string())?;
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        let mut file = tempfile::Builder::new()
+            .prefix(".poster-")
+            .suffix(".tmp")
+            .tempfile_in(parent)
+            .map_err(|error| format!("poster cache staging: {error}"))?;
+        file.write_all(bytes)
+            .map_err(|error| format!("poster cache write: {error}"))?;
+        Ok(Self {
+            file,
+            target: target.to_path_buf(),
+        })
+    }
+
+    fn publish(self) -> Result<(), String> {
+        // Reuse a winner without even touching its metadata via a rename/link.
+        if cached_poster_dimensions(&self.target)?.is_some() {
+            return Ok(());
+        }
+        match self.file.persist_noclobber(&self.target) {
+            Ok(_) => Ok(()),
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if cached_poster_dimensions(&self.target)?.is_some() {
+                    Ok(())
+                } else {
+                    Err("poster cache publication winner disappeared".to_string())
+                }
+            }
+            Err(error) => Err(format!("poster cache publication: {}", error.error)),
+        }
+    }
+}
+
 fn write_png(path: &Path, frame: &RgbaFrame) -> Result<(), String> {
-    if path.exists() {
+    if cached_poster_dimensions(path)?.is_some() {
         return Ok(());
     }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let bytes = encode_png(frame)?;
-    std::fs::write(path, bytes).map_err(|e| e.to_string())
+    StagedPoster::new(path, &encode_png(frame)?)?.publish()
 }
 
 fn encode_png(frame: &RgbaFrame) -> Result<Vec<u8>, String> {
@@ -847,9 +919,10 @@ fn cached_thumbnail_path_for_entry(
     }
     let key = cache_key_for(path).ok()?;
     let poster_path = poster_path_for(cache_root, &key);
-    poster_path
-        .is_file()
-        .then(|| poster_path.to_string_lossy().into_owned())
+    cached_poster_dimensions(&poster_path)
+        .ok()
+        .flatten()
+        .map(|_| poster_path.to_string_lossy().into_owned())
 }
 
 fn poster_target_time(time_secs: Option<f64>) -> f64 {
@@ -862,14 +935,11 @@ fn read_cached_poster(
     poster_path: &Path,
     target: f64,
 ) -> Option<Result<(PathBuf, u32, u32, f64), String>> {
-    if !poster_path.exists() {
-        return None;
+    match cached_poster_dimensions(poster_path) {
+        Ok(Some((width, height))) => Some(Ok((poster_path.to_path_buf(), width, height, target))),
+        Ok(None) => None,
+        Err(error) => Some(Err(error)),
     }
-    Some(
-        image::image_dimensions(poster_path)
-            .map(|(width, height)| (poster_path.to_path_buf(), width, height, target))
-            .map_err(|error| format!("thumbnail dimensions: {error}")),
-    )
 }
 
 /// Decode (or read from cache) a single poster frame for `path` at `target`,
@@ -1089,7 +1159,7 @@ fn generate_thumbnail_for_entry(
         }
         ClipType::Image => {
             let poster_path = poster_path_for(engine.cache_root(), &key);
-            if !poster_path.exists() {
+            if cached_poster_dimensions(&poster_path)?.is_none() {
                 let frame = engine.image_thumbnail(path).map_err(|e| e.to_string())?;
                 write_png(&poster_path, &frame)?;
             }
@@ -1181,12 +1251,11 @@ fn cached_thumbnail_for_entry(
         }
         ClipType::Image => {
             let poster_path = poster_path_for(engine.cache_root(), &key);
-            if !poster_path.exists() {
-                return None;
-            }
-            let (tile_width, tile_height) = image::image_dimensions(&poster_path)
-                .map(|(width, height)| (Some(width), Some(height)))
-                .unwrap_or((None, None));
+            let (tile_width, tile_height) = match cached_poster_dimensions(&poster_path) {
+                Ok(Some((width, height))) => (Some(width), Some(height)),
+                Ok(None) => return None,
+                Err(error) => return Some(Err(error)),
+            };
             Some(Ok(ThumbnailDto {
                 media_ref: entry.id.clone(),
                 kind: entry.kind,
@@ -1210,6 +1279,43 @@ pub(crate) fn probe_media(engine: &MediaEngine, path: &Path) -> ProbedMedia {
         .probe(path)
         .map(media_probe_to_core)
         .unwrap_or_default()
+}
+
+pub(crate) fn is_lottie_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            SUPPORTED_LOTTIE_EXTENSIONS
+                .iter()
+                .any(|supported| extension.eq_ignore_ascii_case(supported))
+        })
+}
+
+/// Validate and derive timeline metadata for a Lottie JSON or `.lottie`
+/// container. The core only recognizes the extension; Velato remains at the
+/// desktop boundary so malformed documents are skipped rather than registered
+/// as media that can never preview.
+pub(crate) fn probe_lottie(path: &Path) -> Result<ProbedMedia, String> {
+    let mut materializer = crate::render::LottieMaterializer::new();
+    let metadata = materializer.metadata(path)?;
+    Ok(lottie_metadata_to_probe(metadata))
+}
+
+pub(crate) fn probe_lottie_file(path: &Path, file: &std::fs::File) -> Result<ProbedMedia, String> {
+    let mut materializer = crate::render::LottieMaterializer::new();
+    let metadata = materializer.metadata_file(path, file)?;
+    Ok(lottie_metadata_to_probe(metadata))
+}
+
+fn lottie_metadata_to_probe(metadata: crate::render::LottieMetadata) -> ProbedMedia {
+    ProbedMedia {
+        duration_secs: metadata.duration_seconds,
+        width: Some(metadata.width as i32),
+        height: Some(metadata.height as i32),
+        fps: Some(metadata.frame_rate),
+        has_audio: false,
+        color: None,
+    }
 }
 
 fn media_probe_to_core(probe: opentake_media::MediaProbe) -> ProbedMedia {
@@ -1299,8 +1405,8 @@ fn display_file_name(path: &Path) -> String {
 /// Map a MIME type to the file extension the imported asset is written with.
 /// 1:1 port of upstream `ToolExecutor+Import.fileExtension(forMime:)` — the
 /// accepted set the agent's `import_media` (bytes / url override) validates
-/// against. `json`/Lottie is intentionally excluded from the import white-list
-/// downstream, but the mapping is kept for parity with upstream's table.
+/// against. JSON/Lottie MIME types map to the Lottie importer and are validated
+/// by the desktop renderer before publication.
 pub(crate) fn file_extension_for_mime(mime: &str) -> Option<&'static str> {
     match mime.to_ascii_lowercase().as_str() {
         "video/mp4" | "video/mpeg4" => Some("mp4"),
@@ -1313,6 +1419,7 @@ pub(crate) fn file_extension_for_mime(mime: &str) -> Option<&'static str> {
         "image/jpeg" | "image/jpg" => Some("jpg"),
         "image/tiff" => Some("tiff"),
         "image/heic" | "image/heif" => Some("heic"),
+        "application/json" | "application/vnd.lottie+json" => Some("json"),
         _ => None,
     }
 }
@@ -1320,7 +1427,7 @@ pub(crate) fn file_extension_for_mime(mime: &str) -> Option<&'static str> {
 /// The accepted-MIME error line upstream raises for an unsupported `mimeType`
 /// (`ToolExecutor+Import`). Centralized so bytes / url imports share the wording.
 pub(crate) const IMPORT_ACCEPTED_MIMES: &str =
-    "Accepted: video/mp4, video/quicktime, audio/mpeg, audio/wav, audio/aac, audio/mp4, image/png, image/jpeg, image/tiff, image/heic.";
+    "Accepted: video/mp4, video/quicktime, audio/mpeg, audio/wav, audio/aac, audio/mp4, image/png, image/jpeg, image/tiff, image/heic, application/json, application/vnd.lottie+json.";
 
 /// Import one file into the core, probing it first. Returns the created entry, or
 /// `None` when the extension is not importable (the file is skipped, not an
@@ -1334,7 +1441,14 @@ pub(crate) fn import_one(
     if importable_clip_type(path).is_none() {
         return Ok(None);
     }
-    let probe = probe_media(engine, path);
+    let probe = if is_lottie_path(path) {
+        match probe_lottie(path) {
+            Ok(probe) => probe,
+            Err(_) => return Ok(None),
+        }
+    } else {
+        probe_media(engine, path)
+    };
     // `import_media_file` re-validates the extension; the type check above only
     // lets us skip probing unsupported files.
     let entry = core.import_media_file(path, display_name(path), &probe)?;
@@ -1508,7 +1622,7 @@ pub(crate) struct SavedMediaFinalizationContext<'a> {
 pub(crate) fn finalize_saved_media(
     context: SavedMediaFinalizationContext<'_>,
     output: crate::export::ProjectMediaOutput,
-    guard: &mut crate::export::ExportGuard<'_>,
+    guard: &mut crate::export::ExportGuard,
 ) -> Result<MediaListDto, String> {
     finalize_saved_media_with_hooks(context, output, guard, (|| {}, || {}, || {}, || {}))
 }
@@ -1516,7 +1630,7 @@ pub(crate) fn finalize_saved_media(
 fn finalize_saved_media_with_hooks(
     context: SavedMediaFinalizationContext<'_>,
     output: crate::export::ProjectMediaOutput,
-    guard: &mut crate::export::ExportGuard<'_>,
+    guard: &mut crate::export::ExportGuard,
     hooks: (impl FnOnce(), impl FnOnce(), impl FnOnce(), impl FnOnce()),
 ) -> Result<MediaListDto, String> {
     let SavedMediaFinalizationContext {
@@ -2177,7 +2291,17 @@ impl<'a> DirectoryImportPlanner<'a> {
                         path: child_path.clone(),
                         reason: "missing media engine".to_string(),
                     })?;
-                    let probe = probe_media_file(engine, &file, self.cancel);
+                    let probe = if is_lottie_path(&child_path) {
+                        match probe_lottie_file(&child_path, &file) {
+                            Ok(probe) => probe,
+                            Err(_) => {
+                                self.skipped.push(display_file_name(&child_path));
+                                continue;
+                            }
+                        }
+                    } else {
+                        probe_media_file(engine, &file, self.cancel)
+                    };
                     self.checkpoint()?;
                     self.plan.push(PreparedMediaImportOp::ImportFile {
                         path: child_path.clone(),
@@ -2632,7 +2756,17 @@ fn prepare_explicit_import_batch(
             skipped.push(display_file_name(&source.final_path));
             continue;
         }
-        let probe = probe_media_file(engine, source.identity.as_file(), None);
+        let probe = if is_lottie_path(&source.final_path) {
+            match probe_lottie_file(&source.final_path, source.identity.as_file()) {
+                Ok(probe) => probe,
+                Err(_) => {
+                    skipped.push(display_file_name(&source.final_path));
+                    continue;
+                }
+            }
+        } else {
+            probe_media_file(engine, source.identity.as_file(), None)
+        };
         plan.push(PreparedMediaImportOp::ImportFile {
             path: source.final_path.clone(),
             name: display_name(&source.final_path),
@@ -5119,6 +5253,7 @@ pub fn preload_media(
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::Write;
 
     fn engine_for(tmp: &Path) -> MediaEngine {
         MediaEngine::new(tmp.join("cache"), tmp.join("models"))
@@ -6926,6 +7061,101 @@ mod tests {
     }
 
     #[test]
+    fn poster_publication_hides_staging_until_complete_publish() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.png");
+        touch(&source);
+        let cache = dir.path().join("cache");
+        let target = poster_path_for(&cache, &cache_key_for(&source).unwrap());
+        let entry: MediaManifestEntry = serde_json::from_value(serde_json::json!({
+            "id": "source", "name": "source", "type": "image", "duration": 1.0,
+            "source": { "external": { "absolutePath": source } }
+        }))
+        .unwrap();
+        let for_thread = target.clone();
+        let (staged_tx, staged_rx) = std::sync::mpsc::channel();
+        let (publish_tx, publish_rx) = std::sync::mpsc::channel();
+        let producer = std::thread::spawn(move || {
+            let bytes = encode_png(&RgbaFrame::black(2, 2)).unwrap();
+            let staged = StagedPoster::new(&for_thread, &bytes).unwrap();
+            staged_tx.send(()).unwrap();
+            publish_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            staged.publish().unwrap();
+        });
+        staged_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(!target.exists());
+        assert!(read_cached_poster(&target, 0.0).is_none());
+        assert!(MediaItemDto::from_entry(&entry, None, Some(&cache), false)
+            .thumbnail
+            .is_none());
+        publish_tx.send(()).unwrap();
+        producer.join().unwrap();
+        assert_eq!(cached_poster_dimensions(&target).unwrap(), Some((2, 2)));
+        assert_eq!(
+            MediaItemDto::from_entry(&entry, None, Some(&cache), false).thumbnail,
+            Some(target.to_string_lossy().into_owned())
+        );
+        assert_eq!(fs::read_dir(target.parent().unwrap()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn poster_publication_reuses_a_winner_that_arrives_after_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("winner.thumb.png");
+        let staged =
+            StagedPoster::new(&target, &encode_png(&RgbaFrame::black(4, 4)).unwrap()).unwrap();
+        write_png(&target, &RgbaFrame::black(2, 2)).unwrap();
+        let before = FileIdentity::from_path(&target).unwrap();
+        let before_bytes = fs::read(&target).unwrap();
+        staged.publish().unwrap();
+        assert_eq!(FileIdentity::from_path(&target).unwrap(), before);
+        assert_eq!(fs::read(&target).unwrap(), before_bytes);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn poster_publication_rejects_partial_png_and_cleans_unused_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("partial.thumb.png");
+        let png = encode_png(&RgbaFrame::black(2, 2)).unwrap();
+        assert!(StagedPoster::new(&target, &png[..33]).is_err());
+        assert!(!target.exists());
+        let staged = StagedPoster::new(&target, &png).unwrap();
+        fs::write(&target, &png[..33]).unwrap();
+        assert!(staged.publish().is_err());
+        assert_eq!(fs::read(&target).unwrap(), png[..33]);
+        assert!(read_cached_poster(&target, 0.0).unwrap().is_err());
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn poster_publication_refuses_symlink_without_modifying_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("other.png");
+        write_png(&other, &RgbaFrame::black(2, 2)).unwrap();
+        let before = fs::read(&other).unwrap();
+        let target = dir.path().join("symlink.thumb.png");
+        std::os::unix::fs::symlink(&other, &target).unwrap();
+        assert!(write_png(&target, &RgbaFrame::black(4, 4)).is_err());
+        assert!(read_cached_poster(&target, 0.0).unwrap().is_err());
+        assert!(fs::symlink_metadata(&target)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&other).unwrap(), before);
+    }
+
+    #[test]
+    fn poster_publication_refuses_invalid_existing_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("invalid.thumb.png");
+        fs::write(&target, b"not a PNG").unwrap();
+        assert!(write_png(&target, &RgbaFrame::black(2, 2)).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"not a PNG");
+    }
+
+    #[test]
     fn media_item_uses_existing_cached_thumbnail_without_decoding() {
         let tmp = tempfile::tempdir().unwrap();
         let source = tmp.path().join("clip.mp4");
@@ -6934,7 +7164,7 @@ mod tests {
         let key = cache_key_for(&source).unwrap();
         let poster = poster_path_for(&cache_root, &key);
         fs::create_dir_all(poster.parent().unwrap()).unwrap();
-        fs::write(&poster, b"cached").unwrap();
+        write_png(&poster, &RgbaFrame::black(2, 2)).unwrap();
         let entry = MediaManifestEntry {
             id: "a".into(),
             name: "clip".into(),
@@ -6960,6 +7190,9 @@ mod tests {
         assert!(!dto.missing);
         let poster_string = poster.to_string_lossy().into_owned();
         assert_eq!(dto.thumbnail.as_deref(), Some(poster_string.as_str()));
+        fs::write(&poster, b"partial PNG").unwrap();
+        let invalid = MediaItemDto::from_entry(&entry, None, Some(&cache_root), false);
+        assert!(invalid.thumbnail.is_none());
     }
 
     #[test]
@@ -8213,6 +8446,68 @@ mod tests {
         assert_eq!(list.items[0].kind, ClipType::Image);
         // The touched file exists → not missing.
         assert!(!list.items[0].missing);
+    }
+
+    #[test]
+    fn import_one_registers_valid_lottie_json_with_composition_metadata() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let source = root.join("title-card.json");
+        std::fs::write(
+            &source,
+            br#"{"v":"5.5.2","fr":2,"ip":0,"op":2,"w":16,"h":16,"ddd":0,"assets":[],"layers":[]}"#,
+        )
+        .unwrap();
+        let core = AppCore::new();
+        let engine = engine_for(root);
+
+        let imported = import_one(&core, &engine, &source).unwrap().unwrap();
+
+        assert_eq!(imported.kind, ClipType::Lottie);
+        assert_eq!(imported.source_width, Some(16));
+        assert_eq!(imported.source_height, Some(16));
+        assert_eq!(imported.source_fps, Some(2.0));
+        assert_eq!(imported.duration, 1.0);
+    }
+
+    #[test]
+    fn import_one_skips_malformed_lottie_json_instead_of_registering_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("broken.json");
+        std::fs::write(&source, b"{not valid lottie}").unwrap();
+        let core = AppCore::new();
+        let engine = engine_for(tmp.path());
+
+        assert!(import_one(&core, &engine, &source).unwrap().is_none());
+        assert!(core.media().entries.is_empty());
+    }
+
+    #[test]
+    fn import_one_registers_lottie_container_animation_json() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("title-card.lottie");
+        let file = fs::File::create(&source).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        archive
+            .start_file("animations/title.json", options)
+            .unwrap();
+        archive
+            .write_all(
+                br#"{"v":"5.5.2","fr":2,"ip":0,"op":2,"w":16,"h":16,"ddd":0,"assets":[],"layers":[]}"#,
+            )
+            .unwrap();
+        archive.finish().unwrap();
+
+        let core = AppCore::new();
+        let engine = engine_for(tmp.path());
+        let imported = import_one(&core, &engine, &source).unwrap().unwrap();
+
+        assert_eq!(imported.kind, ClipType::Lottie);
+        assert_eq!(imported.source_width, Some(16));
+        assert_eq!(imported.source_height, Some(16));
+        assert_eq!(imported.source_fps, Some(2.0));
     }
 
     #[test]

@@ -72,22 +72,12 @@ fn allocation_error(detail: impl std::fmt::Display) -> MediaError {
     MediaError::Decode(format!("audio_allocation_failed: {detail}"))
 }
 
-fn expected_pcm_bytes(path: &Path, spec: &PcmSpec, range: Option<(f64, f64)>) -> Result<usize> {
+fn expected_pcm_bytes_for_duration(duration_secs: f64, spec: &PcmSpec) -> Result<usize> {
     if spec.sample_rate == 0 || spec.channels == 0 {
         return Err(MediaError::Decode(
             "PCM sample rate and channel count must be non-zero".to_string(),
         ));
     }
-    let duration_secs = match range {
-        Some((lo, hi)) => (hi - lo.max(0.0)).max(0.0),
-        None => {
-            let media = probe::probe(path)?;
-            if !media.has_audio {
-                return Err(MediaError::no_track("audio", path));
-            }
-            media.duration_secs
-        }
-    };
     if !duration_secs.is_finite() {
         return Err(audio_buffer_too_large("non-finite duration"));
     }
@@ -101,6 +91,20 @@ fn expected_pcm_bytes(path: &Path, spec: &PcmSpec, range: Option<(f64, f64)>) ->
     (frames as usize)
         .checked_mul(frame_bytes)
         .ok_or_else(|| audio_buffer_too_large("PCM output byte count overflow"))
+}
+
+fn expected_pcm_bytes(path: &Path, spec: &PcmSpec, range: Option<(f64, f64)>) -> Result<usize> {
+    let duration_secs = match range {
+        Some((lo, hi)) => (hi - lo.max(0.0)).max(0.0),
+        None => {
+            let media = probe::probe(path)?;
+            if !media.has_audio {
+                return Err(MediaError::no_track("audio", path));
+            }
+            media.duration_secs
+        }
+    };
+    expected_pcm_bytes_for_duration(duration_secs, spec)
 }
 
 fn read_stdout(
@@ -301,6 +305,28 @@ fn pcm_args(path: &Path, spec: &PcmSpec, range: Option<(f64, f64)>) -> Vec<Strin
     args
 }
 
+fn bounded_pcm_args(
+    path: &Path,
+    spec: &PcmSpec,
+    range: Option<(f64, f64)>,
+    max_frames: usize,
+) -> Vec<String> {
+    let mut args = pcm_args(path, spec, range);
+    args.pop(); // stdout destination follows all output options
+    args.extend([
+        "-af".into(),
+        // AAC decoders may retain a padded final packet beyond the container's
+        // duration. Enforce the same frame budget as the stdout reader, after
+        // conversion to the requested sample rate, without relaxing that cap.
+        format!(
+            "aresample={},atrim=end_sample={max_frames}",
+            spec.sample_rate
+        ),
+        "-".into(),
+    ]);
+    args
+}
+
 /// Convert interleaved raw PCM bytes to mono f32, averaging `channels`.
 #[cfg(test)]
 fn raw_to_mono_f32(bytes: &[u8], spec: &PcmSpec) -> Result<Vec<f32>> {
@@ -424,23 +450,39 @@ pub(super) fn decode_raw_pcm_cancellable(
     } else {
         None
     };
-    let effective_range = match range {
-        Some(range) => Some(range),
+    let expected_bytes = match range {
+        Some(range) => expected_pcm_bytes(path, spec, Some(range))?,
         None => {
             let media = probed.unwrap_or(probe::probe(path)?);
-            Some((0.0, media.duration_secs))
+            expected_pcm_bytes_for_duration(media.duration_secs, spec)?
         }
     };
-    let expected_bytes = expected_pcm_bytes(path, spec, effective_range)?;
     let frame_bytes = usize::from(spec.channels)
         .checked_mul(spec.format.bytes_per_sample())
         .ok_or_else(|| audio_buffer_too_large("PCM frame byte count overflow"))?;
+    // Full-track extraction must preserve decoder output, including padding
+    // excluded from a container's presentation duration. Admit at most one
+    // extra second for that discrepancy; explicit ranges retain one-frame
+    // rounding slack and are trimmed at the requested output sample rate.
+    let slack_frames = if range.is_none() {
+        spec.sample_rate as usize
+    } else {
+        1
+    };
+    let slack_bytes = slack_frames
+        .checked_mul(frame_bytes)
+        .ok_or_else(|| audio_buffer_too_large("PCM padding budget overflow"))?;
     let reader_cap = expected_bytes
-        .checked_add(frame_bytes)
+        .checked_add(slack_bytes)
         .ok_or_else(|| audio_buffer_too_large("PCM reader cap overflow"))?;
 
+    let args = if range.is_some() {
+        bounded_pcm_args(path, spec, range, expected_bytes / frame_bytes)
+    } else {
+        pcm_args(path, spec, None)
+    };
     let mut child = ff::ffmpeg()
-        .args(pcm_args(path, spec, effective_range))
+        .args(args)
         .spawn()
         .map_err(|e| MediaError::Ffmpeg(format!("spawn: {e}")))?;
     cancel.child_spawned();
@@ -542,6 +584,31 @@ mod tests {
 
         assert!(matches!(error, MediaError::Cancelled));
         assert_eq!(cancel.spawned_child_count(), 0);
+    }
+
+    #[test]
+    fn output_frame_limit_trims_padding_after_resampling() {
+        assert!(crate::ff::ffmpeg_available(), "requires runnable FFmpeg");
+        let temp = tempfile::tempdir().unwrap();
+        let input = temp.path().join("padded.wav");
+        // Supply 2 seconds at 48k, but permit only the reported 1 second at
+        // 16k. Trimming before resampling would return just 5,333 samples.
+        write_silence_wav(&input, 48_000, 96_000);
+        let spec = PcmSpec {
+            sample_rate: 16_000,
+            channels: 1,
+            format: PcmFormat::F32,
+        };
+        let output = std::process::Command::new(crate::ff::ffmpeg_path())
+            .args(bounded_pcm_args(&input, &spec, None, 16_000))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout.len(), 16_000 * 4);
     }
 
     #[test]

@@ -8,7 +8,7 @@ import {
   type MediaProjectIdentity,
 } from "./mediaStore";
 import { useProjectStore } from "./projectStore";
-import { useEditorUiStore } from "./uiStore";
+import { previewMediaTabId, useEditorUiStore } from "./uiStore";
 
 type MediaDeleteKind = "folder" | "media";
 
@@ -65,15 +65,23 @@ async function runDeleteTransaction(
 
     const deleted = new Set(targets);
     if (kind === "media") {
+      const remainingSelected = new Set(
+        [...useEditorUiStore.getState().selectedMediaAssetIds].filter((id) => !deleted.has(id)),
+      );
       useEditorUiStore.setState((latest) => ({
         selectedMediaAssetIds: new Set(
           [...latest.selectedMediaAssetIds].filter((id) => !deleted.has(id)),
         ),
-        previewMediaId:
-          latest.previewMediaId && deleted.has(latest.previewMediaId)
-            ? null
-            : latest.previewMediaId,
       }));
+      const ui = useEditorUiStore.getState();
+      if (ui.previewTabIds.length === 0 && ui.previewMediaId && deleted.has(ui.previewMediaId)) {
+        ui.setPreviewMedia(null);
+      } else {
+        for (const mediaId of ui.previewTabIds.filter((id) => deleted.has(id))) {
+          ui.closePreviewTab(previewMediaTabId(mediaId));
+        }
+      }
+      useEditorUiStore.setState({ selectedMediaAssetIds: remainingSelected });
     } else {
       useEditorUiStore.setState((latest) => ({
         selectedFolderIds: new Set(

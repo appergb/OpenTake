@@ -108,7 +108,7 @@ describe("MediaTabBar keyboard semantics", () => {
 
     expect(materialTab.tabIndex).toBe(0);
     await act(async () => materialTab.focus());
-    for (let step = 0; step < 3; step += 1) {
+    for (let step = 0; step < 6; step += 1) {
       await act(async () =>
         document.activeElement!.dispatchEvent(
           new KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }),
@@ -215,6 +215,22 @@ describe("MediaTabBar keyboard semantics", () => {
       ),
     );
     expect(onSelect).toHaveBeenLastCalledWith("material");
+  });
+
+  it("exposes the text tab as an enabled editing surface", async () => {
+    await act(async () => root.render(<MainHarness onSelect={vi.fn()} />));
+    const textTab = container.querySelector<HTMLButtonElement>("#media-main-tab-text")!;
+
+    expect(textTab.disabled).toBe(false);
+    expect(textTab.getAttribute("aria-disabled")).toBe("false");
+  });
+
+  it("exposes the effect tab as an enabled editing surface", async () => {
+    await act(async () => root.render(<MainHarness onSelect={vi.fn()} />));
+    const effectTab = container.querySelector<HTMLButtonElement>("#media-main-tab-effect")!;
+
+    expect(effectTab.disabled).toBe(false);
+    expect(effectTab.getAttribute("aria-disabled")).toBe("false");
   });
 
   it("roves secondary tabs and keeps exactly one tab in the tab order", async () => {

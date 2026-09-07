@@ -1,7 +1,10 @@
 # OpenTake — 历史工作交接 / 状态快照
 
-> **2026-08-03 状态裁决：**本文件保留早期开发过程，不再是当前状态真值。Beta 2
-> 的当前范围与发布门槛见 `docs/releases/1.0.0-beta.2.md`，执行证据见
+> 状态：historical · 阶段：partial-implementation · 历史日期与正文保留。
+> 当前路由：[项目入口](AGENTS.md) / [活动计划](docs/plans/active/2026-09-06-public-beta.md)。本文件不作为自动指令入口。
+
+> **历史裁决（2026-08-03）：**本文件保留早期开发过程，不再是当前状态真值。Beta 2
+> 当时的范围与发布门槛见 `docs/releases/1.0.0-beta.2.md`，执行证据见
 > `docs/audit/2026-08-02/beta-functional-verification.md`。`HANDOFF-2026-07.md` 和
 > `PORT-1TO1-GAP.md` 同样仅作历史/设计参考。
 

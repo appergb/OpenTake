@@ -59,6 +59,7 @@ import {
 import {
   generateThumbnail,
   preloadMedia,
+  searchModelStatus,
   searchIndexStatus,
   searchIndexStart,
   downloadSearchModel,
@@ -70,9 +71,12 @@ import type { MediaItem, MomentHit, SpokenHit, SearchResults } from "../../lib/t
 
 /** Debounce before firing the backend visual/spoken query (upstream 250ms). */
 const SEARCH_DEBOUNCE_MS = 250;
-/** Combined SigLIP2 model size shown before download when the manifest is a
- *  placeholder (bytes 0). ~380 MB is the two fp32 ONNX encoders + tokenizer. */
-const FALLBACK_MODEL_MB = 380;
+const MODEL_REPAIR_MARKER = "SEARCH_MODEL_REPAIR_REQUIRED:";
+
+function requiresModelRepair(error: string | null | undefined): boolean {
+  // Index worker errors wrap the marker (for example, "model error: …").
+  return error?.includes(MODEL_REPAIR_MARKER) ?? false;
+}
 
 function emptySearchResults(): SearchResults {
   return { moments: [], spoken: [], files: [] };
@@ -178,9 +182,11 @@ export function subscribeWithAsyncCleanup<T>(
   };
 }
 
-function formatModelBytes(bytes: number): string {
-  const mb = bytes > 0 ? bytes / (1024 * 1024) : FALLBACK_MODEL_MB;
-  return `${Math.round(mb)} MB`;
+function formatModelBytes(bytes: number | null): string | null {
+  if (bytes === null || !Number.isFinite(bytes) || bytes <= 0) return null;
+  return bytes >= 1_000_000_000
+    ? `${(bytes / 1_000_000_000).toFixed(2)} GB`
+    : `${Math.ceil(bytes / 1_000_000)} MB`;
 }
 
 /** The visual-index lifecycle the affordance renders. */
@@ -190,7 +196,7 @@ type IndexPhase =
   | { kind: "downloading"; fraction: number }
   | { kind: "readyToIndex" }
   | { kind: "indexing"; done: number; total: number; fraction: number }
-  | { kind: "failed"; action: "download" | "index" };
+  | { kind: "failed"; action: "download" | "index"; error?: string };
 
 interface SearchProjectOperation {
   project: MediaProjectIdentity;
@@ -205,10 +211,13 @@ interface SearchOperationEvent {
   operation: SearchProjectOperation;
   state: "started" | "settled";
   succeeded?: boolean;
+  error?: string;
 }
 
 interface SearchIndexController {
   phase: IndexPhase;
+  modelBytes: number | null;
+  queryRevision: number;
   startDownload: () => void;
   startIndex: () => void;
 }
@@ -233,12 +242,13 @@ function settleSearchOperation(
   action: SearchOperationAction,
   operation: SearchProjectOperation,
   succeeded: boolean,
+  error?: string,
 ): void {
   const active = action === "download" ? activeModelDownload : activeIndexBuild;
   if (active?.token !== operation.token) return;
   if (action === "download") activeModelDownload = null;
   else activeIndexBuild = null;
-  publishSearchOperation({ action, operation, state: "settled", succeeded });
+  publishSearchOperation({ action, operation, state: "settled", succeeded, error });
 }
 
 function sameSearchProject(
@@ -266,7 +276,7 @@ export function MediaSearchResults({
   const [searchError, setSearchError] = useState<string | null>(null);
   const projectEpoch = useProjectStore((s) => s.projectEpoch);
   const projectPath = useProjectStore((s) => s.projectPath);
-  const indexController = useSearchIndexPhase(hasIndexableAssets, projectEpoch, projectPath);
+  const indexController = useSearchIndexPhase(hasIndexableAssets, projectEpoch, projectPath, results.visualError);
 
   // Debounced backend query for Moments + Spoken. Files come from `nameMatches`.
   const reqId = useRef(0);
@@ -284,7 +294,7 @@ export function MediaSearchResults({
       },
     });
     return request.cancel;
-  }, [projectEpoch, projectPath, query]);
+  }, [projectEpoch, projectPath, query, indexController.queryRevision]);
 
   const { moments, spoken } = results;
   const selectedMediaAssetIds = useEditorUiStore((s) => s.selectedMediaAssetIds);
@@ -300,8 +310,16 @@ export function MediaSearchResults({
     0,
     nameMatches.findIndex((item) => selectedMediaAssetIds.has(item.id)),
   );
+  const visualError = results.visualError;
+  const displayedError = searchError ?? (visualError
+    ? requiresModelRepair(visualError)
+      ? t("search.repairModelHint")
+      : visualError.includes("SEARCH_VISUAL_BUSY:")
+        ? t("search.visualBusy")
+        : t("search.visualFailed", { error: visualError })
+    : null);
   const isEmpty =
-    searchError === null &&
+    displayedError === null &&
     moments.length === 0 &&
     spoken.length === 0 &&
     nameMatches.length === 0;
@@ -310,11 +328,12 @@ export function MediaSearchResults({
     <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" }}>
       <SearchIndexAffordance
         phase={indexController.phase}
+        modelBytes={indexController.modelBytes}
         onDownload={indexController.startDownload}
         onIndex={indexController.startIndex}
       />
 
-      {searchError && (
+      {displayedError && (
         <div
           role="alert"
           aria-live="polite"
@@ -331,7 +350,7 @@ export function MediaSearchResults({
           }}
         >
           <Icon icon={AlertTriangle} size={13} />
-          <span>{searchError}</span>
+          <span>{displayedError}</span>
         </div>
       )}
 
@@ -412,8 +431,11 @@ function useSearchIndexPhase(
   hasIndexableAssets: boolean,
   projectEpoch: number,
   projectPath: string | null,
+  visualError?: string | null,
 ): SearchIndexController {
   const [phase, setPhase] = useState<IndexPhase>({ kind: "hidden" });
+  const [modelBytes, setModelBytes] = useState<number | null>(null);
+  const [queryRevision, setQueryRevision] = useState(0);
   const mediaCount = useMediaStore((s) => s.items.length);
   const mounted = useRef(false);
   const statusGeneration = useRef(0);
@@ -431,8 +453,23 @@ function useSearchIndexPhase(
     setPhase({ kind: "hidden" });
   }, [projectEpoch, projectPath]);
 
+  useEffect(() => {
+    let disposed = false;
+    const project = { projectEpoch, projectPath };
+    setModelBytes(null);
+    void (async () => {
+      try {
+        const status = await searchModelStatus();
+        if (!disposed && isCurrentMediaProject(project)) setModelBytes(status.bytes);
+      } catch {
+        // A missing manifest size must not block search or invent a download size.
+      }
+    })();
+    return () => { disposed = true; };
+  }, [projectEpoch, projectPath]);
+
   // Re-evaluate whenever the library changes (new assets → maybe need indexing).
-  const refresh = useCallback(async (failedAction?: SearchOperationAction) => {
+  const refresh = useCallback(async (failure?: Extract<IndexPhase, { kind: "failed" }>) => {
     const project = { projectEpoch, projectPath };
     const generation = ++statusGeneration.current;
     let status: Awaited<ReturnType<typeof searchIndexStatus>>;
@@ -444,7 +481,7 @@ function useSearchIndexPhase(
         generation === statusGeneration.current &&
         isCurrentMediaProject(project)
       ) {
-        setPhase(failedAction ? { kind: "failed", action: failedAction } : { kind: "hidden" });
+        setPhase(failure ?? { kind: "hidden" });
       }
       return;
     }
@@ -460,8 +497,8 @@ function useSearchIndexPhase(
       setPhase(running.phase);
       return;
     }
-    if (failedAction) {
-      setPhase({ kind: "failed", action: failedAction });
+    if (failure) {
+      setPhase(failure);
       return;
     }
     if (!status.modelInstalled) {
@@ -493,11 +530,20 @@ function useSearchIndexPhase(
           }
           return;
         }
-        const failedAction =
-          event.succeeded === false && sameSearchProject(event.operation.project, project)
-            ? event.action
+        const sameProject = sameSearchProject(event.operation.project, project);
+        const failure: Extract<IndexPhase, { kind: "failed" }> | undefined =
+          event.succeeded === false && sameProject
+            ? {
+                kind: "failed",
+                action: requiresModelRepair(event.error) ? "download" : event.action,
+                error: event.error,
+              }
             : undefined;
-        void refresh(failedAction);
+        void refresh(failure).then(() => {
+          if (event.succeeded && sameProject && mounted.current && isCurrentMediaProject(project)) {
+            setQueryRevision((revision) => revision + 1);
+          }
+        });
       }),
     [projectEpoch, projectPath, refresh],
   );
@@ -555,8 +601,8 @@ function useSearchIndexPhase(
       () => {
         settleSearchOperation("download", operation, true);
       },
-      () => {
-        settleSearchOperation("download", operation, false);
+      (error: unknown) => {
+        settleSearchOperation("download", operation, false, searchErrorMessage(error));
       },
     );
   }, [projectEpoch, projectPath]);
@@ -587,13 +633,20 @@ function useSearchIndexPhase(
       () => {
         settleSearchOperation("index", operation, true);
       },
-      () => {
-        settleSearchOperation("index", operation, false);
+      (error: unknown) => {
+        settleSearchOperation("index", operation, false, searchErrorMessage(error));
       },
     );
   }, [projectEpoch, projectPath]);
 
-  return { phase, startDownload, startIndex };
+  // A complete index is not proof that its model can execute. Query verification
+  // failures must still offer repair, without replacing any Files/Spoken hits.
+  const effectivePhase: IndexPhase = requiresModelRepair(visualError) &&
+    phase.kind !== "downloading" && phase.kind !== "indexing" &&
+    !(phase.kind === "failed" && phase.action === "download")
+    ? { kind: "failed", action: "download", error: visualError ?? undefined }
+    : phase;
+  return { phase: effectivePhase, modelBytes, queryRevision, startDownload, startIndex };
 }
 
 /** The status affordance: a download/enable button (no model) or a progress ring
@@ -601,10 +654,12 @@ function useSearchIndexPhase(
  *  `MediaTab+IndexStatus.swift`). */
 function SearchIndexAffordance({
   phase,
+  modelBytes,
   onDownload,
   onIndex,
 }: {
   phase: IndexPhase;
+  modelBytes: number | null;
   onDownload: () => void;
   onIndex: () => void;
 }) {
@@ -626,11 +681,12 @@ function SearchIndexAffordance({
   };
 
   if (phase.kind === "needsModel") {
+    const size = formatModelBytes(modelBytes);
     return (
       <button
         type="button"
         onClick={onDownload}
-        title={t("search.smartSearchHint", { size: formatModelBytes(0) })}
+        title={size ? t("search.smartSearchHint", { size }) : t("search.smartSearchUnknownSizeHint")}
         style={{ ...barStyle, cursor: "pointer", textAlign: "left" }}
       >
         <Icon icon={Sparkles} size={13} />
@@ -652,15 +708,19 @@ function SearchIndexAffordance({
     );
   }
   if (phase.kind === "failed") {
+    const repair = requiresModelRepair(phase.error);
     return (
       <button
         type="button"
         onClick={phase.action === "download" ? onDownload : onIndex}
-        title={t("search.retryHint")}
+        title={t(repair ? "search.repairModelHint" : phase.action === "index" ? "search.indexRetryHint" : "search.retryHint")}
         style={{ ...barStyle, cursor: "pointer", textAlign: "left", color: "var(--status-error)" }}
       >
         <Icon icon={AlertTriangle} size={13} />
-        <span style={{ fontWeight: "var(--fw-medium)" }}>{t("search.retry")}</span>
+        <span>
+          <span style={{ fontWeight: "var(--fw-medium)" }}>{t(repair ? "search.repairModel" : "search.retry")}</span>
+          {phase.error && <span style={{ display: "block" }}>{repair ? t("search.repairModelHint") : phase.error}</span>}
+        </span>
       </button>
     );
   }

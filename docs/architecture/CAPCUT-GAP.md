@@ -1,5 +1,9 @@
 # OpenTake vs 剪映 特性差距报告(模块 1–5)
 
+> 状态：historical · 阶段：partial-implementation。原日期、问题与对照结论保留；不作为当前缺口清单。
+> 当前执行与验收：[公开 Beta 计划](../plans/active/2026-09-06-public-beta.md) · [当日验证](../audit/2026-09-06/public-beta-validation.md)。
+
+
 > 由 5 个 max-思考子 Agent 对照 OpenTake 设计稿 + 上游源码逐特性核对。状态:has=已覆盖 / partial=部分 / missing=缺失。已排除剪映模块 6(自然语言交互/语音助手,OpenTake 已有 Agent)与模块 7(云生态/企业协作)。
 
 ## 模块1:基础剪辑与时间线管理

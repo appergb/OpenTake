@@ -4,7 +4,8 @@
  * (per-frame GPU composite → ffmpeg + AAC/LPCM mux).
  *
  * Scope mirrors the backend:
- *  - Format: H.264 / H.265 (`.mp4`) and ProRes 422 (`.mov`). The output path's
+ *  - Format: H.264 / H.265 (`.mp4`), ProRes 422 (`.mov`), and transparent
+ *    ProRes 4444 (`.mov`). The output path's
  *    extension tracks the selected codec so it always matches what the
  *    backend's `resolve_preset` requires (see `extForCodec`/`withExt` below).
  *  - Resolution: 720p / 1080p / 4K short-edge presets. The default pre-selects
@@ -50,7 +51,7 @@ export type ExportMode = "video" | "bundle";
 
 /** The container extension the backend's `resolve_preset` requires for a codec. */
 export function extForCodec(codec: ExportCodec): typeof MP4_EXT | typeof MOV_EXT {
-  return codec === "prores" ? MOV_EXT : MP4_EXT;
+  return codec === "prores" || codec === "prores4444" ? MOV_EXT : MP4_EXT;
 }
 
 /** Ensure a chosen path carries the given extension (does not strip a wrong one). */
@@ -143,6 +144,8 @@ export function ExportDialog() {
   // (belt-and-suspenders; only one export runs at a time in practice).
   const progressUnlisten = useRef<(() => void) | null>(null);
   const activeOperationId = useRef<string | null>(null);
+  const cancelRequested = useRef(false);
+  const exportStarted = useRef(false);
   const dialogRef = useRef<HTMLDivElement>(null);
   const busyRef = useRef(busy);
   busyRef.current = busy;
@@ -214,6 +217,7 @@ export function ExportDialog() {
       { id: "h264" as const, label: t("export.codec.h264") },
       { id: "h265" as const, label: t("export.codec.h265") },
       { id: "prores" as const, label: t("export.codec.prores") },
+      { id: "prores4444" as const, label: t("export.codec.prores4444") },
     ],
     [t],
   );
@@ -273,26 +277,29 @@ export function ExportDialog() {
     const chosen = await save({
       title: t("export.saveDialog"),
       defaultPath,
-      filters: [
-        {
-          name: t(ext === MOV_EXT ? "export.saveFilterMov" : "export.saveFilter"),
-          extensions: [ext],
-        },
-      ],
     });
     if (typeof chosen !== "string") return; // cancelled
 
     setBusy(true);
     setProgress(null);
     const operationId = api.createExportOperationId("video");
+    activeOperationId.current = operationId;
+    cancelRequested.current = false;
+    exportStarted.current = false;
     try {
       progressUnlisten.current = await api.onExportProgress(operationId, ({ done, total }) => {
         setProgress({ done, total });
       });
-      // Expose this identity immediately before dispatching start in the same
-      // turn; a pre-listener click cannot target a later operation.
-      activeOperationId.current = operationId;
-      const summary = await api.exportVideo(
+
+      // A cancel click can arrive while the native progress subscription is
+      // still resolving. Honor that intent before starting a new export.
+      if (cancelRequested.current) {
+        pushToast(t("export.cancelled"));
+        setOpen(false);
+        return;
+      }
+
+      const exportPromise = api.exportVideo(
         {
           outPath: withExt(chosen, ext),
           codec,
@@ -300,6 +307,13 @@ export function ExportDialog() {
         },
         operationId,
       );
+      exportStarted.current = true;
+      // If cancellation raced the invoke boundary, deliver it after the
+      // backend has had a chance to publish its active generation.
+      if (cancelRequested.current) {
+        void api.cancelExport(operationId).catch(() => undefined);
+      }
+      const summary = await exportPromise;
       pushToast(
         t("export.done", {
           width: summary.width,
@@ -322,6 +336,8 @@ export function ExportDialog() {
       progressUnlisten.current?.();
       progressUnlisten.current = null;
       if (activeOperationId.current === operationId) activeOperationId.current = null;
+      cancelRequested.current = false;
+      exportStarted.current = false;
       setProgress(null);
       setBusy(false);
     }
@@ -400,6 +416,8 @@ export function ExportDialog() {
     // Bundling has no cooperative cancel; only the video path can stop mid-run.
     const operationId = activeOperationId.current;
     if (mode === "video" && operationId) {
+      cancelRequested.current = true;
+      if (!exportStarted.current) return;
       try {
         await api.cancelExport(operationId);
       } catch (e) {

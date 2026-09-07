@@ -1,5 +1,10 @@
 # web — 总览
 
+> 状态：draft · 阶段：implementation-backed · 源码同步：2026-09-06。
+> 本次定向来源：`web/src/components/media/MediaPanel.tsx`、`MediaTabBar.tsx`、`components/preview/playbackRoute.ts`、`store/uiStore.ts`。
+> Text/Effect/Sticker 已接线；Sticker 使用项目图片/Lottie 与既有导入、预览、落轨流程。Transition/Captions/Smart Pack 有对应面板。多预览 tab、媒体三种视图和 temporal Rust compositor 已接入。当前测试结果统一引用当日审计，旧测试数仅为历史。
+> 当前验收见[公开 Beta 审计](../../audit/2026-09-06/public-beta-validation.md)；下文历史里程碑和测试记录保留其原时点边界。
+
 > 上级：[本模块目录](INDEX.md) · [模块文档树](../INDEX.md) · [docs 总目录](../../INDEX.md)
 
 ## 一句话定位
@@ -64,10 +69,10 @@ UI 手势 / 快捷键 / 拖放
 - 检查器（Video/Audio/Text、现场采样、关键帧面板与钻石键、可拖拽数值、Source 检查器、截帧入库）。
 - 媒体面板（导入/拖放/双击/星标/萃取音频/Relink/搜索/文件夹）、全局库页、工具栏、主页启动器、设置（BYOK keychain、Codex/ChatGPT 官方登录、外观、导入目录）。
 - 复制/剪切/粘贴、删除健壮化、自动保存、双语（zh-CN/en）、AppTheme 全令牌、可访问性（focus trap、24px 命中、reduced-motion、760×480 布局）。
-- 全量回归：129 个测试文件 / 1072 项测试通过（Vitest），`pnpm build` 通过。
+- 历史 Beta 1/2 回归记录为 129 文件 / 1072 测试；本候选结果见当日审计，不沿用旧计数。
 
 **计划中 / 后续版本：**
-- 媒体面板部分标签（Text/Sticker/Effect/Transition/Captions/Smart Wrap）在剪映式顶栏中为置灰占位，接相应功能面板后逐个点亮。
+- Sticker 已实现项目图片/Lottie 展示、导入、预览、拖拽/落轨及工程身份隔离；[定向测试](../../audit/2026-09-06/sticker-panel.md)通过，当前新包 GUI 验收仍待执行。
 - 高负载流式预览引擎进一步优化、库→时间线拖拽接线（#37 尾巴）。
 - 与上游逐项 1:1 截图/行为/几何对拍验收（见 [SPEC.md](SPEC.md)）。
 

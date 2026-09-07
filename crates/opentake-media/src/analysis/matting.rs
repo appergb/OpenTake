@@ -240,7 +240,7 @@ impl RvmMattingSession {
         let width = frame.width as usize;
         let height = frame.height as usize;
         let mut src = vec![0.0_f32; 3 * width * height];
-        for (index, pixel) in frame.rgba.chunks_exact(4).enumerate() {
+        for (index, pixel) in frame.rgba.as_chunks::<4>().0.iter().enumerate() {
             src[index] = pixel[0] as f32 / 255.0;
             src[width * height + index] = pixel[1] as f32 / 255.0;
             src[2 * width * height + index] = pixel[2] as f32 / 255.0;

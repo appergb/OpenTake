@@ -183,6 +183,7 @@ export function SplitPane({
         height: "100%",
         minWidth: 0,
         minHeight: 0,
+        overflow: "hidden",
         cursor: pointerNear ? (isH ? "col-resize" : "row-resize") : undefined,
       }}
       onPointerDown={onPointerDown}
@@ -199,6 +200,7 @@ export function SplitPane({
           flex: `0 0 ${size}px`,
           minWidth: 0,
           minHeight: 0,
+          overflow: "hidden",
           position: "relative",
         }}
       >
@@ -247,7 +249,15 @@ export function SplitPane({
           }}
         />
       </div>
-      <div style={{ flex: "1 1 0", minWidth: 0, minHeight: 0, position: "relative" }}>
+      <div
+        style={{
+          flex: "1 1 0",
+          minWidth: 0,
+          minHeight: 0,
+          overflow: "hidden",
+          position: "relative",
+        }}
+      >
         {second}
       </div>
     </div>

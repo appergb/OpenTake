@@ -1,5 +1,10 @@
 # opentake-render 总览
 
+> 状态：draft · 阶段：implementation-backed · 源码同步：2026-09-06。
+> 本次定向来源：`crates/opentake-render/src/plan/`、`gpu/`、`src-tauri/src/export.rs`。
+> RenderPlan、源帧时间映射、透明合成与导出协作已经实现；temporal 播放调度由桌面壳/预览路由负责。共享合成语义不等于所有预览/导出组合已通过像素验收。
+> 当前验收见[公开 Beta 审计](../../audit/2026-09-06/public-beta-validation.md)；下文历史里程碑和测试记录保留其原时点边界。
+
 > 上级：[模块文档树](../INDEX.md) · [docs 总目录](../../INDEX.md) · 本模块目录：[INDEX.md](INDEX.md) · 完整规格：[SPEC.md](SPEC.md)
 
 ## 一句话定位
@@ -98,7 +103,7 @@ Compositor::render_to_rgba(device, queue, size, &frame_plan, resolver) -> Decode
 **计划中（仅 SPEC / ROADMAP / GAP 规划，本 crate 代码尚未落地或仅占位）：**
 - **线性光混合**：当前合成在 **sRGB 非线性域**直接混合以最贴近 AVFoundation（`RT_FORMAT = Rgba8Unorm`，`color.rs` 的 sRGB↔linear 已备但合成 over 未切线性）；线性光（RGBA16F）为质量增强项，仅在像素 diff 通过后切换（SPEC §3.7）。
 - **转场 transitions**（相邻 clip 重叠区 pass）：ADVANCED-FEATURES A 层 p0；Beta 1 已交付 cross-dissolve 全链（含时间线标记 / Inspector 选型），扩库为后续版本项。
-- **透明 alpha / PNG sequence / 任意 TSX 动效**：Motion Canvas 透明输出与 frame-sequence 明确属于后续版本（v1 走普通视频导入/预览/导出链路）。
+- **通用 PNG sequence / 任意 TSX 动效**：仍属后续范围；透明 Motion 与 ProRes 4444 已通过普通媒体/编码路径进入候选源码。
 
 > **2026-08-03 更新：**「运行期预览接线」「真实播放引擎」「图片/Lottie 物化」三项
 > 已随 Beta 1 落地（`composite_frame`/播放引擎在 `src-tauri/playback` 与 `web`，像素仍走本 crate

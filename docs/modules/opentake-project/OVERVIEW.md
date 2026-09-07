@@ -1,5 +1,10 @@
 # opentake-project 总览
 
+> 状态：draft · 阶段：implementation-backed · 源码同步：2026-09-06。
+> 本次定向来源：`crates/opentake-project/src/`。
+> 工程保存、自包含归档、布局和 XMEML 交换格式为本模块范围；视频编码位于 media/Tauri。日期化测试和旧交接不自动代表 Beta 6 候选已验收。
+> 当前验收见[公开 Beta 审计](../../audit/2026-09-06/public-beta-validation.md)；下文历史里程碑和测试记录保留其原时点边界。
+
 > 上级：[模块文档树](../INDEX.md) · [docs 总目录](../../INDEX.md) · 本模块目录：[INDEX.md](INDEX.md)
 
 ## 一句话定位

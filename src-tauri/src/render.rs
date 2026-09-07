@@ -21,7 +21,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -435,6 +435,19 @@ impl LottieMaterializer {
         path: &std::path::Path,
         bytes: &[u8],
     ) -> Result<(), String> {
+        let json = if is_lottie_container(path) {
+            extract_lottie_animation(path, bytes)?
+        } else {
+            bytes.to_vec()
+        };
+        self.ensure_json_document_bytes(path, &json)
+    }
+
+    fn ensure_json_document_bytes(
+        &mut self,
+        path: &std::path::Path,
+        bytes: &[u8],
+    ) -> Result<(), String> {
         if bytes.is_empty() || bytes.len() > MAX_LOTTIE_BYTES {
             return Err(format!(
                 "Lottie document {} must be 1..={MAX_LOTTIE_BYTES} bytes (got {})",
@@ -470,6 +483,19 @@ impl LottieMaterializer {
 
     pub(crate) fn metadata(&mut self, path: &std::path::Path) -> Result<LottieMetadata, String> {
         self.ensure_document(path)?;
+        self.metadata_cached(path)
+    }
+
+    pub(crate) fn metadata_file(
+        &mut self,
+        path: &std::path::Path,
+        file: &File,
+    ) -> Result<LottieMetadata, String> {
+        self.ensure_document_file(path, file)?;
+        self.metadata_cached(path)
+    }
+
+    fn metadata_cached(&self, path: &std::path::Path) -> Result<LottieMetadata, String> {
         let composition = &self
             .documents
             .get(path)
@@ -639,6 +665,61 @@ impl Default for LottieMaterializer {
     }
 }
 
+const MAX_LOTTIE_CONTAINER_BYTES: usize = MAX_LOTTIE_BYTES;
+
+fn is_lottie_container(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("lottie"))
+}
+
+/// Extract the first animation JSON from a `.lottie` ZIP container. The
+/// archive is bounded before parsing and the decompressed animation is capped
+/// by the same limit as a plain Lottie JSON document.
+fn extract_lottie_animation(path: &std::path::Path, bytes: &[u8]) -> Result<Vec<u8>, String> {
+    if bytes.is_empty() || bytes.len() > MAX_LOTTIE_CONTAINER_BYTES {
+        return Err(format!(
+            "Lottie container {} must be 1..={MAX_LOTTIE_CONTAINER_BYTES} bytes (got {})",
+            path.display(),
+            bytes.len()
+        ));
+    }
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
+        .map_err(|error| format!("read Lottie container {}: {error}", path.display()))?;
+    let mut selected = None;
+    for index in 0..archive.len() {
+        let file = archive
+            .by_index(index)
+            .map_err(|error| format!("read Lottie container {}: {error}", path.display()))?;
+        let name = file.name().to_ascii_lowercase();
+        if file.is_file() && name.starts_with("animations/") && name.ends_with(".json") {
+            selected = Some(index);
+            break;
+        }
+    }
+    let Some(index) = selected else {
+        return Err(format!(
+            "Lottie container {} has no animations/*.json entry",
+            path.display()
+        ));
+    };
+    let file = archive
+        .by_index(index)
+        .map_err(|error| format!("read Lottie animation {}: {error}", path.display()))?;
+    let mut json = Vec::new();
+    file.take((MAX_LOTTIE_BYTES + 1) as u64)
+        .read_to_end(&mut json)
+        .map_err(|error| format!("read Lottie animation {}: {error}", path.display()))?;
+    if json.is_empty() || json.len() > MAX_LOTTIE_BYTES {
+        return Err(format!(
+            "Lottie animation {} must be 1..={MAX_LOTTIE_BYTES} bytes (got {})",
+            path.display(),
+            json.len()
+        ));
+    }
+    Ok(json)
+}
+
 fn validate_lottie(
     composition: &velato::Composition,
     path: &std::path::Path,
@@ -712,7 +793,11 @@ struct MediaResolver<'d> {
 
 impl MediaResolver<'_> {
     fn fail_materialization<T>(&mut self, message: impl Into<String>) -> Option<T> {
-        if self.strict_materialization && self.materialization_error.is_none() {
+        // A missing or corrupt source is never a valid preview frame. The
+        // strict flag only controls retained-handle authority and the
+        // interpolation tail fallback; it must not turn an unavailable layer
+        // into a successful black composite.
+        if self.materialization_error.is_none() {
             self.materialization_error = Some(message.into());
         }
         None
@@ -1129,7 +1214,7 @@ fn paint_empty_timeline_overlay(size: RenderSize, timecode: &str) -> DecodedFram
     let width = size.width as usize;
     let height = size.height as usize;
     let mut rgba = vec![0_u8; width.saturating_mul(height).saturating_mul(4)];
-    for pixel in rgba.chunks_exact_mut(4) {
+    for pixel in rgba.as_chunks_mut::<4>().0.iter_mut() {
         pixel.copy_from_slice(&EMPTY_TIMELINE_BACKGROUND_RGBA);
     }
 
@@ -2187,6 +2272,59 @@ mod tests {
     fn preview_size_floors_degenerate_canvas() {
         let rs = preview_render_size(0, 0, 1280);
         assert_eq!(rs, RenderSize::new(2, 2));
+    }
+
+    #[test]
+    fn preview_composite_rejects_missing_image_instead_of_returning_a_black_frame() {
+        if RenderDevice::try_new().is_err() {
+            return;
+        }
+        let tmp = tempfile::tempdir().expect("missing image fixture");
+        let mut timeline = Timeline {
+            width: 32,
+            height: 32,
+            fps: 30,
+            ..Timeline::new()
+        };
+        let mut clip = Clip::new("missing-clip", "missing-image", 0, 1);
+        clip.media_type = ClipType::Image;
+        clip.source_clip_type = ClipType::Image;
+        let mut track = Track::new("video", ClipType::Video);
+        track.clips.push(clip);
+        timeline.tracks.push(track);
+
+        let mut manifest = MediaManifest::new();
+        manifest.entries.push(MediaManifestEntry {
+            id: "missing-image".into(),
+            name: "gone.png".into(),
+            kind: ClipType::Image,
+            source: MediaSource::External {
+                absolute_path: tmp.path().join("gone.png").display().to_string(),
+            },
+            duration: 0.0,
+            generation_input: None,
+            source_width: Some(32),
+            source_height: Some(32),
+            source_fps: None,
+            has_audio: Some(false),
+            color: None,
+            proxy: None,
+            folder_id: None,
+            cached_remote_url: None,
+            cached_remote_url_expires_at: None,
+        });
+
+        let error = composite_timeline_frame(
+            &timeline,
+            &manifest,
+            &None,
+            &RenderState::new(),
+            0,
+            32,
+            &MediaCancelToken::new(),
+        )
+        .expect_err("missing preview media must not become a successful black frame");
+        assert!(error.contains("image source missing-image"), "{error}");
     }
 
     #[test]

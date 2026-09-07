@@ -1,6 +1,6 @@
 /**
  * MediaPanel (SPEC §7 + 剪映式顶栏改造)。顶部横排主标签（素材/音频/文本/贴纸/
- * 特效/转场/字幕/智能包裹；素材/音频/音乐/字幕已接真实内容）取代了原左侧竖排
+ * 特效/转场/字幕/智能包裹；素材/音频/音乐/文本/字幕已接真实内容）取代了原左侧竖排
  * Media/Captions/Music 标签条。素材/音频下再分「导入 / 我的」二级标签：导入=当前
  * 项目素材（音频标签仅 type==='audio'），我的=跨项目全局收藏库。
  * 内容区仍是 actions/search/context 工具栏 + 资产网格；网格项 HTML5-draggable 到
@@ -31,6 +31,9 @@ import { Icon } from "../ui/Icon";
 import { HoverButton } from "../ui/HoverButton";
 import { useEditorUiStore, type MediaSubTabId } from "../../store/uiStore";
 import {
+  beginMediaImport,
+  endMediaImport,
+  refreshMedia,
   applyMediaErrorForProject,
   applyMediaListForProject,
   captureMediaProjectIdentity,
@@ -50,14 +53,22 @@ import { setDraggingMedia } from "../../lib/mediaDragState";
 import { assetUrl } from "../../lib/asset";
 import { BoundedCache } from "../../lib/lru";
 import {
+  projectMediaView,
+  type MediaOrganizationMode,
+  type MediaViewGroup,
+} from "../../lib/mediaViewModes";
+import {
   derivedResourceKinds,
   derivedResourceScheduler,
 } from "../../lib/derivedResourceScheduler";
-import { childFolders, folderTrail, normalizeFolderId } from "../../lib/folderTree";
+import { folderTrail } from "../../lib/folderTree";
+import { useSettingsStore } from "../../store/settingsStore";
 import { useProjectStore } from "../../store/projectStore";
 import {
   addMediaToTimeline,
+  addTextClip,
   reportMediaPlacementFailure,
+  setEffects,
 } from "../../store/editActions";
 import {
   deleteFolderFromContextMenu,
@@ -66,6 +77,7 @@ import {
   deleteSelectedMediaAssets,
 } from "../../store/mediaDeleteActions";
 import {
+  importMedia,
   cancelGeneration,
   retryGeneration,
   extractAudio,
@@ -74,7 +86,7 @@ import {
   preloadMedia,
   toggleFavorite,
 } from "../../lib/api";
-import { saveDialog } from "../../lib/dialog";
+import { openDialog, saveDialog } from "../../lib/dialog";
 import type { MediaFolder, MediaItem } from "../../lib/types";
 import {
   AUDIO_SUB_TABS,
@@ -91,6 +103,7 @@ import { SmartPackTab } from "./SmartPackTab";
 import { MediaSearchResults } from "./MediaSearch";
 import { applyFavoriteMigrationOutcome, migrateLocalFavorites } from "./favorites";
 import { LibraryEntryGrid } from "./LibraryView";
+import { EFFECT_REGISTRY, newAdvertisedEffect, type AdvertisedEffectName } from "../../lib/effects";
 
 /** MIME-ish type used on dataTransfer when dragging a media item to the timeline. */
 export const MEDIA_DND_TYPE = "application/x-opentake-media";
@@ -126,6 +139,15 @@ const TYPE_FILTER_OPTIONS: ReadonlyArray<{ id: MediaTypeFilter; labelKey: string
   { id: "image", labelKey: "media.filter.image" },
   { id: "text", labelKey: "media.filter.text" },
   { id: "lottie", labelKey: "media.filter.lottie" },
+];
+
+const ORGANIZATION_OPTIONS: ReadonlyArray<{
+  id: MediaOrganizationMode;
+  labelKey: string;
+}> = [
+  { id: "folder", labelKey: "media.organization.folder" },
+  { id: "flat", labelKey: "media.organization.flat" },
+  { id: "grouped", labelKey: "media.organization.grouped" },
 ];
 
 /** 局部排序（ES2019 稳定排序，同值保持原顺序）。`default` 返回原数组引用。 */
@@ -176,19 +198,18 @@ export function selectMediaFolder(folderId: string): void {
   const ui = useEditorUiStore.getState();
   ui.focusPanel("media");
   ui.selectMediaAssets(new Set());
-  useEditorUiStore.setState({
-    selectedFolderIds: new Set([folderId]),
-    previewMediaId: null,
-  });
+  ui.closeAllPreviewTabs();
+  useEditorUiStore.setState({ selectedFolderIds: new Set([folderId]) });
 }
 
 /** Commit folder navigation and clear the selection that would otherwise stay
  * hidden after the folder grid changes. */
 export function openMediaFolder(folderId: string, onOpen: (id: string) => void): void {
+  const ui = useEditorUiStore.getState();
+  ui.closeAllPreviewTabs();
   useEditorUiStore.setState({
     selectedMediaAssetIds: new Set(),
     selectedFolderIds: new Set(),
-    previewMediaId: null,
   });
   onOpen(folderId);
 }
@@ -244,7 +265,7 @@ function requestMediaCardThumbnail(item: MediaItem, projectEpoch: number) {
   });
 }
 
-/** 当前已实现内容的两个主标签；其余标签在 MediaTabBar 中置灰、点不到。 */
+/** Media/Audio share the asset surface; Text has its own lightweight action surface. */
 type MediaTabKind = "material" | "audio";
 
 export function MediaPanel() {
@@ -298,7 +319,9 @@ export function MediaPanel() {
                 : { display: "none" }
             }
           >
-            {active ? (
+            {tab === "sticker" ? (
+              <StickerPanel key={`${projectEpoch}:${projectPath}`} active={active} />
+            ) : active ? (
               tab === "material" || tab === "audio" ? (
                 <MediaTab kind={tab as MediaTabKind} />
               ) : tab === "music" ? (
@@ -309,6 +332,10 @@ export function MediaPanel() {
                 <CaptionsTab />
               ) : tab === "smartPack" ? (
                 <SmartPackTab />
+              ) : tab === "effect" ? (
+                <EffectTab />
+              ) : tab === "text" ? (
+                <TextTab />
               ) : (
                 <Placeholder label={t(`media.tab.${tab}`)} />
               )
@@ -316,6 +343,270 @@ export function MediaPanel() {
           </div>
         );
       })}
+    </div>
+  );
+}
+
+// Matches the existing Rust image/Lottie importer; JSON validity stays in Rust.
+const STICKER_EXTENSIONS = ["png", "jpg", "jpeg", "tiff", "heic", "webp", "json", "lottie"];
+
+/** A filtered project mirror, with the same preview and atomic placement as Media. */
+function StickerPanel({ active }: { active: boolean }) {
+  const t = useT();
+  const items = useMediaStore((s) => s.items);
+  const importing = useMediaStore((s) => s.importing);
+  const importError = useMediaStore((s) => s.error);
+  const projectPath = useProjectStore((s) => s.projectPath);
+  const readOnly = useProjectStore((s) => s.compatibilityReadOnly);
+  const selectedIds = useEditorUiStore((s) => s.selectedMediaAssetIds);
+  const [placing, setPlacing] = useState(false);
+  const placementPending = useRef(false);
+  const [placementError, setPlacementError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const alive = useRef(true);
+  const hintId = useId();
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; };
+  }, []);
+  const stickers = items.filter((item) => item.type === "image" || item.type === "lottie");
+  const selected = selectedIds.size === 1
+    ? stickers.find((item) => selectedIds.has(item.id))
+    : undefined;
+  const projectDisabled = !projectPath ? t("sticker.noProject") : readOnly ? t("sticker.readOnly") : undefined;
+  const busyReason = importing ? t("media.importing") : placing ? t("sticker.placing") : undefined;
+  const unavailable = (item: MediaItem): string | undefined => {
+    if (item.missing) return t("sticker.missing");
+    if (item.generationStatus === "generating" || item.generationStatus === "downloading") return t("sticker.processing");
+    if (item.generationStatus === "failed" || item.generationStatus === "cancelled") return t("sticker.failed");
+    return undefined;
+  };
+  const selectedReason = projectDisabled ?? busyReason ?? (selected ? unavailable(selected) : t("sticker.select"));
+
+  const onImport = async () => {
+    if (projectDisabled || placementPending.current || useMediaStore.getState().importing) return;
+    const project = captureMediaProjectIdentity();
+    // Own the entire gesture, including the picker, so changing tabs cannot open
+    // a second picker. The store's operation token also isolates project changes.
+    const operation = beginMediaImport();
+    useMediaStore.getState().setError(null);
+    setNotice(null);
+    try {
+      const open = await openDialog();
+      if (!isCurrentMediaProject(project)) return;
+      if (!open) throw new Error(t("sticker.desktopRequired"));
+      const picked = await open({
+        title: t("sticker.import"),
+        directory: false,
+        multiple: true,
+        defaultPath: useSettingsStore.getState().defaultImportFolder ?? undefined,
+        filters: [{ name: t("media.tab.sticker"), extensions: STICKER_EXTENSIONS }],
+      });
+      if (!isCurrentMediaProject(project) || useProjectStore.getState().compatibilityReadOnly) return;
+      const paths = Array.isArray(picked) ? picked : picked ? [picked] : [];
+      const supported = paths.filter((path) => STICKER_EXTENSIONS.includes(path.split(".").pop()?.toLowerCase() ?? ""));
+      let skipped = paths.length - supported.length;
+      if (supported.length > 0) {
+        const list = await importMedia(supported);
+        if (!isCurrentMediaProject(project)) return;
+        skipped += list.skipped?.length ?? 0;
+        await refreshMedia();
+      }
+      if (alive.current && isCurrentMediaProject(project) && skipped > 0) {
+        setNotice(t("media.importSkipped", { count: skipped }));
+      }
+    } catch (error) {
+      applyMediaErrorForProject(project, error instanceof Error ? error.message : String(error));
+    } finally {
+      endMediaImport(operation);
+    }
+  };
+
+  const onPlace = async (item: MediaItem) => {
+    if (projectDisabled || useMediaStore.getState().importing || placementPending.current || unavailable(item)) return;
+    const project = captureMediaProjectIdentity();
+    placementPending.current = true;
+    setPlacing(true);
+    setPlacementError(null);
+    try {
+      await addMediaToTimeline(item);
+    } catch (error) {
+      if (alive.current && isCurrentMediaProject(project)) {
+        setPlacementError(t("media.placeFailed", { error: error instanceof Error ? error.message : String(error) }));
+      }
+    } finally {
+      placementPending.current = false;
+      if (alive.current && isCurrentMediaProject(project)) setPlacing(false);
+    }
+  };
+
+  // Keep the operation state alive across tabs, while unmounting hidden cards.
+  // The parent project key resets this state only when the project changes.
+  if (!active) return null;
+
+  const buttonStyle = {
+    minHeight: 30,
+    padding: "var(--space-xs) var(--space-sm)",
+    borderRadius: "var(--radius-sm)",
+    border: "var(--bw-thin) solid var(--border-primary)",
+    background: "var(--bg-raised)",
+    color: "var(--text-primary)",
+    fontSize: "var(--fs-sm)",
+  };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0, gap: "var(--space-sm)", padding: "var(--space-sm)" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "var(--space-sm)" }}>
+        <button type="button" disabled={!!projectDisabled || importing || placing} aria-busy={importing} aria-describedby={hintId}
+          onClick={() => void onImport()} style={{ ...buttonStyle, opacity: projectDisabled || importing || placing ? 0.5 : 1 }}>
+          {t("sticker.import")}
+        </button>
+        <button type="button" disabled={!!selectedReason} aria-busy={placing} aria-describedby={hintId}
+          onClick={() => { if (selected) void onPlace(selected); }} style={{ ...buttonStyle, opacity: selectedReason ? 0.5 : 1 }}>
+          {t("sticker.add")}
+        </button>
+      </div>
+      <p style={{ margin: 0, color: "var(--text-secondary)", fontSize: "var(--fs-sm)" }}>{t("sticker.hint")}</p>
+      <div id={hintId} role="status" style={{ color: "var(--text-secondary)", fontSize: "var(--fs-sm)" }}>
+        {selectedReason ?? ""}
+        {notice && <p>{notice}</p>}
+        {stickers.length === 0 && <p>{t("sticker.empty")}</p>}
+      </div>
+      {(importError || placementError) && <div role="alert" style={{ color: "var(--text-secondary)", fontSize: "var(--fs-sm)" }}>{importError && <p>{importError}</p>}{placementError && <p>{placementError}</p>}</div>}
+      <div role="grid" data-media-roving-container="true" aria-label={t("media.tab.sticker")} aria-busy={importing || placing}
+        style={{ overflowY: "auto", minHeight: 0, display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(100px, 1fr))", alignContent: "start", gap: "var(--space-sm)" }}>
+        {stickers.map((item, index) => (
+          <div role="row" key={item.id}>
+            <MediaCard item={item} rovingTabIndex={selected ? (selected.id === item.id ? 0 : -1) : index === 0 ? 0 : -1}
+              disabledReason={projectDisabled ?? busyReason ?? unavailable(item)} onPlace={(media) => void onPlace(media)} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TextTab() {
+  const t = useT();
+  const pushToast = useEditorUiStore((state) => state.pushToast);
+  const [pending, setPending] = useState(false);
+
+  const onAddText = async () => {
+    if (pending) return;
+    setPending(true);
+    try {
+      await addTextClip();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      pushToast(`${t("toolbar.addText")}: ${message}`);
+    } finally {
+      setPending(false);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        flex: 1,
+        minHeight: 0,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: "var(--space-md)",
+        color: "var(--text-secondary)",
+      }}
+    >
+      <Icon icon={TypeIcon} size={28} strokeWidth={1.5} />
+      <button
+        type="button"
+        aria-label={t("toolbar.addText")}
+        aria-busy={pending || undefined}
+        disabled={pending}
+        onClick={() => void onAddText()}
+        style={{
+          minHeight: 30,
+          padding: "0 var(--space-lg)",
+          borderRadius: "var(--radius-sm)",
+          border: "var(--bw-thin) solid var(--border-primary)",
+          background: "var(--bg-raised)",
+          color: "var(--text-primary)",
+          cursor: pending ? "wait" : "pointer",
+          opacity: pending ? 0.6 : 1,
+        }}
+      >
+        {t("toolbar.addText")}
+      </button>
+    </div>
+  );
+}
+
+function EffectTab() {
+  const t = useT();
+  const timeline = useProjectStore((state) => state.timeline);
+  const selectedClipIds = useEditorUiStore((state) => state.selectedClipIds);
+  const pushToast = useEditorUiStore((state) => state.pushToast);
+  const [pending, setPending] = useState<AdvertisedEffectName | null>(null);
+  const selectedVisualClips = timeline.tracks
+    .flatMap((track) => track.clips)
+    .filter((clip) => selectedClipIds.has(clip.id) && clip.mediaType !== "audio");
+  const selectedClip = selectedVisualClips.length === 1 ? selectedVisualClips[0] : undefined;
+  const editable = selectedClip !== undefined;
+
+  const onAddEffect = async (name: AdvertisedEffectName) => {
+    if (!selectedClip || !editable || pending) return;
+    setPending(name);
+    try {
+      await setEffects([selectedClip.id], [
+        ...(selectedClip.effects ?? []),
+        newAdvertisedEffect(name),
+      ]);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      pushToast(`${t("media.tab.effect")}: ${message}`);
+    } finally {
+      setPending(null);
+    }
+  };
+
+  return (
+    <div
+      style={{
+        flex: 1,
+        minHeight: 0,
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: "var(--space-md)",
+        color: "var(--text-secondary)",
+      }}
+    >
+      <span>{t("media.tab.effect")}</span>
+      <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: "var(--space-xs)" }}>
+        {EFFECT_REGISTRY.map((effect) => (
+          <button
+            key={effect.name}
+            type="button"
+            data-testid="effect-preset"
+            data-effect-name={effect.name}
+            aria-label={t(effect.labelKey)}
+            disabled={!editable || pending !== null}
+            onClick={() => void onAddEffect(effect.name)}
+            style={{
+              minHeight: 28,
+              padding: "0 var(--space-sm)",
+              borderRadius: "var(--radius-sm)",
+              border: "var(--bw-thin) solid var(--border-primary)",
+              background: "var(--bg-raised)",
+              color: "var(--text-primary)",
+              cursor: editable && pending === null ? "pointer" : "not-allowed",
+              opacity: editable && pending === null ? 1 : 0.5,
+            }}
+          >
+            {t(effect.labelKey)}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -336,9 +627,11 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
   const setCurrentFolderId = useEditorUiStore((s) => s.setMediaPanelCurrentFolderId);
   const [search, setSearch] = useState("");
   // 视图层展示状态：排序/筛选/视图模式只影响渲染，不改媒体镜像（store 不动）。
+  const [organizationMode, setOrganizationMode] = useState<MediaOrganizationMode>("folder");
   const [viewMode, setViewMode] = useState<MediaViewLayout>("grid");
   const [sortKey, setSortKey] = useState<MediaSortKey>("default");
   const [typeFilter, setTypeFilter] = useState<MediaTypeFilter>("all");
+  const [organizationOpen, setOrganizationOpen] = useState(false);
   const [sortOpen, setSortOpen] = useState(false);
   const [filterOpen, setFilterOpen] = useState(false);
   const isAudio = kind === "audio";
@@ -373,38 +666,44 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
   // Effective cursor: favorites view is always flat (root).
   const folderId = browsing ? currentFolderId : null;
   const query = search.trim().toLowerCase();
-
-  // Sub-folders shown as tiles in the current level (only while browsing, and
-  // not while a search is active — search flattens to matching files).
-  const visibleFolders = useMemo(
-    () => (browsing && query === "" ? childFolders(folders, folderId) : []),
-    [browsing, query, folders, folderId],
+  const importItems = useMemo(
+    () => items.filter((item) => (kind === "audio" ? item.type === "audio" : true)),
+    [items, kind],
   );
-
-  // File filter pipeline (all immutable filters; never mutates the store):
-  // 1) main tab — "音频" keeps only pure audio (strict type==='audio', no
-  //    audio-bearing video, matching CapCut). "素材" shows every type.
-  // 2) subtab — "我的" keeps only starred favorites; "导入" shows all.
-  // 3) folder — while browsing without a search, only this folder's direct
-  //    files. A search ignores folder scope and matches names library-wide
-  //    (within the current main/subtab filter).
-  // 4) presentation — local type filter + sort (view-layer only).
-  const filteredItems = useMemo(
+  const importProjection = useMemo(() => {
+    const projection = projectMediaView({
+      mode: organizationMode,
+      items: importItems,
+      folders,
+      currentFolderId: folderId,
+      query,
+      typeFilter,
+      favoriteOnly: false,
+    });
+    return {
+      folders: projection.folders,
+      items: sortMediaItems(projection.items, sortKey),
+      groups: projection.groups.map((group) => ({
+        ...group,
+        items: sortMediaItems(group.items, sortKey),
+      })),
+    };
+  }, [organizationMode, importItems, folders, folderId, query, typeFilter, sortKey]);
+  const searchNameMatches = useMemo(
     () =>
       sortMediaItems(
-        filterMediaByType(
-          items.filter((item) => {
-            if (kind === "audio" && item.type !== "audio") return false;
-            if (subTab === "mine" && !item.favorite) return false;
-            if (query !== "") return item.name.toLowerCase().includes(query);
-            if (browsing && normalizeFolderId(item.folderId) !== folderId) return false;
-            return true;
-          }),
+        projectMediaView({
+          mode: "flat",
+          items: importItems,
+          folders,
+          currentFolderId: folderId,
+          query,
           typeFilter,
-        ),
+          favoriteOnly: false,
+        }).items,
         sortKey,
       ),
-    [items, kind, subTab, query, browsing, folderId, typeFilter, sortKey],
+    [importItems, folders, folderId, query, typeFilter, sortKey],
   );
   const filteredLibraryEntries = useMemo(
     () =>
@@ -437,8 +736,12 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
   );
 
   const trail = useMemo(() => folderTrail(folders, folderId), [folders, folderId]);
-  const totalCount = visibleFolders.length + filteredItems.length;
-  const isEmpty = totalCount === 0;
+  const totalCount =
+    organizationMode === "grouped"
+      ? importProjection.groups.reduce((count, group) => count + group.items.length, 0)
+      : importProjection.folders.length + importProjection.items.length;
+  const isEmpty =
+    organizationMode === "grouped" ? importProjection.groups.length === 0 : totalCount === 0;
   const audioExtractView = isAudio && subTab === "extract";
   const audioSoundView = isAudio && subTab === "sound";
   const displayCount = audioExtractView
@@ -521,6 +824,27 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
               （数据源不同或语义固定），不显示这些控件，避免死按钮。 */}
           {subTab === "import" && (
             <>
+              <ToolbarMenu
+                title={t("media.organizationMode")}
+                icon={FolderIcon}
+                open={organizationOpen}
+                onToggle={setOrganizationOpen}
+              >
+                {(closeAndRestore) =>
+                  ORGANIZATION_OPTIONS.map((option, index) => (
+                    <ToolbarMenuOption
+                      key={option.id}
+                      label={t(option.labelKey)}
+                      selected={organizationMode === option.id}
+                      tabIndex={index === 0 ? 0 : -1}
+                      onSelect={() => {
+                        setOrganizationMode(option.id);
+                        closeAndRestore();
+                      }}
+                    />
+                  ))
+                }
+              </ToolbarMenu>
               <HoverButton
                 title={t("media.viewMode")}
                 active={viewMode === "list"}
@@ -576,7 +900,7 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
         </div>
         {/* Breadcrumb / 返回上级 — only while browsing the library tree and not
             searching. Root is always clickable; the current folder is plain text. */}
-        {browsing && query === "" && (
+        {browsing && organizationMode === "folder" && query === "" && (
           <FolderBreadcrumb trail={trail} onNavigate={setCurrentFolderId} />
         )}
         {/* contextBar */}
@@ -662,22 +986,25 @@ function MediaTab({ kind }: { kind: MediaTabKind }) {
                 )
               ) : query !== "" ? (
                 // Smart search: three result groups (Moments / Spoken / Files) + the
-                // index-status affordance. `filteredItems` is the name-matched Files group
+                // index-status affordance. `searchNameMatches` is the name-matched Files group
                 // (already scoped to the current main/subtab). Moments/Spoken come from
                 // the backend query; they degrade to empty with no model, leaving Files.
                 <MediaSearchResults
                   query={query}
-                  nameMatches={filteredItems}
+                  nameMatches={searchNameMatches}
                   hasIndexableAssets={items.some((i) => i.type === "video" || i.type === "image")}
                 />
               ) : isEmpty ? (
                 <EmptyState subTab={subTab} insideFolder={browsing && folderId !== null} />
+              ) : organizationMode === "grouped" ? (
+                <MediaGroupedView groups={importProjection.groups} layout={viewMode} />
               ) : (
                 <MediaGrid
-                  folders={visibleFolders}
-                  items={filteredItems}
+                  folders={importProjection.folders}
+                  items={importProjection.items}
                   onOpenFolder={setCurrentFolderId}
                   layout={viewMode}
+                  organization={organizationMode}
                 />
               )
             ) : null}
@@ -1058,11 +1385,13 @@ function MediaGrid({
   items,
   onOpenFolder,
   layout = "grid",
+  organization = "folder",
 }: {
   folders: MediaFolder[];
   items: MediaItem[];
   onOpenFolder: (id: string) => void;
   layout?: MediaViewLayout;
+  organization?: MediaOrganizationMode;
 }) {
   const selectedMediaAssetIds = useEditorUiStore((s) => s.selectedMediaAssetIds);
   const selectedFolderIds = useEditorUiStore((s) => s.selectedFolderIds);
@@ -1082,6 +1411,7 @@ function MediaGrid({
         aria-label="Media"
         data-media-roving-container="true"
         data-media-layout="list"
+        data-media-organization={organization}
         style={{
           flex: 1,
           overflowY: "auto",
@@ -1123,6 +1453,7 @@ function MediaGrid({
       aria-label="Media"
       data-media-roving-container="true"
       data-media-layout="grid"
+      data-media-organization={organization}
       style={{
         flex: 1,
         overflowY: "auto",
@@ -1154,6 +1485,86 @@ function MediaGrid({
             rovingTabIndex={item.id === (activeMediaId ?? defaultMediaId) ? 0 : -1}
           />
         </div>
+      ))}
+    </div>
+  );
+}
+
+function MediaGroupedView({
+  groups,
+  layout,
+}: {
+  groups: MediaViewGroup[];
+  layout: MediaViewLayout;
+}) {
+  const t = useT();
+  const selectedMediaAssetIds = useEditorUiStore((s) => s.selectedMediaAssetIds);
+  const allItems = groups.flatMap((group) => group.items);
+  const activeMediaId = allItems.find((item) => selectedMediaAssetIds.has(item.id))?.id;
+  const defaultMediaId = allItems[0]?.id;
+
+  return (
+    <div
+      role="grid"
+      aria-label="Media"
+      data-media-roving-container="true"
+      data-media-layout={layout}
+      data-media-organization="grouped"
+      style={{
+        flex: 1,
+        overflowY: "auto",
+        display: "flex",
+        flexDirection: "column",
+        gap: "var(--space-sm)",
+        padding: "var(--space-sm)",
+      }}
+    >
+      {groups.map((group) => (
+        <section
+          key={group.folderId ?? "__root__"}
+          style={{ display: "flex", flexDirection: "column", gap: "var(--space-xs)" }}
+        >
+          <div
+            data-media-group-heading="true"
+            style={{
+              color: "var(--text-secondary)",
+              fontSize: "var(--fs-xs)",
+              fontWeight: "var(--fw-medium)",
+            }}
+          >
+            {group.folderId === null ? t("media.folderRoot") : group.label}
+          </div>
+          {layout === "list" ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              {group.items.map((item) => (
+                <div key={item.id} role="row" style={{ minWidth: 0 }}>
+                  <MediaListRow
+                    item={item}
+                    rovingTabIndex={item.id === (activeMediaId ?? defaultMediaId) ? 0 : -1}
+                  />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fill, minmax(96px, 1fr))",
+                gap: "var(--space-sm)",
+                alignContent: "start",
+              }}
+            >
+              {group.items.map((item) => (
+                <div key={item.id} role="row" style={{ minWidth: 0 }}>
+                  <MediaCard
+                    item={item}
+                    rovingTabIndex={item.id === (activeMediaId ?? defaultMediaId) ? 0 : -1}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
       ))}
     </div>
   );
@@ -1807,7 +2218,10 @@ export function handleMediaTileArrowNavigation(
   const folderId = next.dataset.mediaFolderId;
   const mediaId = next.dataset.mediaAssetId;
   if (folderId) selectMediaFolder(folderId);
-  else if (mediaId) selectMediaForPreview(mediaId);
+  else if (mediaId) {
+    if (next.getAttribute("aria-disabled") === "true") selectMediaAsset(mediaId);
+    else selectMediaForPreview(mediaId);
+  }
   next.focus();
   next.scrollIntoView?.({ block: "nearest", inline: "nearest" });
   return true;
@@ -1957,12 +2371,45 @@ export function FolderTile({
   );
 }
 
+/** A failed <img> does not recover when its cached file becomes readable later.
+ * Retry only the asset read, not decoding or timeline work. */
+function MediaCardThumbnail({ src, name, type }: { src: string; name: string; type: MediaItem["type"] }) {
+  const [attempt, setAttempt] = useState(0);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    if (!failed || attempt >= 2) return;
+    const timer = window.setTimeout(() => {
+      setAttempt((previous) => previous + 1);
+      setFailed(false);
+    }, attempt === 0 ? 250 : 1000);
+    return () => window.clearTimeout(timer);
+  }, [attempt, failed]);
+
+  if (failed) return <Icon icon={TYPE_ICON[type]} size={22} strokeWidth={1.5} />;
+  // The native protocol authorizes uri.path(), so a retry query does not change
+  // the file being granted. Changing the URL avoids WebKit retaining a failed load.
+  const retrySrc = attempt === 0 ? src : `${src}${src.includes("?") ? "&" : "?"}opentake-thumbnail-retry=${attempt}`;
+  return (
+    <img
+      src={retrySrc}
+      alt={name}
+      draggable={false}
+      onError={() => setFailed(true)}
+      style={{ width: "100%", height: "100%", objectFit: "cover" }}
+    />
+  );
+}
+
 export function MediaCard({
   item,
   rovingTabIndex = 0,
+  onPlace,
+  disabledReason,
 }: {
   item: MediaItem;
   rovingTabIndex?: number;
+  onPlace?: (item: MediaItem) => void;
+  disabledReason?: string;
 }) {
   const t = useT();
   const cardRef = useRef<HTMLDivElement | null>(null);
@@ -1990,7 +2437,7 @@ export function MediaCard({
 
   const activate = () => {
     selectMediaAsset(item.id);
-    if (generationActive) return;
+    if (generationActive || disabledReason) return;
     useEditorUiStore.getState().setPreviewMedia(item.id);
     // Warm poster/sprite/waveform caches so preview + a later timeline drop
     // are instant instead of decoding on the interaction path.
@@ -2092,6 +2539,10 @@ export function MediaCard({
   }, [item.id, item.type, item.missing]);
 
   const onDragStart = (e: React.DragEvent) => {
+    if (disabledReason) {
+      e.preventDefault();
+      return;
+    }
     e.dataTransfer.setData(MEDIA_DND_TYPE, item.id);
     e.dataTransfer.effectAllowed = "copy";
     if (thumbnailRef.current) {
@@ -2142,7 +2593,7 @@ export function MediaCard({
   return (
     <div
       ref={cardRef}
-      draggable={!generationActive}
+      draggable={!generationActive && !disabledReason}
       onDragStart={onDragStart}
       onDragEnd={onDragEnd}
       onClick={(event) => {
@@ -2150,8 +2601,9 @@ export function MediaCard({
         activate();
       }}
       onDoubleClick={() => {
-        if (!generationActive && !generationFailed) {
-          void addMediaToTimeline(item).catch(reportMediaPlacementFailure);
+        if (!generationActive && !generationFailed && !disabledReason) {
+          if (onPlace) onPlace(item);
+          else void addMediaToTimeline(item).catch(reportMediaPlacementFailure);
         }
       }}
       onMouseEnter={() => setHovered(true)}
@@ -2192,7 +2644,8 @@ export function MediaCard({
           });
         }
       }}
-      title={item.name}
+      title={disabledReason ? `${item.name}: ${disabledReason}` : item.name}
+      aria-disabled={disabledReason ? true : undefined}
       role="gridcell"
       tabIndex={rovingTabIndex}
       aria-selected={selected}
@@ -2203,7 +2656,7 @@ export function MediaCard({
         display: "flex",
         flexDirection: "column",
         gap: 4,
-        cursor: generationActive ? "progress" : generationFailed ? "default" : "grab",
+        cursor: disabledReason ? "not-allowed" : generationActive ? "progress" : generationFailed ? "default" : "grab",
         borderRadius: "var(--radius-sm)",
         outline: focused ? "2px solid var(--accent-primary)" : "none",
         outlineOffset: 2,
@@ -2229,11 +2682,11 @@ export function MediaCard({
         {/* `draggable={false}` on the inner media so the card's custom drag
             (MEDIA_DND_TYPE) wins instead of a native image drag. */}
         {thumb ? (
-          <img
+          <MediaCardThumbnail
+            key={`${projectEpoch}:${thumbnailKey}:${thumb}`}
             src={thumb}
-            alt={item.name}
-            draggable={false}
-            style={{ width: "100%", height: "100%", objectFit: "cover" }}
+            name={item.name}
+            type={item.type}
           />
         ) : item.type === "audio" ? (
           <AudioWaveform

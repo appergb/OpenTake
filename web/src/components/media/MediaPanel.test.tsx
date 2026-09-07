@@ -6,7 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { MediaItem, MediaList } from "../../lib/types";
+import type { Clip, MediaItem, MediaList, Timeline } from "../../lib/types";
 import {
   applyMediaErrorForProject,
   applyMediaListForProject,
@@ -63,6 +63,8 @@ vi.mock("../../store/editActions", async (importOriginal) => {
   return {
     ...actual,
     addMediaToTimeline: vi.fn(),
+    addTextClip: vi.fn(),
+    setEffects: vi.fn(),
     deleteFolder: vi.fn(),
     deleteMedia: vi.fn(),
   };
@@ -104,6 +106,10 @@ afterEach(() => {
     saveAsProgress: null,
     projectSettingsPrompt: null,
     pendingSwapClipId: null,
+    previewTabIds: [],
+    previewTabHistory: [],
+    previewActiveTabId: "timeline",
+    mediaTab: "material",
     selectedMediaAssetIds: new Set(),
     selectedFolderIds: new Set(),
     previewMediaId: null,
@@ -274,6 +280,104 @@ describe("AudioWaveform", () => {
       stale.resolve(null);
       current.resolve(null);
       vi.mocked(api.getWaveform).mockResolvedValue(null);
+    }
+  });
+});
+
+describe("MediaCard thumbnail load recovery", () => {
+  it("retries a failed cached asset URL and keeps the recovered image without regenerating media", async () => {
+    vi.useFakeTimers();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const item = { ...mediaItem("recover-thumb"), thumbnail: "/cache/recover.thumb.png" };
+    try {
+      await act(async () => root.render(<MediaCard item={item} />));
+      const original = container.querySelector("img")!;
+      expect(original.getAttribute("src")).toBe("asset:///cache/recover.thumb.png");
+      await act(async () => original.dispatchEvent(new Event("error")));
+      expect(container.querySelector("img")).toBeNull();
+      await act(async () => vi.advanceTimersByTime(1000));
+      const recovered = container.querySelector("img")!;
+      expect(recovered).not.toBeNull();
+      expect(recovered.getAttribute("src")).toBe("asset:///cache/recover.thumb.png?opentake-thumbnail-retry=1");
+      expect(recovered.alt).toBe("recover-thumb");
+      await act(async () => recovered.dispatchEvent(new Event("load")));
+      await act(async () => vi.advanceTimersByTime(10000));
+      expect(container.querySelector("img")).toBe(recovered);
+      expect(api.generateThumbnail).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds repeated thumbnail failures and leaves the media card usable instead of a broken image", async () => {
+    vi.useFakeTimers();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<MediaCard item={{ ...mediaItem("permanent-thumb"), thumbnail: "/cache/unavailable.png" }} />));
+      for (let failure = 0; failure < 3; failure++) {
+        const img = container.querySelector("img")!;
+        expect(img).not.toBeNull();
+        await act(async () => img.dispatchEvent(new Event("error")));
+        await act(async () => vi.advanceTimersByTime(2000));
+      }
+      expect(container.querySelector("img")).toBeNull();
+      await act(async () => vi.advanceTimersByTime(30000));
+      expect(container.querySelector("img")).toBeNull();
+      expect(api.generateThumbnail).not.toHaveBeenCalled();
+      await act(async () => container.querySelector<HTMLElement>('[role="gridcell"]')!.click());
+      expect(useEditorUiStore.getState().previewMediaId).toBe("permanent-thumb");
+    } finally {
+      await act(async () => root.unmount());
+      vi.useRealTimers();
+    }
+  });
+
+  it("isolates a pending thumbnail retry when project or source changes", async () => {
+    vi.useFakeTimers();
+    useProjectStore.setState({ projectEpoch: 450 });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    const item = { ...mediaItem("switched-thumb"), thumbnail: "/cache/shared.png" };
+    try {
+      await act(async () => root.render(<MediaCard item={item} />));
+      await act(async () => container.querySelector("img")!.dispatchEvent(new Event("error")));
+      await act(async () => useProjectStore.setState({ projectEpoch: 451 }));
+      expect(container.querySelector("img")?.getAttribute("src")).toBe("asset:///cache/shared.png");
+      await act(async () => vi.advanceTimersByTime(2000));
+      expect(container.querySelector("img")?.getAttribute("src")).toBe("asset:///cache/shared.png");
+      await act(async () => container.querySelector("img")!.dispatchEvent(new Event("error")));
+      await act(async () => root.render(<MediaCard item={{ ...item, thumbnail: "/cache/relinked.png" }} />));
+      await act(async () => vi.advanceTimersByTime(2000));
+      expect(container.querySelector("img")?.getAttribute("src")).toBe("asset:///cache/relinked.png");
+    } finally {
+      await act(async () => root.unmount());
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels thumbnail retry work on unmount", async () => {
+    vi.useFakeTimers();
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<MediaCard item={{ ...mediaItem("disposed-thumb"), thumbnail: "/cache/disposed.png" }} />));
+      await act(async () => container.querySelector("img")!.dispatchEvent(new Event("error")));
+      expect(vi.getTimerCount()).toBe(1);
+      await act(async () => root.unmount());
+      expect(vi.getTimerCount()).toBe(0);
+      await act(async () => vi.advanceTimersByTime(10000));
+      expect(container.querySelector("img")).toBeNull();
+      expect(api.generateThumbnail).not.toHaveBeenCalled();
+    } finally {
+      await act(async () => root.unmount());
+      vi.useRealTimers();
     }
   });
 });
@@ -988,6 +1092,47 @@ describe("media grid interaction consistency", () => {
     expect(useEditorUiStore.getState().previewMediaId).toBeNull();
   });
 
+  it("keeps the most recent valid media tab active after batch deleting older preview tabs", async () => {
+    const completed = deferred<{
+      changed: boolean;
+      actionName: string;
+      affectedClipIds: string[];
+      timelineVersion: number;
+      summary: string;
+    }>();
+    vi.mocked(editActions.deleteMedia).mockReturnValue(completed.promise);
+    useProjectStore.setState({
+      projectEpoch: 24,
+      projectPath: "/same.opentake",
+      timelineVersion: 15,
+    });
+    const ui = useEditorUiStore.getState();
+    ui.openPreviewTab("a");
+    ui.openPreviewTab("b");
+    ui.openPreviewTab("c");
+    ui.selectPreviewTab("media_a");
+    useEditorUiStore.setState({
+      selectedMediaAssetIds: new Set(["a", "b"]),
+    });
+
+    const deletion = deleteSelectedMediaAssets();
+    useProjectStore.setState({ timelineVersion: 16 });
+    completed.resolve({
+      changed: true,
+      actionName: "Delete Media",
+      affectedClipIds: [],
+      timelineVersion: 16,
+      summary: "Deleted a,b",
+    });
+    await deletion;
+
+    expect(useEditorUiStore.getState()).toMatchObject({
+      previewTabIds: ["c"],
+      previewActiveTabId: "media_c",
+      previewMediaId: "c",
+    });
+  });
+
   it("keeps folder selection when a newer revision supersedes completion", async () => {
     const completed = deferred<{
       changed: boolean;
@@ -1301,6 +1446,87 @@ describe("media presentation controls (view mode / sort / filter)", () => {
     await act(async () => root.unmount());
   });
 
+  it("switches folder, flat, and grouped media organization while keeping layout toggle active", async () => {
+    useEditorUiStore.setState({
+      view: "editor",
+      settingsOpen: false,
+      exportDialogOpen: false,
+      saveAsProgress: null,
+      projectSettingsPrompt: null,
+      pendingSwapClipId: null,
+      mediaTab: "material",
+      mediaSubTab: "import",
+      mediaPanelCurrentFolderId: null,
+    });
+    useMediaStore.setState({
+      items: [
+        { ...mediaItem("root-asset"), name: "Root Asset", folderId: null },
+        { ...mediaItem("folder-a-asset"), name: "Folder A Asset", folderId: "folder-a" },
+        { ...mediaItem("folder-b-asset"), name: "Folder B Asset", folderId: "folder-b" },
+      ],
+      folders: [
+        { id: "folder-a", name: "Folder A" },
+        { id: "folder-b", name: "Folder B" },
+      ],
+      importing: false,
+      error: null,
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<MediaPanel />));
+
+    const assetIds = () =>
+      [...container.querySelectorAll<HTMLElement>("[data-media-asset-id]")].map(
+        (element) => element.dataset.mediaAssetId,
+      );
+    const folderIds = () =>
+      [...container.querySelectorAll<HTMLElement>("[data-media-folder-id]")].map(
+        (element) => element.dataset.mediaFolderId,
+      );
+    const openMenu = async (title: string) => {
+      await act(async () =>
+        container
+          .querySelector<HTMLButtonElement>(`button[title="${title}"]`)!
+          .dispatchEvent(new MouseEvent("click", { bubbles: true })),
+      );
+    };
+    const chooseMenuItem = async (label: string) => {
+      await act(async () =>
+        [...container.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
+          .find((button) => button.textContent === label)!
+          .dispatchEvent(new MouseEvent("click", { bubbles: true })),
+      );
+    };
+
+    expect(container.querySelector('[data-media-organization="folder"]')).not.toBeNull();
+    expect(folderIds()).toEqual(["folder-a", "folder-b"]);
+    expect(assetIds()).toEqual(["root-asset"]);
+
+    await openMenu("媒体组织方式");
+    await chooseMenuItem("平铺");
+    expect(container.querySelector('[data-media-organization="flat"]')).not.toBeNull();
+    expect(folderIds()).toEqual([]);
+    expect(assetIds()).toEqual(["root-asset", "folder-a-asset", "folder-b-asset"]);
+
+    await openMenu("媒体组织方式");
+    await chooseMenuItem("分组");
+    expect(container.querySelector('[data-media-organization="grouped"]')).not.toBeNull();
+    expect(folderIds()).toEqual([]);
+    expect(assetIds()).toEqual(["root-asset", "folder-a-asset", "folder-b-asset"]);
+    expect(
+      [...container.querySelectorAll<HTMLElement>("[data-media-group-heading]")].map(
+        (element) => element.textContent?.trim(),
+      ),
+    ).toEqual(["全部", "Folder A", "Folder B"]);
+
+    const viewButton = container.querySelector<HTMLButtonElement>('button[title="视图模式"]')!;
+    await act(async () => viewButton.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    expect(container.querySelector('[data-media-layout="list"]')).not.toBeNull();
+    expect(container.querySelector('[data-media-organization="grouped"]')).not.toBeNull();
+    await act(async () => root.unmount());
+  });
+
   it("gives list rows the same selection/delete contract as grid cards", async () => {
     useEditorUiStore.setState({
       view: "editor",
@@ -1515,6 +1741,78 @@ describe("MediaPanel accessibility contracts", () => {
     }
   });
 
+  it("routes the enabled text tab to the existing undoable text action", async () => {
+    useEditorUiStore.setState({
+      view: "editor",
+      mediaTab: "text",
+      mediaSubTab: "import",
+      mediaPanelCurrentFolderId: null,
+    });
+    vi.mocked(editActions.addTextClip).mockResolvedValue(undefined);
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<MediaPanel />));
+
+    const addText = container.querySelector<HTMLButtonElement>('button[aria-label="添加文本"]');
+    expect(addText).not.toBeNull();
+    await act(async () => addText?.click());
+    expect(editActions.addTextClip).toHaveBeenCalledTimes(1);
+    await act(async () => root.unmount());
+  });
+
+  it("routes an effect preset to the selected clip effect chain", async () => {
+    const selectedClip = { id: "clip-1", mediaType: "video", effects: [] } as unknown as Clip;
+    const linkedAudio = { id: "audio-1", mediaType: "audio", effects: [] } as unknown as Clip;
+    const timeline = {
+      fps: 30,
+      width: 1920,
+      height: 1080,
+      settingsConfigured: true,
+      tracks: [
+        {
+          id: "track-1",
+          type: "video",
+          muted: false,
+          hidden: false,
+          syncLocked: true,
+          clips: [selectedClip],
+        },
+        {
+          id: "track-a1",
+          type: "audio",
+          muted: false,
+          hidden: false,
+          syncLocked: true,
+          clips: [linkedAudio],
+        },
+      ],
+    } as Timeline;
+    useProjectStore.setState({ timeline });
+    useEditorUiStore.setState({
+      view: "editor",
+      mediaTab: "effect",
+      selectedClipIds: new Set(["clip-1", "audio-1"]),
+    });
+    vi.mocked(editActions.setEffects).mockResolvedValue(undefined);
+
+    const container = document.createElement("div");
+    document.body.append(container);
+    const root = createRoot(container);
+    await act(async () => root.render(<MediaPanel />));
+    const grayscale = container.querySelector<HTMLButtonElement>(
+      '[data-testid="effect-preset"][data-effect-name="grayscale"]',
+    );
+    expect(grayscale).not.toBeNull();
+
+    await act(async () => grayscale?.click());
+    expect(editActions.setEffects).toHaveBeenCalledWith(
+      ["clip-1"],
+      [{ name: "grayscale", params: {}, enabled: true }],
+    );
+    await act(async () => root.unmount());
+  });
+
   it("exposes popup state and supports complete menu focus navigation", async () => {
     useEditorUiStore.setState({
       view: "editor",
@@ -1527,12 +1825,13 @@ describe("MediaPanel accessibility contracts", () => {
     const root = createRoot(container);
     await act(async () => root.render(<MediaPanel />));
 
-    const popupTriggers = () =>
-      [...container.querySelectorAll<HTMLButtonElement>('button[aria-haspopup="menu"]')];
-    expect(popupTriggers()).toHaveLength(3);
+    const popupTrigger = (title: string) =>
+      container.querySelector<HTMLButtonElement>(`button[title="${title}"]`)!;
+    const popupTitles = ["导入媒体 (⌘I)", "媒体组织方式", "排序", "筛选"] as const;
+    expect(popupTitles.map((title) => popupTrigger(title))).toHaveLength(4);
 
-    for (let index = 0; index < popupTriggers().length; index += 1) {
-      const trigger = popupTriggers()[index]!;
+    for (const title of popupTitles) {
+      const trigger = popupTrigger(title);
       expect(trigger.getAttribute("aria-expanded")).toBe("false");
       const menuId = trigger.getAttribute("aria-controls");
       expect(menuId).toBeTruthy();
@@ -1592,7 +1891,7 @@ describe("MediaPanel accessibility contracts", () => {
       expect(document.activeElement).toBe(trigger);
     }
 
-    const importTrigger = popupTriggers()[0]!;
+    const importTrigger = popupTrigger("导入媒体 (⌘I)");
     await act(async () =>
       importTrigger.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true })),
     );
@@ -1623,23 +1922,24 @@ describe("MediaPanel accessibility contracts", () => {
     const root = createRoot(container);
     await act(async () => root.render(<MediaPanel />));
 
-    const popupTriggers = () =>
-      [...container.querySelectorAll<HTMLButtonElement>('button[aria-haspopup="menu"]')];
-    expect(popupTriggers()).toHaveLength(3);
+    const popupTrigger = (title: string) =>
+      container.querySelector<HTMLButtonElement>(`button[title="${title}"]`)!;
+    const popupTitles = ["导入媒体 (⌘I)", "媒体组织方式", "排序", "筛选"] as const;
+    expect(popupTitles.map((title) => popupTrigger(title))).toHaveLength(4);
 
-    await act(async () => popupTriggers()[0]?.click());
-    await act(async () => popupTriggers()[1]?.click());
+    await act(async () => popupTrigger("导入媒体 (⌘I)").click());
+    await act(async () => popupTrigger("媒体组织方式").click());
     expect(container.querySelectorAll('[role="menu"]')).toHaveLength(1);
-    expect(popupTriggers()[0]?.getAttribute("aria-expanded")).toBe("false");
-    expect(popupTriggers()[1]?.getAttribute("aria-expanded")).toBe("true");
+    expect(popupTrigger("导入媒体 (⌘I)").getAttribute("aria-expanded")).toBe("false");
+    expect(popupTrigger("媒体组织方式").getAttribute("aria-expanded")).toBe("true");
     await act(async () =>
       document.activeElement?.dispatchEvent(
         new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
       ),
     );
 
-    for (let index = 0; index < 3; index += 1) {
-      let trigger = popupTriggers()[index]!;
+    for (const title of popupTitles) {
+      let trigger = popupTrigger(title);
       const menuId = trigger.getAttribute("aria-controls")!;
       await act(async () => trigger.click());
       let option = document
@@ -1650,7 +1950,7 @@ describe("MediaPanel accessibility contracts", () => {
       await act(async () =>
         option.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true })),
       );
-      trigger = popupTriggers()[index]!;
+      trigger = popupTrigger(title);
       expect(document.getElementById(menuId)).toBeNull();
       expect(trigger.getAttribute("aria-expanded")).toBe("false");
       expect(document.activeElement).not.toBe(trigger);
@@ -1661,7 +1961,7 @@ describe("MediaPanel accessibility contracts", () => {
         .querySelector<HTMLButtonElement>('[role^="menuitem"]')!;
       expect(document.activeElement).toBe(option);
       await act(async () => outside.focus());
-      trigger = popupTriggers()[index]!;
+      trigger = popupTrigger(title);
       expect(document.getElementById(menuId)).toBeNull();
       expect(trigger.getAttribute("aria-expanded")).toBe("false");
       expect(document.activeElement).toBe(outside);
@@ -1683,11 +1983,12 @@ describe("MediaPanel accessibility contracts", () => {
     const root = createRoot(container);
     await act(async () => root.render(<MediaPanel />));
 
-    const keys = ["Enter", " ", "Enter"] as const;
+    const popupTitles = ["导入媒体 (⌘I)", "媒体组织方式", "排序", "筛选"] as const;
+    const keys = ["Enter", " ", "Enter", " "] as const;
     for (let index = 0; index < keys.length; index += 1) {
-      const trigger = [
-        ...container.querySelectorAll<HTMLButtonElement>('button[aria-haspopup="menu"]'),
-      ][index]!;
+      const trigger = container.querySelector<HTMLButtonElement>(
+        `button[title="${popupTitles[index]}"]`,
+      )!;
       const menuId = trigger.getAttribute("aria-controls")!;
       await act(async () => trigger.click());
       const option = document

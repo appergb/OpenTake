@@ -1,5 +1,8 @@
 # mcp-server — rmcp MCP server 网络面
 
+> 状态：draft · 阶段：implementation-backed · 源码同步：2026-09-06。
+> 实际桌面认证与候选验证见[当日审计](../../audit/2026-09-06/public-beta-validation.md)。
+
 > 上级：[模块目录](INDEX.md) · [总览](OVERVIEW.md) · [docs 总目录](../../INDEX.md)
 >
 > 源码：[`../../../crates/opentake-agent/src/mcp/server.rs`](../../../crates/opentake-agent/src/mcp/server.rs)
@@ -17,7 +20,7 @@
 `McpServer` 实现 rmcp 的 `ServerHandler`，持有一个 `Arc<Dispatcher>`（自带会话级 agent-undo 栈）+ 构造时快照的系统提示 `instructions`。
 
 - **`get_info`** — 广告 `instructions`（base 提示 + 激活插件，构造时由 [`assemble_system_prompt`](prompt.md) 生成）与 tools 能力；`server_info.name = "opentake"`，版本取 `CARGO_PKG_VERSION`。
-- **`list_tools`** — 从最多 39 个基础工具（`ToolName::ALL`）按当前主机的媒体桥能力过滤，在授权可用时追加 4 个生成工具，并在桌面 Motion 渲染桥可用时追加 add/edit 两工具；描述/Schema 来自 [`tools::descriptions`](dispatch-tools.md)。
+- **`list_tools`** — 从基础工具集合（`ToolName::ALL`）按当前主机的媒体桥能力过滤，在授权可用时追加 4 个生成工具，并在桌面 Motion 渲染桥可用时追加 add/edit 两工具；描述/Schema 来自 [`tools::descriptions`](dispatch-tools.md)。
 - **`call_tool`** — 把工具调用交给 `Dispatcher::dispatch`。因为所有已接线工具是同步的，用 `tokio::task::spawn_blocking` 在阻塞线程池跑，避免堵住 async 运行时；结果经 [`convert::to_call_tool_result`](core-handle-convert.md) 转成 rmcp `CallToolResult`。
 - **`call`** — 与 `call_tool` 等价的同步入口，单独拆出以便**不构造传输 `RequestContext`** 就能单测一次工具派发。
 
@@ -26,19 +29,19 @@
 `build_router` 组装 axum 路由：
 
 - `nest_service("/mcp", StreamableHttpService::new(...))` —— 每次会话用 `McpServer::new(handle, registry)` 新建（`LocalSessionManager` 管理会话）。
-- `GET /.well-known/oauth-protected-resource` —— 返回 `{ resource: "opentake", authorization_servers: [] }`，让探测客户端得到明确的"无需鉴权"回答（服务仅回环，故不挂任何授权服务器）。
+- `GET /.well-known/oauth-protected-resource` —— 返回 `{ resource: "opentake", authorization_servers: [] }`，该发现信息不列出 OAuth authorization server；不能由空数组推导为桌面端无需 Bearer 认证。
 - 整条路由外层 `from_fn(localhost_guard)`。
 
-`serve(addr, handle, registry)` 绑定回环 `TcpListener` 并 `axum::serve` 到进程退出。`DEFAULT_ADDR = "127.0.0.1:19789"`（端口沿用上游）。
+`build_router*` 是库层装配面；桌面生产路径使用 gated/authorized transport。官方 Codex 逐轮临时启动认证 listener，Beta 5 外部 MCP 使用显式配对和可撤销凭据。`DEFAULT_ADDR = "127.0.0.1:19789"` 是默认常量，不能等同于默认启动的未认证服务。生命周期见 `src-tauri/src/codex.rs` 与 `src-tauri/src/external_mcp.rs`。
 
 ### 回环 Origin/Host 守卫（DNS-rebinding 防御）
 
 `localhost_guard` 中间件检查请求头：
 
-- `Host` 与 `Origin` **若存在**必须指向回环；**缺省即放行**（原生 MCP 客户端常不带 `Origin`）。
+- Host/Origin 的缺省、重复值、authority 与端口按 `localhost_guard`、`host_is_local` 和 `origin_is_local` 的实际规则校验；认证由外层 Bearer authorizer 与工程/请求 gate 完成。
 - 存在但非回环 → `403 "non-local Origin/Host rejected"`。
 
-`host_is_local` 解析规则：剥协议（`http://host:port` 形式）→ 剥路径/查询 → 剥端口（IPv6 括号形式 `[::1]:port` 单独处理）→ 匹配 `localhost` / `127.0.0.1` / `::1`。这是防 DNS-rebinding 把本地回环服务暴露给 LAN/网页的关键（对应上游 `NWParameters.requiredLocalEndpoint` 锁回环）。
+`host_is_local` 解析规则：剥协议（`http://host:port` 形式）→ 剥路径/查询 → 剥端口（IPv6 括号形式 `[::1]:port` 单独处理）→ 匹配 `localhost` / `127.0.0.1` / `::1`。这是回环请求校验的一部分，不能替代 Bearer、工程身份和请求边界检查（对应上游 `NWParameters.requiredLocalEndpoint` 锁回环）。
 
 ## 数据流
 

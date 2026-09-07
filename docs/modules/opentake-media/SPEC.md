@@ -1,5 +1,8 @@
 # opentake-media 实现就绪规格 (Issue #8)
 
+> 状态：draft · 阶段：partial-implementation · 设计与早期实现来源保留；原文日期、行号和“待做”属于设计时点。2026-09-06 当前实现见本模块 [OVERVIEW.md](OVERVIEW.md)，当前验收见[公开 Beta 记录](../../audit/2026-09-06/public-beta-validation.md)。
+
+
 > 范围:`crates/opentake-media`。把上游基于 AVFoundation / DSWaveformImage / macOS 26 Speech / CoreML 的媒体读取层,移植为跨平台 Rust:**ffmpeg-next 解码/编码/缩略图/抽 PCM、Symphonia 波形、whisper-rs 转写、candle/ort + SigLIP2 语义搜索、ort 通用推理 worker**。本 crate 是媒体**读取与离线分析**层,不含 wgpu 帧合成器(那在 `opentake-render`,见 §9 边界)。
 >
 > 状态:设计规格。对应 ROADMAP **Phase 2**(缩略图/波形,易)与 **Phase 8**(转写/语义搜索/进阶 AI worker)。本 crate 在 workspace 已有空壳 `crates/opentake-media/{Cargo.toml,src/lib.rs}`(`crate_compiles` 占位测试)。
@@ -8,8 +11,8 @@
 > - 解码/编码/缩略图/PCM:`palmier-pro-upstream/Sources/PalmierPro/Preview/{ImageVideoGenerator,AlphaVideoNormalizer,TimelineRenderer}.swift`、`Transcription/Transcription.swift`(`extractAudioTrack`)、`Timeline/MediaVisualCache.swift`(缩略图 sprite + 波形 + 磁盘缓存)。
 > - 转写:`Transcription/{Transcription,TranscriptCache,TranscriptSearch}.swift`。
 > - 语义搜索:`Search/{SearchIndexConfig,SearchIndexCoordinator}.swift`、`Search/Models/{VisualEmbedder,VisualModelLoader,ModelDownloader,TextTokenizer}.swift`、`Search/Indexing/{FrameSampler,VisualIndexer,EmbeddingStore}.swift`、`Search/Query/VisualSearch.swift`。
-> - 横切分析:`docs/_analysis/02-苹果框架可移植性.md`、`docs/_analysis/01-架构与数据流.md`、`docs/MODULE-PORT-MAP.md`(行级算法笔记 L833–883、L923–940、L1211)。
-> - 架构/相位:`docs/ARCHITECTURE.md` §1/§6/§7、`docs/ROADMAP.md` Phase 2/8、`docs/ADVANCED-FEATURES.md`(ort worker 复用方)。
+> - 横切分析:`docs/_analysis/02-苹果框架可移植性.md`、`docs/_analysis/01-架构与数据流.md`、`docs/architecture/MODULE-PORT-MAP.md`(行级算法笔记 L833–883、L923–940、L1211)。
+> - 架构/相位:`docs/architecture/ARCHITECTURE.md` §1/§6/§7、`docs/architecture/ROADMAP.md` Phase 2/8、`docs/architecture/ADVANCED-FEATURES.md`(ort worker 复用方)。
 > - 领域契约:`crates/opentake-domain/src/{media,clip_type,timeline,clip}.rs`(本 crate 消费方,不可改)。
 
 ---
@@ -21,11 +24,11 @@
 1. **时间单位分层**:本 crate 一律用**秒(`f64`)**与**源采样位置**作 IO 边界量;帧↔秒换算(`Int(s*fps)` 截断)留在 `opentake-domain`/调用层,本 crate**不做** fps 折算。证据:上游 `Transcription`/`MediaVisualCache`/`FrameSampler` 全用 `seconds`,`secondsToFrame` 在 `MediaTab`(上层)。
 2. **零硬编码常量**:所有阈值(promoteDiff=12、coverageFloor=8.0、imageSize=256、dim=768、relativeCutoff=0.85、cosineFloor=0.05、波形 count 公式 150/帧 与 20000 上限、缩略图 maximumSize=120×68、sprite 列数=50 …)以 `pub const` / `Options` 结构体集中声明,值**逐字照搬**上游。
 3. **缓存键与磁盘格式逐字节复刻**:嵌入/转写使用 `SHA256("path|mtime_unix_f64|size")`,缩略图/波形使用 `SHA256("path|size|mtime_unix_f64")`,均保留前 16 字节为 32 hex;同时复刻 `PALMEMB1` 二进制布局、`.waveform`/`.thumbs.jpg`+`.thumbs.json` sidecar、转写 JSON。理由:让 OpenTake 与上游/旧工程的缓存目录**可互读**(同机迁移),并保证幂等判定一致。
-4. **错误用 `thiserror` 定义本 crate 错误,内部传播用 `anyhow`,边界返回 `Result<T, MediaError>`**;`opentake-domain` 零依赖,本 crate 是第一层允许 IO 的 crate。
+4. **错误用 `thiserror` 定义本 crate 错误,内部传播用 `anyhow`,边界返回 `Result<T, MediaError>`**;`opentake-domain` 无 I/O（依赖 serde）,本 crate 是第一层允许 IO 的 crate。
 5. **不可变 / 纯函数优先**:排名(`VisualSearch`)、波形降采样、采样判定、转写过滤等都是无副作用纯函数,可全单测;有状态的只有索引调度器(§7.7)与模型加载器(§5.6)。
 6. **后端推理可插拔**:`Embedder` / `Transcriber` / `OrtWorker` 定义为 trait,默认实现走 ort 或 candle;测试注入 mock(协议化 DI)。
 7. **导出期让路**:任何后台任务(索引/缩略图/波形)在导出活跃时暂停。证据:上游 `ExportService.isExporting.didSet → SearchIndexCoordinator.exportDidBegin/End`(`MODULE-PORT-MAP` L457)、`SearchIndexCoordinator.waitWhileExportActive`(`SearchIndexCoordinator.swift:49`)。
-8. **L2 归一化对齐风险**:上游裸点积 `cblas_sgemv` 是否等价余弦,取决于导出模型是否在图内 L2 归一化(`MODULE-PORT-MAP` L860)。本 crate **必须复用上游同一份权重转 ONNX**,并在 `Embedder::encode` 后做一次**条件 L2 归一化开关**(`Spec.normalized: bool`),默认 false 以匹配上游(模型内已归一化)——除非验证证明需要外部归一化。
+8. **L2 归一化契约**：以真实固定模型输出为准。当前 ONNX Community 图输出未归一化，`Spec.normalized=false`，应用执行 L2 归一化后再按余弦阈值排名；已通过 macOS/Windows 真实模型验证。旧“false 表示模型已归一化”的假设已废止。更换模型/I/O 必须重测并升级缓存版本，见 [语义搜索规范](semantic-search.md)。
 
 ---
 
@@ -759,7 +762,7 @@ pub fn best_supported_locale(supported: &[&str]) -> Option<String>; // 系统首
 
 ## 7. ort 推理 worker 通用接口(供进阶 AI 特性复用)
 
-上游无此抽象(CoreML 直接在 `VisualEmbedder`)。`docs/ROADMAP.md` Phase 8 与 `docs/ADVANCED-FEATURES.md` B/C/D 层要求「统一 ort worker」承载:超分(Real-ESRGAN/SeedVR)、AI 抠像(RVM/BiRefNet)、运动追踪(CoTracker)、人声分离(Demucs)等。SigLIP2 的 `OrtEmbedder`(§5.7)是它的第一个使用者。
+上游无此抽象(CoreML 直接在 `VisualEmbedder`)。`docs/architecture/ROADMAP.md` Phase 8 与 `docs/architecture/ADVANCED-FEATURES.md` B/C/D 层要求「统一 ort worker」承载:超分(Real-ESRGAN/SeedVR)、AI 抠像(RVM/BiRefNet)、运动追踪(CoTracker)、人声分离(Demucs)等。SigLIP2 的 `OrtEmbedder`(§5.7)是它的第一个使用者。
 
 ### 7.1 通用模型抽象
 
@@ -858,14 +861,14 @@ impl IndexCoordinator {
 - `encode::{VideoEncoder, ExportPreset}`(导出后端把合成 RGBA 帧序列 + 混音编码成容器)。
 - `MediaProbe`(渲染尺寸/源 fps 决策)。
 
-**职责切分**(`docs/ARCHITECTURE.md` §1/§6):
+**职责切分**(`docs/architecture/ARCHITECTURE.md` §1/§6):
 - `opentake-media` = **读取/编码 + 离线分析**(解码到 RGBA、抽 PCM、缩略图、波形、转写、语义索引/搜索、ort worker)。
 - `opentake-render` = **合成 + 调度**(RenderPlan 纯函数、wgpu 逐帧合成、媒体物化为纹理、预览/导出后端、A/V 同步)。`renderSize` 偶数化、BT.709 instruction、关键帧 ramp **全在 render**。
 - 二者通过 **`RgbaFrame` / `PcmBuffer`** 这两个朴素值类型交换帧/样本,无 wgpu/ffmpeg 类型泄漏到边界。
 
 ### 8.3 媒体物化(图片/Lottie → 纹理)的归属
 
-上游用 `ImageVideoGenerator`(图片烧静止视频)、`LottieVideoGenerator`(Lottie 烧 ProRes)、`AlphaVideoNormalizer`(直 alpha 预乘)绕开 AVPlayer 限制。`docs/_analysis/02` 表 L74/L75/L81 与 `docs/ARCHITECTURE.md` §6 L130:**自建 wgpu 合成器后,这三类 hack 整类消失**——图片/Lottie 在合成前**物化为纹理**(content-hash 缓存),由 `opentake-render` 负责。
+上游用 `ImageVideoGenerator`(图片烧静止视频)、`LottieVideoGenerator`(Lottie 烧 ProRes)、`AlphaVideoNormalizer`(直 alpha 预乘)绕开 AVPlayer 限制。`docs/_analysis/02` 表 L74/L75/L81 与 `docs/architecture/ARCHITECTURE.md` §6 L130:**自建 wgpu 合成器后,这三类 hack 整类消失**——图片/Lottie 在合成前**物化为纹理**(content-hash 缓存),由 `opentake-render` 负责。
 - 本 crate **提供**:图片解码 → `RgbaFrame`(§3.2 / `image` crate);(可选)Lottie 解码用 `rlottie` FFI 或 `velato`(`docs/_analysis/02` 表 L81),渲成 `RgbaFrame` 序列。**建议** Lottie 放 render 的物化层或独立 `opentake-motion` fallback。Motion Canvas v1 输出 mp4 后走普通视频 import,不归本 crate。
 - 本 crate **不提供**:静止视频烧制、ProRes 烧制、alpha 预乘转码(整类删除)。
 
@@ -966,4 +969,4 @@ impl MediaEngine {
 - 转写:`Transcription/Transcription.swift:5-39`(模型/`offsetting:26-38`)、`:72-90`(locale)、`:284-322`(`decodeResults` segment/word);`Transcription/TranscriptCache.swift:12-88`(缓存/filter/key);`Transcription/TranscriptSearch.swift:12-36`(terms/matches)。
 - 语义搜索:`Search/SearchIndexConfig.swift:4-45`(阈值/manifest);`Search/Models/VisualEmbedder.swift:7-87`(Spec/encode/预处理 squash 黑底 `:81-85`/输出断言 `:53-61`);`Search/Models/TextTokenizer.swift:16-23`(截断 64 右填 0);`Search/Models/ModelDownloader.swift:46-172`(安装/校验/解压);`Search/Models/VisualModelLoader.swift:86-110`(load + warm-up);`Search/Indexing/FrameSampler.swift:40-117`(采样/LumaGrid `:94-117`);`Search/Indexing/VisualIndexer.swift:15-86`(累积/幂等);`Search/Indexing/EmbeddingStore.swift:30-115`(PALMEMB1);`Search/Query/VisualSearch.swift:16-56`(sgemv 排名);`Search/SearchIndexCoordinator.swift:37-257`(调度/导出暂停/查询)。
 - 领域契约:`OpenTake/crates/opentake-domain/src/media.rs:226-440`(MediaResolver/MediaAsset)、`clip_type.rs:781-832`(ClipType)、`timeline.rs:931-1031`、`clip.rs`。
-- 横切:`OpenTake/docs/_analysis/02-苹果框架可移植性.md`(能力→栈映射表 L66-83、攻坚清单 L98-136);`OpenTake/docs/MODULE-PORT-MAP.md`(L833-883 搜索、L923-940 存储、L1211 转写);`OpenTake/docs/ARCHITECTURE.md` §1/§6/§7;`OpenTake/docs/ROADMAP.md` Phase 2/8。
+- 横切:`OpenTake/docs/_analysis/02-苹果框架可移植性.md`(能力→栈映射表 L66-83、攻坚清单 L98-136);`OpenTake/docs/architecture/MODULE-PORT-MAP.md`(L833-883 搜索、L923-940 存储、L1211 转写);`OpenTake/docs/architecture/ARCHITECTURE.md` §1/§6/§7;`OpenTake/docs/architecture/ROADMAP.md` Phase 2/8。

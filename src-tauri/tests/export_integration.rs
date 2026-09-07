@@ -111,6 +111,36 @@ fn decoded_rgb_range(path: &Path) -> Option<(u8, u8)> {
     )
 }
 
+fn decoded_alpha_range(path: &Path) -> Option<(u8, u8)> {
+    let output = Command::new("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args([
+            "-vf",
+            "alphaextract",
+            "-frames:v",
+            "1",
+            "-pix_fmt",
+            "gray",
+            "-f",
+            "rawvideo",
+            "-",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return None;
+    }
+    Some(
+        output
+            .stdout
+            .into_iter()
+            .fold((u8::MAX, u8::MIN), |(minimum, maximum), value| {
+                (minimum.min(value), maximum.max(value))
+            }),
+    )
+}
+
 /// Generate an N-frame test video *with* a sine audio track. Returns false on
 /// failure (→ skip).
 fn make_video_with_audio(path: &Path, w: u32, h: u32, fps: u32, frames: u32) -> bool {
@@ -630,4 +660,60 @@ fn export_with_text_clip_respects_font_availability() {
         }
         Err(error) => panic!("text export failed: {error}"),
     }
+}
+
+/// Transparent delivery must preserve the alpha plane through the full GPU →
+/// raw-RGBA → ProRes 4444 path. The text glyph gives the frame a non-zero alpha
+/// island while the transparent clear color leaves the surrounding canvas at 0.
+#[test]
+fn export_prores_4444_preserves_transparent_text_alpha() {
+    if !ffmpeg_ready() {
+        eprintln!("skip: ffmpeg/ffprobe not available");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("transparent-text.mov");
+    let frames = 6;
+    let mut timeline = Timeline::new();
+    timeline.fps = 10;
+    let mut text_track = Track::new("t-alpha-text", ClipType::Video);
+    let mut text = Clip::new("clip-alpha-text", "", 0, frames);
+    text.media_type = ClipType::Text;
+    text.source_clip_type = ClipType::Text;
+    text.text_content = Some("alpha integration probe".to_string());
+    text.text_style = Some(TextStyle::default());
+    text_track.clips.push(text);
+    timeline.tracks.push(text_track);
+
+    let req = ExportRequest {
+        out_path: out.to_string_lossy().into_owned(),
+        codec: opentake_tauri_lib::export::ExportCodec::Prores4444,
+        quality: ExportQuality::P720,
+    };
+    let manifest = MediaManifest::new();
+    let summary = match run_export(&timeline, &manifest, &None, &req) {
+        Ok(summary) => summary,
+        Err(error) if error.contains("no GPU device") || error.contains("no system fonts") => {
+            eprintln!("skip: {error}");
+            return;
+        }
+        Err(error) => panic!("transparent ProRes export failed: {error}"),
+    };
+
+    assert_eq!(summary.frame_count, frames);
+    assert_eq!(
+        probe_field(&out, "stream=codec_name").as_deref(),
+        Some("prores")
+    );
+    assert!(
+        matches!(
+            probe_field(&out, "stream=pix_fmt").as_deref(),
+            Some("yuva444p10le" | "yuva444p12le")
+        ),
+        "ProRes 4444 should retain a yuva444 pixel format"
+    );
+    let (minimum, maximum) = decoded_alpha_range(&out).expect("decode alpha plane");
+    assert_eq!(minimum, 0, "transparent canvas should retain zero alpha");
+    assert!(maximum > 0, "text glyph should contribute non-zero alpha");
 }

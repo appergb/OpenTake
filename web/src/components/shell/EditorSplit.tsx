@@ -26,6 +26,13 @@ const PREVIEW_MIN = 200;
 const INSPECTOR_MIN = 160;
 const VERTICAL_LEFT_BASE_MIN = 300;
 const VERTICAL_PREVIEW_MIN = 300;
+const fillPaneStyle = {
+  width: "100%",
+  height: "100%",
+  minWidth: 0,
+  minHeight: 0,
+  overflow: "hidden",
+} as const;
 
 function verticalLeftMinimumWidth(mediaVisible: boolean, inspectorVisible: boolean): number {
   const nestedMinimum =
@@ -121,8 +128,8 @@ export function EditorSplit() {
   // Maximized panel takes the whole area.
   if (maximized) {
     return (
-      <div ref={ref} style={{ width: "100%", height: "100%" }}>
-        <div data-maximized-panel={maximized} style={{ width: "100%", height: "100%" }}>
+      <div ref={ref} style={fillPaneStyle}>
+        <div data-maximized-panel={maximized} style={fillPaneStyle}>
           {maximized === "media" && <Media />}
           {maximized === "preview" && <PreviewPanel />}
           {maximized === "inspector" && <InspectorPanel />}
@@ -144,7 +151,7 @@ export function EditorSplit() {
       ref={ref}
       data-editor-split-root
       data-responsive-collapsed-agent={responsiveAgentCollapsed ? "true" : undefined}
-      style={{ width: "100%", height: "100%" }}
+      style={fillPaneStyle}
     >
       {!agentVisible ? (
         presetSubtree
@@ -164,7 +171,7 @@ export function EditorSplit() {
             ref={agentSplitRef}
             className="editor-agent-split"
             data-responsive-collapsed={responsiveAgentCollapsed ? "true" : undefined}
-            style={{ width: "100%", height: "100%" }}
+            style={fillPaneStyle}
           >
             <SplitPane
               mode="horizontal"
@@ -176,7 +183,7 @@ export function EditorSplit() {
                   ref={agentContentRef}
                   data-responsive-agent-content
                   aria-hidden={responsiveAgentCollapsed ? "true" : undefined}
-                  style={{ width: "100%", height: "100%" }}
+                  style={fillPaneStyle}
                 >
                   <PanelShell panel="agent">
                     <AgentPanel />
@@ -221,7 +228,7 @@ function DefaultLayout() {
     <div
       ref={ref}
       data-layout-preset="default"
-      style={{ width: "100%", height: "100%" }}
+      style={fillPaneStyle}
     >
       {size.h > 0 && (
         <SplitPane
@@ -262,7 +269,7 @@ function MediaLayout() {
   );
 
   return (
-    <div ref={ref} data-layout-preset="media" style={{ width: "100%", height: "100%" }}>
+    <div ref={ref} data-layout-preset="media" style={fillPaneStyle}>
       {size.w > 0 &&
         (mediaVisible ? (
           <SplitPane
@@ -312,7 +319,7 @@ function VerticalLayout() {
     <div
       ref={ref}
       data-layout-preset="vertical"
-      style={{ width: "100%", height: "100%" }}
+      style={fillPaneStyle}
     >
       {size.w > 0 && (
         <SplitPane
@@ -341,7 +348,7 @@ function RightVerticalSplit({
   const { ref, size } = useContainerSize();
   const topH = Math.round(size.h * topRatio) || 1;
   return (
-    <div ref={ref} style={{ width: "100%", height: "100%" }}>
+    <div ref={ref} style={fillPaneStyle}>
       {size.h > 0 && (
         <SplitPane mode="vertical" initial={topH} min={160} secondMin={120} first={top} second={bottom} />
       )}
@@ -376,9 +383,9 @@ function ThreeColumn({
   // the remaining Media panel must consume the full top-left region just as a
   // collapsed NSSplitView item does upstream.
   if (!renderedCenter) {
-    if (left) return <div style={{ width: "100%", height: "100%" }}>{left}</div>;
-    if (right) return <div style={{ width: "100%", height: "100%" }}>{right}</div>;
-    return <div style={{ width: "100%", height: "100%", background: "var(--bg-base)" }} />;
+    if (left) return <div style={fillPaneStyle}>{left}</div>;
+    if (right) return <div style={fillPaneStyle}>{right}</div>;
+    return <div style={{ ...fillPaneStyle, background: "var(--bg-base)" }} />;
   }
 
   if (left && right) {
@@ -408,7 +415,7 @@ function ThreeColumn({
         min={MEDIA_MIN}
         secondMin={centerMin}
         first={left}
-        second={renderedCenter ?? <div style={{ width: "100%", height: "100%", background: "var(--bg-base)" }} />}
+        second={renderedCenter ?? <div style={{ ...fillPaneStyle, background: "var(--bg-base)" }} />}
       />
     );
   }
@@ -422,7 +429,7 @@ function ThreeColumn({
       />
     );
   }
-  return <div style={{ width: "100%", height: "100%" }}>{renderedCenter}</div>;
+  return <div style={fillPaneStyle}>{renderedCenter}</div>;
 }
 
 /** center (flex) + right panel of a fixed initial width. */
@@ -443,7 +450,7 @@ function SplitPaneRightAnchored({
     <div
       ref={ref}
       data-layout-split="preview-inspector"
-      style={{ width: "100%", height: "100%" }}
+      style={fillPaneStyle}
     >
       {size.w > 0 && (
         <SplitPane
@@ -451,7 +458,7 @@ function SplitPaneRightAnchored({
           initial={firstWidth}
           min={centerMin}
           secondMin={INSPECTOR_MIN}
-          first={center ?? <div style={{ width: "100%", height: "100%", background: "var(--bg-base)" }} />}
+          first={center ?? <div style={{ ...fillPaneStyle, background: "var(--bg-base)" }} />}
           second={right}
         />
       )}

@@ -3,8 +3,8 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { act, createElement } from "react";
-import { createRoot } from "react-dom/client";
-import { describe, expect, it } from "vitest";
+import { createRoot, type Root } from "react-dom/client";
+import { afterEach, describe, expect, it } from "vitest";
 import { useI18nStore } from "../../i18n";
 import { useSettingsStore } from "../../store/settingsStore";
 import { useEditorUiStore } from "../../store/uiStore";
@@ -14,6 +14,13 @@ const settingsSource = readFileSync(
   resolve(process.cwd(), "src/components/settings/SettingsView.tsx"),
   "utf8",
 );
+
+let container: HTMLDivElement | null = null;
+let root: Root | null = null;
+
+function expectZeroLength(value: string) {
+  expect(["0", "0px"]).toContain(value);
+}
 
 function appearanceChoices(windowSize: "standard" | "compact"): Array<{
   text: string;
@@ -39,8 +46,25 @@ function appearanceChoices(windowSize: "standard" | "compact"): Array<{
   return choices;
 }
 
+function renderSettings(pane: "general" | "appearance" = "general") {
+  useI18nStore.setState({ locale: "zh-CN" });
+  useEditorUiStore.setState({ settingsPane: pane });
+  container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  act(() => root?.render(createElement(SettingsView)));
+  return container.querySelector<HTMLElement>('[role="dialog"]')!;
+}
+
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean })
   .IS_REACT_ACT_ENVIRONMENT = true;
+
+afterEach(() => {
+  act(() => root?.unmount());
+  container?.remove();
+  root = null;
+  container = null;
+});
 
 describe("SettingsView minimal embedded visual direction", () => {
   it("uses one unified settings surface without header divider", () => {
@@ -71,12 +95,28 @@ describe("SettingsView minimal embedded visual direction", () => {
   });
 
   it("uses a wide settings window with a left sidebar", () => {
-    expect(settingsSource).toContain("maxWidth: 960");
-    expect(settingsSource).toContain("maxHeight: 620");
-    expect(settingsSource).toContain('width: "100%"');
-    expect(settingsSource).toContain('height: "100%"');
-    expect(settingsSource).toContain("SettingsSidebar");
-    expect(settingsSource).toContain("settingsSidebarStyle");
+    const dialog = renderSettings();
+    const surface = dialog as HTMLElement;
+    const bodyRow = surface.querySelector("header + div") as HTMLElement;
+    const sidebar = surface.querySelector("nav") as HTMLElement;
+    const content = sidebar.nextElementSibling as HTMLElement;
+    const surfaceStyle = surface.getAttribute("style") ?? "";
+
+    expect(settingsSource).toContain('width: "min(960px, 100%)"');
+    expect(surface.style.height).toBe("100%");
+    expect(surface.style.maxWidth).toBe("960px");
+    expect(surfaceStyle).toMatch(/max-height:\s*min\([^,]+,\s*100%\)/);
+    expect(surface.style.maxHeight).toContain("min(");
+    expect(surface.style.maxHeight).toContain("100%");
+    expectZeroLength(surface.style.minWidth);
+    expectZeroLength(surface.style.minHeight);
+    expect(bodyRow.style.display).toBe("flex");
+    expectZeroLength(bodyRow.style.minHeight);
+    expect(settingsSource).toContain('width: "clamp(138px, 16vw, 150px)"');
+    expect(sidebar.style.overflowY).toBe("auto");
+    expect(content.style.flex).toBe("1 1 0%");
+    expectZeroLength(content.style.minWidth);
+    expect(content.style.overflowY).toBe("auto");
   });
 
   it("renders one active settings pane instead of stacking every section", () => {

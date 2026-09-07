@@ -41,7 +41,7 @@ impl TextureResolver for SolidResolver<'_> {
     fn resolve(&mut self, _source: &TextureSource, _frame: i64) -> Option<Rc<GpuTexture>> {
         if self.cached.is_none() {
             let mut buf = vec![0u8; 16 * 16 * 4];
-            for px in buf.chunks_exact_mut(4) {
+            for px in buf.as_chunks_mut::<4>().0.iter_mut() {
                 px.copy_from_slice(&self.rgba);
             }
             let frame = DecodedFrame::new(16, 16, buf, true); // already premultiplied
@@ -109,7 +109,7 @@ fn empty_plan_clears_to_opaque_black() {
         .expect("render");
 
     // Every pixel opaque black.
-    for px in frame.rgba.chunks_exact(4) {
+    for px in frame.rgba.as_chunks::<4>().0.iter() {
         assert_eq!(px, &[0, 0, 0, 255], "clear color must be opaque black");
     }
 }
@@ -285,7 +285,7 @@ fn read_back_round_trips_through_png() {
 
 fn make_solid(device: &wgpu::Device, queue: &wgpu::Queue, rgba: [u8; 4]) -> Rc<GpuTexture> {
     let mut buf = vec![0u8; 16 * 16 * 4];
-    for px in buf.chunks_exact_mut(4) {
+    for px in buf.as_chunks_mut::<4>().0.iter_mut() {
         px.copy_from_slice(&rgba);
     }
     let frame = DecodedFrame::new(16, 16, buf, true);

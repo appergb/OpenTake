@@ -88,7 +88,7 @@ describe("resolveTimelinePlaybackRoute", () => {
     expect(result).toEqual({ kind: "rust", reasons: [] });
   });
 
-  it("keeps temporally remapped video stacks on WebKit", () => {
+  it("routes temporally remapped video stacks through the native compositor", () => {
     const result = resolveTimelinePlaybackRoute(
       timeline(
         clip({ id: "upper-video", mediaType: "video", speed: 1.5 }),
@@ -97,7 +97,37 @@ describe("resolveTimelinePlaybackRoute", () => {
       runtime,
     );
 
-    expect(result).toEqual({ kind: "webkit", reasons: [] });
+    expect(result).toEqual({ kind: "rust", reasons: [] });
+  });
+
+  it("returns rust-unavailable for temporally remapped video stacks when native playback is absent", () => {
+    const result = resolveTimelinePlaybackRoute(
+      timeline(
+        clip({ id: "upper-video", mediaType: "video", speed: 1.5 }),
+        clip({ id: "lower-video", mediaType: "video" }),
+      ),
+      { rustAvailable: false, rustEnabled: true },
+    );
+
+    expect(result).toEqual({
+      kind: "unsupported",
+      reasons: [{ code: "rust-unavailable" }],
+    });
+  });
+
+  it("returns rust-disabled for temporally remapped video stacks when native playback is disabled", () => {
+    const result = resolveTimelinePlaybackRoute(
+      timeline(
+        clip({ id: "upper-video", mediaType: "video", reversed: true }),
+        clip({ id: "lower-video", mediaType: "video" }),
+      ),
+      { rustAvailable: true, rustEnabled: false },
+    );
+
+    expect(result).toEqual({
+      kind: "unsupported",
+      reasons: [{ code: "rust-disabled" }],
+    });
   });
 
   it("retries a failed WebKit video revision through the native decoder", () => {
@@ -200,21 +230,65 @@ describe("resolveTimelinePlaybackRoute", () => {
     }
   });
 
-  it("returns Unsupported for text plus reverse instead of dropping text", () => {
-    const result = resolveTimelinePlaybackRoute(
-      timeline(clip({ mediaType: "text", sourceClipType: "text", reversed: true })),
-      runtime,
-    );
-    expect(result.kind).toBe("unsupported");
-    expect(reasonCodes(result)).toContain("composited-reverse");
+  it("routes Lottie clips through the native compositor", () => {
+    expect(
+      resolveTimelinePlaybackRoute(
+        timeline(clip({ id: "lottie", mediaType: "lottie", sourceClipType: "lottie" })),
+        runtime,
+      ),
+    ).toEqual({ kind: "rust", reasons: [] });
   });
 
-  it("only treats a previous native startup failure as retryable", () => {
+  it("routes temporal compositor timelines through Rust when native playback is available", () => {
+    const temporalCompositorCases = [
+      clip({ id: "text-reversed", mediaType: "text", sourceClipType: "text", reversed: true }),
+      clip({
+        id: "color-speed",
+        speed: 1.5,
+        colorGrade: {
+          exposure: 0.25,
+          temperature: 0,
+          tint: 0,
+          liftGammaGain: {
+            lift: { r: 0, g: 0, b: 0 },
+            gamma: { r: 1, g: 1, b: 1 },
+            gain: { r: 1, g: 1, b: 1 },
+          },
+          contrast: 1,
+          saturation: 1,
+        },
+      }),
+      clip({
+        id: "mask-speed",
+        speed: 1.5,
+        masks: [
+          {
+            shape: {
+              kind: "circle",
+              center: { x: 0.5, y: 0.5 },
+              radius: { x: 0.2, y: 0.2 },
+            },
+            feather: 0,
+            invert: false,
+          },
+        ],
+      }),
+    ];
+
+    for (const item of temporalCompositorCases) {
+      expect(resolveTimelinePlaybackRoute(timeline(item), runtime)).toEqual({
+        kind: "rust",
+        reasons: [],
+      });
+    }
+  });
+
+  it("treats rust-disabled temporal compositor routes as retryable", () => {
     const nativeStartupFailure = resolveTimelinePlaybackRoute(
       timeline(clip({ mediaType: "text", sourceClipType: "text" })),
       { rustAvailable: true, rustEnabled: false },
     );
-    const authoredUnsupportedFeature = resolveTimelinePlaybackRoute(
+    const temporalCompositorNativeFallback = resolveTimelinePlaybackRoute(
       timeline(
         clip({ mediaType: "text", sourceClipType: "text", reversed: true }),
       ),
@@ -223,27 +297,53 @@ describe("resolveTimelinePlaybackRoute", () => {
 
     expect(isRetryableRustPlaybackFailure(nativeStartupFailure, true)).toBe(true);
     expect(isRetryableRustPlaybackFailure(nativeStartupFailure, false)).toBe(false);
-    expect(isRetryableRustPlaybackFailure(authoredUnsupportedFeature, true)).toBe(false);
+    expect(
+      isRetryableRustPlaybackFailure(temporalCompositorNativeFallback, true),
+    ).toBe(true);
   });
 
-  it("returns Unsupported for composited content plus speed", () => {
-    for (const speed of [2, 0, 1 + Number.EPSILON]) {
-      const result = resolveTimelinePlaybackRoute(
-        timeline(
-          clip({
-            speed,
-            chromaKey: {
-              keyColor: { r: 0, g: 1, b: 0 },
-              similarity: 0.2,
-              smoothness: 0.1,
-              spill: 0.1,
+  it("returns rust-unavailable for temporal compositor timelines when native playback is absent", () => {
+    const rustUnavailableRuntime = { rustAvailable: false, rustEnabled: true };
+    const temporalCompositorCases = [
+      clip({ id: "text-reversed", mediaType: "text", sourceClipType: "text", reversed: true }),
+      clip({
+        id: "color-speed",
+        speed: 1.5,
+        colorGrade: {
+          exposure: 0.25,
+          temperature: 0,
+          tint: 0,
+          liftGammaGain: {
+            lift: { r: 0, g: 0, b: 0 },
+            gamma: { r: 1, g: 1, b: 1 },
+            gain: { r: 1, g: 1, b: 1 },
+          },
+          contrast: 1,
+          saturation: 1,
+        },
+      }),
+      clip({
+        id: "mask-speed",
+        speed: 1.5,
+        masks: [
+          {
+            shape: {
+              kind: "circle",
+              center: { x: 0.5, y: 0.5 },
+              radius: { x: 0.2, y: 0.2 },
             },
-          }),
-        ),
-        runtime,
-      );
-      expect(result.kind).toBe("unsupported");
-      expect(reasonCodes(result)).toContain("composited-speed");
+            feather: 0,
+            invert: false,
+          },
+        ],
+      }),
+    ];
+
+    for (const item of temporalCompositorCases) {
+      expect(resolveTimelinePlaybackRoute(timeline(item), rustUnavailableRuntime)).toEqual({
+        kind: "unsupported",
+        reasons: [{ code: "rust-unavailable" }],
+      });
     }
   });
 
@@ -280,7 +380,6 @@ describe("resolveTimelinePlaybackRoute", () => {
     ).toEqual({ kind: "rust", reasons: [] });
 
     const cases: Array<[Clip, string]> = [
-      [clip({ mediaType: "lottie", sourceClipType: "lottie" }), "lottie"],
       [clip({ effects: [{ name: "blur", params: {}, enabled: true }] }), "unknown-effect"],
       [
         clip({
@@ -310,7 +409,7 @@ describe("resolveTimelinePlaybackRoute", () => {
         timeline(clip({ mediaType: "lottie", sourceClipType: "lottie" })),
         preferRust,
       ).kind,
-    ).toBe("unsupported");
+    ).toBe("rust");
   });
 
   it("returns Unsupported when Rust is unavailable and WebKit lacks parity", () => {

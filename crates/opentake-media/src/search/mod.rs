@@ -52,7 +52,7 @@ mod integration_tests {
         let bright = RgbaFrame::new(8, 8, vec![240; 8 * 8 * 4]);
         let dark = RgbaFrame::new(8, 8, {
             let mut v = vec![0u8; 8 * 8 * 4];
-            for px in v.chunks_exact_mut(4) {
+            for px in v.as_chunks_mut::<4>().0.iter_mut() {
                 px[3] = 255;
             }
             v

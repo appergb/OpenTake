@@ -1,0 +1,6 @@
+import React from 'react';
+import {Img,interpolate,staticFile,useCurrentFrame} from 'remotion';
+import {Background,VERSION} from '../theme';
+export const Outro:React.FC=()=>{const f=useCurrentFrame();return <Background><div style={{position:'absolute',inset:0,background:'radial-gradient(ellipse at 50% 100%, #29564266, transparent 70%)'}}/>
+ <div style={{position:'absolute',top:135,left:0,width:'100%',textAlign:'center',opacity:interpolate(f,[0,30],[0,1],{extrapolateRight:'clamp'})}}><Img src={staticFile('assets/logo.png')} style={{width:100,height:100}}/><div style={{fontSize:96,fontFamily:'Arial',fontWeight:600,letterSpacing:-4,marginTop:25}}>OpenTake</div><div style={{fontSize:64,marginTop:42,letterSpacing:1}}>下一部作品，从这里开始。</div><div style={{fontSize:28,color:'#a4efd1',marginTop:40,letterSpacing:2}}>{VERSION} · PUBLIC BETA</div><div style={{fontSize:28,color:'#a4b9ae',marginTop:72}}>开源视频编辑器 <span style={{padding:'0 25px',color:'#4c7660'}}> / </span> GPL-3.0</div><div style={{fontSize:29,color:'#e0eee5',fontFamily:'Arial',marginTop:25}}>github.com/appergb/OpenTake</div></div>
+ <div style={{position:'absolute',bottom:57,left:0,width:'100%',textAlign:'center',fontSize:22,color:'#789487'}}>Public Beta 持续迭代中 · 功能与平台支持以项目发布说明为准</div></Background>};

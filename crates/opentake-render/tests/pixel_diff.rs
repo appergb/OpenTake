@@ -138,7 +138,7 @@ fn ssim(a: &[u8], b: &[u8], w: u32, h: u32) -> f64 {
 
 fn make_solid(rgba: [u8; 4]) -> DecodedFrame {
     let mut buf = vec![0u8; (Q * Q * 4) as usize];
-    for px in buf.chunks_exact_mut(4) {
+    for px in buf.as_chunks_mut::<4>().0.iter_mut() {
         px.copy_from_slice(&rgba);
     }
     DecodedFrame::new(Q, Q, buf, true)
@@ -638,7 +638,9 @@ fn text_overlay_visible_above_video() {
     if rasterizer.has_fonts() {
         let any_text = frame
             .rgba
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .any(|px| px[0] > 30 && px[1] > 30);
         assert!(any_text, "expected visible text pixels above blue video");
     } else {

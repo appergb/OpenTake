@@ -36,6 +36,7 @@ export function MotionStudio({ store = useMotionStudioStore }: { store?: MotionS
   const previewPhase = store((state) => state.previewPhase);
   const lastGoodPreview = store((state) => state.lastGoodPreview);
   const parameters = store((state) => state.parameters);
+  const transparent = store((state) => state.transparent);
   const load = store((state) => state.load);
   const suspend = store((state) => state.suspend);
   const resume = store((state) => state.resume);
@@ -47,6 +48,7 @@ export function MotionStudio({ store = useMotionStudioStore }: { store?: MotionS
   const reloadConflict = store((state) => state.reloadConflict);
   const reapplyConflict = store((state) => state.reapplyConflict);
   const setParameter = store((state) => state.setParameter);
+  const setTransparent = store((state) => state.setTransparent);
   const publishPhase = store((state) => state.publishPhase);
   const publishFrameProgress = store((state) => state.publishFrameProgress);
   const publishError = store((state) => state.publishError);
@@ -280,6 +282,16 @@ export function MotionStudio({ store = useMotionStudioStore }: { store?: MotionS
               />
             </label>
           ))}
+          <label className="motion-inspector__toggle">
+            <input
+              name="transparent"
+              type="checkbox"
+              checked={transparent}
+              aria-label={t("motionStudio.transparentOutput")}
+              onChange={(event) => setTransparent(event.currentTarget.checked)}
+            />
+            <span>{t("motionStudio.transparentOutput")}</span>
+          </label>
         </div>
         <dl className="motion-inspector__summary">
           <div><dt>{t("motionStudio.aspect")}</dt><dd>{parameters.width} × {parameters.height}</dd></div>

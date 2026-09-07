@@ -135,6 +135,7 @@ pub enum JobState {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkerError {
     QueueFull,
+    QueueTimeout,
     Cancelled,
     Shutdown,
     Panicked,
@@ -147,6 +148,7 @@ impl std::fmt::Display for WorkerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::QueueFull => f.write_str("inference queue is full"),
+            Self::QueueTimeout => f.write_str("inference worker is busy"),
             Self::Cancelled => f.write_str("inference job was cancelled"),
             Self::Shutdown => f.write_str("inference worker is shut down"),
             Self::Panicked => f.write_str("inference job panicked"),
@@ -325,6 +327,27 @@ where
                 ));
             }
         }
+    }
+
+    /// Bound admission latency for interactive callers. A job that has already
+    /// started may finish normally; an expired queued job is cancelled while
+    /// holding the same status lock used by `set_running`, so it cannot start
+    /// after this method reports a timeout.
+    pub fn wait_with_queue_timeout(&self, timeout: Duration) -> Result<T, WorkerError> {
+        let status = self.shared.status.lock().unwrap_or_else(|e| e.into_inner());
+        let (status, _) = self
+            .shared
+            .changed
+            .wait_timeout_while(status, timeout, |status| {
+                status.state == JobState::Queued && status.result.is_none()
+            })
+            .unwrap_or_else(|e| e.into_inner());
+        if status.state == JobState::Queued && status.result.is_none() {
+            self.shared.cancel.cancel();
+            return Err(WorkerError::QueueTimeout);
+        }
+        drop(status);
+        self.wait()
     }
 }
 

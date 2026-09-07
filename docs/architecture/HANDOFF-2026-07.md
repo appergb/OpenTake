@@ -1,5 +1,9 @@
 # 交接 · 未完成工作规划(2026-07-04)
 
+> 状态：historical · 阶段：partial-implementation。原日期、问题与对照结论保留；不作为当前缺口清单。
+> 当前执行与验收：[公开 Beta 计划](../plans/active/2026-09-06-public-beta.md) · [当日验证](../audit/2026-09-06/public-beta-validation.md)。
+
+
 > **2026-08-03 状态裁决：**本文件是历史交接记录，不再是当前状态真值。Beta 1
 > 已发布（`v1.0.0-beta.1`，起点 `c73c192`），Beta 2 收尾进行中；当前范围与发布
 > 门槛见 `docs/releases/1.0.0-beta.2.md`，逐项执行证据见

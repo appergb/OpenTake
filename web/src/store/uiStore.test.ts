@@ -59,7 +59,13 @@ describe("timeline playback state", () => {
       activeFrame: 0,
       isPlaying: false,
       isScrubbing: false,
+      previewTabIds: [],
+      previewTabHistory: [],
+      previewActiveTabId: "timeline",
       previewMediaId: null,
+      selectedClipIds: new Set(),
+      selectedMediaAssetIds: new Set(),
+      selectedFolderIds: new Set(),
     });
   });
 
@@ -127,5 +133,155 @@ describe("timeline playback state", () => {
     expect(useEditorUiStore.getState().isPlaying).toBe(false);
     // Pausing must not clear it — the paused frame came from the legacy <video>.
     expect(useEditorUiStore.getState().rustEngineFailed).toBe(true);
+  });
+
+  it("opens preview tabs idempotently and keeps the newest one active", () => {
+    useEditorUiStore.setState({
+      previewTabIds: [],
+      previewActiveTabId: "timeline",
+      previewMediaId: null,
+      selectedClipIds: new Set(["clip-1"]),
+      selectedFolderIds: new Set(["folder-1"]),
+    });
+
+    useEditorUiStore.getState().openPreviewTab("a");
+    expect(useEditorUiStore.getState()).toMatchObject({
+      previewTabIds: ["a"],
+      previewActiveTabId: "media_a",
+      previewMediaId: "a",
+    });
+    expect([...useEditorUiStore.getState().selectedClipIds]).toEqual([]);
+    expect([...useEditorUiStore.getState().selectedFolderIds]).toEqual([]);
+    expect([...useEditorUiStore.getState().selectedMediaAssetIds]).toEqual(["a"]);
+
+    useEditorUiStore.getState().openPreviewTab("a");
+    useEditorUiStore.getState().openPreviewTab("b");
+    expect(useEditorUiStore.getState()).toMatchObject({
+      previewTabIds: ["a", "b"],
+      previewActiveTabId: "media_b",
+      previewMediaId: "b",
+    });
+  });
+
+  it("selects timeline without changing preview tab order", () => {
+    useEditorUiStore.setState({
+      previewTabIds: ["a", "b"],
+      previewActiveTabId: "media_b",
+      previewMediaId: "b",
+      selectedMediaAssetIds: new Set(["b"]),
+    });
+
+    useEditorUiStore.getState().selectPreviewTab("timeline");
+
+    expect(useEditorUiStore.getState()).toMatchObject({
+      previewTabIds: ["a", "b"],
+      previewActiveTabId: "timeline",
+      previewMediaId: null,
+    });
+    expect([...useEditorUiStore.getState().selectedMediaAssetIds]).toEqual([]);
+  });
+
+  it("falls back to the previous valid tab when closing the active source", () => {
+    useEditorUiStore.setState({
+      previewTabIds: ["a", "b"],
+      previewActiveTabId: "media_b",
+      previewMediaId: "b",
+    });
+
+    useEditorUiStore.getState().closePreviewTab("media_b");
+    expect(useEditorUiStore.getState()).toMatchObject({
+      previewTabIds: ["a"],
+      previewActiveTabId: "media_a",
+      previewMediaId: "a",
+    });
+
+    useEditorUiStore.getState().closePreviewTab("media_a");
+    expect(useEditorUiStore.getState()).toMatchObject({
+      previewTabIds: [],
+      previewActiveTabId: "timeline",
+      previewMediaId: null,
+    });
+
+    useEditorUiStore.getState().closePreviewTab("timeline");
+    expect(useEditorUiStore.getState()).toMatchObject({
+      previewTabIds: [],
+      previewActiveTabId: "timeline",
+      previewMediaId: null,
+    });
+  });
+
+  it("returns to the most recent valid preview tab from history when closing the active tab", () => {
+    useEditorUiStore.getState().openPreviewTab("a");
+    useEditorUiStore.getState().openPreviewTab("b");
+    useEditorUiStore.getState().openPreviewTab("c");
+    useEditorUiStore.getState().selectPreviewTab("media_a");
+
+    useEditorUiStore.getState().closePreviewTab("media_a");
+
+    expect(useEditorUiStore.getState()).toMatchObject({
+      previewTabIds: ["b", "c"],
+      previewActiveTabId: "media_c",
+      previewMediaId: "c",
+    });
+  });
+
+  it("does not change the active tab when closing a non-active media tab", () => {
+    useEditorUiStore.getState().openPreviewTab("a");
+    useEditorUiStore.getState().openPreviewTab("b");
+    useEditorUiStore.getState().openPreviewTab("c");
+
+    useEditorUiStore.getState().closePreviewTab("media_b");
+
+    expect(useEditorUiStore.getState()).toMatchObject({
+      previewTabIds: ["a", "c"],
+      previewActiveTabId: "media_c",
+      previewMediaId: "c",
+    });
+  });
+
+  it("restores the exact timeline-only state when all preview tabs close", () => {
+    useEditorUiStore.setState({
+      previewTabIds: ["a", "b"],
+      previewActiveTabId: "media_b",
+      previewMediaId: "b",
+    });
+
+    useEditorUiStore.getState().closeAllPreviewTabs();
+
+    expect(useEditorUiStore.getState()).toMatchObject({
+      previewTabIds: [],
+      previewActiveTabId: "timeline",
+      previewMediaId: null,
+    });
+  });
+
+  it("normalizes legacy previewMediaId-only state when selecting and closing a synthetic media tab", () => {
+    useEditorUiStore.setState({
+      previewTabIds: [],
+      previewTabHistory: [],
+      previewActiveTabId: "timeline",
+      previewMediaId: "legacy",
+      selectedClipIds: new Set(["clip-1"]),
+      selectedFolderIds: new Set(["folder-1"]),
+      selectedMediaAssetIds: new Set(),
+    });
+
+    useEditorUiStore.getState().selectPreviewTab("media_legacy");
+    expect(useEditorUiStore.getState()).toMatchObject({
+      previewTabIds: ["legacy"],
+      previewActiveTabId: "media_legacy",
+      previewMediaId: "legacy",
+    });
+    expect([...useEditorUiStore.getState().selectedClipIds]).toEqual([]);
+    expect([...useEditorUiStore.getState().selectedFolderIds]).toEqual([]);
+    expect([...useEditorUiStore.getState().selectedMediaAssetIds]).toEqual(["legacy"]);
+
+    useEditorUiStore.getState().closePreviewTab("media_legacy");
+    expect(useEditorUiStore.getState()).toMatchObject({
+      previewTabIds: [],
+      previewActiveTabId: "timeline",
+      previewMediaId: null,
+    });
+    expect([...useEditorUiStore.getState().selectedMediaAssetIds]).toEqual([]);
   });
 });

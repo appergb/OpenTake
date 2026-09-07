@@ -1,5 +1,10 @@
 # opentake-agent — 总览
 
+> 状态：draft · 阶段：implementation-backed · 源码同步：2026-09-06。
+> 本次定向来源：`crates/opentake-agent/src/tools/`、`mcp/`、`src-tauri/src/external_mcp.rs`。
+> 工具集合按实际主机能力和凭据动态发布，勿混用上游 31、兼容 wire 名和实际可见工具数。Beta 5 已引入外部 MCP 认证配对；透明 Motion 文档工具、链接移动修复在后续源码中存在。
+> 当前验收见[公开 Beta 审计](../../audit/2026-09-06/public-beta-validation.md)；下文历史里程碑和测试记录保留其原时点边界。
+
 > 上级：[模块目录](INDEX.md) · [模块文档树](../INDEX.md) · [docs 总目录](../../INDEX.md)
 
 ---
@@ -30,7 +35,7 @@ src-tauri         桌面壳：build_registry + server::serve 起 MCP（src-tauri
 
 **做什么**
 
-- 定义 **44 个可发布工具**（38 基础 + 4 生成 + 2 动效，能力门控后按能力发布；另有 9 个高级 AI 工具仅 schema 已知不主动发布，KNOWN wire 名共 54）的名称 / 描述 / JSON Schema / 类型化参数（= 上游工具单一事实源）。
+- 定义 **44 个可发布工具**（基础 + 生成 + 动效，能力门控后按能力发布；另有 9 个高级 AI 工具仅 schema 已知不主动发布，KNOWN wire 名共 54）的名称 / 描述 / JSON Schema / 类型化参数（= 上游工具单一事实源）。
 - 一条统一派发管线包裹**每个**工具：解析名 → 快照 → 展开短 id → 解码（精确路径错误）→ 跑 body → 附 Context Signal → 缩短 id。
 - 把编辑类工具归一到 `opentake-ops::EditCommand`，经 `CoreHandle` 应用到权威 `AppCore`。
 - 提供 rmcp transport 组装能力；Beta 2 由官方 Codex 每轮创建带 Bearer 的临时回环 server。
@@ -112,13 +117,12 @@ MCP 客户端 → /mcp (loopback 守卫) → McpServer::call_tool
 
 ### 已实现
 
-- **44 个可发布工具的名称 / 描述 / Schema / 类型化参数**（`tools/`：38 基础 + 4 生成 + 2 动效，能力门控后按能力发布；未就绪能力按主机会话 fail-closed 隐藏）。
+- **可发布工具的名称 / 描述 / Schema / 类型化参数**（`tools/`：基础 + 生成 + 动效，能力门控后按能力发布；未就绪能力按主机会话 fail-closed 隐藏）。
 - **统一派发管线**全链路（解析 → 快照 → 短 id 展开 → 解码 → body → 信号 → 短 id 缩短）。
 - 编辑类工具接线到 `EditCommand`：`add_clips` / `insert_clips` / `move_clips` / `remove_clips` / `remove_tracks` / `split_clip` / `set_keyframes` / `ripple_delete_ranges` / `add_texts` / `set_clip_properties` / `create_folder` / `move_to_folder` / `rename_media` / `rename_folder` / `delete_media` / `delete_folder` / `undo`，以及 A-tier 效果 `set_color_grade` / `chroma_key` / `set_mask` / `apply_effect`。
 - 读类工具：`get_timeline`（紧凑编码）/ `get_media` / `list_folders` / `list_models`（读 `opentake-gen` 静态目录，纯本地）。
 - 分析驱动工具：`detect_beats` / `auto_cut_to_beats` / `tighten_silences` / `remove_filler_words`（PCM 或词级转写分析，**返回预览/建议，不直接落地**——`applied:false`，由模型审阅后再调编辑工具落地）。
-- **MCP server**：rmcp Streamable-HTTP + loopback/Origin 守卫 + Bearer gate；Beta 2 由
-  `src-tauri/src/codex.rs` 按官方 Codex 轮次临时启动，固定外部 listener 不启动。
+- **MCP server**：rmcp Streamable-HTTP + loopback/Origin 守卫 + Bearer gate；官方 Codex 轮次由 `src-tauri/src/codex.rs` 临时启动；外部客户端由 `src-tauri/src/external_mcp.rs` 管理显式配对与认证 listener。
 - **Context Signal**：视频类型自动判定 / 轨道角色检测 + 逐轨建议 / 剪辑阶段推断 + 阶段指引 / 内置规则告警 + 插件规则。
 - **工作流插件**：JSON 模型 + 注册表（扫描/校验/激活）+ 内置 `audio-first` + 三个工作流工具（`list_workflows` / `activate_workflow` / `deactivate_workflow`）。
 - **系统提示**：分段 base + 插件围栏注入。
@@ -133,7 +137,7 @@ MCP 客户端 → /mcp (loopback 守卫) → McpServer::call_tool
 - `create_folder` / `move_to_folder` 的批量 `entries` 形式未接线（仅单条形式）。
 - **应用内聊天客户端**（`AgentService` 等价的 SSE 工具循环、BYOK 直连）已随 Beta 1 交付内置 Agent 聊天面板（`chat/` 模块 + `ChatLoop` / `ChatTurnGate`），并接入官方 Codex CLI / ChatGPT 登录（逐轮临时 loopback MCP，Beta 2）。剩余：ChatGPT 凭据由官方 CLI 独占，应用内不持久化。
 
-## 工具总数：**最多 44 个可发布工具（当前 38 基础 + 4 生成 + 2 动效，能力门控后按能力发布）；KNOWN wire 名共 54（含 9 个高级 AI 工具，仅 schema 已知、不主动发布）**
+## 工具总数：**最多 44 个可发布工具（当前 基础 + 生成 + 动效，能力门控后按能力发布）；KNOWN wire 名共 54（含 9 个高级 AI 工具，仅 schema 已知、不主动发布）**
 
 源：`crates/opentake-agent/src/tools/names.rs` 的 `ALL`（38）/ `GENERATION`（4）/ `MOTION`（2）/ `KNOWN`（54）/ `UPSTREAM`（31）常量。
 

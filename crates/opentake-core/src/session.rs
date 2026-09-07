@@ -143,9 +143,9 @@ pub(crate) struct GenerationStateCheckpoint {
 /// list. OpenTake's importer routes every decode through the system `ffmpeg`,
 /// which handles a much wider set of containers/codecs cross-platform, so the
 /// white-list is widened to the formats ffmpeg reads well rather than mirroring
-/// upstream's narrow macOS-native list. The Lottie/JSON special-case is still
-/// excluded (it needs a content sniff the bare extension can't provide, so JSON
-/// files are not auto-imported here).
+/// upstream's narrow macOS-native list. Lottie JSON and `.lottie` containers
+/// are admitted by extension and validated by the Tauri render/materializer
+/// boundary before they are shown as usable media.
 pub const SUPPORTED_VIDEO_EXTENSIONS: [&str; 14] = [
     "mov", "mp4", "m4v", "mkv", "webm", "avi", "mts", "m2ts", "mpg", "mpeg", "3gp", "wmv", "flv",
     "ts",
@@ -158,10 +158,13 @@ pub const SUPPORTED_AUDIO_EXTENSIONS: [&str; 11] = [
 pub const SUPPORTED_IMAGE_EXTENSIONS: [&str; 9] = [
     "png", "jpg", "jpeg", "tiff", "heic", "webp", "bmp", "gif", "avif",
 ];
+/// Accepted Lottie document extensions. Validation happens in the desktop
+/// renderer because the zero-dependency core must not link the Velato parser.
+pub const SUPPORTED_LOTTIE_EXTENSIONS: [&str; 2] = ["json", "lottie"];
 
 /// The [`ClipType`] for `path` if its (lowercased) extension is on the import
-/// white-list, else `None`. JSON/Lottie are intentionally excluded (see
-/// [`SUPPORTED_VIDEO_EXTENSIONS`]).
+/// white-list, else `None`. Lottie files map to [`ClipType::Lottie`] and are
+/// validated by the host before registration.
 pub fn importable_clip_type(path: &Path) -> Option<ClipType> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     if SUPPORTED_VIDEO_EXTENSIONS.contains(&ext.as_str()) {
@@ -170,6 +173,8 @@ pub fn importable_clip_type(path: &Path) -> Option<ClipType> {
         Some(ClipType::Audio)
     } else if SUPPORTED_IMAGE_EXTENSIONS.contains(&ext.as_str()) {
         Some(ClipType::Image)
+    } else if SUPPORTED_LOTTIE_EXTENSIONS.contains(&ext.as_str()) {
+        Some(ClipType::Lottie)
     } else {
         None
     }
@@ -1506,8 +1511,14 @@ mod tests {
             importable_clip_type(Path::new("/x/pic.JPG")),
             Some(ClipType::Image)
         );
-        // JSON/Lottie is intentionally not auto-importable here.
-        assert_eq!(importable_clip_type(Path::new("/x/anim.json")), None);
+        assert_eq!(
+            importable_clip_type(Path::new("/x/anim.json")),
+            Some(ClipType::Lottie)
+        );
+        assert_eq!(
+            importable_clip_type(Path::new("/x/anim.lottie")),
+            Some(ClipType::Lottie)
+        );
         assert_eq!(importable_clip_type(Path::new("/x/notes.txt")), None);
         assert_eq!(importable_clip_type(Path::new("/x/noext")), None);
     }

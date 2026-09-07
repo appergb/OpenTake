@@ -22,15 +22,21 @@
 
 ## inspector（检查器）
 
-- `Inspector.tsx`：属性检查器主体（SPEC §6）。四态：多选摘要 / 单选 clip 检查（Video·Audio·Text 标签）/ 无选时显工程元数据 / 媒体资产检查（占位）。**现场采样**：每次 render 从 `activeFrame` 取 clip 的动画值，故数值字段总显示播放头处当前值；已有关键帧轨的属性显示为只读「(animated)」并把编辑转到关键帧面板。所有编辑经 `editActions.setClipProperties()`。
+- `Inspector.tsx`：属性检查器主体（SPEC §6）。四态：多选摘要 / 单选 clip 检查（Video·Audio·Text 标签）/ 无选时显工程元数据 / 媒体资产 Source 检查器。**现场采样**：每次 render 从 `activeFrame` 取 clip 的动画值，故数值字段总显示播放头处当前值；已有关键帧轨的属性显示为只读「(animated)」并把编辑转到关键帧面板。所有编辑经 `editActions.setClipProperties()`。
 - `KeyframesPanel.tsx` + `KeyframesLaneRow.tsx`：关键帧面板（SPEC §6.4）。单选 clip 下每个可动画属性一行（视频 position/scale/rotation/opacity/crop；音频 volume），顶部刻度尺 + 面板级红色播放头叠加，行内可拖拽菱形标记（→ stamp/move/remove/insertation 关键帧动作）。
 - `ScrubbableNumberField.tsx`：可拖拽数值控件（SPEC §6.6）。水平拖拽改值（Shift×10 / Cmd×0.1），单击切文本输入（Enter/失焦提交、ESC 取消），动画属性时只读；`onCommit` 触发命令。
-- `TextTab.tsx`：编辑 `Clip.textContent`（草稿本地态，失焦提交；字号/颜色/对齐等样式延后）。
+- `TextTab.tsx`：编辑 `Clip.textContent`及 TextStyle（字体、字号、颜色、对齐等），经命令提交。
 - `SwapMediaSection.tsx`：检查器内的「替换素材」入口（→ `swapMedia`）。
+
+## 2026-09-06 媒体与预览增量
+
+`MediaPanel.tsx` 的 TextTab 调用 `addTextClip`；EffectTab 仅对单个选中视觉片段追加预设并保留既有 effects，链接音轨不作为额外视觉选中项。Sticker 已从 `33ee8e2` 的禁用占位接为可用主标签，筛选当前项目（含子目录）的 image/Lottie，复用 MediaCard 与导入/落轨事务；空态、处理中、错误和工程身份隔离有对应处理。转场、字幕与 Smart Pack 均有独立内容组件。媒体视图支持 folder/flat/grouped，预览区支持多个素材 tab 与旧存储状态归一。
+
+本段记录源码接线；[当日审计](../../audit/2026-09-06/public-beta-validation.md)记录 GUI 与自动化结果。
 
 ## media（媒体面板与全局库）
 
-- `MediaPanel.tsx`：媒体库容器。顶部主标签（Material/Audio/Text/Sticker/Effect/Transition/Captions/Smart Wrap，仅 Material·Audio 可用、余者置灰占位，仿剪映）；二级标签 Import/Mine（Mine=星标收藏，localStorage）。过滤管线不可变（audio 标签仅显纯音频，Mine 仅显收藏）。卡片 HTML5-draggable（`MEDIA_DND_TYPE`），单击预览、双击 `addMediaToTimeline`、星标切换、视频可「萃取音频」（`extractAudio` + 保存对话框）；离线素材红覆盖 + Relink。订阅 `uiStore.mediaTab/mediaSubTab`，消费 `mediaStore`。
+- `MediaPanel.tsx`：媒体库容器。顶部主标签（Material/Audio/Music/Text/Sticker/Effect/Transition/Captions/Smart Pack；全部已有对应内容入口）；二级标签 Import/Mine（Mine=星标收藏，localStorage）。过滤管线不可变（audio 标签仅显纯音频，Mine 仅显收藏）。卡片 HTML5-draggable（`MEDIA_DND_TYPE`），单击预览、双击 `addMediaToTimeline`、星标切换、视频可「萃取音频」（`extractAudio` + 保存对话框）；离线素材红覆盖 + Relink。订阅 `uiStore.mediaTab/mediaSubTab`，消费 `mediaStore`。
 - `LibraryView.tsx`：全局库整页视图（`view === "library"`，跨项目永久库），消费 `libraryStore`，支持分类/搜索/排序与「导入到项目」。
 - `MediaTabBar.tsx`：主/次标签按钮组。
 - `favorites.ts`：星标收藏 store（localStorage）。
@@ -43,7 +49,7 @@
 
 - `home/HomeView.tsx`：启动器。最近项目列表 / 空态 + 新建/打开/设置入口。消费 `recentStore`，调 `newProjectAndEnter`/`openProjectViaDialog`/`openProjectPath`。
 - `settings/SettingsView.tsx`：模态设置。标签式：General(语言) / Appearance(主题) / Import(默认目录) / AI(BYOK 密钥) / About(版本·许可)。**BYOK 明文密钥存 OS keychain**（`secret_*`），不进 localStorage。消费 `settingsStore` 与 i18n。
-- `agent/AgentPanel.tsx`：内置 Agent 聊天面板（当前占位，SPEC §2.1，后续接通）。
+- `agent/AgentPanel.tsx`：内置 Agent 聊天面板（有序文本/tool use/tool result、历史恢复与 provider 对话接线）。
 
 ## ui（通用原始件）
 
@@ -57,7 +63,7 @@
 ## 完成状态
 
 - **已实现**：三种布局 + 最大化、检查器（Video/Audio/Text + 现场采样 + 关键帧面板 + 可拖拽数值）、媒体面板（导入/拖放/双击/星标/萃取音频/Relink）、全局库页、工具栏、主页启动器、设置（含 BYOK keychain）、lucide 图标体系。
-- **计划中/占位**：Agent 面板真实对话；媒体面板的 Text/Sticker/Effect/Transition/Captions/Smart Wrap 标签为置灰占位；检查器文本样式（字号/颜色/对齐）与媒体资产检查待补。
+- **待原生验收**：Sticker 主标签及图片/Lottie 导入、预览、拖拽/落轨已经实现，[专项记录](../../audit/2026-09-06/sticker-panel.md)包含定向测试与构建；其他主标签、文本样式与 Source 检查器亦已有实现，新包原生交互按候选验收。
 
 ## 相关文档
 

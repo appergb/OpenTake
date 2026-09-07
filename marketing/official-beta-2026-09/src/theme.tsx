@@ -1,0 +1,13 @@
+import React from 'react';
+import {AbsoluteFill, Img, interpolate, staticFile, useCurrentFrame} from 'remotion';
+export const VERSION='1.0.0-beta.6';
+export const Background:React.FC<{children?:React.ReactNode}>=({children})=>{const f=useCurrentFrame();return <AbsoluteFill style={{background:'#080e11',color:'#f0f6f2',fontFamily:'"PingFang SC", "Heiti SC", Arial, sans-serif',overflow:'hidden'}}>
+ <AbsoluteFill style={{background:'radial-gradient(ellipse at 80% 30%, #173d3544, transparent 65%)'}}/>
+ <div style={{position:'absolute',left:1200,top:-470,width:1050,height:1050,border:'1px solid #a9ffe21a',borderRadius:'50%',translate:`${f*.025}px ${f*.018}px`}}/>
+ <div style={{position:'absolute',left:1120,top:-550,width:1200,height:1200,border:'1px solid #a9ffe20a',borderRadius:'50%'}}/>
+ {children}
+ </AbsoluteFill>};
+export const Brand:React.FC=()=> <div style={{position:'absolute',left:96,top:48,display:'flex',alignItems:'center',gap:15,fontFamily:'Arial',fontSize:25,fontWeight:600,letterSpacing:0.5}}><Img src={staticFile('assets/logo.png')} style={{width:38,height:38}}/>OpenTake</div>;
+export const Footer:React.FC<{note?:string}>=({note='历史安装包实拍 · 界面以实际版本为准'})=><div style={{position:'absolute',left:96,right:96,bottom:36,display:'flex',justifyContent:'space-between',fontSize:21,color:'#81968e',letterSpacing:.2}}><span>{note}</span><span>PUBLIC BETA</span></div>;
+export const Heading:React.FC<{eyebrow:string;title:string;sub:string}>=({eyebrow,title,sub})=>{const f=useCurrentFrame();return <div style={{position:'absolute',left:96,top:112,opacity:interpolate(f,[0,20],[0,1],{extrapolateRight:'clamp'}),translate:`0px ${interpolate(f,[0,30],[20,0],{extrapolateRight:'clamp'})}px`}}><div style={{color:'#96dec3',fontSize:22,letterSpacing:5,fontFamily:'Arial',marginBottom:14}}>{eyebrow}</div><div style={{fontSize:76,fontWeight:600,letterSpacing:-2,lineHeight:1.2}}>{title}</div><div style={{fontSize:30,color:'#a8bbb3',marginTop:18}}>{sub}</div></div>};
+export const Screen:React.FC<{src:string;left?:number;top?:number;width?:number;height?:number;origin?:string;zoom?:number}>=({src,left=694,top=345,width=1130,height=610,origin='50% 50%',zoom=1})=>{const f=useCurrentFrame();return <div style={{position:'absolute',left,top,width,height,overflow:'hidden',borderRadius:13,border:'1px solid #647d7355',boxShadow:'0 30px 80px #0008',background:'#121212',opacity:interpolate(f,[8,30],[0,1],{extrapolateLeft:'clamp',extrapolateRight:'clamp'}),translate:`0px ${interpolate(f,[0,45],[24,0],{extrapolateRight:'clamp'})}px`}}><Img src={staticFile(`assets/${src}`)} style={{width:'100%',height:'100%',objectFit:'contain',transformOrigin:origin,scale:interpolate(f,[0,250],[zoom,zoom+.025],{extrapolateRight:'clamp'})}}/></div>};
