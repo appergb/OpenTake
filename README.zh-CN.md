@@ -242,7 +242,7 @@ PRIMARY-CN/
 ### 前置依赖
 
 - **Rust** ≥ 1.96 (via [rustup](https://rustup.rs))
-- **Node.js** ≥ 20 + **pnpm**
+- **Node.js** 20.x ≥ 20.19、22.x ≥ 22.12 或 ≥ 24；建议使用 **Node 22.12+ + pnpm 10**，与 CI 保持一致。
 - **FFmpeg** ≥ 6.0
 
 ### 构建
@@ -255,10 +255,17 @@ cargo build
 cargo test
 cargo clippy
 
-cd web && pnpm install && pnpm build
-cd .. && cargo tauri dev
+# 以下命令均在仓库根目录执行
+pnpm --dir web install --frozen-lockfile
+pnpm --dir web build
+
+# Windows、macOS、Linux 使用相同的桌面开发启动命令
+pnpm --dir web tauri dev
 ```
 
+`tauri` 脚本使用 `web/pnpm-lock.yaml` 锁定的项目本地 CLI，无需全局安装 `cargo-tauri`；仍需安装 Rust 和对应平台的原生依赖。桌面生产构建在仓库根目录执行 `pnpm --dir web tauri build`。
+
+`web/package.json` 声明支持的 Node 版本，项目脚本会在启动工具前拒绝不支持的版本；`web/.npmrc` 还为 pnpm 10 开启严格的安装检查。若版本检查失败，请根据错误中的当前版本和要求版本升级 Node，再执行 `pnpm --dir web install --frozen-lockfile`。
 
 ---
 

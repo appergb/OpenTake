@@ -1,6 +1,6 @@
 # 开发规范
 
-> 状态：canonical · 阶段：implementation-backed · 同步日期：2026-09-06
+> 状态：canonical · 阶段：implementation-backed · 同步日期：2026-11-16
 > 来源：根 AGENTS.md 的开发规则、Cargo.toml、web/package.json 与现有代码契约。入口迁移保留有效规则；覆盖率等要求是目标，不是已测结果。
 
 ## 工作区与源码来源
@@ -32,7 +32,7 @@ Agent 主动指引的设计来源保留在 [Context Signal](../modules/opentake-
 
 ## 构建与验证
 
-在活动工作树运行：
+在活动工作树的仓库根目录运行以下命令；全新 clone 可使用自选目录名。Node 支持范围为 `^20.19.0 || ^22.12.0 || >=24.0.0`（20.x ≥ 20.19、22.x ≥ 22.12 或 ≥ 24），建议使用与 CI 一致的 Node 22.12+ 和 pnpm 10：
 
 ```bash
 cargo build
@@ -42,11 +42,15 @@ cargo clippy
 pnpm --dir web install --frozen-lockfile
 pnpm --dir web test
 pnpm --dir web build
-cargo tauri dev
+pnpm --dir web tauri dev
 python3 scripts/check_docs.py
 ```
 
 Rust 工具链跟随 `rust-toolchain.toml`；依赖版本以 Cargo.lock / web/pnpm-lock.yaml 为准。`web/package.json` 目前没有 lint script，不使用 `pnpm run lint`。FFmpeg sidecar 通过 `scripts/provision_ffmpeg_sidecars.py` 与锁清单准备，不提交二进制。
+
+Windows、macOS、Linux 统一使用 `pnpm --dir web tauri dev` 启动桌面开发模式，使用 `pnpm --dir web tauri build` 构建桌面包。`tauri` 脚本进入 `src-tauri` 后调用项目本地 CLI，版本由锁文件确定，无需全局安装 `cargo-tauri`；Rust 和各平台的原生系统依赖仍是前置条件。
+
+`web/package.json` 的 `engines.node` 声明支持范围；dev/build/test/preview/tauri 脚本会在启动工具前显式检查 Node，`web/.npmrc` 还为 pnpm 10 开启严格的安装检查。检查失败时错误会显示当前与要求的 Node 版本；升级到支持的版本后，重新运行 `pnpm --dir web install --frozen-lockfile`。
 
 简单文档改动检查 diff 和链接即可；复杂实现须跑可用测试、类型检查或构建。记录实际命令、结果和环境；浏览器 fallback 测试不等于原生桌面或安装包验收，macOS 证据不替代 Windows/Linux 证据。发布与签名流程以活动计划和候选发布文档为准。
 

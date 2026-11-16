@@ -1,6 +1,6 @@
 # src-tauri — Tauri 2 desktop shell
 
-> Status: draft · Stage: implementation-backed · Updated: 2026-09-06.
+> Status: draft · Stage: implementation-backed · Updated: 2026-11-16.
 > This page describes the shell boundary and early command examples. Use the [current module index](../docs/modules/src-tauri/INDEX.md), [export contract](../docs/modules/src-tauri/export.md), and [candidate validation](../docs/audit/2026-09-06/public-beta-validation.md) for the full current surface. Command registration lives in `src/lib.rs`; the table below is not an exhaustive catalog.
 
 
@@ -36,13 +36,23 @@ that maps 1:1 onto the variants the front end issues.
 
 ## Running
 
+Run these commands from the repository root on Windows, macOS, or Linux. Use Node 20.19+ (20.x), 22.12+ (22.x), or 24+; Node 22.12+ and pnpm 10 match CI. Rust and your platform's native dependencies are still required.
+
 ```bash
 # build only (no Tauri CLI needed)
 cargo build -p opentake-tauri
 
-# dev (front end + shell); needs the Tauri CLI
-pnpm -C web exec tauri dev     # or: cargo tauri dev  (if cargo-tauri installed)
+# install the locked project-local CLI and frontend dependencies
+pnpm --dir web install --frozen-lockfile
+
+# dev (front end + shell)
+pnpm --dir web tauri dev
+
+# production desktop build
+pnpm --dir web tauri build
 ```
+
+The `tauri` script enters `src-tauri` and uses the CLI locked in `web/pnpm-lock.yaml`; no global `cargo-tauri` installation is needed. Project scripts check the Node range in `web/package.json` before starting their tools, and `web/.npmrc` also enables strict installation checks with pnpm 10. If a version check fails, upgrade Node according to the actual and required versions in the error, then rerun the install command above. See the [development conventions](../docs/project/conventions.md) for shared validation rules.
 
 `tauri.conf.json` points `frontendDist` at `../web/dist`, the dev server at
 `:1420`, and window size to 1600×1000 / min 960×600 (SPEC §2.8). Icons live in
