@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -1744,7 +1744,7 @@ fn encode_frames(
             )
         })?
         .join("frame_%05d.png");
-    let mut command = Command::new(opentake_media::ffmpeg_status::ffmpeg_path());
+    let mut command = opentake_media::ffmpeg_status::ffmpeg_command();
     command
         .args(["-v", "error", "-nostdin", "-framerate"])
         .arg(rendered.fps.to_string())
@@ -1825,6 +1825,7 @@ fn io_motion_error(error: std::io::Error) -> MotionBridgeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     fn saved_document() -> (
         tempfile::TempDir,

@@ -25,9 +25,12 @@
 | 函数 | 作用 |
 |---|---|
 | `ffmpeg_path()` / `ffprobe_path()` | 返回二进制路径：优先环境变量 `OPENTAKE_FFMPEG` / `OPENTAKE_FFPROBE`，其次应用可执行文件旁的常规非符号链接 sidecar，最后回退 `PATH` 上的 `ffmpeg` / `ffprobe`。纯 `resolve_cli_path` 测试覆盖优先级而不修改并行测试的全局环境。 |
-| `ffmpeg()` | 构造绑定到 `ffmpeg_path()` 的 `FfmpegCommand`。 |
+| `ffmpeg()` | 构造绑定到 `ffmpeg_path()` 的 `FfmpegCommand`；锁定的 `ffmpeg-sidecar 2.5.2` 已在内部禁用 Windows 控制台窗口。 |
+| `ffmpeg_command()` | 经 `opentake_process_tree::background_command(ffmpeg_path())` 创建普通 `Command`，Windows 上带 `CREATE_NO_WINDOW`，启动后立即运行，无需 `ProcessTree::attach`。经 `lib.rs::ffmpeg_status` 重导出供宿主使用。 |
 | `ffmpeg_available()` / `ffprobe_available()` | `-version` 是否退出 0。集成测试用它在无 ffmpeg 的机器上 skip，保证默认测试运行绿。经 `lib.rs::ffmpeg_status` 重导出供宿主能力检查。 |
 | `ffprobe_json(path)` | 运行 `ffprobe -v quiet -of json -show_streams -show_format <path>`，返回解析后的 `serde_json::Value`。**零解码**，仅读头/流参数。spawn 失败或非零退出 → `MediaError::Ffmpeg`。 |
+
+产品代码直接启动 FFmpeg 的入口统一使用 `ffmpeg_command()`：可用性探测、HDR filter 查询、生成源片段裁剪、音频提取、代理转码与宿主动效帧编码。解码/编码的 `FfmpegCommand` 路径由依赖内部隐藏控制台。FFprobe 的版本检查与媒体探测走 `configure_command`，Windows 上带 `CREATE_NO_WINDOW`，并保留 `CREATE_SUSPENDED` 与 spawn 后 `ProcessTree::attach` 的进程树生命周期要求；普通 FFmpeg 命令不使用挂起启动。
 
 ---
 

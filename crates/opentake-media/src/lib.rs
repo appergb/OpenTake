@@ -98,7 +98,7 @@ pub fn trim_video_range(
         std::fs::create_dir_all(parent)?;
     }
     let duration = end_seconds - start_seconds;
-    let mut child = std::process::Command::new(ff::ffmpeg_path())
+    let mut child = ff::ffmpeg_command()
         .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y"])
         .arg("-ss")
         .arg(format!("{start_seconds:.6}"))
@@ -215,11 +215,11 @@ pub use index_coordinator::{work_needed, ExportPause, IndexProgress, WorkNeeded}
 
 pub use ort_worker::ExecutionProvider;
 
-/// ffmpeg/ffprobe availability probes (re-exported for integration tests and
-/// host-capability checks).
+/// FFmpeg command construction, tool paths, and availability probes for hosts
+/// and integration tests.
 pub mod ffmpeg_status {
     pub use crate::ff::{
-        ffmpeg_available, ffmpeg_path, ffprobe_available, packaged_sidecar_beside,
+        ffmpeg_available, ffmpeg_command, ffmpeg_path, ffprobe_available, packaged_sidecar_beside,
         packaged_sidecar_path,
     };
 }
@@ -409,7 +409,7 @@ fn extract_audio_file(input: &Path, output: &Path) -> Result<()> {
         ))
     })?;
 
-    let mut cmd = std::process::Command::new(ff::ffmpeg_path());
+    let mut cmd = ff::ffmpeg_command();
     cmd.arg("-y")
         .arg("-i")
         .arg(input)

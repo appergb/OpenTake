@@ -6,6 +6,23 @@ use std::time::Duration;
 #[cfg(any(test, windows))]
 use std::time::Instant;
 
+/// Create a helper command without a Windows console window. Unlike
+/// [`configure_command`], this does not suspend the child or require containment.
+pub fn background_command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+        let mut command = Command::new(program);
+        command.creation_flags(CREATE_NO_WINDOW);
+        command
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new(program)
+    }
+}
+
 #[cfg(any(test, windows))]
 fn wait_for_processes_to_exit(
     timeout: Duration,
@@ -34,9 +51,9 @@ fn wait_for_processes_to_exit(
 /// Configure a command before spawn so descendants can be terminated as a
 /// unit. Call [`ProcessTree::attach`] immediately after a successful spawn.
 ///
-/// Windows children start with their primary thread suspended. `attach` first
-/// places that inert process in a kill-on-close Job Object and only then resumes
-/// it, closing the spawn-to-assignment escape window.
+/// Windows children have no console window and start with their primary thread
+/// suspended. `attach` first places that inert process in a kill-on-close Job
+/// Object and only then resumes it, closing the spawn-to-assignment escape window.
 pub fn configure_command(command: &mut Command) {
     #[cfg(unix)]
     {
@@ -46,8 +63,10 @@ pub fn configure_command(command: &mut Command) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_SUSPENDED};
-        command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_SUSPENDED);
+        use windows_sys::Win32::System::Threading::{
+            CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, CREATE_SUSPENDED,
+        };
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_SUSPENDED | CREATE_NO_WINDOW);
     }
 }
 
@@ -426,17 +445,120 @@ mod contract_tests {
 mod tests {
     use super::*;
     use std::fs;
+    use std::os::windows::process::CommandExt;
     use std::process::Stdio;
     use std::thread;
     use std::time::{Duration, Instant};
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, STILL_ACTIVE};
+    use windows_sys::Win32::System::Console::GetConsoleWindow;
     use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        GetExitCodeProcess, OpenProcess, CREATE_SUSPENDED, DETACHED_PROCESS,
+        PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
     const TEST_NAME: &str = "tests::windows_suspended_job_contains_fast_exit_descendant";
     const MODE_ENV: &str = "OPENTAKE_PROCESS_TREE_TEST_MODE";
     const DIR_ENV: &str = "OPENTAKE_PROCESS_TREE_TEST_DIR";
+    const CONSOLE_TEST_NAME: &str = "tests::windows_console_probe";
+    const CONSOLE_ENV: &str = "OPENTAKE_PROCESS_TREE_CONSOLE_PROBE";
+
+    #[test]
+    fn windows_console_probe() {
+        let Ok(mode) = std::env::var(CONSOLE_ENV) else {
+            return;
+        };
+        match mode.as_str() {
+            "background" => assert_console_free(
+                background_command(std::env::current_exe().expect("current test executable")),
+                false,
+                "probe",
+            ),
+            "contained" => {
+                let mut command =
+                    Command::new(std::env::current_exe().expect("current test executable"));
+                configure_command(&mut command);
+                assert_console_free(command, true, "probe");
+            }
+            "probe" => {
+                // SAFETY: this API only inspects this helper's console window.
+                assert!(
+                    unsafe { GetConsoleWindow() }.is_null(),
+                    "helper allocated a console window"
+                );
+            }
+            _ => panic!("unknown console probe mode: {mode}"),
+        }
+        println!("console-free helper ran");
+    }
+
+    fn assert_console_free(mut command: Command, contained: bool, mode: &str) {
+        command
+            .args([
+                "--exact",
+                CONSOLE_TEST_NAME,
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env(CONSOLE_ENV, mode)
+            .env("RUST_BACKTRACE", "0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().expect("spawn console probe");
+        let mut tree = if contained {
+            match ProcessTree::attach(child.id()) {
+                Ok(tree) => Some(tree),
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("contain and resume console probe: {error}");
+                }
+            }
+        } else {
+            None
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while child.try_wait().expect("poll console probe").is_none() {
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("console probe did not run to completion");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let output = child
+            .wait_with_output()
+            .expect("collect console probe output");
+        if let Some(tree) = &mut tree {
+            tree.disarm();
+        }
+        assert!(
+            output.status.success(),
+            "console probe failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("console-free helper ran"));
+    }
+
+    fn probe_from_console_free_parent(mode: &str) {
+        // A GUI application has no console to inherit. Isolate the test from
+        // Cargo's terminal so a missing flag must allocate a new window.
+        let mut parent = Command::new(std::env::current_exe().expect("current test executable"));
+        // Contain the driver too, so a timeout cannot orphan its probe.
+        parent.creation_flags(DETACHED_PROCESS | CREATE_SUSPENDED);
+        assert_console_free(parent, true, mode);
+    }
+
+    #[test]
+    fn windows_background_command_runs_without_console_window() {
+        probe_from_console_free_parent("background");
+    }
+
+    #[test]
+    fn windows_contained_command_runs_without_console_window() {
+        probe_from_console_free_parent("contained");
+    }
 
     struct TestProcessHandle(HANDLE);
 

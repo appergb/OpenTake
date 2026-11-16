@@ -723,14 +723,22 @@ pub fn ffprobe_path() -> OsString {
 
 /// A fresh `FfmpegCommand` bound to [`ffmpeg_path`].
 pub fn ffmpeg() -> FfmpegCommand {
+    // ffmpeg-sidecar already disables console creation on Windows.
     FfmpegCommand::new_with_path(ffmpeg_path())
+}
+
+/// A plain FFmpeg command that runs without a console window on Windows.
+///
+/// The child starts immediately on spawn and needs no process-tree attachment.
+pub fn ffmpeg_command() -> Command {
+    opentake_process_tree::background_command(ffmpeg_path())
 }
 
 /// Whether `ffmpeg` is runnable (`-version` exits 0). Used by tests/integration
 /// to skip when the binary is unavailable, keeping the default test run green on
 /// machines without ffmpeg.
 pub fn ffmpeg_available() -> bool {
-    Command::new(ffmpeg_path())
+    ffmpeg_command()
         .arg("-version")
         .output()
         .map(|o| o.status.success())
