@@ -274,7 +274,7 @@ Key files for comparison:
 ### Prerequisites
 
 - **Rust** ≥ 1.96 (via [rustup](https://rustup.rs))
-- **Node.js** ≥ 20 + **pnpm**
+- **Node.js** 20.19+ (20.x), 22.12+ (22.x), or 24+; Node 22.12+ with **pnpm 10** is recommended to match CI.
 - **FFmpeg** ≥ 6.0 (`brew install ffmpeg` / `winget install ffmpeg` / `apt install ffmpeg`)
 
 ### Build
@@ -288,14 +288,17 @@ cargo build
 cargo test
 cargo clippy
 
-# Frontend
-cd web && pnpm install && pnpm build
-cd ..
+# Frontend (run from the repository root)
+pnpm --dir web install --frozen-lockfile
+pnpm --dir web build
 
-# Launch Tauri dev mode
-cargo tauri dev
+# Launch Tauri dev mode (Windows, macOS, and Linux)
+pnpm --dir web tauri dev
 ```
 
+The `tauri` script uses the project-local CLI version locked in `web/pnpm-lock.yaml`; no global `cargo-tauri` installation is needed. Rust and the native dependencies for your platform are still required. For a desktop production build, run `pnpm --dir web tauri build` from the repository root.
+
+`web/package.json` declares the supported Node versions. Project scripts reject unsupported Node versions before starting their tools, and `web/.npmrc` also enables strict installation checks with pnpm 10. If a version check fails, compare the actual and required Node versions in the error, upgrade Node, and rerun `pnpm --dir web install --frozen-lockfile`.
 
 The sibling directory `palmier-pro-upstream/` contains upstream Swift sources for reference during porting.
 

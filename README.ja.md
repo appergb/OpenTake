@@ -222,6 +222,8 @@ PRIMARY-CN/
 
 ## 🚀 クイックスタート
 
+前提条件は **Rust ≥ 1.96**、**Node.js 20.x ≥ 20.19 / 22.x ≥ 22.12 / ≥ 24**、**pnpm**、**FFmpeg ≥ 6.0** です。CI に合わせて **Node 22.12+ と pnpm 10** を推奨します。
+
 ```bash
 git clone https://github.com/appergb/OpenTake.git
 cd OpenTake
@@ -230,10 +232,17 @@ cargo build
 cargo test
 cargo clippy
 
-cd web && pnpm install && pnpm build
-cd .. && cargo tauri dev
+# 以下はすべてリポジトリのルートで実行
+pnpm --dir web install --frozen-lockfile
+pnpm --dir web build
+
+# Windows、macOS、Linux 共通の開発起動コマンド
+pnpm --dir web tauri dev
 ```
 
+`tauri` スクリプトは `web/pnpm-lock.yaml` で固定されたプロジェクト内の CLI を使うため、`cargo-tauri` のグローバルインストールは不要です。Rust と各 OS のネイティブ依存関係は引き続き必要です。デスクトップの本番ビルドは、リポジトリのルートで `pnpm --dir web tauri build` を実行します。
+
+対応する Node バージョンは `web/package.json` に宣言され、各プロジェクトスクリプトがツールの起動前に非対応バージョンを拒否します。`web/.npmrc` は pnpm 10 のインストール時にも厳密なチェックを有効にします。バージョンチェックに失敗した場合は、エラーに表示された現在のバージョンと必要なバージョンを確認し、Node を更新してから `pnpm --dir web install --frozen-lockfile` を再実行してください。
 
 ---
 
