@@ -6,7 +6,6 @@
 //! delivery policy, not an HDR passthrough claim.
 
 use opentake_domain::MediaColorMetadata;
-use std::process::Command;
 use std::sync::OnceLock;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,7 +36,7 @@ fn backend_from_filter_listing(output: &str) -> HdrDecodeBackend {
 fn hdr_decode_backend() -> HdrDecodeBackend {
     static BACKEND: OnceLock<HdrDecodeBackend> = OnceLock::new();
     *BACKEND.get_or_init(|| {
-        let output = Command::new(crate::ff::ffmpeg_path())
+        let output = crate::ff::ffmpeg_command()
             .args(["-hide_banner", "-filters"])
             .output();
         let Ok(output) = output else {
