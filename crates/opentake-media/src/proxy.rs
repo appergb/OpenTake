@@ -403,6 +403,7 @@ mod tests {
 
     #[test]
     fn successful_proxy_is_bounded_probed_and_source_preserving() {
+        let _fixture = crate::test_support::FfmpegFixturePermit::acquire();
         assert_proxy_tools_available();
 
         let temp = tempfile::tempdir().expect("proxy test directory");
@@ -450,6 +451,7 @@ mod tests {
 
     #[test]
     fn cancellation_during_transcode_kills_child_and_cleans_partial() {
+        let _fixture = crate::test_support::FfmpegFixturePermit::acquire();
         assert_proxy_tools_available();
 
         let temp = tempfile::tempdir().expect("proxy test directory");
@@ -482,6 +484,7 @@ mod tests {
 
     #[test]
     fn changed_source_fails_identity_check_and_cleans_partial() {
+        let _fixture = crate::test_support::FfmpegFixturePermit::acquire();
         assert_proxy_tools_available();
 
         let temp = tempfile::tempdir().expect("proxy test directory");
@@ -519,6 +522,7 @@ mod tests {
 
     #[test]
     fn pathname_replacement_a_to_b_to_a_cannot_change_the_retained_source() {
+        let _fixture = crate::test_support::FfmpegFixturePermit::acquire();
         assert_proxy_tools_available();
 
         let temp = tempfile::tempdir().expect("proxy test directory");
@@ -570,6 +574,7 @@ mod tests {
 
     #[test]
     fn cancellation_at_verification_probe_and_prepublication_cleans_partial() {
+        let _fixture = crate::test_support::FfmpegFixturePermit::acquire();
         assert_proxy_tools_available();
 
         for cancellation_progress in [910, 950, 990] {
@@ -606,6 +611,7 @@ mod tests {
 
     #[test]
     fn destination_appearing_after_final_check_is_preserved_and_partial_is_cleaned() {
+        let _fixture = crate::test_support::FfmpegFixturePermit::acquire();
         assert_proxy_tools_available();
 
         let temp = tempfile::tempdir().expect("proxy test directory");
@@ -639,6 +645,7 @@ mod tests {
 
     #[test]
     fn verified_partial_rebound_at_prepublication_cannot_change_output_or_delete_replacement() {
+        let _fixture = crate::test_support::FfmpegFixturePermit::acquire();
         assert_proxy_tools_available();
 
         let temp = tempfile::tempdir().expect("proxy test directory");
@@ -683,6 +690,7 @@ mod tests {
 
     #[test]
     fn ffmpeg_output_is_never_exposed_at_the_ambient_partial_path() {
+        let _fixture = crate::test_support::FfmpegFixturePermit::acquire();
         assert_proxy_tools_available();
 
         let temp = tempfile::tempdir().expect("proxy test directory");
@@ -726,6 +734,7 @@ mod tests {
         use std::os::unix::fs::FileTypeExt;
         use std::time::Instant;
 
+        let _fixture = crate::test_support::FfmpegFixturePermit::acquire();
         assert_proxy_tools_available();
 
         let temp = tempfile::tempdir().expect("proxy test directory");
@@ -820,6 +829,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn unlinked_source_namespace_does_not_break_the_retained_source() {
+        let _fixture = crate::test_support::FfmpegFixturePermit::acquire();
         assert_proxy_tools_available();
 
         let temp = tempfile::tempdir().expect("proxy test directory");

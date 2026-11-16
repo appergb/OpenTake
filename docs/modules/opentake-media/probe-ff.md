@@ -71,6 +71,14 @@ H.265 与 ProRes 往返均在这对二进制上通过。旧 6.0 包证据保留�
 
 ---
 
+## FFprobe 准入与并行测试
+
+FFprobe 共用 8 个准入位。媒体探测在满载时仍立即返回准入错误；`ffprobe_available()` 则在原操作截止时间内等待空位，排队计入超时预算，避免把短暂忙碌误报成工具缺失。结果不做全局缓存，以保留路径覆盖和工具状态变化的语义。隔离子进程回归覆盖满载超时、释放后恢复、16 个并发版本检查以及名额回收。
+
+单元测试与 `tests/ffmpeg_integration.rs` 通过测试专用的 `src/test_support.rs`，在每个测试进程内最多同时运行 4 个涉及 FFprobe 的媒体工作流，并为内部探测保留余量；等待测试名额超过 60 秒会失败。过载拒绝仍由独立回归验证，不依赖整套测试串行运行。Windows 验证结果见[并行测试记录](../../audit/2026-11-16/windows-media-parallel-tests.md)。
+
+---
+
 ## 页脚
 
 - 本模块目录：[INDEX.md](INDEX.md) · 总览：[OVERVIEW.md](OVERVIEW.md)

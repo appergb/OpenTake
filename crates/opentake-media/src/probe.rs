@@ -245,6 +245,7 @@ mod tests {
 
     #[test]
     fn retained_regular_file_probe_rewinds_and_uses_fd_protocol() {
+        let _fixture = crate::test_support::FfmpegFixturePermit::acquire();
         if !crate::ff::ffmpeg_available() || !crate::ff::ffprobe_available() {
             return;
         }

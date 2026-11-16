@@ -73,6 +73,9 @@ pub mod timecode;
 pub mod transcribe;
 pub mod waveform;
 
+#[cfg(test)]
+mod test_support;
+
 use std::path::{Path, PathBuf};
 
 /// Materialize an exact visible source range as an uploadable MP4. This is used
@@ -633,6 +636,7 @@ mod tests {
 
     #[test]
     fn trim_video_range_materializes_only_visible_window_and_honors_cancel() {
+        let _fixture = test_support::FfmpegFixturePermit::acquire();
         use std::process::Command;
         if !ff::ffmpeg_available() || !ff::ffprobe_available() {
             eprintln!("skipping: ffmpeg/ffprobe unavailable");

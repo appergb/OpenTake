@@ -613,6 +613,7 @@ mod tests {
 
     #[test]
     fn pcm_decode_reports_non_terminal_progress_for_multiple_stdout_chunks() {
+        let _fixture = crate::test_support::FfmpegFixturePermit::acquire();
         assert!(
             crate::ff::ffmpeg_available(),
             "required progress test needs a runnable FFmpeg"

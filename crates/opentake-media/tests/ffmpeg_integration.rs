@@ -10,6 +10,10 @@
 use std::path::Path;
 use std::process::Command;
 
+#[path = "../src/test_support.rs"]
+mod test_support;
+use test_support::FfmpegFixturePermit;
+
 use opentake_media::decode::spawn_video_stream;
 use opentake_media::ffmpeg_status::{ffmpeg_available, ffmpeg_path, ffprobe_available};
 use opentake_media::{
@@ -67,6 +71,7 @@ fn make_audio(path: &Path) -> bool {
 
 #[test]
 fn probe_reports_dimensions_fps_and_audio() {
+    let _fixture = FfmpegFixturePermit::acquire();
     if !ffprobe_available() {
         eprintln!("skip: ffprobe not available");
         return;
@@ -89,6 +94,7 @@ fn probe_reports_dimensions_fps_and_audio() {
 
 #[test]
 fn decode_frame_returns_rgba_of_expected_size() {
+    let _fixture = FfmpegFixturePermit::acquire();
     if !ffmpeg_available() {
         eprintln!("skip: ffmpeg not available");
         return;
@@ -113,6 +119,7 @@ fn decode_frame_returns_rgba_of_expected_size() {
 
 #[test]
 fn decode_frame_scales_within_box() {
+    let _fixture = FfmpegFixturePermit::acquire();
     if !ffmpeg_available() {
         return;
     }
@@ -138,6 +145,7 @@ fn decode_frame_scales_within_box() {
 
 #[test]
 fn extract_pcm_yields_16k_mono() {
+    let _fixture = FfmpegFixturePermit::acquire();
     if !ffmpeg_available() {
         return;
     }
@@ -159,6 +167,7 @@ fn extract_pcm_yields_16k_mono() {
 
 #[test]
 fn extract_pcm_without_explicit_range_matches_full_track_decode() {
+    let _fixture = FfmpegFixturePermit::acquire();
     if !ffmpeg_available() {
         return;
     }
@@ -217,6 +226,7 @@ fn extract_pcm_without_explicit_range_matches_full_track_decode() {
 
 #[test]
 fn extract_pcm_range_is_shorter() {
+    let _fixture = FfmpegFixturePermit::acquire();
     if !ffmpeg_available() {
         return;
     }
@@ -238,6 +248,7 @@ fn extract_pcm_range_is_shorter() {
 
 #[test]
 fn extract_pcm_no_audio_track_errors() {
+    let _fixture = FfmpegFixturePermit::acquire();
     if !ffmpeg_available() {
         return;
     }
@@ -278,6 +289,7 @@ fn extract_pcm_no_audio_track_errors() {
 
 #[test]
 fn extract_pcm_empty_stdout_errors_not_silent_buffer() {
+    let _fixture = FfmpegFixturePermit::acquire();
     // Regression for the "ffmpeg exits 0 but emits no PCM" case: a range window
     // entirely past the media end seeks past EOF, so ffmpeg succeeds yet writes
     // zero bytes. extract_pcm must surface NoTrack rather than return an empty
@@ -306,6 +318,7 @@ fn extract_pcm_empty_stdout_errors_not_silent_buffer() {
 
 #[test]
 fn waveform_has_expected_bucket_count() {
+    let _fixture = FfmpegFixturePermit::acquire();
     if !ffmpeg_available() {
         return;
     }
@@ -325,6 +338,7 @@ fn waveform_has_expected_bucket_count() {
 
 #[test]
 fn waveform_decodes_audio_from_mp4_video_container() {
+    let _fixture = FfmpegFixturePermit::acquire();
     // Regression guard: the waveform path must decode the audio track that lives
     // INSIDE a video container (the common case — a clip's `media_ref` points at
     // the video file, and its linked audio reuses that ref). The earlier
@@ -352,6 +366,7 @@ fn waveform_decodes_audio_from_mp4_video_container() {
 
 #[test]
 fn video_thumbnails_generates_and_caches() {
+    let _fixture = FfmpegFixturePermit::acquire();
     if !ffmpeg_available() {
         return;
     }
@@ -376,6 +391,7 @@ fn video_thumbnails_generates_and_caches() {
 
 #[test]
 fn encode_roundtrip_produces_playable_video() {
+    let _fixture = FfmpegFixturePermit::acquire();
     if !ffmpeg_available() || !ffprobe_available() {
         return;
     }
@@ -411,6 +427,7 @@ fn encode_roundtrip_produces_playable_video() {
 }
 
 fn encode_codec_roundtrip(codec: VideoCodec, extension: &str, expected_codec: &str) {
+    let _fixture = FfmpegFixturePermit::acquire();
     if !ffmpeg_available() || !ffprobe_available() {
         return;
     }
@@ -486,6 +503,7 @@ fn encode_prores_roundtrip_produces_prores_mov() {
 
 #[test]
 fn prores_4444_roundtrip_preserves_alpha_plane() {
+    let _fixture = FfmpegFixturePermit::acquire();
     if !ffmpeg_available() || !ffprobe_available() {
         eprintln!("SKIP: ffmpeg/ffprobe unavailable");
         return;
@@ -529,6 +547,7 @@ fn prores_4444_roundtrip_preserves_alpha_plane() {
 #[test]
 #[ignore = "requires OPENTAKE_MAIN10_FIXTURE pointing at a real HEVC Main10 clip"]
 fn continuous_decode_scales_real_main10_frames_without_corruption() {
+    let _fixture = FfmpegFixturePermit::acquire();
     let path = std::env::var_os("OPENTAKE_MAIN10_FIXTURE")
         .map(std::path::PathBuf::from)
         .expect("set OPENTAKE_MAIN10_FIXTURE");
