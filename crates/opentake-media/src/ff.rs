@@ -93,12 +93,29 @@ static FFPROBE_EXECUTOR: OnceLock<Result<ProbeExecutor, String>> = OnceLock::new
 
 impl ProbeAdmission {
     fn acquire() -> crate::error::Result<Self> {
+        Self::try_acquire().ok_or_else(|| {
+            crate::error::MediaError::Ffmpeg("ffprobe admission limit reached".to_string())
+        })
+    }
+
+    fn acquire_before(deadline: Instant) -> crate::error::Result<Self> {
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(timeout_error());
+            }
+            if let Some(admission) = Self::try_acquire() {
+                return Ok(admission);
+            }
+            std::thread::sleep(FFPROBE_POLL_INTERVAL.min(deadline.saturating_duration_since(now)));
+        }
+    }
+
+    fn try_acquire() -> Option<Self> {
         let mut active = FFPROBE_ACTIVE.load(Ordering::Acquire);
         loop {
             if active >= FFPROBE_MAX_IN_FLIGHT {
-                return Err(crate::error::MediaError::Ffmpeg(
-                    "ffprobe admission limit reached".to_string(),
-                ));
+                return None;
             }
             match FFPROBE_ACTIVE.compare_exchange_weak(
                 active,
@@ -106,7 +123,7 @@ impl ProbeAdmission {
                 Ordering::AcqRel,
                 Ordering::Acquire,
             ) {
-                Ok(_) => return Ok(Self),
+                Ok(_) => return Some(Self),
                 Err(observed) => active = observed,
             }
         }
@@ -737,7 +754,8 @@ pub fn ffmpeg_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Whether `ffprobe` is runnable.
+/// Whether `ffprobe` is runnable. Wait for temporary capacity contention within
+/// the same bounded deadline as the version command itself.
 pub fn ffprobe_available() -> bool {
     run_ffprobe_availability(&ffprobe_path(), FFPROBE_TIMEOUT).unwrap_or(false)
 }
@@ -746,8 +764,10 @@ fn run_ffprobe_availability(
     executable: &std::ffi::OsStr,
     timeout: Duration,
 ) -> crate::error::Result<bool> {
-    let _admission = ProbeAdmission::acquire()?;
     let (operation_deadline, api_deadline) = probe_deadlines(timeout)?;
+    // Busy media workers do not mean the executable is missing. Retain the
+    // shared concurrency limit and include admission waiting in the budget.
+    let _admission = ProbeAdmission::acquire_before(operation_deadline)?;
     let (response_tx, response_rx) = std::sync::mpsc::sync_channel(1);
     probe_executor()?
         .sender
@@ -812,8 +832,105 @@ pub fn ffprobe_json_file_cancellable(
 mod tests {
     use super::*;
 
+    #[test]
+    fn availability_waits_for_capacity_without_losing_its_deadline() {
+        const TEST_NAME: &str =
+            "ff::tests::availability_waits_for_capacity_without_losing_its_deadline";
+        const CHILD_ENV: &str = "OPENTAKE_FFPROBE_ADMISSION_TEST";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            // Saturating the global limiter must not starve unrelated tests.
+            let mut child = Command::new(std::env::current_exe().expect("current test executable"))
+                .args(["--exact", TEST_NAME, "--nocapture", "--test-threads=1"])
+                .env(CHILD_ENV, "1")
+                .env("RUST_BACKTRACE", "0")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn isolated admission test");
+            let deadline = Instant::now() + Duration::from_secs(30);
+            while child.try_wait().expect("poll admission test").is_none() {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("isolated admission test exceeded its deadline");
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let output = child.wait_with_output().expect("collect admission test");
+            assert!(
+                output.status.success(),
+                "admission regression: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let executable = ffprobe_path();
+        assert!(
+            run_ffprobe_availability(&executable, Duration::from_secs(5))
+                .expect("required ffprobe can be started"),
+            "required ffprobe must exit successfully"
+        );
+        let permits: Vec<_> = (0..FFPROBE_MAX_IN_FLIGHT)
+            .map(|_| ProbeAdmission::acquire().expect("fill isolated probe capacity"))
+            .collect();
+        assert!(
+            ProbeAdmission::acquire().is_err(),
+            "business limit stays bounded"
+        );
+
+        let started = Instant::now();
+        let result = run_ffprobe_availability(&executable, Duration::from_millis(40));
+        assert!(
+            matches!(result, Err(crate::MediaError::Ffmpeg(message)) if message == "ffprobe timed out"),
+            "a busy availability check must exhaust its budget, not report missing capacity"
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(
+            FFPROBE_ACTIVE.load(Ordering::Acquire),
+            FFPROBE_MAX_IN_FLIGHT
+        );
+
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            drop(permits);
+        });
+        let available = run_ffprobe_availability(&executable, Duration::from_secs(5));
+        releaser.join().expect("release occupied capacity");
+        assert!(available.expect("capacity must become available"));
+
+        let callers = FFPROBE_MAX_IN_FLIGHT * 2;
+        let barrier = std::sync::Barrier::new(callers);
+        std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..callers)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        run_ffprobe_availability(&executable, Duration::from_secs(5))
+                    })
+                })
+                .collect();
+            for worker in workers {
+                assert!(worker
+                    .join()
+                    .expect("availability worker")
+                    .expect("bounded check"));
+            }
+        });
+        assert_eq!(FFPROBE_ACTIVE.load(Ordering::Acquire), 0);
+        assert!(!run_ffprobe_availability(
+            std::env::current_exe().unwrap().as_os_str(),
+            Duration::from_secs(2),
+        )
+        .expect("a nonzero version command is unavailable"));
+        assert!(run_ffprobe_availability(&executable, Duration::from_secs(5)).unwrap());
+    }
+
     #[cfg(unix)]
     fn assert_capture_limit_kills_tree(output_redirection: &str, expected_stream: &str) {
+        let _fixture = crate::test_support::FfmpegFixturePermit::acquire();
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().unwrap();
@@ -928,6 +1045,7 @@ mod tests {
 
     #[test]
     fn nonreturning_wait_and_drain_are_abandoned_without_poisoning_executor() {
+        let _fixture = crate::test_support::FfmpegFixturePermit::acquire();
         let started = Instant::now();
         for _ in 0..4 {
             let result = run_probe_executor_seam(true, Duration::from_millis(80));
@@ -949,6 +1067,7 @@ mod tests {
 
     #[test]
     fn synchronous_dispatch_is_safe_inside_an_existing_tokio_runtime() {
+        let _fixture = crate::test_support::FfmpegFixturePermit::acquire();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -962,6 +1081,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn availability_probe_uses_deadline_and_process_tree_containment() {
+        let _fixture = crate::test_support::FfmpegFixturePermit::acquire();
         use std::os::unix::fs::PermissionsExt;
 
         let temp = tempfile::tempdir().unwrap();
@@ -1071,6 +1191,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn cancellable_ffprobe_kills_descendants_that_inherit_helper_resources() {
+        let _fixture = crate::test_support::FfmpegFixturePermit::acquire();
         use std::os::unix::fs::PermissionsExt;
         use std::sync::mpsc;
 

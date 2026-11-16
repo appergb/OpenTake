@@ -778,7 +778,7 @@ pub fn decode_frames_at(
 mod tests {
     use super::*;
 
-    use std::process::Command;
+    use std::net::TcpListener;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
@@ -790,39 +790,59 @@ mod tests {
             crate::ff::ffmpeg_available(),
             "required cancellation test needs a runnable FFmpeg"
         );
-        let temp = tempfile::tempdir().expect("create frame cancellation fixture directory");
-        let fifo = temp.path().join("blocking-video-input");
-        let status = Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .expect("spawn mkfifo");
-        assert!(
-            status.success(),
-            "mkfifo must create a blocking media input"
-        );
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind blocking media input");
+        listener
+            .set_nonblocking(true)
+            .expect("configure media input listener");
+        let input = std::path::PathBuf::from(format!(
+            "tcp://{}",
+            listener.local_addr().expect("blocking media input address")
+        ));
 
         let cancel = MediaCancelToken::new();
         let worker_cancel = cancel.clone();
         let (done_tx, done_rx) = mpsc::channel();
         let worker = std::thread::spawn(move || {
             let result =
-                decode_frame_at_cancellable(&fifo, &FrameRequest::default(), &worker_cancel);
+                decode_frame_at_cancellable(&input, &FrameRequest::default(), &worker_cancel);
             done_tx.send(result).expect("publish frame decoder result");
         });
 
         let deadline = Instant::now() + Duration::from_secs(5);
-        while cancel.spawned_child_count() == 0 && Instant::now() < deadline {
+        // Keep the accepted socket open without writing bytes. FFmpeg cannot
+        // finish probing this input, on Windows or Unix, until cancellation.
+        let connection = loop {
+            match listener.accept() {
+                Ok((connection, _)) => break Ok(connection),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => break Err(error),
+            }
+            if Instant::now() >= deadline {
+                break Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "FFmpeg did not connect to the blocking input",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        while cancel.active_reader_count() == 0 && Instant::now() < deadline {
             std::thread::yield_now();
         }
         let spawned = cancel.spawned_child_count();
+        let active_readers = cancel.active_reader_count();
         cancel.cancel();
-        assert_eq!(spawned, 1, "the test must cancel a live FFmpeg child");
 
         let result = done_rx
             .recv_timeout(Duration::from_secs(5))
             .expect("cancellation must not wait for the first iterator event");
-        assert!(matches!(result, Err(MediaError::Cancelled)));
         worker.join().expect("frame decoder worker must be reaped");
+        assert!(
+            connection.is_ok(),
+            "FFmpeg must connect to the blocking input: {connection:?}"
+        );
+        assert_eq!(spawned, 1, "the test must cancel a live FFmpeg child");
+        assert_eq!(active_readers, 1, "the iterator reader must be running");
+        assert!(matches!(result, Err(MediaError::Cancelled)));
         assert_eq!(cancel.active_reader_count(), 0);
     }
 

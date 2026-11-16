@@ -97,6 +97,8 @@ SPEC §1.1 列了 `decode/reader.rs`（顺序解帧迭代器）供 render 预览
 ## 测试
 `fit_within`（不放大/单边界/最小 1 像素/零输入）、`frame_args`（seek 夹持/RGBA 声明/缩放滤镜条件）、`pcm_args`（range/-ss/-to/-ac/-ar/-f）、`raw_to_mono_f32`（S16Le→单位浮点/立体声 f32 平均/尾帧截断）均有纯函数单测；实际解码集成测试在 ffmpeg 可用时运行。
 
+单帧取消测试使用跨平台的 loopback TCP 阻塞输入，取代依赖 Unix `mkfifo` 的 fixture：确认真实 FFmpeg 已连接且事件 reader 活跃后，保持连接、不发送数据，再触发取消，检查调用及时返回 `Cancelled`、工作线程 join 完成、活动 reader 数归零。该测试覆盖尚未收到可解码输入时的子进程终止与 reader 收尾。
+
 ---
 
 ## 页脚
