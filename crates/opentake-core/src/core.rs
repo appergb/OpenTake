@@ -3443,14 +3443,25 @@ mod tests {
         assert!(seen.lock().unwrap().is_empty());
     }
 
-    #[test]
-    fn import_media_for_project_rejects_replacement_without_mutating_manifest() {
-        let sequence = CoreIdGen::default().next_id();
-        let root = std::env::temp_dir().join(format!(
-            "opentake-core-conditional-import-{}-{sequence}",
+    /// Scratch directory unique across concurrent invocations in this process.
+    ///
+    /// `CoreIdGen::default().next_id()` always returns `id-1`, so two threads
+    /// running the same body (a `#[test]` and `cross_cutting_runtime_acceptance`)
+    /// used to delete each other's in-progress save.
+    fn isolated_scratch_dir(label: &str) -> PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let sequence = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "opentake-core-{label}-{}-{sequence}",
             std::process::id()
         ));
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn import_media_for_project_rejects_replacement_without_mutating_manifest() {
+        let root = isolated_scratch_dir("conditional-import");
         let project_a = root.join("A.opentake");
         let project_b = root.join("B.opentake");
         let core = AppCore::new();
@@ -3484,12 +3495,7 @@ mod tests {
 
     #[test]
     fn project_scoped_media_mutations_reject_a_replacement_project() {
-        let sequence = CoreIdGen::default().next_id();
-        let root = std::env::temp_dir().join(format!(
-            "opentake-core-project-scoped-media-{}-{sequence}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = isolated_scratch_dir("project-scoped-media");
         let project_a = root.join("A.opentake");
         let project_b = root.join("B.opentake");
         let core = AppCore::new();
@@ -3539,12 +3545,7 @@ mod tests {
 
     #[test]
     fn prepared_media_batch_rejects_project_replacement_without_pollution() {
-        let sequence = CoreIdGen::default().next_id();
-        let root = std::env::temp_dir().join(format!(
-            "opentake-core-stale-media-batch-{}-{sequence}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = isolated_scratch_dir("stale-media-batch");
         let project_a = root.join("A.opentake");
         let project_b = root.join("B.opentake");
         let core = AppCore::new();
@@ -3588,12 +3589,7 @@ mod tests {
 
     #[test]
     fn prepared_media_batch_writer_failure_restores_full_editor_state() {
-        let sequence = CoreIdGen::default().next_id();
-        let root = std::env::temp_dir().join(format!(
-            "opentake-core-media-batch-rollback-{}-{sequence}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = isolated_scratch_dir("media-batch-rollback");
         let project = root.join("Rollback.opentake");
         let core = AppCore::new();
         core.save_project(Some(project.clone())).unwrap();
